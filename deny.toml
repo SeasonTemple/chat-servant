@@ -44,12 +44,84 @@ allow = [
 #
 # 源码可见但限制商业使用的（如 BUSL、SSPL、Elastic License、"非商业免费"）
 # 一律不写进 allow，靠 default-deny 兜住。
+#
+# 白名单之外可以开**具名例外**，但每一条都要重新论证。
+#
+#   MPL-2.0（弱 copyleft）的例外是**选 Tauri 2 的既定代价**，共六条，
+#   理由逐条写在下面 exceptions 上方。要点：
+#     · MPL-2.0 只要求「改动该 crate 本身要开源」，链接使用**不传染**
+#       整个分发包——这与 GPL/LGPL 的传染性不同。
+#     · 本项目源码是 MIT/Apache-2.0，**不修改**这些 crate，不分发它们的源码。
+#     · 但要注意：cssparser / selectors / dtoa-short / option-ext 是
+#       **运行时**依赖（wry 的 WebView 绑定层），会进最终二进制。
+#       这不是"构建期所以无所谓"。
+#
+#   判据：
+#     · 换 Tauri 大版本或换框架时，**必须重新跑 cargo deny**，
+#       不要假设还是这几个 crate——上游依赖树会变。
+#     · 若将来引入**别的** copyleft 依赖，**不能**顺手加进来，
+#       新增一行必须重新论证，不许「反正已经破例了」。
+#
+# ⚠ `exceptions` 必须写在 `[licenses]` **表内**，不是独立子表
+#   （`[licenses.exceptions]` 会报 "expected an array"，cargo-deny 0.20 实测）。
+# ⚠ 这四个是 **Tauri 2 的 wry（WebView 绑定层）在 Windows 上的运行时依赖**，
+#   不是构建期依赖，会进最终二进制：
+#     cssparser  0.37.0 —— HTML/CSS 解析
+#     selectors  0.38.0 —— CSS 选择器匹配
+#     dtoa-short 0.3.5  —— 浮点格式化（渲染属性用）
+#     option-ext 0.2.0  —— Option 扩展
+#   它们的代码生成宏（cssparser-macros / selectors-macros）同样是 MPL-2.0，
+#   但宏只在编译期展开，不进二进制。
+#
+#   这里把它们列进来**不是**"它们安全"，而是要让读的人知道：
+#   选 Tauri 2 就等于接受这几个 MPL-2.0 crate 进分发包。
+#   换个 Tauri 版本或换框架时，**必须重新跑 cargo deny**，不要假设还是这几个。
+exceptions = [
+  { allow = ["MPL-2.0"], crate = "cssparser" },
+  { allow = ["MPL-2.0"], crate = "cssparser-macros" },
+  { allow = ["MPL-2.0"], crate = "selectors" },
+  { allow = ["MPL-2.0"], crate = "selectors-macros" },
+  { allow = ["MPL-2.0"], crate = "dtoa-short" },
+  { allow = ["MPL-2.0"], crate = "option-ext" },
+]
+
+[licenses.private]
+# 不查本 crate 自身的私有依赖树。默认 false，显式写出来是为了让读的人知道
+# 这里想过这件事。
+ignore = false
 
 [advisories]
 # 已知漏洞 / 不可维护的 crate 直接失败。
 unmaintained = "workspace"
 yanked = "warn"
-ignore = []
+
+# 每一条豁免都要写清 RUSTSEC 编号与理由。没有编号的豁免一律不接受——
+# 「暂时忽略」不是理由。
+ignore = [
+  # RUSTSEC-2026-0194 / -0195：quick-xml 0.38.x 的两个 DoS
+  #   （① 检查重复属性名时运行时间二次增长；② NsReader 命名空间声明无上限分配）
+  #
+  # 为什么绕不开：`quick-xml` 只能经 `plist` → `tauri-utils` 进来，
+  # 而 `plist 1.8.0` 把 `quick-xml` 钉在 `^0.38`，修复版是 **0.41**——
+  # 跨大版本，必须上游 `plist` 先升 `quick-xml`。cargo update 到不了。
+  #
+  # 为什么对本项目不构成风险：
+  #   · `plist` 在 Tauri 里**只用于 macOS 的 Info.plist 处理**
+  #     （见 tauri-utils/src/config.rs 的 info_plist / LSMinimumSystemVersion）。
+  #     本项目是纯 Windows 构建（bundle targets 只有 msi / nsis），
+  #     这条路径根本不会执行。
+  #   · 两个漏洞都要**解析攻击者可控的 XML**才会触发。plist 读的是
+  #     自己工程目录下的 Info.plist，不是网络输入。
+  #   · `plist` 出现在 `tauri-build` 的依赖树里，属**构建期**，
+  #     不进最终二进制的运行时。
+  #
+  # 复审条件（满足任一就要重看这条豁免）：
+  #   · 本项目要支持 macOS —— 那时这条豁免**立刻失效**，必须先让上游修好。
+  #   · 上游 plist 升到用 quick-xml 0.41+ —— 那就直接删掉这条豁免。
+  #   · 半年内上游没动静 —— 重新评估是否值得为它绕开 Tauri。
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.38 DoS；plist 钉死 ^0.38 修不了。仅 macOS Info.plist 路径用，本项目纯 Windows，且只解析本工程文件" },
+  { id = "RUSTSEC-2026-0195", reason = "同上：quick-xml NsReader 命名空间无上限分配。同为 macOS-only 构建期路径" },
+]
 
 [bans]
 # 同名 crate 的多个主版本并存：警告（tui 生态常见，不一定有问题）。

@@ -1,0 +1,11 @@
+# pnpm 11 把「依赖构建脚本许可」从 `package.json#pnpm.onlyBuiltDependencies`
+# 迁到了这里的新字段 `allowBuilds`。
+#
+# ⚠ 旧的 `onlyBuiltDependencies` **不能与它并存**——两个白名单语义相反，
+#   共存时新的那个会失效，被拦下的包依然跑不了 postinstall。
+#
+# esbuild 的 postinstall 只是把预编译二进制链出来，不执行网络请求、
+# 不编译用户代码；SvelteKit 的构建必须经过它，所以显式放行。
+
+allowBuilds:
+  esbuild: true

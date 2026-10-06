@@ -1,0 +1,33 @@
+[package]
+name = "chat-servant-app"
+version = "0.1.0"
+description = "桌面聊天回复助手的界面外壳"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+# Tauri 2 把移动端目标放进同一个 crate，必须显式声明这个 name，
+# 否则 `cargo build` 会因为 crate 名里的连字符而找不到库。
+#
+# 桌面端不需要这个库——所以它只有一个空的 lib.rs，真正的主程序在 main.rs。
+# 移动端目标（iOS/Android）需要它来导出入口，所以保留。
+name = "chat_servant_app_lib"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+# 与 tauri 同次版本，`tauri-build` 生成的代码才和运行时对得上。
+# 用 `=` 钉死：`2.6` 会解析到 2.7，而 tauri 已经是 2.12，
+# 于是 build 产物与运行时不匹配，tauri build 直接拒绝。
+tauri-build = { version = "=2.7.1", features = [] }
+
+[dependencies]
+chatservant-core = { path = "../../crates/core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# ⚠ 版本必须与 `@tauri-apps/api` 的 **次版本**对齐，tauri build 会硬性检查：
+#   Found version mismatched Tauri packages: tauri (v2.11.6) : @tauri-apps/api (v2.12.1)
+# 改 node 依赖时这里要跟着动，不是「宽松点没关系」。
+tauri = { version = "=2.12.1", features = ["tray-icon"] }

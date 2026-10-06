@@ -1,7 +1,18 @@
 /target
 /ui/node_modules
-/ui/dist
 /ui/.svelte-kit
+# SvelteKit 静态导出产物 + Tauri 生成物（wix / nsis 工具链缓存都在这里）。
+/ui/build
+/ui/src-tauri/target
+/ui/src-tauri/gen
+# Tauri CLI 会把 Android/iOS 的平台清单写在这里，只在本地生成。
+/ui/gen
+
+# 本项目是**纯 Windows**（bundle targets 只有 msi / nsis），
+# `tauri icon` 顺带生成的移动端图标用不上，不入库。
+# 需要时在 ui/ 下跑 `pnpm exec tauri icon app-icon.svg` 重新生成。
+/ui/src-tauri/icons/android
+/ui/src-tauri/icons/ios
 
 # 抓帧调试产物。截图不落盘是硬约束，这里只允许 xtask probe 写。
 /probe-out

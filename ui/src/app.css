@@ -1,0 +1,68 @@
+// 全局样式。**只有变量与 reset 在这里**，组件样式一律写在各自 .svelte 里。
+//
+// 设计取向：深色玻璃拟态，贴近微信深色主题，但**不模仿**它——
+// 这是工具面板，不是第二个微信。
+
+:root {
+  color-scheme: dark;
+
+  /* 层级：越靠前越贴近用户 */
+  --cs-surface: rgb(28 28 30 / 88%);
+  --cs-surface-raised: rgb(38 38 41 / 94%);
+  --cs-border: rgb(255 255 255 / 8%);
+  --cs-border-strong: rgb(255 255 255 / 14%);
+
+  --cs-text: rgb(233 233 236);
+  --cs-text-dim: rgb(150 150 158);
+  --cs-text-faint: rgb(104 104 112);
+
+  /* 我方绿：与微信气泡同色，让「我发的」在面板上也认得出来 */
+  --cs-me: rgb(114 205 144);
+  --cs-them: rgb(190 190 198);
+  --cs-accent: rgb(114 205 144);
+  --cs-danger: rgb(238 118 118);
+
+  --cs-radius: 14px;
+  --cs-radius-sm: 9px;
+
+  /* 动效时长。统一在这里，前端不散落魔数。 */
+  --cs-dur-fast: 140ms;
+  --cs-dur: 240ms;
+  --cs-dur-slow: 420ms;
+  --cs-ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --cs-shadow: 0 18px 48px rgb(0 0 0 / 45%);
+
+  font-family: 'Segoe UI', 'Microsoft YaHei UI', 'PingFang SC', system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  /* 悬浮窗必须能透出底下的聊天窗口 */
+  background: transparent;
+  color: var(--cs-text);
+  /* 面板自己不该能被选中——它不是文档 */
+  user-select: none;
+  overflow: hidden;
+  /* 150% DPI 下不要出现发虚的半像素文字 */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 真正需要复制文字的地方（候选回复）单独放开 */
+.selectable {
+  user-select: text;
+  cursor: text;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}

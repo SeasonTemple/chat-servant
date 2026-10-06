@@ -27,6 +27,17 @@ if (Get-Command cargo-deny -ErrorAction SilentlyContinue) {
   Write-Output ">>> cargo deny check SKIPPED（cargo-deny 未安装：cargo install cargo-deny）"
 }
 
+# ---- 前端 ----
+# node_modules 不在就跳过，不算红：那只是还没装依赖。
+if (Test-Path "ui\node_modules") {
+  Step "ui svelte-check" { Push-Location ui; pnpm check 2>&1 | Select-Object -Last 40; Pop-Location }
+  Step "ui lint"         { Push-Location ui; pnpm lint 2>&1 | Select-Object -Last 40; Pop-Location }
+  Step "ui build"        { Push-Location ui; pnpm build 2>&1 | Select-Object -Last 25; Pop-Location }
+} else {
+  Write-Output ""
+  Write-Output ">>> ui SKIPPED（ui/node_modules 不存在，先 cd ui && pnpm install）"
+}
+
 Write-Output ""
 Write-Output "=========================="
 if ($fail -eq 0) { Write-Output "GATE: ALL GREEN" } else { Write-Output "GATE: FAILED" }

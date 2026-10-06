@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/capture", "crates/perceive", "xtask"]
+members = ["crates/core", "crates/capture", "crates/perceive", "xtask", "ui/src-tauri"]
+# Tauri 的 Android/iOS 目标在 ui/src-tauri/gen 下生成，独立于本工作区构建，
+# 排除掉免得门禁去扫它的 target。
+exclude = ["ui/src-tauri/gen"]
 
 [workspace.package]
 version = "0.1.0"

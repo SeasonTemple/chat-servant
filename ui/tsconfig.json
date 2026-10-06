@@ -1,0 +1,20 @@
+{
+  "extends": "./.svelte-kit/tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "strict": true,
+    "moduleResolution": "bundler",
+    // vite.config.ts / svelte.config.js 在 Node 侧跑，需要 process / node:*
+    // 前端代码不引它们——见 `include`，只放行配置文件。
+    "types": ["node"]
+  },
+  // eslint.config.js 交给 eslint 自己处理类型：它的 `@eslint/js` 与
+  // `LegacyConfig` 迭代器在 checkJs 下全是噪声，而 svelte-check 不需要它。
+  "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte", "vite.config.ts", "svelte.config.js"]
+}
