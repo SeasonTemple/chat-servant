@@ -15,14 +15,42 @@
   /** 分段调用次数。**Rust 侧算好推过来**，前端不自己累加——
    *  四个数是「静默期零调用」那条硬约束的唯一可视证据，自己数一遍就可能数错。 */
   let counts = $state<CallCounts | null>(null);
-  /**
-   * 当前窗口里的会话名。
+  /** 当前窗口里的会话名。
    *
-   * 这是**会话名闸**的判据，必须显眼：程序只对锁定会话动手，
+   * 这是**会话身份闸**的判据，必须显眼：程序只对锁定会话动手，
    * 而「为什么不动」这件事用户要能一眼看到，不能只在 reason 里猜。
    * 空串 = 没认出来，那同样是不动手。
    */
   let peer = $state('');
+  /**
+   * 重锁请求**还在等着被下一轮取走**。
+   *
+   * 按钮点了之后真正生效要等下一轮（最多一个 `TICK`）。不把这个状态
+   * 显出来，用户点了只看到请求成功，却不知道它还没起作用——
+   * 而「点了没反应」正是这个项目反复在修的东西。
+   */
+  let relockPending = $state(false);
+  /** 重锁请求进行中。**按钮要有状态**——点了没反馈等于没点。 */
+  let locking = $state(false);
+
+  /**
+   * 把当前这个会话锁成要处理的那个。
+   *
+   * 指纹闸在第一帧读到头部时就建了锁，所以「启动时开着的会话」
+   * 就是被锁的那个。这是**唯一的修正手段**——没有它，用户在错的会话上
+   * 启动了应用就只能关掉重开。
+   */
+  async function relock() {
+    locking = true;
+    try {
+      await invoke('relock_session');
+      reason = '已请求重锁：下一轮起以当前这个会话为基准。';
+    } catch (e) {
+      reason = `重锁失败：${String(e)}`;
+    } finally {
+      locking = false;
+    }
+  }
   let busy = $state(false);
   /** 紧凑模式：面板窄于阈值时切。**不靠媒体查询**——
    *  窗口可以被用户拖到任意宽度，媒体查询只看视口。 */
@@ -74,12 +102,15 @@
         counts: CallCounts | null;
         /** 当前窗口里的会话名。**空串 = 没认出来**。 */
         peer: string;
+        /** 重锁请求是否还在等着被下一轮取走。 */
+        relock_pending: boolean;
       }>('readout', (e) => {
         messages = e.payload.messages;
         candidates = e.payload.candidates ?? [];
         reason = e.payload.reason;
         counts = e.payload.counts ?? null;
         peer = e.payload.peer ?? '';
+        relockPending = e.payload.relock_pending ?? false;
       });
       if (cancelled) {
         un();
@@ -156,19 +187,30 @@
     </div>
   </header>
 
-  <!-- 会话名闸：只对「小号」动手。这个徽标必须显眼——
-       程序不动的时候，用户要能立刻看出「它看到的是哪个会话」。 -->
-  <p
-    class="cs-peer"
-    class:unknown={!peer}
-    title={peer ? `当前窗口：${peer}` : '没认出会话名——程序不会动手'}
-  >
-    {#if peer}
-      会话：{peer}
-    {:else}
-      会话：没认出来
-    {/if}
-  </p>
+  <!-- 会话闸：只对锁定会话动手。徽标 + 重锁按钮都要显眼——
+       程序不动的时候，用户要能立刻看出「它看到的是哪个会话」，
+       并且能当场纠正，而不是只能关掉重开。 -->
+  <div class="cs-peer">
+    <span class="cs-peer-name" class:unknown={!peer}>
+      {#if peer}
+        会话：{peer}
+      {:else}
+        会话：没认出来
+      {/if}
+    </span>
+    <button
+      class="cs-peer-lock"
+      onclick={relock}
+      disabled={locking || relockPending}
+      title="把当前这个会话锁成要处理的那个。程序只对它动手。"
+    >
+      {#if locking || relockPending}
+        等下一轮…
+      {:else}
+        锁这个会话
+      {/if}
+    </button>
+  </div>
 
   <ReasonBar {reason} {counts} />
 
@@ -191,17 +233,49 @@
 </main>
 
 <style>
-  /* 会话名徽标。认不出来时用警告色——那意味着程序**不会动手**，
+  /* 会话徽标 + 重锁按钮。认不出来时用警告色——那意味着程序**不会动手**，
      得让人一眼看出来，而不是当成一个还没加载完的空白。 */
   .cs-peer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
     margin: 0 0 0.2rem;
+  }
+
+  .cs-peer-name {
     font-size: 0.66rem;
     letter-spacing: 0.02em;
     color: var(--cs-text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .cs-peer.unknown {
+  .cs-peer-name.unknown {
     color: var(--cs-danger);
+  }
+
+  /* 重锁是个**小的、明确的**动作，不是主按钮——
+     免得被误当成「开始工作」。 */
+  .cs-peer-lock {
+    flex: none;
+    padding: 0.12rem 0.4rem;
+    font-size: 0.62rem;
+    border: 1px solid var(--cs-border-strong);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--cs-text-dim);
+  }
+
+  .cs-peer-lock:hover:not(:disabled) {
+    background: rgb(255 255 255 / 6%);
+    color: var(--cs-text);
+  }
+
+  .cs-peer-lock:disabled {
+    opacity: 0.45;
+    cursor: default;
   }
 
   .cs-panel {

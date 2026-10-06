@@ -35,6 +35,8 @@ struct AppState {
     images_out: crate::watch::ImagesOut,
     /// 发送档位。**唯一事实来源**，前端只请求改。
     tier: crate::watch::TierCell,
+    /// 「重新锁定当前会话」的请求。与循环共用同一个格子。
+    relock: crate::watch::Relock,
 }
 
 /// 取全局状态。**锁中毒不算致命**——状态还在，继续用比崩掉好。
@@ -491,6 +493,16 @@ fn budget_ceiling(provider: &chatservant_reason::Provider) -> u32 {
     }
 }
 
+/// 「把当前这个会话锁成要处理的那个」。
+///
+/// 指纹闸在**第一帧读到头部**时建锁，所以启动时开着的会话就是被锁的。
+/// 用户在错的会话上启动了应用之后，这条命令是**唯一的修正手段**——
+/// 没有它就只能关掉重开，那不是设计，是放弃。
+#[tauri::command]
+pub fn relock_session() -> Result<(), String> {
+    with_state(|s| s.relock.request()).ok_or_else(|| "观察循环还没起来".to_string())
+}
+
 /// 读预算。
 #[tauri::command]
 pub fn get_token_budget() -> Result<BudgetView, String> {
@@ -565,6 +577,7 @@ pub fn start(app: &AppHandle) {
     let token_budget = cfg.token_budget.clone();
     let images_out = cfg.images_out.clone();
     let tier = cfg.tier.clone();
+    let relock = cfg.relock.clone();
 
     let watcher = crate::watch::spawn(cfg);
     if let Ok(mut g) = STATE.lock() {
@@ -575,6 +588,7 @@ pub fn start(app: &AppHandle) {
             token_budget,
             images_out,
             tier,
+            relock,
         });
     }
 
@@ -642,6 +656,7 @@ fn build_loop_config() -> LoopConfig {
                 token_budget: TokenBudget::new(BUDGET_DEFAULT),
                 images_out: crate::watch::ImagesOut::off(),
                 tier: crate::watch::TierCell::default_manual(),
+                relock: crate::watch::Relock::new(),
                 provider,
             };
         }
@@ -656,6 +671,7 @@ fn build_loop_config() -> LoopConfig {
         token_budget: TokenBudget::new(BUDGET_DEFAULT),
         images_out: crate::watch::ImagesOut::off(),
         tier: crate::watch::TierCell::default_manual(),
+        relock: crate::watch::Relock::new(),
         provider: chatservant_reason::Provider::OpenAi,
     }
 }

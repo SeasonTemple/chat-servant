@@ -94,6 +94,12 @@ pub struct Readout {
     pub model_calls: u32,
     /// 分段计数。界面上要分开显示。
     pub counts: CallCounts,
+    /// 「重锁当前会话」的请求是否还在等着被下一轮取走。
+    ///
+    /// 按钮点了之后**真正生效要等下一轮**（最多一个 `TICK`）。
+    /// 不把这个状态报给界面，用户点了却看不到任何确认——
+    /// 而「点了没反应」正是这个项目反复在修的东西。
+    pub relock_pending: bool,
     /// 循环已经跑了多少圈。
     pub ticks: u64,
     /// 累计 OCR 调用次数。
@@ -182,6 +188,8 @@ pub struct LoopConfig {
     /// 当前回复模型是哪一家。**视觉计费随它变**——
     /// gpt-4o-mini 的底账是 2833，Claude 的 patch 计费是 0。
     pub provider: Provider,
+    /// 「重新锁定当前会话」的一次性请求。命令层与循环共用。
+    pub relock: Relock,
 }
 
 /// 一轮里的**可变会话状态**。合成一个结构体，而不是给 `step` 递九个 `&mut`。
@@ -212,6 +220,8 @@ struct Scratch {
     peer: String,
     /// 锁定的那一个会话的头部像素指纹。**第一帧读到时建立。**
     locked_print: Option<chatservant_perceive::identity::HeaderPrint>,
+    /// 用户请求的「重新锁定当前会话」。一次性。
+    relock: Relock,
     /// 图片外发总闸。**默认关**——见 [`ImagesOut`]。
     images_out: ImagesOut,
     /// 单张图片的 token 预算。循环每圈读一次。
@@ -238,6 +248,7 @@ impl Scratch {
             locked_peer: String::new(),
             peer: String::new(),
             locked_print: None,
+            relock: Relock::new(),
             images_out: ImagesOut::off(),
             token_budget: TokenBudget::new(crate::commands::BUDGET_DEFAULT),
             provider: chatservant_reason::Provider::OpenAi,
@@ -328,6 +339,42 @@ impl TierCell {
     }
 }
 
+/// 「重新锁定当前会话」的一次性请求。
+///
+/// ## 为什么需要它
+///
+/// 指纹闸在**第一帧读到头部**时建锁，也就是说「启动时开着的那个会话」
+/// 就是被锁的那个。如果没有重锁入口，用户在错误的会话上启动了应用之后
+/// **没有任何办法修正**，只能关掉重开——那不是设计，是放弃。
+#[derive(Clone)]
+pub struct Relock(Arc<std::sync::atomic::AtomicBool>);
+
+impl Relock {
+    pub fn new() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+
+    /// 请求重锁。下一轮读到头部时**以当时那块像素**为新基准。
+    pub fn request(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// 读一次就清掉——**重锁是一次性的**，不该每轮都重新认人。
+    pub fn take(&self) -> bool {
+        self.0.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn pending(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for Relock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 预算下界。低于 64 token 连一张缩略图都放不下，那不是「更省」。
 pub const BUDGET_MIN: u32 = 64;
 /// 预算的**绝对**上界，取各家供应商里能接受最大的那个。
@@ -408,6 +455,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
             s.images_out = cfg.images_out.clone();
             s.token_budget = cfg.token_budget.clone();
             s.provider = cfg.provider;
+            s.relock = cfg.relock.clone();
             let mut last_calls = 0u32;
             let mut ticks = 0u64;
             let mut anchor: Option<PaneAnchor> = None;
@@ -429,6 +477,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                             candidates: s.candidates.clone(),
                             reason: s.reason.clone(),
                             model_calls: last_calls,
+                            relock_pending: s.relock.pending(),
                             counts: CallCounts {
                                 judge: st.judge,
                                 draft: st.draft,
@@ -459,6 +508,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                             candidates: s.candidates.clone(),
                             reason: "这一轮没跑通".into(),
                             model_calls: last_calls,
+                            relock_pending: s.relock.pending(),
                             counts: CallCounts {
                                 judge: st.judge,
                                 draft: st.draft,
@@ -550,6 +600,11 @@ fn step(
     // 换会话像素必然变；同一会话在帧之间基本不变（阈值吸收角标抖动）。
     let print = header_print(&full, &anchor);
     s.peer = peer_name.clone().unwrap_or_default();
+    // ⚠ 重锁请求必须**在建锁判断之前**取走，否则这一轮的请求会被跳过，
+    // 用户点了按钮却什么也没发生——那是最难查的一种「没反应」。
+    if s.relock.take() {
+        s.locked_print = None;
+    }
     let peer_ok = match (&s.locked_print, &print) {
         // 还没锁过：拿**第一帧读到的**当基准，并把名字报给用户看。
         // ⚠ 这意味着「启动时开着的那个会话」就是被锁的那个。
@@ -796,8 +851,8 @@ fn shift(r: chatservant_core::frame::Rect, dx: i32, dy: i32) -> chatservant_core
 #[cfg(test)]
 mod tests {
     use super::{
-        BUDGET_MAX, BUDGET_MIN, ImagesOut, RecentN, Scratch, TierCell, TokenBudget, collect_images,
-        header_print,
+        BUDGET_MAX, BUDGET_MIN, ImagesOut, RecentN, Relock, Scratch, TierCell, TokenBudget,
+        collect_images, header_print,
     };
     use chatservant_reason::context;
 
@@ -996,6 +1051,83 @@ mod tests {
             pa.pixels() > 5_000,
             "头带只有 {} px，太薄不足以当身份",
             pa.pixels()
+        );
+    }
+
+    /// **重锁是一次性的，而且请求不会丢。**
+    ///
+    /// ⚠ 如果 `take()` 放在建锁判断**之后**，用户点了按钮、这一轮请求被跳过，
+    /// 要等到下一轮才生效——那正是「点了没反应」最难查的一种形态。
+    /// 所以顺序必须是：先取走请求，再判断建锁。
+    #[test]
+    fn a_relock_request_is_taken_exactly_once() {
+        let g = Relock::new();
+        assert!(!g.pending(), "刚建好时不该有待处理请求");
+        assert!(!g.take(), "没有请求时 take 必须返回 false");
+
+        g.request();
+        assert!(g.pending(), "请求后必须看得到");
+        assert!(g.take(), "第一次 take 必须拿到它");
+        assert!(
+            !g.take(),
+            "重锁是一次性的——第二次 take 必须为空，否则每轮都在重新认人"
+        );
+        assert!(!g.pending());
+
+        // clone 出去的与本体共用一个格子：命令层设的循环得知道。
+        let shared = g.clone();
+        shared.request();
+        assert!(g.pending(), "clone 与本体必须是同一个请求槽");
+    }
+
+    /// 锁错会话之后能修正：清掉旧锁 → 下一轮以当前像素为新基准。
+    #[test]
+    fn relocking_replaces_the_locked_conversation() {
+        use chatservant_capture::Frame;
+        use chatservant_capture::anchor::PaneAnchor;
+        use chatservant_core::frame::Rect;
+
+        const W: u32 = 500;
+        const H: u32 = 300;
+        fn frame_with(tint: u8) -> Frame {
+            let mut px = vec![30u8; (W * H * 3) as usize];
+            for y in 0..40u32 {
+                for x in 0..W {
+                    let i = ((y * W + x) * 3) as usize;
+                    if x > 20 && x < 200 && (x / 7) % 3 == 0 {
+                        px[i] = tint;
+                        px[i + 1] = tint;
+                        px[i + 2] = tint;
+                    }
+                }
+            }
+            Frame::from_rgb(W, H, px).expect("尺寸一致")
+        }
+        let anchor = PaneAnchor {
+            chat: Rect::new(0, 0, W as i32, H as i32),
+            panel_bg: [30, 30, 31],
+            panel: Rect::new(0, 0, W as i32, H as i32),
+            header_top: 0,
+            input_top: H as i32,
+        };
+
+        let mut s = Scratch::new(RecentN::new(12));
+        // 先锁在「错」的会话上
+        s.locked_print = header_print(&frame_with(225), &anchor);
+        assert!(s.locked_print.is_some());
+
+        // 用户点重锁：请求被取走，旧锁被清掉
+        s.relock.request();
+        assert!(s.relock.take());
+        s.locked_print = None;
+
+        // 下一轮以当前像素为新基准
+        let now = header_print(&frame_with(120), &anchor).expect("取得到");
+        assert!(now.is_same(&s.locked_print.clone().unwrap_or_else(|| now.clone())));
+        assert_ne!(
+            now,
+            header_print(&frame_with(225), &anchor).expect("取得到"),
+            "重锁之后基准必须换成当前的会话"
         );
     }
 }
