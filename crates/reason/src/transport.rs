@@ -34,6 +34,41 @@ pub trait Http {
         body: &serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, String>;
+
+    /// GET 一个只读端点。**只为测连通性存在**——见 [`Provider::models_url`]。
+    ///
+    /// 单独一个方法而不是复用 `post_json`：测连通性要的是
+    /// 「这个 key 能不能访问 API」，用一个**不调用模型**的端点才既准确又不花钱。
+    /// 拿 `POST /messages` 去测会为了一次点按真的产生一次模型调用。
+    fn get_json(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String>;
+}
+
+/// 测连通性用的只读端点。**两家都有 `/v1/models`**，
+/// 且它既不需要模型、也不产生 token 费用。
+impl Provider {
+    pub fn models_url(self) -> &'static str {
+        match self {
+            Self::OpenAi => "https://api.openai.com/v1/models",
+            Self::Anthropic => "https://api.anthropic.com/v1/models",
+        }
+    }
+
+    /// 端点需要的 header。与 [`Provider::headers`] 同源，但**不带**模型名——
+    /// `anthropic-default` 那个头是本项目自己加的，上游的 models 端点不认。
+    pub fn probe_headers(self, api_key: &str) -> Vec<(String, String)> {
+        match self {
+            Self::OpenAi => vec![("Authorization".into(), format!("Bearer {api_key}"))],
+            Self::Anthropic => vec![
+                ("x-api-key".into(), api_key.to_string()),
+                ("anthropic-version".into(), "2023-06-01".into()),
+            ],
+        }
+    }
 }
 
 /// 各家模型 API 的差异都收在这一处。
@@ -407,6 +442,45 @@ impl Reasoner for HttpReasoner {
     }
 }
 
+/// 测一次连通性。**只回「通不通」和一句人话，不回任何响应体。**
+///
+/// ## 为什么必须真的发一次请求
+///
+/// 早先的 `probe_key` 恒返回 `false`，注释写着「网络层 ticket 10 接上」。
+/// 但网络层早就是真的了——于是设置页那个「测试连通」按钮**永远说不通**。
+/// 一个恒假的指示器比没有更糟：用户会以为 key 坏了，去反复重填。
+///
+/// ## 为什么不调模型
+///
+/// 走 `GET /v1/models`：不产生 token、不花钱、也不占用速率额度，
+/// 而「这个 key 能不能访问 API」这个问题它答得一样准。
+///
+/// ## 错误里的 key
+///
+/// 上游的错误正文**可能带上你刚发的 header**。所以整条错误都过一遍
+/// [`redact`]，并且只截前 200 字符——这两步都必要。
+pub fn probe_connectivity(
+    http: &dyn Http,
+    provider: Provider,
+    api_key: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let resp = http
+        .get_json(
+            provider.models_url(),
+            &provider.probe_headers(api_key),
+            timeout,
+        )
+        .map_err(|e| redact(&e))?;
+    // 能解析出 JSON 说明契约没变。反过来不检查内容：models 列表长什么样
+    // 不影响「通不通」这个答案，硬要校验字段只会引入新的脆弱点。
+    if resp.is_object() {
+        Ok(())
+    } else {
+        Err(redact("上游返回的不是 JSON 对象——端点可能变了"))
+    }
+}
+
 /// 剥掉模型爱加的 ```json … ``` 围栏。
 ///
 /// 这是**实测**出来的：即使 system prompt 说了「只输出 JSON」，
@@ -487,6 +561,26 @@ mod tests {
     }
 
     impl Http for FakeHttp {
+        /// 测连通性用的假实现。**不消耗 reply 队列**——
+        /// 那队列是给三段式准备的，测一次连通不该把下一轮的回复吃掉。
+        fn get_json(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+            _t: Duration,
+        ) -> Result<serde_json::Value, String> {
+            let auth = headers
+                .iter()
+                .find(|(k, _)| k == "Authorization" || k == "x-api-key")
+                .map(|(_, v)| v.clone());
+            self.seen.lock().expect("锁").push(Seen {
+                url: url.to_string(),
+                auth_header: auth,
+                body: serde_json::Value::Null,
+            });
+            Ok(serde_json::json!({ "data": [] }))
+        }
+
         fn post_json(
             &self,
             url: &str,
@@ -590,6 +684,75 @@ mod tests {
         let d = format!("{r:?}");
         assert!(!d.contains(KEY), "Debug 泄了 key：{d}");
         assert!(d.contains("redacted"), "该显示占位：{d}");
+    }
+
+    /// **测连通性必须打到 `/v1/models`，不能调模型。**
+    ///
+    /// 早先的 `probe_key` 恒返回 false，注释说「网络层 ticket 10 接上」——
+    /// 但网络层早就是真的了，于是那个按钮**永远说不通**。
+    /// 恒假的指示器比没有更糟：用户会以为 key 坏了，反复重填。
+    #[test]
+    fn probing_hits_the_models_endpoint_not_the_model() {
+        let http = std::sync::Arc::new(FakeHttp::new(vec![]));
+        probe_connectivity(&*http, Provider::OpenAi, KEY, Duration::from_secs(5))
+            .expect("假 HTTP 应当通");
+        probe_connectivity(&*http, Provider::Anthropic, KEY, Duration::from_secs(5))
+            .expect("假 HTTP 应当通");
+
+        let seen = http.seen.lock().expect("锁").clone();
+        assert_eq!(seen.len(), 2, "两次探测应各留一条记录");
+        for s in &seen {
+            assert!(
+                s.url.ends_with("/v1/models"),
+                "探测打到了 {} —— 调模型是要花钱的",
+                s.url
+            );
+            assert!(
+                !s.url.contains("/messages"),
+                "探测不该打 messages 端点：{}",
+                s.url
+            );
+        }
+    }
+
+    /// **探测的错误里不能有 key。** 上游的错误正文可能带上刚发的 header。
+    #[test]
+    fn a_probe_error_never_contains_the_key() {
+        /// 把 key 写进错误正文的假上游——模拟最坏情况。
+        struct Leaky;
+        impl Http for Leaky {
+            fn get_json(
+                &self,
+                _u: &str,
+                _h: &[(String, String)],
+                _t: Duration,
+            ) -> Result<serde_json::Value, String> {
+                Err(format!("上游返回 401：invalid key {KEY}"))
+            }
+            fn post_json(
+                &self,
+                _u: &str,
+                _h: &[(String, String)],
+                _b: &serde_json::Value,
+                _t: Duration,
+            ) -> Result<serde_json::Value, String> {
+                Ok(serde_json::json!({}))
+            }
+        }
+        let e = probe_connectivity(&Leaky, Provider::OpenAi, KEY, Duration::from_secs(5))
+            .expect_err("应当失败");
+        assert!(!e.contains(KEY), "错误泄了 key：{e}");
+        assert!(e.contains("401"), "状态码要留着，那才是有用的信息：{e}");
+    }
+
+    /// 探测**不消耗**三段式的回复队列——测一次连通不该影响下一轮。
+    #[test]
+    fn probing_does_not_consume_the_reply_queue() {
+        let http = std::sync::Arc::new(FakeHttp::new(vec![judge_json().into()]));
+        probe_connectivity(&*http, Provider::OpenAi, KEY, Duration::from_secs(5)).expect("探测");
+        // 队列里那条还在——下一轮 judge 拿得到它。
+        let left = http.replies.lock().expect("锁").len();
+        assert_eq!(left, 1, "探测把回复队列吃掉了");
     }
 
     #[test]

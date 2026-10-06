@@ -96,6 +96,26 @@
     }
   }
 
+  /**
+   * 测连通性。
+   *
+   * 失败**必须显示**。早先的 `probe_key` 恒返回 false、前端又没有按钮，
+   * 等于这个功能从来没存在过；现在它真的会发请求了，失败信息就是用户
+   * 唯一能判断「是 key 不对还是网络不通」的依据。吞掉它等于白做。
+   */
+  async function probe(p: ProviderView) {
+    busy[p.id] = true;
+    notes[p.id] = '';
+    try {
+      await invoke<boolean>('probe_key', { provider: p.id });
+      notes[p.id] = '连上了。走的是只读的 /v1/models，没有产生任何 token 费用。';
+    } catch (e) {
+      notes[p.id] = `连不上：${String(e)}`;
+    } finally {
+      busy[p.id] = false;
+    }
+  }
+
   async function close() {
     try {
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
@@ -307,6 +327,10 @@
         <div class="cs-actions">
           <button class="cs-btn" onclick={() => (drafts[p.id] = REVEAL)} disabled={busy[p.id]}>
             换一把
+          </button>
+          <!-- 连通性测试。不调模型：走 /v1/models，只读、不花钱。 -->
+          <button class="cs-btn" onclick={() => probe(p)} disabled={busy[p.id]}>
+            {busy[p.id] ? '测试中…' : '测连通'}
           </button>
           <button class="cs-btn danger" onclick={() => forget(p)} disabled={busy[p.id]}>
             删除

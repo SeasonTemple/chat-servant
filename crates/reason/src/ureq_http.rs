@@ -68,6 +68,30 @@ impl Http for UreqHttp {
         resp.into_json::<Value>()
             .map_err(|e| format!("响应不是合法 JSON（{e}）——上游契约可能变了"))
     }
+
+    fn get_json(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        _timeout: Duration,
+    ) -> Result<Value, String> {
+        let mut req = self.agent.get(url);
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
+        let resp = req.call().map_err(|e| match e {
+            ureq::Error::Status(code, r) => {
+                let body = r.into_string().unwrap_or_default();
+                format!(
+                    "上游返回 {code}：{}",
+                    crate::transport::redact(&truncate(&body, 200))
+                )
+            }
+            ureq::Error::Transport(t) => format!("网络层失败：{t}"),
+        })?;
+        resp.into_json::<Value>()
+            .map_err(|e| format!("响应不是合法 JSON（{e}）——上游契约可能变了"))
+    }
 }
 
 fn truncate(s: &str, n: usize) -> String {

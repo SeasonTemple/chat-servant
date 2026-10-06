@@ -453,19 +453,30 @@ pub fn forget_key(provider: String) -> Result<(), String> {
     secret::erase(&provider)
 }
 
-/// 测试连通性。**只回「通不通」，不回任何响应体**——
+/// 测试连通性。**只回「通不通」**，不回任何响应体——
 /// 上游的错误正文可能带 key。
 #[tauri::command]
 pub fn probe_key(provider: String) -> Result<bool, String> {
-    if !PROVIDERS.contains(&provider.as_str()) {
-        return Err(format!("未知的供应商 {provider}"));
-    }
-    if secret::load(&provider).is_none() {
+    use chatservant_reason::{Provider, UreqHttp, probe_connectivity};
+
+    let p = match provider.as_str() {
+        "openai" => Provider::OpenAi,
+        "anthropic" => Provider::Anthropic,
+        // 认不出来的一律拒绝，**不静默接受**。
+        _ => return Err(format!("未知的供应商 {provider}")),
+    };
+    let Some(key) = secret::load(&provider) else {
         return Err(secret::missing_hint(&provider));
+    };
+    // 真的发一次请求。早先这里恒返回 false，注释说「网络层 ticket 10 接上」——
+    // 但网络层早就是真的了，于是这个按钮**永远说不通**。
+    // 恒假的指示器比没有更糟：用户会以为 key 坏了，反复重填。
+    let http = UreqHttp::new(std::time::Duration::from_secs(10));
+    match probe_connectivity(&http, p, &key, std::time::Duration::from_secs(10)) {
+        Ok(()) => Ok(true),
+        // 失败原因已经过 `redact`，可以安全显示。
+        Err(e) => Err(e),
     }
-    // 网络层 ticket 10 接上。**现在不假装能连通**——
-    // 返回 false 而不是 true，前端就知道还没接。
-    Ok(false)
 }
 
 /// 起观察循环。**只在启动时调一次。**
