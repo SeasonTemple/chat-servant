@@ -11,14 +11,15 @@ Rust 侧暴露一个真实的 `invoke` 命令，前端能调通并拿到结果�
 
 **Blocked by:** None (can start immediately)
 
-**Status:** done
+**Status:** done（`emit_readout` 已在 ticket 16 接上真实数据；面板现在还会显示
+会话身份徽标与分段调用计数）
 
 - [x] 应用启动后 `main` 窗口是透明、无边框、置顶、不占任务栏的，
       且**不抢焦点**（`focus: false`）
 - [x] `settings` 窗口启动时隐藏，能从 `main` 打开再关闭
 - [x] 前端调一个真实 `invoke` 命令并渲染返回结果，Rust→前端的链路通
 - [x] Rust 主动 `emit` 的事件前端能收到（不轮询）——`listen` 已接，
-      `emit_readout` 待 ticket 16 有真实数据后启用
+      ticket 16 接上真实 readout 后已在面板上渲染
 - [x] 懒加载的窗口写在配置里是 `visible: true` + 停在屏幕外，
       而不是 `visible: false`（否则 WebView2 不会注册 drop target）
 - [x] 窗口配置里 `dragDropEnabled` 写在配置文件里而不是只写在 Rust builder 里

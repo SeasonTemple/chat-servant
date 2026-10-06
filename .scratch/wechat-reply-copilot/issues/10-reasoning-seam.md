@@ -13,7 +13,10 @@
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** done（`8e94cfb` 接缝 + 三条降级路径 + 静默期零调用；
+`ba66d3c` 真实 HTTP 传输 ureq，key 只从凭据管理器读、不进日志；
+`cabc323` 起 `TurnContext` 另带 `images` 与分段计数。
+⚠ 验收项实现时未逐条勾选——见 `docs/agents/issue-tracker.md` 那条纪律）
 
 - [ ] `Message[]` + 配置 → `DraftSet`，候选按胜出概率排序，推荐条置顶
 - [ ] 判断调用失败时，仍然返回候选，且走的是盲起草路径
