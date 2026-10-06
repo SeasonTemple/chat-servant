@@ -1,0 +1,4 @@
+# 让 `cargo xtask ...` 指向 xtask crate，是社区惯例写法。
+# 见 https://github.com/matklad/cargo-workspaces/blob/master/examples/xtask/Cargo.toml
+[alias]
+xtask = "run --package xtask --"

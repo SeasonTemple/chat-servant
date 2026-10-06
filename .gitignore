@@ -1,0 +1,16 @@
+/target
+/ui/node_modules
+/ui/dist
+/ui/.svelte-kit
+
+# 抓帧调试产物。截图不落盘是硬约束，这里只允许 xtask probe 写。
+/probe-out
+
+# 本地配置与凭据。任何文件里都不该出现 key。
+config.json
+*.key
+.env
+.env.*
+
+# 第三方参考项目（自带 LICENSE，MIT/GPL 混合）。只读，不入库。
+examples/

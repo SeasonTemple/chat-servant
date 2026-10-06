@@ -1,0 +1,73 @@
+# cargo-deny 依赖合规策略
+#
+# 目标：**任何依赖都不得给商业使用带来麻烦。**
+# 做法：只允许宽松许可（permissive），copyleft / 商业限制 / 无许可证一律拒绝。
+#
+# 首次配置用 `cargo deny init` 生成官方模板后并入本文件。
+# 日常校验：`cargo deny check`（advisories + licenses + bans + sources）
+
+[licenses]
+# 策略本身：只允许 permissive 白名单。
+#
+# 未列出的许可证、未声明许可证的 crate、许可证正文识别不出来的 crate，
+# cargo-deny 全部按"拒绝"处理（这三条都是它的默认值，不需要显式写）。
+# 白名单是唯一的开口——往里加一行要能说清楚理由。
+#
+# 从许可证正文推断时的置信度门槛，调高更保守。
+confidence-threshold = 0.92
+
+# 允许清单：全部是 permissive，闭源商用无义务、无源码披露要求。
+# SPDX v2.1 标识符，注意 Apache-2.0 带显式专利授权。
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "0BSD",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "BSL-1.0",          # Boost，permissive
+  "CC0-1.0",          # 公有领域奉献
+]
+
+# 明确点名拒绝——allow 里不写就默认拒绝，写出来是为了让读者一眼看到意图，
+# 并且能在有人手滑加进 allow 时立刻看到冲突。
+#
+# GPL / AGPL / LGPL / MPL：copyleft，会传染分发包。
+#   参考项目就踩过这个坑——它自己的代码是 MIT，但发布包捆绑了
+#   GPLv3 的 PySide6-Fluent-Widgets，导致整个分发包受 GPLv3 约束。
+#   本项目不吃这个教训。
+# "BSL-1.0" 已在 allow：Boost 是 permissive，与 Boost 的衍生商业条款不同。
+#
+# 源码可见但限制商业使用的（如 BUSL、SSPL、Elastic License、"非商业免费"）
+# 一律不写进 allow，靠 default-deny 兜住。
+
+[advisories]
+# 已知漏洞 / 不可维护的 crate 直接失败。
+unmaintained = "workspace"
+yanked = "warn"
+ignore = []
+
+[bans]
+# 同名 crate 的多个主版本并存：警告（tui 生态常见，不一定有问题）。
+multiple-versions = "warn"
+# 通配符版本要求（`foo = "*"`）是供应链隐患，禁止。
+wildcards = "deny"
+# 但放过 `foo.workspace = true`：它继承工作区里声明的具体版本，
+# 不是真正的通配符，被 wildcards 拦下是误报。
+allow-wildcard-paths = true
+deny = [
+  # 需要 OpenSSL C 库，会让 Windows 构建变脆。统一走 rustls。
+  { name = "openssl-sys" },
+]
+skip-tree = []
+
+[sources]
+# 只允许 crates.io。引入 git 依赖需要在此显式列出并说明理由。
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

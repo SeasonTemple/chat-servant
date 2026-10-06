@@ -1,0 +1,18 @@
+[package]
+name = "xtask"
+description = "开发者探针与维护命令"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+chatservant-core.workspace = true
+chatservant-capture.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+image.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+windows.workspace = true

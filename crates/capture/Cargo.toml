@@ -1,0 +1,16 @@
+[package]
+name = "chatservant-capture"
+description = "窗口发现与 Windows Graphics Capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# 内部 crate，不发 crates.io。理由同 crates/core。
+publish = false
+
+[dependencies]
+chatservant-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+windows.workspace = true
+windows-capture.workspace = true

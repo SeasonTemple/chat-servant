@@ -1,0 +1,13 @@
+[package]
+name = "chatservant-core"
+description = "域类型与不依赖平台的纯逻辑"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# 内部 crate，不发 crates.io。标出来 cargo-deny 才会把
+# `deps.workspace = true` 当作普通工作区继承而不是"要发布的 path 依赖"。
+publish = false
+
+[dependencies]
+thiserror.workspace = true
