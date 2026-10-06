@@ -2,6 +2,8 @@
 
 pub use chatservant_core::frame::Frame;
 
+pub mod anchor;
+pub mod anchor_diag;
 pub mod ocr;
 pub mod printwindow;
 pub mod region;

@@ -32,6 +32,15 @@ enum Cmd {
     Occluded,
     /// 抓一帧（默认 wgc）并立刻本地 OCR，把读到的文字打出来
     Read,
+    /// 取证一帧的像素结构，为 PaneAnchor 的阈值提供依据
+    ///
+    /// 不带 `--file` 时现场抓一帧；带 `--file` 时对已存的 PNG 重放。
+    /// 取证必须可重放——不然每次改阈值都要重新摆一次窗口状态。
+    Layout {
+        /// 对已有的 PNG 做取证
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
     /// 抓取与识别的诊断探针
     Probe {
         #[command(subcommand)]
@@ -81,6 +90,7 @@ fn main() -> Result<()> {
         }
         Cmd::Occluded => probe_occluded("wechat"),
         Cmd::Read => probe_read(),
+        Cmd::Layout { file } => probe_layout(file),
         Cmd::Probe { kind } => match kind {
             ProbeCmd::Frame {
                 app,
@@ -216,6 +226,56 @@ fn probe_read() -> Result<()> {
     println!();
     println!("---- 整图 ----");
     println!("{}", ocr.text);
+    Ok(())
+}
+
+/// 取证一帧的像素结构。
+///
+/// 这是 PaneAnchor 的**前置**：阈值必须从真实帧里推，不能照搬参考项目的
+/// 数字（那是别人机器、别人微信版本的实测值）。所以这个命令只打印
+/// 像素分布，不推导任何结论——结论由人看着数据定，写进 PaneAnchor 的测试里。
+fn probe_layout(file: Option<PathBuf>) -> Result<()> {
+    let frame = match file {
+        Some(p) => {
+            println!("来源 = {}（重放，不抓新帧）\n", p.display());
+            let img = image::open(&p).context("打开 PNG 失败")?.to_rgb8();
+            let (w, h) = img.dimensions();
+            chatservant_capture::Frame::from_rgb(w, h, img.into_raw())
+                .context("PNG 尺寸与缓冲区不匹配")?
+        }
+        None => {
+            set_dpi_aware();
+            let hit = chatservant_capture::find_chat_window(&WECHAT)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let f = chatservant_capture::wgc_alt::capture_one_frame(hit.hwnd_raw)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+                .context("wgc 抓帧失败")?;
+            println!("来源 = 现场抓帧 0x{:X}\n", hit.hwnd_raw);
+            f
+        }
+    };
+    let diag = chatservant_capture::anchor_diag::analyze(&frame);
+    match chatservant_capture::anchor::derive(&frame) {
+        Ok(a) => println!(
+            "== 推导出的 PaneAnchor ==\n  消息区     = ({}, {}) - ({}, {})   {}x{}\n  面板左右   = ({}, {})\n  面板底色   = rgb({}, {}, {})\n  标题栏下沿 = y={}\n  输入框上沿 = y={}",
+            a.chat.x0,
+            a.chat.y0,
+            a.chat.x1,
+            a.chat.y1,
+            a.chat.width(),
+            a.chat.height(),
+            a.panel.x0,
+            a.panel.x1,
+            a.panel_bg[0],
+            a.panel_bg[1],
+            a.panel_bg[2],
+            a.header_top,
+            a.input_top
+        ),
+        Err(e) => println!("== 推导失败 ==\n  {e}\n  -> 上层应降级重试，不猜默认坐标"),
+    }
+    println!();
+    println!("{}", chatservant_capture::anchor_diag::render(&diag));
     Ok(())
 }
 
