@@ -27,6 +27,9 @@ tauri-build = { version = "=2.7.1", features = [] }
 chatservant-core = { path = "../../crates/core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Windows 凭据管理器。必须与工作区里的 windows 版本一致——
+# 同一个 HWND / CREDENTIAL 跨 crate 版本传指针是不安全的。
+windows = { workspace = true }
 # ⚠ 版本必须与 `@tauri-apps/api` 的 **次版本**对齐，tauri build 会硬性检查：
 #   Found version mismatched Tauri packages: tauri (v2.11.6) : @tauri-apps/api (v2.12.1)
 # 改 node 依赖时这里要跟着动，不是「宽松点没关系」。

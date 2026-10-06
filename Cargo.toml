@@ -34,6 +34,9 @@ windows = { version = "0.62", features = [
   "Win32_System_SystemInformation",
   "Win32_System_WinRT",
   "Win32_System_Threading",
+    # Windows 凭据管理器（API key 只存这里，绝不落普通文件）。
+    "Win32_Security_Credentials",
+    "Win32_Foundation",
 ] }
 windows-capture = "2.0"
 wgc = "2.0"

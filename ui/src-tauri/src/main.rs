@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod secret;
 
 fn main() {
     tauri::Builder::default()
@@ -13,6 +14,10 @@ fn main() {
             commands::probe_anchor,
             commands::dispatch,
             commands::open_settings,
+            commands::get_settings,
+            commands::save_setting,
+            commands::forget_key,
+            commands::probe_key,
         ])
         .run(tauri::generate_context!())
         .expect("启动失败");

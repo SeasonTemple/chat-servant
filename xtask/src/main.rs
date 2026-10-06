@@ -16,6 +16,7 @@ use chatservant_capture::{ChatSurface, WECHAT};
 use clap::{Parser, Subcommand};
 
 mod caps;
+mod secret_probe;
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "chat-servant 开发者探针")]
@@ -65,6 +66,11 @@ enum Cmd {
         #[arg(long)]
         file: Option<PathBuf>,
     },
+    /// 扫描仓库里是否残留 API key
+    ///
+    /// key 从环境变量 `CHATSERVANT_PROBE_KEY` 读，**不进命令行**
+    /// （进命令行就会留在 shell 历史和进程列表里）。
+    SecretScan,
     /// 抓取与识别的诊断探针
     Probe {
         #[command(subcommand)]
@@ -118,6 +124,7 @@ fn main() -> Result<()> {
         Cmd::Perceive { file } => probe_perceive(file),
         Cmd::Measure { file } => probe_measure(file),
         Cmd::Layout { file } => probe_layout(file),
+        Cmd::SecretScan => secret_probe::run(),
         Cmd::Probe { kind } => match kind {
             ProbeCmd::Frame {
                 app,

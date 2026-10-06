@@ -8,6 +8,8 @@ use chatservant_core::dispatch::{DeliveryReceipt, Dispatch, Dispatcher};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, PhysicalPosition};
 
+use crate::secret::{self, KeyStatus};
+
 /// `probe_anchor` 的返回。前端只渲染，不自己算几何。
 #[derive(Serialize)]
 pub struct AnchorProbe {
@@ -89,6 +91,97 @@ pub fn park_settings(app: &AppHandle) {
     };
     let _ = w.set_position(PhysicalPosition::new(-32000.0, -32000.0));
     let _ = w.hide();
+}
+
+/// 当前支持的模型供应商。
+///
+/// 换供应商只需在这里加一项，**不用重配整个应用**——
+/// 设置页按这个列表渲染，每个供应商的 key 独立存在凭据管理器里。
+pub const PROVIDERS: &[&str] = &["openai", "anthropic"];
+
+/// 设置页要读的状态。**这里没有任何 key。**
+#[derive(Serialize)]
+pub struct SettingsView {
+    pub providers: Vec<ProviderView>,
+}
+
+#[derive(Serialize)]
+pub struct ProviderView {
+    pub id: String,
+    /// 已经配好了。
+    pub configured: bool,
+    /// 值来自环境变量——这种情况下输入框应只读。
+    pub from_env: bool,
+    /// 掩码，仅供显示。
+    pub masked: String,
+    /// 没配时给的下一步指引。**不能是空字符串或静默失败。**
+    pub hint: String,
+}
+
+#[tauri::command]
+pub fn get_settings() -> SettingsView {
+    SettingsView {
+        providers: PROVIDERS
+            .iter()
+            .map(|p| {
+                let s: KeyStatus = secret::status(p);
+                ProviderView {
+                    id: (*p).to_string(),
+                    configured: s.configured,
+                    from_env: s.from_env,
+                    masked: s.masked,
+                    hint: if s.configured {
+                        String::new()
+                    } else {
+                        secret::missing_hint(p)
+                    },
+                }
+            })
+            .collect(),
+    }
+}
+
+/// 提交设置。**立即生效，不用重启。**
+///
+/// `key` 为 `None` 或空白 = 保留原值。删 key 走 `forget_key`。
+#[tauri::command]
+pub fn save_setting(provider: String, key: Option<String>) -> Result<bool, String> {
+    if !PROVIDERS.contains(&provider.as_str()) {
+        // 认不出来的 provider 一律拒绝，**不静默接受**——
+        // 拼错的供应商名会让人以为 key 存上了，其实没有。
+        return Err(format!(
+            "未知的供应商 {provider}。支持的是：{}",
+            PROVIDERS.join(" / ")
+        ));
+    }
+    let wrote = secret::apply(&provider, key.as_deref())?;
+    if wrote {
+        secret::forget_all();
+    }
+    Ok(wrote)
+}
+
+#[tauri::command]
+pub fn forget_key(provider: String) -> Result<(), String> {
+    if !PROVIDERS.contains(&provider.as_str()) {
+        return Err(format!("未知的供应商 {provider}"));
+    }
+    secret::erase(&provider)
+}
+
+/// 测试连通性。**只回「通不通」，不回任何响应体**——
+/// 上游的错误正文可能带 key。
+#[tauri::command]
+pub fn probe_key(provider: String) -> Result<bool, String> {
+    if !PROVIDERS.contains(&provider.as_str()) {
+        return Err(format!("未知的供应商 {provider}"));
+    }
+    if secret::load(&provider).is_none() {
+        return Err(secret::missing_hint(&provider));
+    }
+    // 网络层 ticket 10 接上。**现在不假装能连通**——
+    // 返回 false 而不是 true，前端就知道还没接。
+    Ok(false)
 }
 
 /// 启动观察循环的占位。现在是空的——**不假装在跑**。

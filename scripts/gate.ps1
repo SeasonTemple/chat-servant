@@ -18,6 +18,16 @@ function Step($name, $scriptblock) {
 Step "cargo fmt --all --check" { cargo fmt --all --check 2>&1 | Select-Object -Last 40 }
 Step "cargo clippy -D warnings" { cargo clippy --workspace --all-targets -- -D warnings 2>&1 | Select-Object -Last 60 }
 Step "cargo test --workspace"  { cargo test --workspace 2>&1 | Select-Object -Last 60 }
+
+# 仓库里不能有 API key（硬约束第 7 条）。
+# key 从环境变量 CHATSERVANT_PROBE_KEY 读——**绝不能进命令行**，
+# 命令行会留在 shell 历史和进程列表里，比日志泄露更隐蔽也更难清。
+if ($env:CHATSERVANT_PROBE_KEY) {
+  Step "secret scan" { cargo run -q -p xtask -- secret-scan 2>&1 | Select-Object -Last 20 }
+} else {
+  Write-Output ""
+  Write-Output ">>> secret scan SKIPPED（CHATSERVANT_PROBE_KEY 未设置——机器上本来就不该有 key）"
+}
 if (Get-Command cargo-deny -ErrorAction SilentlyContinue) {
   # 走 scripts/deny.ps1：advisory-db 要从 github.com 拉，直连会 schannel
   # 握手失败，那是网络问题不是门禁红。代理与 openssl 后端都在那个脚本里。
