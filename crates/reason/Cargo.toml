@@ -13,8 +13,23 @@ publish = false
 chatservant-core.workspace = true
 chatservant-perceive.workspace = true
 serde = { workspace = true }
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+# HTTP 传输。选 ureq 而不是 reqwest 的理由（三条，都是实测/读文档得来的）：
+#   ① **阻塞 I/O**。推理层每条新消息最多 3 次调用，异步运行时买不到任何东西，
+#      却要多背一整个 tokio 依赖树。
+#   ② **rustls + 操作系统信任库**（`native-certs`）。默认的 `tls` feature 会拉
+#      `webpki-roots`，而它带的是 **MPL-2.0** 的 Mozilla 根证书数据——
+#      为一份证书数据破掉 permissive-only 的门禁不划算。用 OS 信任库
+#      对 Windows 应用本来就更对：企业自签根证书能被认出来。
+#   ③ `reason` 是核心 crate，**绝不能依赖 tauri**。reqwest 目前只在树里
+#      （由 tauri 带入，且仅限桌面目标），依赖它等于让核心依赖壳——架构倒过来。
+ureq = { version = "2", default-features = false, features = [
+  "json",
+  "gzip",
+  "native-certs",
+] }
+
 [dev-dependencies]
-serde_json.workspace = true

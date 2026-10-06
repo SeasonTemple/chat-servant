@@ -59,6 +59,11 @@ impl Turn {
     pub fn recommended(&self) -> Option<&Candidate> {
         self.draft.sorted().first().copied()
     }
+
+    /// 候选条数。
+    pub fn candidates_count(&self) -> usize {
+        self.draft.candidates.len()
+    }
 }
 
 /// 跑一轮推理。**保证要么有候选，要么报明确错误。**

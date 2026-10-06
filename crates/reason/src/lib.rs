@@ -9,6 +9,8 @@
 pub mod clean;
 pub mod model;
 pub mod seam;
+pub mod transport;
+pub mod ureq_http;
 
 #[cfg(test)]
 mod gate;
@@ -17,3 +19,5 @@ mod quiet;
 
 pub use model::{Candidate, DraftSet, Intent, ReasonError, Reasoner, TurnContext};
 pub use seam::{Turn, turn};
+pub use transport::{Http, HttpReasoner, Provider};
+pub use ureq_http::UreqHttp;
