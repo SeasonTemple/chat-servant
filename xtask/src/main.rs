@@ -314,7 +314,7 @@ fn make_fixture(name: &str, source: Option<PathBuf>) -> Result<()> {
         .ok()
         .and_then(|a| Palette::learn(&frame, a.chat));
 
-    let redacted = {
+    let (redacted, keep) = {
         let a = before_anchor.as_ref().ok();
         let p = before_palette.ok_or_else(|| anyhow::anyhow!("学不到配色，无法脱敏"))?;
         let a = a.ok_or_else(|| anyhow::anyhow!("锚点推不出来，无法确定要保留哪些颜色"))?;
@@ -326,8 +326,40 @@ fn make_fixture(name: &str, source: Option<PathBuf>) -> Result<()> {
             a.input_top,
         );
         println!("保留色（{} 个）：{:?}", keep.len(), keep);
-        chatservant_perceive::redact_with(&frame, &keep)
+        (chatservant_perceive::redact_with(&frame, &keep), keep)
     };
+
+    // 产物调色板必须**封闭在保留色里**。这条守卫是血换来的：
+    // 夹具脱敏连续出过五次泄漏，全都能被它一眼抓住——
+    //   ① 文字变绿（退回全局最近保留色）
+    //   ② 绿气泡上的正文是深色麻点（普查容差太松，深字被算成面板色）
+    //   ③ 头像整块变绿（空块退回全局最近）
+    //   ④ 与头像宫格同形的深色剪影（照片暗部恰好等于某个保留色）
+    //   ⑤ 能看出字形的麻点（抗锯齿边缘落在表面容差内）
+    // 只要有一个像素既不是保留色、也不在它的容差内，就是泄漏。
+    let mut off_palette = 0usize;
+    let mut first_off: Option<(u32, u32, [u8; 3])> = None;
+    for y in 0..redacted.height() {
+        for x in 0..redacted.width() {
+            let px = redacted.pixel(x, y).expect("在范围内");
+            if !keep
+                .iter()
+                .any(|k| chatservant_perceive::fixture::near_color(px, *k))
+            {
+                off_palette += 1;
+                first_off.get_or_insert((x, y, px));
+            }
+        }
+    }
+    if let Some((x, y, px)) = first_off {
+        bail!(
+            "产物有 {off_palette} 个像素不在保留色内（首个 ({x},{y}) = rgb({},{},{})）——\
+             泄漏了原始像素。保留色：{keep:?}",
+            px[0],
+            px[1],
+            px[2]
+        );
+    }
 
     let after_anchor = chatservant_capture::anchor::derive(&redacted);
     let after_palette = after_anchor
@@ -377,12 +409,20 @@ fn make_fixture(name: &str, source: Option<PathBuf>) -> Result<()> {
         "# 夹具 {name}\n\
          #\n\
          # 由 `cargo xtask fixture --name {name} --source <png>` 生成。\n\
-         # 已脱敏：按**面积**保留布局色，小面积高频色（文字/头像/图片）吸附到最近保留色。\n\
          # 原始帧含真实联系人名与消息正文，**不入库**。\n\
+         #\n\
+         # 脱敏分两步：①按**面积**挑出布局色（面板/侧边栏/两侧气泡/选中行/边框线），\n\
+         # 整帧切 8x8 的块，每块记下块内最多的布局色作为它的**底色**；\n\
+         # ②渲染时，凡是与所在块底色不是同一片表面的像素，一律刷成块底色。\n\
+         # 空块（头像/图片）向邻近块**传播**底色，不往全局找。\n\
+         #\n\
+         # 生成时会当场校验三件事，任何一条不成立就拒收、不写盘：\n\
+         #   · 产物的每个像素都在保留色内（调色板封闭）\n\
+         #   · 锚点 chat 矩形与脱敏前逐像素相同\n\
+         #   · 学到的面板底色与脱敏前相同\n\
          # 更新基线需手动删掉 png 再重跑——不允许静默覆盖。\n\
          #\n\
-         # 锁的是几何与配色，不锁 OCR 读出的文字内容。\n\
-         \n\
+         # 锁的是几何与配色，不锁 OCR 读出的文字内容（夹具里本来就没有文字）。\n         \n\
          width = {}\n\
          height = {}\n\
          chat_x0 = {}\n\

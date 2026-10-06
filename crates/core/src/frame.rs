@@ -13,7 +13,8 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub fn new(x0: i32, y0: i32, x1: i32, y1: i32) -> Self {
+    /// `const`：夹具的黄金基线要把它写进常量里。
+    pub const fn new(x0: i32, y0: i32, x1: i32, y1: i32) -> Self {
         Self { x0, y0, x1, y1 }
     }
 
