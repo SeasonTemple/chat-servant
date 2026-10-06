@@ -61,6 +61,33 @@ pub fn group(attrs: &[Attribution]) -> Vec<Message> {
     out
 }
 
+/// 聊天区顶部的**会话名**。
+///
+/// 头部那一行白字大标题（[`NoiseClass::Header`]）就是它。
+/// 多个 Header 时取**最靠上**的那一条——会话名在标题栏，别的 Header
+/// （群公告之类）在下面，取最上的那条才是会话名本身。
+///
+/// 取不到返回 `None`，**不要退回空串**：空串和「真的没有会话名」
+/// 在调用方眼里是两回事，调用方要靠它决定敢不敢动手。
+pub fn conversation_name(attrs: &[Attribution]) -> Option<String> {
+    let mut best: Option<&Attribution> = None;
+    for a in attrs {
+        if a.noise != NoiseClass::Header {
+            continue;
+        }
+        let t = a.text.trim();
+        if t.is_empty() {
+            continue;
+        }
+        best = match best {
+            None => Some(a),
+            Some(b) if a.rect.y0 < b.rect.y0 => Some(a),
+            keep => keep,
+        };
+    }
+    best.map(|a| a.text.trim().to_string())
+}
+
 /// 拼接处要不要补一个空格。
 ///
 /// 中文按字断行，直接拼是对的；英文/数字断在词中间，不补空格会粘成
@@ -71,5 +98,70 @@ pub(crate) fn needs_space(left: &str, right: &str) -> bool {
     match (left.chars().next_back(), right.chars().next()) {
         (Some(a), Some(b)) => is_word_char(a) && is_word_char(b),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod session_gate {
+    use super::*;
+    use crate::attribute::{Evidence, Speaker};
+    use chatservant_core::frame::Rect;
+
+    fn line(noise: NoiseClass, text: &str, y0: i32) -> Attribution {
+        Attribution {
+            speaker: Speaker::System,
+            noise,
+            text: text.into(),
+            rect: Rect::new(10, y0, 120, y0 + 18),
+            evidence: Evidence {
+                bg: [30, 30, 31],
+                ink: [240, 240, 240],
+                contrast: 200.0,
+                on_panel: true,
+                chroma: 0,
+                purity: 1.0,
+                height: 18,
+            },
+        }
+    }
+
+    /// 会话名取**最靠上**的那条 Header。
+    #[test]
+    fn the_topmost_header_is_the_conversation_name() {
+        let attrs = vec![
+            line(NoiseClass::Header, "群公告在下面", 300),
+            line(NoiseClass::Header, "小号", 20),
+        ];
+        assert_eq!(conversation_name(&attrs).as_deref(), Some("小号"));
+    }
+
+    /// 正文和时间戳**不算**会话名。认错人就会把 A 的对话当成 B 的处理。
+    #[test]
+    fn text_and_gray_are_never_the_conversation_name() {
+        let attrs = vec![
+            line(NoiseClass::Text, "今晚有空吗", 100),
+            line(NoiseClass::Gray, "昨天 22:31", 150),
+        ];
+        assert_eq!(conversation_name(&attrs), None, "只有 Header 才是会话名");
+    }
+
+    /// 认不出就返回 `None`，**不返回空串**。
+    ///
+    /// 空串会让调用方以为「名字是空的」，而 `None` 的意思是
+    /// 「没认出来，更不该动手」——这是两种不同的结论。
+    #[test]
+    fn unreadable_header_is_none_not_empty() {
+        let attrs = vec![line(NoiseClass::Header, "   ", 20)];
+        assert_eq!(conversation_name(&attrs), None);
+    }
+
+    /// 空白 Header 即使最靠上也要**跳过**，不因为位置就选它。
+    #[test]
+    fn blank_headers_are_skipped_even_when_topmost() {
+        let attrs = vec![
+            line(NoiseClass::Header, " ", 10),
+            line(NoiseClass::Header, "小号", 40),
+        ];
+        assert_eq!(conversation_name(&attrs).as_deref(), Some("小号"));
     }
 }

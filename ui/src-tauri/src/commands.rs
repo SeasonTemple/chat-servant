@@ -594,6 +594,14 @@ pub fn start(app: &AppHandle) {
     }
 }
 
+/// 要锁定的会话名。**空串 = 不锁**——那时程序宁可不做，也不猜。
+///
+/// 锁定的意义是「只对这个会话动手」：窗口里是别的聊天时不推理也不投递。
+/// OCR 认错名字的概率不为零（`reason::peer` 记着两个字的中文名无法
+/// 归并），所以**认不出名字和名字对不上，都按「不是目标会话」处理**，
+/// 不去猜「大概是它」。
+const LOCKED_PEER: &str = "小号";
+
 /// 组装循环配置。**key 从凭据管理器读**，读不到就用预置传输。
 fn build_loop_config() -> LoopConfig {
     use chatservant_reason::{HttpReasoner, Provider, UreqHttp};
@@ -614,6 +622,7 @@ fn build_loop_config() -> LoopConfig {
                 reasoner: Box::new(r),
                 transport_ready: true,
                 recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
+                locked_peer: LOCKED_PEER.to_string(),
                 token_budget: TokenBudget::new(BUDGET_DEFAULT),
                 images_out: crate::watch::ImagesOut::off(),
                 tier: crate::watch::TierCell::default_manual(),
@@ -626,6 +635,7 @@ fn build_loop_config() -> LoopConfig {
         reasoner: Box::new(PresetReasoner),
         transport_ready: false,
         recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
+        locked_peer: LOCKED_PEER.to_string(),
         token_budget: TokenBudget::new(BUDGET_DEFAULT),
         images_out: crate::watch::ImagesOut::off(),
         tier: crate::watch::TierCell::default_manual(),

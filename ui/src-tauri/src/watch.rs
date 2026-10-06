@@ -81,6 +81,11 @@ impl CallCounts {
 #[derive(Debug, Clone, Serialize)]
 pub struct Readout {
     pub anchor: Option<PaneAnchor>,
+    /// **当前窗口里的会话名。** 空串 = 没认出来。
+    ///
+    /// 界面必须显示它——会话名闸是「只对锁定会话动手」那道闸，
+    /// 而闸的判据必须看得见，否则用户不知道为什么程序不动。
+    pub peer: String,
     pub messages: Vec<Message>,
     pub candidates: Vec<DraftCandidate>,
     /// 判断摘要 + 降级说明。
@@ -168,6 +173,12 @@ pub struct LoopConfig {
     pub images_out: ImagesOut,
     /// 发送档位。**默认 Manual**，Rust 侧唯一事实来源。
     pub tier: TierCell,
+    /// **只对这个会话动手。** 空串 = 不锁（锁不住就先不推理，比对错人安全）。
+    ///
+    /// 这是「测试会话锁定小号」那条要求的落点，也是硬约束第 1 条
+    /// （只处理自己有权查看的对话）在**运行时**的体现：
+    /// 程序会一直核对窗口顶部的会话名，对不上就**不推理也不投递**。
+    pub locked_peer: String,
 }
 
 /// 一轮里的**可变会话状态**。合成一个结构体，而不是给 `step` 递九个 `&mut`。
@@ -192,6 +203,10 @@ struct Scratch {
     context: chatservant_reason::Context,
     /// 本会话的完整历史，喂给推理。**只在有新消息时追加**。
     history: Vec<String>,
+    /// **只对这个会话动手。** 见 [`LoopConfig::locked_peer`]。
+    locked_peer: String,
+    /// 当前窗口里认出的会话名。**空串 = 没认出来**。
+    peer: String,
     /// 与设置页共用一个格子的条数。循环每圈读一次。
     recent: RecentN,
     /// 视觉桥。**默认关闭**——`VisionBridge::off()` 不发任何请求，
@@ -209,6 +224,8 @@ impl Scratch {
             history: Vec::new(),
             recent,
             vision: chatservant_reason::VisionBridge::off(),
+            locked_peer: String::new(),
+            peer: String::new(),
         }
     }
 }
@@ -362,9 +379,15 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
             let mut watcher = PaneWatcher::new(cfg.ignore_top);
             let mut reasoner = cfg.reasoner;
             let mut s = Scratch::new(cfg.recent_n);
+            // 会话名闸的目标。**从 LoopConfig 拷进 Scratch**，
+            // 这样 `step` 不用再收第七个参数。
+            s.locked_peer = cfg.locked_peer.clone();
             let mut last_calls = 0u32;
             let mut ticks = 0u64;
             let mut anchor: Option<PaneAnchor> = None;
+            // 最近一次认出的会话名。**认不出来就是空串**，
+            // 界面据此显示「没认出会话」，不显示空白。
+            // 最近一次认出的会话名由 `step` 写进 `s.peer`，这里直接读。
 
             while !stop_bg.load(Ordering::Relaxed) {
                 ticks += 1;
@@ -375,6 +398,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         let st = reasoner.stage_calls();
                         let out = Readout {
                             anchor,
+                            peer: s.peer.clone(),
                             messages: Vec::new(),
                             candidates: s.candidates.clone(),
                             reason: s.reason.clone(),
@@ -404,6 +428,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         let st = reasoner.stage_calls();
                         let out = Readout {
                             anchor,
+                            peer: s.peer.clone(),
                             messages: Vec::new(),
                             candidates: s.candidates.clone(),
                             reason: "这一轮没跑通".into(),
@@ -480,6 +505,33 @@ fn step(
     let attrs = chatservant_perceive::classify_all(&lines, &full, &palette);
     let messages = chatservant_perceive::group(&attrs);
 
+    // **会话名闸。** 窗口顶部的白字大标题就是当前会话的名字。
+    //
+    // 认不出、或与锁定目标不符 → **本轮不推理、不投递**。
+    // 这不是「读个名字显示一下」：认错人就会把 A 的对话当成 B 的来处理，
+    // 而误发的代价是别人收到一句不该收到的话。
+    // OCR 认错名字的概率不为零，所以「认不出」和「对不上」都归到同一侧。
+    let peer_name = chatservant_perceive::conversation_name(&attrs);
+    // 存进 Scratch，`spawn` 那边要拿它往 UI 推。**认不出来存空串**——
+    // 界面据此显示「没认出会话」，不显示空白。
+    s.peer = peer_name.clone().unwrap_or_default();
+    let peer_ok = match (peer_name.as_deref(), s.locked_peer.as_str()) {
+        (_, "") => false, // 没锁 → 不动。宁可不做，也不猜对谁。
+        (Some(got), want) => got == want,
+        (None, _) => false,
+    };
+    if !peer_ok {
+        s.candidates.clear();
+        s.reason = format!(
+            "当前会话是 {}，不是要处理的「{}」——本轮不动手",
+            peer_name.as_deref().unwrap_or("（没读出会话名）"),
+            s.locked_peer
+        );
+        // **不推进水位线**：这样下一帧会重试同一个会话，
+        // 用户切回「小号」之后能立刻接上，而不是要重新发一条消息。
+        return Ok(None);
+    }
+
     // 存一份给调试画布。**在整帧坐标系**——画布按帧的百分比定位，
     // 用 ROI 坐标会让框整体偏移。
     *last_boxes.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::debug::build(
@@ -531,7 +583,9 @@ fn step(
 
         let ctx = TurnContext::text(
             rendered.lines().map(str::to_string).collect(),
-            String::new(),
+            // 过了闸才填对端名。**这里不是空串了**——早先一直留空占位，
+            // 判据是「还没接识别会话名」，现在接上了。
+            peer_name.clone().unwrap_or_default(),
         );
         match chatservant_reason::turn(reasoner.as_mut(), &ctx) {
             Ok(t) => {

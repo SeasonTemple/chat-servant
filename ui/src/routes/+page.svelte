@@ -15,6 +15,14 @@
   /** 分段调用次数。**Rust 侧算好推过来**，前端不自己累加——
    *  四个数是「静默期零调用」那条硬约束的唯一可视证据，自己数一遍就可能数错。 */
   let counts = $state<CallCounts | null>(null);
+  /**
+   * 当前窗口里的会话名。
+   *
+   * 这是**会话名闸**的判据，必须显眼：程序只对锁定会话动手，
+   * 而「为什么不动」这件事用户要能一眼看到，不能只在 reason 里猜。
+   * 空串 = 没认出来，那同样是不动手。
+   */
+  let peer = $state('');
   let busy = $state(false);
   /** 紧凑模式：面板窄于阈值时切。**不靠媒体查询**——
    *  窗口可以被用户拖到任意宽度，媒体查询只看视口。 */
@@ -64,11 +72,14 @@
         candidates: Candidate[];
         reason: string;
         counts: CallCounts | null;
+        /** 当前窗口里的会话名。**空串 = 没认出来**。 */
+        peer: string;
       }>('readout', (e) => {
         messages = e.payload.messages;
         candidates = e.payload.candidates ?? [];
         reason = e.payload.reason;
         counts = e.payload.counts ?? null;
+        peer = e.payload.peer ?? '';
       });
       if (cancelled) {
         un();
@@ -145,6 +156,20 @@
     </div>
   </header>
 
+  <!-- 会话名闸：只对「小号」动手。这个徽标必须显眼——
+       程序不动的时候，用户要能立刻看出「它看到的是哪个会话」。 -->
+  <p
+    class="cs-peer"
+    class:unknown={!peer}
+    title={peer ? `当前窗口：${peer}` : '没认出会话名——程序不会动手'}
+  >
+    {#if peer}
+      会话：{peer}
+    {:else}
+      会话：没认出来
+    {/if}
+  </p>
+
   <ReasonBar {reason} {counts} />
 
   <MessageStream {messages} />
@@ -166,6 +191,19 @@
 </main>
 
 <style>
+  /* 会话名徽标。认不出来时用警告色——那意味着程序**不会动手**，
+     得让人一眼看出来，而不是当成一个还没加载完的空白。 */
+  .cs-peer {
+    margin: 0 0 0.2rem;
+    font-size: 0.66rem;
+    letter-spacing: 0.02em;
+    color: var(--cs-text-dim);
+  }
+
+  .cs-peer.unknown {
+    color: var(--cs-danger);
+  }
+
   .cs-panel {
     display: flex;
     flex-direction: column;
