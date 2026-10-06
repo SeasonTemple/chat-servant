@@ -654,6 +654,21 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
     }
 
     println!();
+    // 会话名是**安全闸的判据**，必须在这里看得见。
+    // 头部的**归类**（NoiseClass::Header）与头部的**文字读得对不对**
+    // 是两件事：真实帧上分类是对的，OCR 却可能把「小号」读成别的。
+    // 只打印归类不打印文字，会让人以为闸一定认得出人。
+    match chatservant_perceive::conversation_name(&r.attributions) {
+        Some(name) => {
+            println!("== 会话名 ==");
+            println!("  {name}");
+            println!("  ⚠ 这就是会话名闸拿去比对的**那串文字**。");
+            println!("     锁定名是编译期常量，所以 OCR 认错一个字，闸就会永远拒绝动手。");
+        }
+        None => println!("== 会话名 ==\n  （没读出标题行）"),
+    }
+
+    println!();
     println!("== 归并后的消息 ==");
     for m in &r.messages {
         println!(
