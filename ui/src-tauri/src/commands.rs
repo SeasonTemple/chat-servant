@@ -6,9 +6,30 @@
 
 use chatservant_core::dispatch::{DeliveryReceipt, Dispatch, Dispatcher};
 use serde::Serialize;
-use tauri::{AppHandle, Manager, PhysicalPosition};
+use std::sync::Mutex;
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
 use crate::secret::{self, KeyStatus};
+use crate::watch::{DraftCandidate, LoopConfig, Readout, Watcher};
+use chatservant_reason::TurnContext;
+
+/// 全局单例：一个应用只有一个观察循环。
+///
+/// **Mutex 里的类型必须能在循环线程里用**——所以循环自己起了线程，
+/// 这里只存 `Watcher` 句柄与**纯数据**快照。
+static STATE: Mutex<Option<AppState>> = Mutex::new(None);
+
+struct AppState {
+    watcher: Watcher,
+    /// 最新一轮的候选。`dispatch` 要按 id 取正文。
+    candidates: Vec<DraftCandidate>,
+}
+
+/// 取全局状态。**锁中毒不算致命**——状态还在，继续用比崩掉好。
+fn with_state<R>(f: impl FnOnce(&mut AppState) -> R) -> Option<R> {
+    let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_mut().map(f)
+}
 
 /// `probe_anchor` 的返回。前端只渲染，不自己算几何。
 #[derive(Serialize)]
@@ -21,13 +42,51 @@ pub struct AnchorProbe {
 
 #[tauri::command]
 pub fn probe_anchor() -> AnchorProbe {
-    // 现在还没有常驻的观察循环，所以只报「没在观察」而不是编一个锚点。
-    // 编出来的锚点会让前端渲染一个假的框，比报错难查得多。
-    AnchorProbe {
-        ok: false,
-        anchor: String::new(),
-        detail: "观察循环尚未启动（ticket 16 接上采集层后才有锚点）".into(),
+    let Some(out) = with_state(|s| s.watcher.latest()).flatten() else {
+        return AnchorProbe {
+            ok: false,
+            anchor: String::new(),
+            detail: "观察循环还没跑出第一帧".into(),
+        };
+    };
+    if let Some(e) = &out.error {
+        return AnchorProbe {
+            ok: false,
+            anchor: String::new(),
+            detail: e.clone(),
+        };
     }
+    match out.anchor {
+        Some(a) => AnchorProbe {
+            ok: true,
+            anchor: format!(
+                "({},{})-({},{})",
+                a.chat.x0, a.chat.y0, a.chat.x1, a.chat.y1
+            ),
+            detail: format!(
+                "第 {} 圈｜OCR 累计 {} 次｜模型累计 {} 次",
+                out.ticks, out.ocr_calls, out.model_calls
+            ),
+        },
+        None => AnchorProbe {
+            ok: false,
+            anchor: String::new(),
+            detail: format!("第 {} 圈：静默期，没有新消息", out.ticks),
+        },
+    }
+}
+
+/// 取最近一轮的完整快照。**前端刷新时用它对齐**，不轮询——用户手动触发。
+#[tauri::command]
+pub fn latest_readout() -> Option<Readout> {
+    with_state(|s| s.watcher.latest()).flatten()
+}
+
+/// 调试画布数据。**没跑出第一帧时返回 `None`**，前端显示「等第一帧」，
+/// 不画一张空白画布假装正常。
+#[tauri::command]
+pub fn debug_pane() -> Option<crate::debug::DebugPane> {
+    crate::watch::debug_pane()
 }
 
 /// `dispatch` 的返回。**回执不是布尔值。**
@@ -38,7 +97,12 @@ pub struct DispatchReply {
 }
 
 #[tauri::command]
-pub fn dispatch(candidate_id: String, action: String, tier: String) -> DispatchReply {
+pub fn dispatch(
+    app: AppHandle,
+    candidate_id: String,
+    action: String,
+    tier: String,
+) -> DispatchReply {
     let tier: Dispatch = match tier.as_str() {
         "Auto" => Dispatch::Auto,
         "Confirm" => Dispatch::Confirm,
@@ -50,12 +114,14 @@ pub fn dispatch(candidate_id: String, action: String, tier: String) -> DispatchR
     d.set_tier(tier);
 
     // Confirm 档：**没确认就不发送**。这条是硬约束，程序不许替人省这一步。
-    if action == "confirm" && tier == Dispatch::Confirm {
-        let reply = DispatchReply {
+    // 第一次点「填入并确认发送」只是**准备**，第二次（tier 已是 Confirm）
+    // 才真的发。所以判据是 tier 而不是 action。
+    if tier == Dispatch::Confirm && action == "confirm" {
+        let _ = app.emit("armed", &candidate_id);
+        return DispatchReply {
             outcome: "NotSent",
-            detail: "Confirm 档：已准备好，等你在面板上再点一次「确认发送」。".into(),
+            detail: "已准备好。再点一次「确认发送」才会真的发出去。".into(),
         };
-        return reply;
     }
 
     let receipt = deliver(&candidate_id, &action, tier);
@@ -111,24 +177,41 @@ fn outcome_name(r: &DeliveryReceipt) -> &'static str {
     }
 }
 
-/// 候选正文。ticket 10 接上起草层后，这里读真实的 `Candidate[]`。
+/// 候选正文。**从观察循环的快照里按 id 取。**
 ///
-/// **现在恒返回 `None`**——宁可报「没接」也不送占位文本。
-fn candidate_text(_id: &str) -> Option<String> {
-    None
+/// ⚠ 取不到就返回 `None`，`deliver` 随后报「没接起草层」——
+/// **绝不拿占位文本去注入**。往别人的聊天框里送一句假话，
+/// 比不送严重得多。
+fn candidate_text(id: &str) -> Option<String> {
+    with_state(|s| {
+        s.candidates
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.text.clone())
+    })
+    .flatten()
 }
 
-#[tauri::command]
-pub fn open_settings(app: AppHandle) -> Result<(), String> {
+/// 把某个隐藏窗口挪到屏幕内并显示。**共用一条路径**——
+/// 三个窗口的「打开」逻辑一样，写三遍就是三处能写错的地方。
+fn show_window(app: &AppHandle, label: &str) -> Result<(), String> {
     let w = app
-        .get_webview_window("settings")
-        .ok_or_else(|| "settings 窗口不存在".to_string())?;
-    // 从屏幕外挪回屏幕内再显示。`park_settings` 把它藏到了 (-32000, -32000)，
-    // 直接 show 会在左上角闪一下。
+        .get_webview_window(label)
+        .ok_or_else(|| format!("{label} 窗口不存在"))?;
     w.set_position(PhysicalPosition::new(120.0, 120.0))
         .map_err(|e| e.to_string())?;
     w.show().map_err(|e| e.to_string())?;
     w.set_focus().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn open_settings(app: AppHandle) -> Result<(), String> {
+    show_window(&app, "settings")
+}
+
+#[tauri::command]
+pub fn open_debug(app: AppHandle) -> Result<(), String> {
+    show_window(&app, "debug")
 }
 
 /// 把 `settings` 窗口挪到屏幕外。
@@ -238,11 +321,125 @@ pub fn probe_key(provider: String) -> Result<bool, String> {
     Ok(false)
 }
 
-/// 启动观察循环的占位。现在是空的——**不假装在跑**。
+/// 起观察循环。**只在启动时调一次。**
 ///
-/// ticket 16 会把 `PaneWatcher` + `pipeline::read` 接进来。
-/// 那之前 `probe_anchor` 如实说「没在观察」，不编一个锚点出来。
-#[allow(dead_code)]
+/// 有 key 就组装**真实传输**（`UreqHttp` + `HttpReasoner`）；
+/// 没 key 就用**明确标注的预置传输**——界面上每条候选都带「预置」字样，
+/// 不能让用户以为模型接通了。
 pub fn start(app: &AppHandle) {
-    let _ = app;
+    let cfg = build_loop_config();
+    let transport_ready = cfg.transport_ready;
+
+    let watcher = crate::watch::spawn(cfg);
+    if let Ok(mut g) = STATE.lock() {
+        *g = Some(AppState {
+            watcher,
+            candidates: Vec::new(),
+        });
+    }
+
+    // 快照 → Tauri 事件。UI 只监听，不轮询。
+    let app2 = app.clone();
+    std::thread::Builder::new()
+        .name("cs-pump".into())
+        .spawn(move || {
+            let mut last = 0u64;
+            loop {
+                if let Some(out) = with_state(|s| s.watcher.latest()).flatten()
+                    && out.ticks != last
+                {
+                    last = out.ticks;
+                    if let Ok(mut g) = STATE.lock()
+                        && let Some(s) = g.as_mut()
+                    {
+                        s.candidates = out.candidates.clone();
+                    }
+                    let _ = app2.emit("readout", &out);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        })
+        .ok();
+
+    if transport_ready {
+        tracing::info!("观察循环已启动（真实模型传输）");
+    } else {
+        tracing::warn!(
+            "观察循环已启动，但**没有可用 key**——用预置传输。候选是假的，别当成模型输出。"
+        );
+    }
+}
+
+/// 组装循环配置。**key 从凭据管理器读**，读不到就用预置传输。
+fn build_loop_config() -> LoopConfig {
+    use chatservant_reason::{HttpReasoner, Provider, UreqHttp};
+
+    // 谁有 key 就用谁。**默认先试 OpenAI**——设置页上它是第一个选项。
+    for (name, provider) in [
+        ("openai", Provider::OpenAi),
+        ("anthropic", Provider::Anthropic),
+    ] {
+        if let Some(key) = secret::load(name) {
+            // `Box<dyn Reasoner>` 不是 `Send` 的边界——循环自己起线程，
+            // 所以这里不需要 Send。`Http` 那边要 Send+Sync 是因为
+            // `HttpReasoner` 内部用 `Arc` 共享 agent。
+            let http = UreqHttp::default();
+            let r = HttpReasoner::new(std::sync::Arc::new(http), provider, key);
+            return LoopConfig {
+                ignore_top: IGNORE_TOP,
+                reasoner: Box::new(r),
+                transport_ready: true,
+            };
+        }
+    }
+
+    LoopConfig {
+        ignore_top: IGNORE_TOP,
+        reasoner: Box::new(PresetReasoner),
+        transport_ready: false,
+    }
+}
+
+/// 顶部跳过多高（置顶公告条）。**由 ChatSurface 给，不该写死在引擎里**；
+/// 还没有 `ChatSurface` 的配置入口，先用实测值 60。
+const IGNORE_TOP: i32 = 60;
+
+/// 预置传输。**每条候选都带自曝标记**，界面与日志里一眼看得出。
+pub struct PresetReasoner;
+
+impl chatservant_reason::Reasoner for PresetReasoner {
+    fn judge(
+        &mut self,
+        _ctx: &TurnContext,
+    ) -> Result<chatservant_reason::Intent, chatservant_reason::ReasonError> {
+        Ok(chatservant_reason::Intent {
+            intent: "预置判断（没配置 key，没读懂对话）".into(),
+            need: String::new(),
+            action: "blind".into(),
+            tension: 0.0,
+        })
+    }
+
+    fn draft(
+        &mut self,
+        _ctx: &TurnContext,
+        _i: &chatservant_reason::Intent,
+    ) -> Result<chatservant_reason::DraftSet, chatservant_reason::ReasonError> {
+        Ok(chatservant_reason::DraftSet {
+            candidates: vec![chatservant_reason::Candidate {
+                text: "【预置候选，没配置 key，不是模型输出】".into(),
+                probability: 1.0,
+            }],
+            blind: true,
+            calls: 0,
+        })
+    }
+
+    fn rank(
+        &mut self,
+        _c: &TurnContext,
+        d: &chatservant_reason::DraftSet,
+    ) -> Result<Vec<chatservant_reason::Candidate>, chatservant_reason::ReasonError> {
+        Ok(d.candidates.clone())
+    }
 }

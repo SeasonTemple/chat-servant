@@ -2,7 +2,9 @@
 name = "chat-servant-app"
 version = "0.1.0"
 description = "桌面聊天回复助手的界面外壳"
-edition = "2021"
+# 与工作区其它 crate 一致用 2024 edition，才能用 let-chain（`if let … && let …`）。
+# Tauri 模板默认给 2021 —— 那样写不了 let-chain，所以显式提到 2024。
+edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -26,8 +28,11 @@ tauri-build = { version = "=2.7.1", features = [] }
 [dependencies]
 chatservant-core = { path = "../../crates/core" }
 chatservant-capture = { path = "../../crates/capture" }
+chatservant-perceive = { path = "../../crates/perceive" }
+chatservant-reason = { path = "../../crates/reason" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tracing.workspace = true
 # Windows 凭据管理器。必须与工作区里的 windows 版本一致——
 # 同一个 HWND / CREDENTIAL 跨 crate 版本传指针是不安全的。
 windows = { workspace = true }

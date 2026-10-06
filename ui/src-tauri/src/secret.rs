@@ -20,12 +20,12 @@
 //!
 //! 所以 [`redact`] 是**所有**对外文本的必经之路。
 
-use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::ERROR_NOT_FOUND;
 use windows::Win32::Security::Credentials::{
-    CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
-    CRED_TYPE_GENERIC,
+    CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW,
+    CredWriteW,
 };
+use windows::core::{PCWSTR, PWSTR};
 
 /// 凭据管理器里的目标名前缀。`chat-servant/<provider>`。
 const TARGET_PREFIX: &str = "chat-servant";

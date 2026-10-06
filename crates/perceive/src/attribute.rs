@@ -77,7 +77,7 @@ pub const RING_PURITY_MIN: f32 = 0.35;
 pub const MIN_TEXT_HEIGHT: i32 = 8;
 
 /// 谁说的。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Speaker {
     Me,
     Them,

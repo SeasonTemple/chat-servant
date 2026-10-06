@@ -10,6 +10,8 @@ publish = false
 
 [dependencies]
 chatservant-core.workspace = true
+# `PaneAnchor` 要能直接发给 UI 渲染。边界不变：判定仍在 Rust 侧。
+serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 windows.workspace = true

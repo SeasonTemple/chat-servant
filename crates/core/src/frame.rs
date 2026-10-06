@@ -4,7 +4,10 @@
 //! ��那条路径要打���提示。
 
 /// 矩形。坐标原点在左上角，右下开区间（`x1`/`y1` 是**不含**的）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize` 让它能直接发给 UI——**几何判定仍然只在 Rust 侧**，
+/// 前端拿到的坐标只用来渲染，不用来重算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Rect {
     pub x0: i32,
     pub y0: i32,

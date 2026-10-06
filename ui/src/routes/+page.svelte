@@ -100,7 +100,23 @@
 <main {@attach watchWidth} class="cs-panel" class:compact>
   <header class="cs-head">
     <span class="cs-title">副驾</span>
-    <TierSwitch bind:tier />
+    <div class="cs-head-tools">
+      <button
+        class="cs-tool"
+        title="打开识别画布：每个框按归类结果上色"
+        onclick={() => invoke('open_debug').catch(() => {})}
+      >
+        画布
+      </button>
+      <button
+        class="cs-tool"
+        title="打开设置"
+        onclick={() => invoke('open_settings').catch(() => {})}
+      >
+        设置
+      </button>
+      <TierSwitch bind:tier />
+    </div>
   </header>
 
   <ReasonBar {reason} />
@@ -145,6 +161,26 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: 0.5rem;
+  }
+
+  .cs-head-tools {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .cs-tool {
+    padding: 0.15rem 0.4rem;
+    font-size: 0.66rem;
+    border-radius: 6px;
+    border: 1px solid var(--cs-border);
+    background: transparent;
+    color: var(--cs-text-faint);
+  }
+
+  .cs-tool:hover {
+    color: var(--cs-text);
+    background: rgb(255 255 255 / 6%);
   }
 
   .cs-title {

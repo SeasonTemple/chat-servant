@@ -51,7 +51,10 @@ const INPUT_TOP_MIN_FRAC: f32 = 0.45;
 const TITLE_BAR_MAX_FRAC: f32 = 0.12;
 
 /// 推导出来的锚点。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize` 是因为 UI 要显示它——**但几何判定仍然只在 Rust 侧**，
+/// 前端拿到的这些数字只用来渲染，不用来重算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct PaneAnchor {
     /// 消息列表区。坐标以帧左上角为原点。
     pub chat: Rect,

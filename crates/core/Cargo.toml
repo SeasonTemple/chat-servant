@@ -10,4 +10,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+# `Rect`/`PaneAnchor` 要能直接发给 UI 渲染。**这不改变边界**——
+# 几何判定仍然只在 Rust 侧，前端拿到的坐标只用来画，不用来重算。
+serde = { workspace = true }
 thiserror.workspace = true

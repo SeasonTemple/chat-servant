@@ -9,7 +9,9 @@ use chatservant_core::frame::Rect;
 use crate::attribute::{Attribution, NoiseClass, Speaker};
 
 /// 归并成一条消息。
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Serialize` 是因为 UI 要渲染它——**但归并仍然只在 Rust 侧**。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Message {
     pub speaker: Speaker,
     pub text: String,

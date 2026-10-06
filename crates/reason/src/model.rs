@@ -105,6 +105,14 @@ pub trait Reasoner {
 
     /// 第三段：给候选排序。**返回的顺序即最终顺序。**
     fn rank(&mut self, ctx: &TurnContext, draft: &DraftSet) -> Result<Vec<Candidate>, ReasonError>;
+
+    /// 累计发出的模型请求数。
+    ///
+    /// **默认 0**：预置传输不计数，它本来就不发请求。
+    /// 有真实网络的传输要覆写——「静默期零调用」那条硬约束要靠它断言。
+    fn calls(&self) -> u32 {
+        0
+    }
 }
 
 /// 一轮对话的输入。**上下文裁剪的结果**（ticket 11 负责裁，这里只收）。

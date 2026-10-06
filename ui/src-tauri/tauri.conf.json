@@ -41,6 +41,18 @@
         "visible": true,
         "focus": false,
         "dragDropEnabled": false
+      },
+      {
+        "label": "debug",
+        "title": "识别画布",
+        "url": "/debug",
+        "width": 760,
+        "height": 720,
+        "resizable": true,
+        "decorations": true,
+        "visible": false,
+        "focus": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {

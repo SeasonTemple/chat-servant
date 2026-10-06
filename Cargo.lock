@@ -369,10 +369,13 @@ version = "0.1.0"
 dependencies = [
  "chatservant-capture",
  "chatservant-core",
+ "chatservant-perceive",
+ "chatservant-reason",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tracing",
  "windows",
 ]
 
@@ -381,6 +384,7 @@ name = "chatservant-capture"
 version = "0.1.0"
 dependencies = [
  "chatservant-core",
+ "serde",
  "thiserror 2.0.21",
  "tracing",
  "wgc",
@@ -392,6 +396,7 @@ dependencies = [
 name = "chatservant-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "thiserror 2.0.21",
 ]
 
@@ -402,6 +407,7 @@ dependencies = [
  "chatservant-capture",
  "chatservant-core",
  "image",
+ "serde",
  "thiserror 2.0.21",
 ]
 

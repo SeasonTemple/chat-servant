@@ -302,6 +302,10 @@ impl Reasoner for HttpReasoner {
         }
         Ok(out)
     }
+
+    fn calls(&self) -> u32 {
+        self.calls.get()
+    }
 }
 
 /// 剥掉模型爱加的 ```json … ``` 围栏。

@@ -11,6 +11,8 @@ publish = false
 
 [dependencies]
 chatservant-core.workspace = true
+# `Message`/`Speaker` 要能直接发给 UI 渲染。边界不变：归并仍在 Rust 侧。
+serde.workspace = true
 # OCR 的**数据结构**（带坐标的 OcrLine）放在 capture crate 里。
 # 这里只依赖它的类型，不依赖它的实现——采集层与感知层之间只过数据。
 chatservant-capture.workspace = true
