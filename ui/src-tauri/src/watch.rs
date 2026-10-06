@@ -166,6 +166,8 @@ pub struct LoopConfig {
     pub token_budget: TokenBudget,
     /// 图片外发总闸。**默认关**——见 [`ImagesOut`]。
     pub images_out: ImagesOut,
+    /// 发送档位。**默认 Manual**，Rust 侧唯一事实来源。
+    pub tier: TierCell,
 }
 
 /// 一轮里的**可变会话状态**。合成一个结构体，而不是给 `step` 递九个 `&mut`。
@@ -238,6 +240,59 @@ impl ImagesOut {
     pub fn set(&self, v: bool) -> bool {
         self.0.store(v, Ordering::Relaxed);
         v
+    }
+}
+
+/// 发送档位的**唯一事实来源**。设置页与主面板共用这一个格子。
+///
+/// ## 「会话结束回落」目前只做到哪一步
+///
+/// 硬约束第 5 条要求「会话结束自动回落到 `Manual`」。现在实际做到的是
+/// **应用重启即回落**——档位只存在内存里，没有落盘，所以关掉再开必然是
+/// `Manual`。
+///
+/// **「切换到另一个聊天会话时回落」没有实现**，因为多会话路由本身还没做
+/// （见 `SESSION` 常量的说明）。这里写清楚现状，免得后来的人以为已经覆盖了。
+///
+/// ## 为什么档位不能待在前端
+///
+/// 硬约束第 5 条：「升档必须是显式的、可回退的、会话结束自动回落到
+/// `Manual` 的操作」。这三条全都要求档位由**程序**持有：
+///
+/// - 早先 `tier` 是前端 `$state`，而设置页和主面板**各有一份**。
+///   用户在设置里选 Auto，主面板还是 Manual——设置页那个开关
+///   **完全不起作用**，是个和 `probe_key` 同类的死控件。
+/// - `dispatch` 过去直接相信前端传来的 `tier: String`。那等于把
+///   「发不发出去」这个安全决策交给了一个可以随便改的字符串。
+///
+/// 现在前端只负责**请求**改档，真正的档位在 Rust 手里，
+/// `dispatch` 读的是自己的格子，不看前端说什么。
+#[derive(Clone)]
+pub struct TierCell(Arc<std::sync::atomic::AtomicU8>);
+
+impl TierCell {
+    /// 启动时一律 `Manual`——硬约束第 5 条「默认档最低」。
+    pub fn default_manual() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicU8::new(
+            chatservant_core::dispatch::Dispatch::Manual as u8,
+        )))
+    }
+
+    pub fn get(&self) -> chatservant_core::dispatch::Dispatch {
+        match self.0.load(Ordering::Relaxed) {
+            1 => chatservant_core::dispatch::Dispatch::Confirm,
+            2 => chatservant_core::dispatch::Dispatch::Auto,
+            // **未知一律当 Manual。** 解析失败就升档是最危险的默认值。
+            _ => chatservant_core::dispatch::Dispatch::Manual,
+        }
+    }
+
+    pub fn set(
+        &self,
+        d: chatservant_core::dispatch::Dispatch,
+    ) -> chatservant_core::dispatch::Dispatch {
+        self.0.store(d as u8, Ordering::Relaxed);
+        d
     }
 }
 
@@ -543,7 +598,7 @@ fn shift(r: chatservant_core::frame::Rect, dx: i32, dy: i32) -> chatservant_core
 
 #[cfg(test)]
 mod tests {
-    use super::{BUDGET_MAX, BUDGET_MIN, ImagesOut, RecentN, TokenBudget};
+    use super::{BUDGET_MAX, BUDGET_MIN, ImagesOut, RecentN, TierCell, TokenBudget};
     use chatservant_reason::context;
 
     /// **clone 出来的句柄和本体读的是同一个格子。**
@@ -608,5 +663,36 @@ mod tests {
         assert!(in_loop.get(), "循环必须能读到设置打开的总闸");
         in_loop.set(false);
         assert!(!in_settings.get(), "关闭也要能同步回去");
+    }
+
+    /// **档位启动时必须是 Manual。** 硬约束第 5 条「默认档最低」。
+    #[test]
+    fn the_tier_starts_at_manual() {
+        use chatservant_core::dispatch::Dispatch;
+        assert_eq!(TierCell::default_manual().get(), Dispatch::Manual);
+    }
+
+    /// 设置页与主面板**共用同一个档位**。
+    ///
+    /// 早先 `tier` 是前端 `$state`、两个页面各一份：用户在设置里选 Auto，
+    /// 主面板还是 Manual。那个开关是个**完全不起作用的死控件**。
+    #[test]
+    fn the_tier_is_shared_across_windows() {
+        use chatservant_core::dispatch::Dispatch;
+        let cell = TierCell::default_manual();
+        let settings = cell.clone();
+        settings.set(Dispatch::Auto);
+        assert_eq!(cell.get(), Dispatch::Auto, "设置页升档，主面板必须看到");
+    }
+
+    /// **档位能被夹回 Manual。** 硬约束第 5 条「程序自己不会升档」——
+    /// 一个存坏了的格子值只能降回最低档，绝不能被解释成别的档。
+    #[test]
+    fn an_unrecognised_tier_value_falls_back_to_manual() {
+        use chatservant_core::dispatch::Dispatch;
+        let cell = TierCell::default_manual();
+        // 直接往格子里塞一个不存在的编码，模拟存坏的值。
+        cell.0.store(200, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(cell.get(), Dispatch::Manual, "认不出来的档位一律当最低档");
     }
 }

@@ -83,14 +83,35 @@
     };
   });
 
+  /**
+   * 改档。**用 Rust 回传的真实生效值覆盖**——
+   * 硬约束第 5 条「默认档最低」，所以 Rust 有可能在解析失败时把档位
+   * 夹回 Manual。界面必须显示程序认定的那个，不是用户点过的那个。
+   */
+  async function changeTier(t: Tier) {
+    try {
+      tier = await invoke<Tier>('set_tier', { tier: t });
+    } catch (e) {
+      reason = `改档失败：${String(e)}`;
+      // 读回真实值，别让界面停在一个程序并不认同的档位上。
+      try {
+        tier = await invoke<Tier>('get_tier');
+      } catch {
+        tier = 'Manual';
+      }
+    }
+  }
+
   async function act(c: Candidate, action: 'fill' | 'confirm') {
     busy = true;
     try {
       // 回执**不是布尔值**。PossiblySent 之后禁止自动重放。
+      // ⚠ 不传 tier：档位由 Rust 自己持有并读取。
+      // 早先这里传的是前端 `tier`，那等于把「会不会真发出去」
+      // 交给一个界面可以随便改的字符串。
       const r = await invoke<DispatchReply>('dispatch', {
         candidateId: c.id,
         action,
-        tier,
       });
       reason = `${r.outcome}：${r.detail}`;
     } catch (e) {
@@ -120,7 +141,7 @@
       >
         设置
       </button>
-      <TierSwitch bind:tier />
+      <TierSwitch bind:tier onchange={changeTier} />
     </div>
   </header>
 

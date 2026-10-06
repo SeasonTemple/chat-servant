@@ -25,6 +25,8 @@
   }
 
   let tier = $state<Tier>('Manual');
+  /** 改档失败时的说明。空 = 没问题。 */
+  let tierNote = $state<string | null>(null);
   let recentN = $state(12);
   /** 滑块上下限。**不写死在 HTML 里**——写死迟早和 Rust 侧的策略对不上。 */
   let recentMin = $state(4);
@@ -103,6 +105,23 @@
    * 等于这个功能从来没存在过；现在它真的会发请求了，失败信息就是用户
    * 唯一能判断「是 key 不对还是网络不通」的依据。吞掉它等于白做。
    */
+  /**
+   * 改档。与主面板**共用 Rust 那一个格子**。
+   * 界面上显示的是 Rust 回传的真实生效值，不是用户点过的那个。
+   */
+  async function changeTier(t: Tier) {
+    try {
+      tier = await invoke<Tier>('set_tier', { tier: t });
+    } catch (e) {
+      tierNote = String(e);
+      try {
+        tier = await invoke<Tier>('get_tier');
+      } catch {
+        tier = 'Manual';
+      }
+    }
+  }
+
   async function probe(p: ProviderView) {
     busy[p.id] = true;
     notes[p.id] = '';
@@ -143,6 +162,14 @@
       } catch {
         // 读不到就当关着。**失败方向要偏保守**——总闸读不出来时
         // 宁可当成关着，也不能当成开着。
+      }
+      try {
+        // 档位也要**读回来**：两个页面各有一份本地 state，
+        // 不读的话设置页显示的可能是用户上次在这页点过的那个，
+        // 而程序实际认定的档位在别处。
+        tier = await invoke<Tier>('get_tier');
+      } catch {
+        tier = 'Manual';
       }
     })();
   });
@@ -215,11 +242,15 @@
 
   <section class="cs-row">
     <span class="cs-label">发送档位</span>
-    <div><TierSwitch bind:tier /></div>
+    <div><TierSwitch bind:tier onchange={changeTier} /></div>
   </section>
   <p class="cs-note">
     档位只在**你按了之后**才生效。会话结束时一律回落到「只填入」，程序自己不会升档。
+    这里改的和主面板改的是**同一个档位**——早先两边各存一份，设置页那个开关 完全不起作用。
   </p>
+  {#if tierNote}
+    <p class="cs-fail" role="alert">{tierNote}</p>
+  {/if}
 
   <h2 class="cs-h2">上下文</h2>
   <p class="cs-note">

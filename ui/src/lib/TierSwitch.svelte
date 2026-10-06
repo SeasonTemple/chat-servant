@@ -4,10 +4,19 @@
   import type { Tier } from './types';
 
   interface Props {
+    /**
+     * 档位。**值由 Rust 持有**，这里只负责显示。
+     *
+     * 父组件把 `onchange` 接到 `set_tier`，再用 Rust 回传的真实生效值
+     * 更新它——所以界面上显示的一律是**程序认定的档位**，
+     * 不是用户记得自己点过什么。
+     */
     tier: Tier;
+    /** 请求改档。**前端只负责请求**，升档这件事由 Rust 裁决。 */
+    onchange?: (t: Tier) => void;
   }
 
-  let { tier = $bindable() }: Props = $props();
+  let { tier = $bindable(), onchange }: Props = $props();
 
   const TIERS: { id: Tier; label: string; hint: string }[] = [
     { id: 'Manual', label: '只填入', hint: '默认。填进输入框，停在光标处，不发送。' },
@@ -46,9 +55,11 @@
 
   function pick(id: Tier) {
     if (id === tier) return;
+    // 只改本地显示，**由父组件回填 Rust 的真实生效值**。
+    // Rust 若把值夹回 Manual（比如解析失败），界面就会显示 Manual——
+    // 那才是程序真正的档位，而不是用户以为自己选上的那个。
     tier = id;
-    // Auto 是安全相关的档位，闪一次表示「我知道了」。
-    // 不让用户以为「点了一下没反应」——那正是安全操作里最糟的体验。
+    onchange?.(id);
   }
 </script>
 

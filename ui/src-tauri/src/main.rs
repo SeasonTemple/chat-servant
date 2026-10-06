@@ -32,6 +32,8 @@ fn main() {
             commands::set_token_budget,
             commands::get_images_out,
             commands::set_images_out,
+            commands::get_tier,
+            commands::set_tier,
         ])
         .run(tauri::generate_context!())
         .expect("启动失败");

@@ -384,6 +384,46 @@ pub fn focus(target: HWND) -> Result<(), String> {
     }
 }
 
+/// 按一次回车。**不移动鼠标指针**。
+pub fn press_enter() -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
+    send_keys(&[VK_RETURN])
+}
+
+/// 填进输入框**并按回车发送**——Auto 档走这条路。
+///
+/// ## 为什么单独一个函数而不是给 `fill_input_box` 加个参数
+///
+/// 「填」和「发」是**不可逆性不同**的两个动作。加个 `send: bool` 的话，
+/// 调用点变成 `fill_input_box(&t, hwnd, tier == Dispatch::Auto)`，
+/// 于是「什么时候会发出去」被藏进一个布尔表达式里。分成两个函数后，
+/// **只有 Auto 档的调用点会出现按回车**，一眼可查。
+///
+/// ## 回执只能到 `PossiblySent`
+///
+/// 回车按下去之后，程序**没有**证据证明这条消息真的发出去了——
+/// 证明它需要 OCR 聊天区看那条消息有没有离开输入框，
+/// 而发送后输入框会被清空，OCR 那一刻读到的已经不是它。
+///
+/// 所以这里**不报 `Sent`**。`Sent` 是「确定送达」，报它就是撒谎，
+/// 而撒谎的回执会让上层以为不必再做回读。拿不到更高档的回执不是缺陷，
+/// 是**证据能力的边界**，如实标出来。
+pub fn fill_and_send(text: &str, target: HWND) -> DeliveryReceipt {
+    let filled = fill_input_box(text, target);
+    // 填充失败就**到此为止**——绝不在没填进去的时候按回车，
+    // 那会把输入框里原有的内容（用户自己打了一半的话）发出去。
+    if !matches!(filled, DeliveryReceipt::PossiblySent) {
+        return filled;
+    }
+
+    match press_enter() {
+        Ok(()) => DeliveryReceipt::PossiblySent,
+        Err(e) => DeliveryReceipt::Failed(format!(
+            "回车发送失败（内容已填入输入框，你可以手动发）：{e}"
+        )),
+    }
+}
+
 /// 鼠标当前位置。**只读**，用于在调试视图里证明「指针没动过」。
 pub fn cursor_pos() -> Option<POINT> {
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;

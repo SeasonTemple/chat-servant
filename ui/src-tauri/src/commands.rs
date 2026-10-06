@@ -33,6 +33,8 @@ struct AppState {
     token_budget: TokenBudget,
     /// 图片外发总闸。**默认关。**
     images_out: crate::watch::ImagesOut,
+    /// 发送档位。**唯一事实来源**，前端只请求改。
+    tier: crate::watch::TierCell,
 }
 
 /// 取全局状态。**锁中毒不算致命**——状态还在，继续用比崩掉好。
@@ -109,18 +111,13 @@ pub struct DispatchReply {
 }
 
 #[tauri::command]
-pub fn dispatch(
-    app: AppHandle,
-    candidate_id: String,
-    action: String,
-    tier: String,
-) -> DispatchReply {
-    let tier: Dispatch = match tier.as_str() {
-        "Auto" => Dispatch::Auto,
-        "Confirm" => Dispatch::Confirm,
-        // 认不出来的一律当最低档。**不许因为解析失败就升档。**
-        _ => Dispatch::Manual,
-    };
+pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> DispatchReply {
+    // ⚠ **档位从 Rust 自己的格子读，不看前端传什么。**
+    // 早先的签名收一个 `tier: String` 并直接采信——那等于把「这条消息
+    // 会不会真的发出去」交给一个前端可以随便改的字符串。
+    let tier = with_state(|s| s.tier.get())
+        .ok_or_else(|| "观察循环还没起来".to_string())
+        .unwrap_or(Dispatch::Manual);
 
     let mut d = Dispatcher::new();
     d.set_tier(tier);
@@ -142,8 +139,45 @@ pub fn dispatch(
     let next = d.next(receipt.clone(), 0);
     DispatchReply {
         outcome: outcome_name(&receipt),
-        detail: format!("{}｜下一步：{}", receipt.explain(), next.explain()),
+        detail: format!(
+            "档位 {}｜{}｜下一步：{}",
+            tier_name(tier),
+            receipt.explain(),
+            next.explain()
+        ),
     }
+}
+
+/// 档位 → 界面认得的字符串。**回读用**——让用户看到程序此刻认定的档位，
+/// 而不是他记得自己点过什么。
+#[tauri::command]
+pub fn get_tier() -> String {
+    with_state(|s| s.tier.get())
+        .map(tier_name)
+        .unwrap_or_else(|| tier_name(Dispatch::Manual))
+}
+
+/// 改档。**返回真实生效值**——界面上要显示程序认定的那个。
+#[tauri::command]
+pub fn set_tier(tier: String) -> String {
+    // 认不出来的一律当 Manual。**不许因为解析失败就升档。**
+    let d = match tier.as_str() {
+        "Auto" => Dispatch::Auto,
+        "Confirm" => Dispatch::Confirm,
+        _ => Dispatch::Manual,
+    };
+    with_state(|s| s.tier.set(d))
+        .map(tier_name)
+        .unwrap_or_else(|| tier_name(Dispatch::Manual))
+}
+
+fn tier_name(d: Dispatch) -> String {
+    match d {
+        Dispatch::Manual => "只填入",
+        Dispatch::Confirm => "确认后发",
+        Dispatch::Auto => "自动发送",
+    }
+    .to_string()
 }
 
 /// 找微信主窗口的 `HWND`。找不到就**如实报找不到**。
@@ -160,22 +194,43 @@ fn find_wechat() -> Option<windows::Win32::Foundation::HWND> {
     unsafe { IsWindow(Some(hwnd)).as_bool().then_some(hwnd) }
 }
 
-/// 真正去送一次。**目前只有 Manual 档能走到这里。**
+/// 真正去送一次。
+///
+/// ## 档位在这里才第一次真正起作用
+///
+/// 早先的版本写的是 `let _ = (action, tier);`——**把档位整个丢掉**，
+/// 只调 `fill_input_box`。于是 Auto 档和 Manual 档行为完全一样：
+/// 都只填不发。而设置页写着「自动发送，填入即发送，不打断」——
+/// 界面承诺的是整个产品里**最危险的那个能力**，代码却根本没实现。
+///
+/// 现在 Auto 走 [`fill_and_send`]，其余两档走 [`fill_input_box`]。
 fn deliver(candidate_id: &str, action: &str, tier: Dispatch) -> DeliveryReceipt {
     let Some(hwnd) = find_wechat() else {
         return DeliveryReceipt::Failed("找不到微信窗口（已退出？换了进程名？）".into());
     };
 
-    // ⚠ 候选取文本这一步还没接（ticket 10 起草层）。
-    // 在那之前**不能**拿占位文本去注入——那会把一句假话送进别人的聊天框。
+    // 取不到正文就**不注入**。拿占位文本去注入等于把一句假话送进
+    // 别人的聊天框，那比不送严重得多。
+    //
+    // ⚠ 早先的报错写「正文还没接起草层（ticket 10）」——ticket 10 早做完了，
+    // 起草层是接好的。真正的失败原因是**这个 id 不在当前快照里**：
+    // 对方又发了新消息、readout 已经推进到新一轮，旧候选就没了。
+    // 报错要指向真实原因，否则会把人引到完全错误的方向。
     let Some(text) = candidate_text(candidate_id) else {
         return DeliveryReceipt::Failed(format!(
-            "候选 {candidate_id} 的正文还没接起草层（ticket 10），不注入占位文本"
+            "候选 {candidate_id} 已不在当前这轮的候选里（对方又发了新消息，候选被换掉了）。重新等一轮。"
         ));
     };
 
-    let _ = (action, tier);
-    chatservant_capture::inject::fill_input_box(&text, hwnd)
+    let _ = action;
+    match tier {
+        Dispatch::Auto => chatservant_capture::inject::fill_and_send(&text, hwnd),
+        // Manual 与 Confirm 都在这里停下。Confirm 的第二次点击由
+        // `dispatch` 在更早的地方处理（第一次只准备，不发）。
+        Dispatch::Manual | Dispatch::Confirm => {
+            chatservant_capture::inject::fill_input_box(&text, hwnd)
+        }
+    }
 }
 
 /// 回执 → 前端认得的字符串。
@@ -493,6 +548,7 @@ pub fn start(app: &AppHandle) {
     let recent_n = cfg.recent_n.clone();
     let token_budget = cfg.token_budget.clone();
     let images_out = cfg.images_out.clone();
+    let tier = cfg.tier.clone();
 
     let watcher = crate::watch::spawn(cfg);
     if let Ok(mut g) = STATE.lock() {
@@ -502,6 +558,7 @@ pub fn start(app: &AppHandle) {
             recent_n,
             token_budget,
             images_out,
+            tier,
         });
     }
 
@@ -559,6 +616,7 @@ fn build_loop_config() -> LoopConfig {
                 recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
                 token_budget: TokenBudget::new(BUDGET_DEFAULT),
                 images_out: crate::watch::ImagesOut::off(),
+                tier: crate::watch::TierCell::default_manual(),
             };
         }
     }
@@ -570,6 +628,7 @@ fn build_loop_config() -> LoopConfig {
         recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
         token_budget: TokenBudget::new(BUDGET_DEFAULT),
         images_out: crate::watch::ImagesOut::off(),
+        tier: crate::watch::TierCell::default_manual(),
     }
 }
 
