@@ -455,8 +455,13 @@ fn make_fixture(name: &str, source: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// 感知层探针：走**真正的生产接缝** `chatservant_perceive::read`，
+/// 从一张帧一路跑到归并后的消息流。
+///
+/// 这里刻意不自己拼装各步骤——探针和生产走同一条路，
+/// 否则「探针能跑」根本不能说明「产品能跑」。
 fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
-    use chatservant_perceive::{NoiseClass, Palette, Speaker, classify_all, group};
+    use chatservant_perceive::{NoiseClass, Speaker, SystemOcr, read};
 
     let frame = match file {
         Some(p) => {
@@ -477,22 +482,17 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
         }
     };
 
-    let anchor = chatservant_capture::anchor::derive(&frame)
-        .map_err(|e| anyhow::anyhow!("锚点推导失败：{e}"))?;
-    let pane = frame.crop(anchor.chat).context("裁剪消息区失败")?;
-
-    // 配色只学面板底色。「在不在气泡里」看底色是否等于它，
-    // 「我方还是对方」看彩度——两个判断都不需要先知道气泡色。
-    let palette = Palette::learn(&frame, anchor.chat).ok_or_else(|| {
-        anyhow::anyhow!("学不到配色（聊天区太平，可能是空会话）——上层应降级，不许退回硬编码颜色")
-    })?;
+    let r = read(&frame, &SystemOcr).map_err(|e| anyhow::anyhow!("{e}"))?;
     println!(
-        "配色 = 面板 rgb({},{},{})",
-        palette.panel_bg[0], palette.panel_bg[1], palette.panel_bg[2]
+        "   锚点 ({},{})-({},{})  配色 rgb({},{},{})",
+        r.anchor.chat.x0,
+        r.anchor.chat.y0,
+        r.anchor.chat.x1,
+        r.anchor.chat.y1,
+        r.palette.panel_bg[0],
+        r.palette.panel_bg[1],
+        r.palette.panel_bg[2],
     );
-
-    let ocr = chatservant_capture::ocr::recognize(&pane).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let attrs = classify_all(&ocr.lines, &pane, &palette);
 
     println!();
     println!(
@@ -500,7 +500,7 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
         "#", "说话人", "归类", "依据"
     );
     println!("{}", "-".repeat(110));
-    for (i, a) in attrs.iter().enumerate() {
+    for (i, a) in r.attributions.iter().enumerate() {
         println!(
             "{:<3} {:<7} {:<10} {:<30} {}",
             i,
@@ -523,7 +523,7 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
 
     println!();
     println!("== 归并后的消息 ==");
-    for m in group(&attrs) {
+    for m in &r.messages {
         println!(
             "  [{}] ({},{})-({},{})  {}",
             match m.speaker {
