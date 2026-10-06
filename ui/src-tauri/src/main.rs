@@ -26,6 +26,8 @@ fn main() {
             commands::save_setting,
             commands::forget_key,
             commands::probe_key,
+            commands::get_recent_n,
+            commands::set_recent_n,
         ])
         .run(tauri::generate_context!())
         .expect("启动失败");

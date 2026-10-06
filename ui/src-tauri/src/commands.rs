@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
 use crate::secret::{self, KeyStatus};
-use crate::watch::{DraftCandidate, LoopConfig, Readout, Watcher};
+use crate::watch::{DraftCandidate, LoopConfig, Readout, RecentN, Watcher};
 use chatservant_reason::TurnContext;
 
 /// 全局单例：一个应用只有一个观察循环。
@@ -23,6 +23,12 @@ struct AppState {
     watcher: Watcher,
     /// 最新一轮的候选。`dispatch` 要按 id 取正文。
     candidates: Vec<DraftCandidate>,
+    /// 与观察循环**共用同一个格子**的设置句柄。
+    ///
+    /// ⚠ 这里必须是 `start()` 建的**那一份**（clone），不能新造一个。
+    /// 新造的话设置写进了一个没人读的格子——界面显示「已设为 24」，
+    /// 而模型那边永远还是 12。
+    recent_n: RecentN,
 }
 
 /// 取全局状态。**锁中毒不算致命**——状态还在，继续用比崩掉好。
@@ -298,6 +304,50 @@ pub fn save_setting(provider: String, key: Option<String>) -> Result<bool, Strin
     Ok(wrote)
 }
 
+/// 「参考上下文」设置。**上下限由 Rust 下发**，前端不自己写死。
+///
+/// 硬编码 `min="4" max="40"` 在 HTML 里的话，后端一旦改了策略，
+/// 滑块能拖到的范围和真实生效范围就对不上了——用户拖到 3，
+/// 后端夹成 4，界面上那个数永远是假的。所以数字只从这儿来。
+#[derive(Serialize)]
+pub struct RecentView {
+    /// 当前生效值（已夹取）。
+    pub n: usize,
+    pub min: usize,
+    pub max: usize,
+    pub default: usize,
+}
+
+fn recent_view(n: usize) -> RecentView {
+    use chatservant_reason::context;
+    RecentView {
+        n,
+        min: context::MIN_RECENT,
+        max: context::MAX_RECENT,
+        default: context::DEFAULT_RECENT,
+    }
+}
+
+/// 读「参考上下文」条数。
+#[tauri::command]
+pub fn get_recent_n() -> Result<RecentView, String> {
+    let n = with_state(|s| s.recent_n.get())
+        .ok_or_else(|| "观察循环还没起来，读不到设置".to_string())?;
+    Ok(recent_view(n))
+}
+
+/// 改「参考上下文」条数。**返回夹取后的真实生效值。**
+///
+/// 循环每圈读一次这个格子，所以**下一圈就用新值**，不用重启。
+/// 越界不报错，直接夹——报错的话用户只会看到「设置失败」，
+/// 不知道自己拖的值被改成了什么。
+#[tauri::command]
+pub fn set_recent_n(n: usize) -> Result<RecentView, String> {
+    let applied = with_state(|s| s.recent_n.set(n))
+        .ok_or_else(|| "观察循环还没起来，改不了设置".to_string())?;
+    Ok(recent_view(applied))
+}
+
 #[tauri::command]
 pub fn forget_key(provider: String) -> Result<(), String> {
     if !PROVIDERS.contains(&provider.as_str()) {
@@ -329,12 +379,17 @@ pub fn probe_key(provider: String) -> Result<bool, String> {
 pub fn start(app: &AppHandle) {
     let cfg = build_loop_config();
     let transport_ready = cfg.transport_ready;
+    // 关键：**先把句柄 clone 一份给命令层，再把 cfg move 进循环。**
+    // 两边指的是同一个 `Arc<AtomicUsize>`，所以 `set_recent_n` 写进去的
+    // 值，循环下一圈就能读到。少这一步，滑块就是个摆设。
+    let recent_n = cfg.recent_n.clone();
 
     let watcher = crate::watch::spawn(cfg);
     if let Ok(mut g) = STATE.lock() {
         *g = Some(AppState {
             watcher,
             candidates: Vec::new(),
+            recent_n,
         });
     }
 
@@ -389,6 +444,7 @@ fn build_loop_config() -> LoopConfig {
                 ignore_top: IGNORE_TOP,
                 reasoner: Box::new(r),
                 transport_ready: true,
+                recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
             };
         }
     }
@@ -397,6 +453,7 @@ fn build_loop_config() -> LoopConfig {
         ignore_top: IGNORE_TOP,
         reasoner: Box::new(PresetReasoner),
         transport_ready: false,
+        recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
     }
 }
 

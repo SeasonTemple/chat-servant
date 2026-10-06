@@ -7,7 +7,9 @@
 //! 三段式与降级路径见 [`seam`]。
 
 pub mod clean;
+pub mod context;
 pub mod model;
+pub mod peer;
 pub mod seam;
 pub mod transport;
 pub mod ureq_http;
@@ -17,7 +19,9 @@ mod gate;
 #[cfg(test)]
 mod quiet;
 
+pub use context::{Context, Summarizer, Trimmed};
 pub use model::{Candidate, DraftSet, Intent, ReasonError, Reasoner, TurnContext};
+pub use peer::{same_peer, similarity};
 pub use seam::{Turn, turn};
 pub use transport::{Http, HttpReasoner, Provider};
 pub use ureq_http::UreqHttp;

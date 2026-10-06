@@ -79,6 +79,48 @@ pub struct DraftCandidate {
     pub probability: f32,
 }
 
+/// 「参考上下文」条数的可改句柄。
+///
+/// ## 为什么不是一个 `static`
+///
+/// 早先的版本把 `recent_n: usize` 直接 move 进观察线程的闭包。
+/// 那是**按值捕获**——设置页改了值，运行中的循环读到的还是启动时那份，
+/// 界面上那句「下一次生成就会用上」是**假的**。而且 `LoopConfig` 里
+/// 留着字段就等于留了两个事实来源（启动值 vs 设置值），迟早写岔。
+///
+/// 现在传的是 `Arc<AtomicUsize>` 的句柄：命令层和循环**共用同一个格子**，
+/// 循环每圈读一次，所以改完下一圈就用上。
+///
+/// ## 为什么也不是 `Context` 那种 owned struct
+///
+/// `Context` 是**每个会话一份**的域状态（可能同时有多个会话桶），
+/// 谁开谁负责，所以做成 owned。这里是**整个应用一份的用户偏好**——
+/// 就一个循环、一个旋钮，句柄复制一份给命令层是最省事的写法。
+/// 真要多个会话各自调「最近多少条」，那时才该把它塞进 `Context`。
+#[derive(Clone)]
+pub struct RecentN(Arc<std::sync::atomic::AtomicUsize>);
+
+impl RecentN {
+    pub fn new(n: usize) -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicUsize::new(
+            chatservant_reason::context::clamp_recent(n),
+        )))
+    }
+
+    /// 当前值。**循环每圈都调它**——这就是「即时生效」的落点。
+    pub fn get(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// 改值。**返回夹取后的真实生效值**——
+    /// 调用方要拿它回给界面，不能拿自己传进去的数糊弄过去。
+    pub fn set(&self, n: usize) -> usize {
+        let applied = chatservant_reason::context::clamp_recent(n);
+        self.0.store(applied, Ordering::Relaxed);
+        applied
+    }
+}
+
 /// 循环的配置。组装真实传输需要 key，所以从这里进。
 pub struct LoopConfig {
     /// 顶部跳过多高（置顶公告条）。由 `ChatSurface` 给，不写死。
@@ -92,6 +134,47 @@ pub struct LoopConfig {
     pub reasoner: Box<dyn Reasoner + Send>,
     /// 传输是不是真的。没配 key 时是 false。
     pub transport_ready: bool,
+    /// 「参考上下文」条数。**共享句柄**——改它下一圈就生效，不用重启。
+    pub recent_n: RecentN,
+}
+
+/// 一轮里的**可变会话状态**。合成一个结构体，而不是给 `step` 递九个 `&mut`。
+///
+/// ## 为什么要收成一个结构体
+///
+/// 九个 `&mut` 参数不只是长。每个都各自可变，编译器**看不出它们之间
+/// 的一致性约束**——比如「`history` 只在有对方说话时追加」这种规则，
+/// 在九个散参数里只能靠注释维持。收进来之后，「这几个东西是一份
+/// 会话状态」这件事变成了类型层面的事实。
+///
+/// `watcher`（引擎）和 `reasoner`（传输）**故意留在外面**：它们不是
+/// 会话状态，换配置时会被换掉，而这份状态是跨轮次攒下来的。
+struct Scratch {
+    candidates: Vec<DraftCandidate>,
+    /// 给界面看的一句话说明（判断摘要 / 降级 / 失败原因）。
+    reason: String,
+    /// 累计 OCR 调用次数。静默期**不该增长**。
+    ocr_calls: u32,
+    /// 摘要缓存。**每个会话一份**——换会话要调 `forget`，
+    /// 否则会带着上一个会话的摘要去见对端。
+    context: chatservant_reason::Context,
+    /// 本会话的完整历史，喂给推理。**只在有新消息时追加**。
+    history: Vec<String>,
+    /// 与设置页共用一个格子的条数。循环每圈读一次。
+    recent: RecentN,
+}
+
+impl Scratch {
+    fn new(recent: RecentN) -> Self {
+        Self {
+            candidates: Vec::new(),
+            reason: String::from("等待第一条消息"),
+            ocr_calls: 0,
+            context: chatservant_reason::Context::new(),
+            history: Vec::new(),
+            recent,
+        }
+    }
 }
 
 /// 循环句柄。`Drop` 时自动结束线程。
@@ -127,34 +210,25 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
         .spawn(move || {
             let mut watcher = PaneWatcher::new(cfg.ignore_top);
             let mut reasoner = cfg.reasoner;
+            let mut s = Scratch::new(cfg.recent_n);
             let mut last_calls = 0u32;
             let mut ticks = 0u64;
-            let mut ocr_calls = 0u32;
-            let mut candidates: Vec<DraftCandidate> = Vec::new();
-            let mut reason = String::from("等待第一条消息");
             let mut anchor: Option<PaneAnchor> = None;
 
             while !stop_bg.load(Ordering::Relaxed) {
                 ticks += 1;
-                match step(
-                    &mut watcher,
-                    &mut reasoner,
-                    &mut candidates,
-                    &mut reason,
-                    &mut ocr_calls,
-                    &LAST_BOXES,
-                ) {
+                match step(&mut watcher, &mut reasoner, &mut s, &LAST_BOXES) {
                     Ok(Some(a)) => {
                         anchor = Some(a);
                         last_calls = reasoner.calls();
                         let out = Readout {
                             anchor,
                             messages: Vec::new(),
-                            candidates: candidates.clone(),
-                            reason: reason.clone(),
+                            candidates: s.candidates.clone(),
+                            reason: s.reason.clone(),
                             model_calls: last_calls,
                             ticks,
-                            ocr_calls,
+                            ocr_calls: s.ocr_calls,
                             error: None,
                         };
                         if let Ok(mut g) = latest_bg.lock() {
@@ -168,11 +242,11 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         let out = Readout {
                             anchor,
                             messages: Vec::new(),
-                            candidates: candidates.clone(),
+                            candidates: s.candidates.clone(),
                             reason: "这一轮没跑通".into(),
                             model_calls: last_calls,
                             ticks,
-                            ocr_calls,
+                            ocr_calls: s.ocr_calls,
                             error: Some(e),
                         };
                         if let Ok(mut g) = latest_bg.lock() {
@@ -194,11 +268,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
 fn step(
     watcher: &mut PaneWatcher,
     reasoner: &mut Box<dyn Reasoner + Send>,
-    candidates: &mut Vec<DraftCandidate>,
-    reason_out: &mut String,
-    ocr_calls: &mut u32,
-    // `Mutex` 自带内部可变性，**共享引用就够了**——要 `&mut` 反而
-    // 得给静态量绑一层 `mut` 局部名，白绕一道。
+    s: &mut Scratch,
     last_boxes: &std::sync::Mutex<Option<crate::debug::DebugPane>>,
 ) -> Result<Option<PaneAnchor>, String> {
     // ① 找窗口 + 抓帧
@@ -218,7 +288,7 @@ fn step(
         .crop(roi)
         .ok_or_else(|| format!("ROI {roi:?} 裁不出图"))?;
     let ocr = chatservant_capture::ocr::recognize(&pane).map_err(|e| format!("OCR 失败：{e}"))?;
-    *ocr_calls += 1;
+    s.ocr_calls += 1;
 
     // ④ 在**整帧**上归类——行框是相对 ROI 的，要换算回去
     let anchor =
@@ -261,15 +331,42 @@ fn step(
     // ⑤ 有对方说话才推理。**没读到就不推理**——省的不只是钱，
     // 还有一次可能失败的外部调用。
     if newest.is_some() {
+        // **每圈读一次**活值，读完存成本地变量给整轮用。
+        // 分两次读的话，用户恰好在中间拖了滑块，同一轮里
+        // 裁剪用 N=12、兜底用 N=11——半套生效比不生效更难查。
+        let recent_n = s.recent.get();
+
+        // 历史**只增不减**——摘要靠它判断「更早的部分」有多长。
+        // ⚠ 只在这条路径上追加：没读到对方说话时不追加，避免把
+        // 时间戳、系统提示当成对话塞进上下文。
+        s.history.extend(messages.iter().map(|m| m.text.clone()));
+
+        // 裁剪。**摘要只在这里发生，且按块**（见 RESUMMARIZE_CHUNK）——
+        // 这就是「惰性」的落点：不是每次都算，是攒够一块才算。
+        let rendered = match s
+            .context
+            .trim(SESSION, &s.history, recent_n, &mut NoSummary)
+        {
+            Ok(t) => t.render(),
+            Err(e) => {
+                // 摘要失败**不阻断本轮**——用最近的消息先出候选，
+                // 在 reason 里说清楚摘要没成。硬失败等于「不回复」，
+                // 那比语境差一点糟得多。
+                s.reason = format!("摘要失败（{e}）；本轮只用最近消息");
+                let tail: Vec<&String> = s.history.iter().rev().take(recent_n).collect();
+                let mut lines: Vec<String> = vec!["[最近的对话]".into()];
+                lines.extend(tail.into_iter().rev().cloned());
+                lines.join("\n")
+            }
+        };
+
         let ctx = TurnContext {
-            messages: messages.iter().map(|m| m.text.clone()).collect(),
-            // 对端名要 OCR 头部才知道，ticket 11 接。现在留空——
-            // 空名只影响模型的话术，不影响链路。
+            messages: rendered.lines().map(str::to_string).collect(),
             peer: String::new(),
         };
         match chatservant_reason::turn(reasoner.as_mut(), &ctx) {
             Ok(t) => {
-                *candidates = t
+                s.candidates = t
                     .draft
                     .sorted()
                     .into_iter()
@@ -280,21 +377,21 @@ fn step(
                         probability: c.probability,
                     })
                     .collect();
-                *reason_out = t.explain();
+                s.reason = t.explain();
             }
             // `NothingToDo` = 静默期，**不是错误**
             Err(chatservant_reason::ReasonError::NothingToDo) => {
-                *reason_out = "没有新消息".into();
+                s.reason = "没有新消息".into();
             }
             Err(e) => {
                 // 推理失败**不推进水位线**——下一帧重试。
                 // 漏消息比多调一次外部 API 糟得多。
-                *reason_out = format!("推理失败：{e}");
+                s.reason = format!("推理失败：{e}");
             }
         }
     } else {
-        candidates.clear();
-        *reason_out = "这一段里没有对方说的话".into();
+        s.candidates.clear();
+        s.reason = "这一段里没有对方说的话".into();
     }
 
     // 没读到对方的话时**不推进**——下一帧会重试同一段。
@@ -304,8 +401,68 @@ fn step(
     Ok(Some(anchor))
 }
 
+/// 循环用的会话 key。**多会话路由还没做**（`Session` 按 `PeerName` 分桶），
+/// 现在只有一个键。等 `peer::same_peer` 接上观察循环后换成真的对端名。
+const SESSION: &str = "current";
+
+/// 不做摘要的占位实现。
+///
+/// **它让摘要这一步不花钱**，也**不让这一步悄悄失败**——
+/// `context.trim` 仍然跑完整逻辑（阈值判定、缓存、渲染），
+/// 只是长对话不会真的调模型。要接真实摘要时换掉这个类型。
+struct NoSummary;
+
+impl chatservant_reason::Summarizer for NoSummary {
+    fn summarize(&mut self, older: &[String]) -> Result<String, String> {
+        Ok(format!(
+            "（{older_len} 条早期消息，未启用摘要）",
+            older_len = older.len()
+        ))
+    }
+}
+
 /// 把行框平移到整帧坐标系。
 fn shift(r: chatservant_core::frame::Rect, dx: i32, dy: i32) -> chatservant_core::frame::Rect {
     use chatservant_core::frame::Rect;
     Rect::new(r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RecentN;
+    use chatservant_reason::context;
+
+    /// **clone 出来的句柄和本体读的是同一个格子。**
+    ///
+    /// 这条锁的是「设置真能改到运行中的循环」。早先 `recent_n: usize`
+    /// 是按值 move 进线程闭包的，命令层拿不到、也改不了它——
+    /// 界面照常显示「已设为 24」，模型那边永远还是 12。
+    /// 那个 bug 编译得过、跑得动、界面上看不出破绽，
+    /// 唯一能抓住它的就是这条断言。
+    #[test]
+    fn a_cloned_handle_shares_one_cell() {
+        let in_loop = RecentN::new(context::DEFAULT_RECENT);
+        let in_settings = in_loop.clone();
+
+        in_settings.set(30);
+        assert_eq!(in_loop.get(), 30, "循环必须能读到设置写进去的值");
+    }
+
+    /// 越界夹取，且**回夹后的值**——调用方拿它回给界面。
+    #[test]
+    fn out_of_range_is_clamped_and_reported_back() {
+        let r = RecentN::new(context::DEFAULT_RECENT);
+        assert_eq!(r.set(0), context::MIN_RECENT);
+        assert_eq!(r.get(), context::MIN_RECENT);
+        assert_eq!(r.set(9999), context::MAX_RECENT);
+        assert_eq!(r.get(), context::MAX_RECENT);
+    }
+
+    /// 构造时就该夹好——不能让非法值活到第一次读取。
+    #[test]
+    fn construction_clamps_too() {
+        let r = RecentN::new(0);
+        assert_eq!(r.get(), context::MIN_RECENT);
+        assert_eq!(RecentN::new(usize::MAX).get(), context::MAX_RECENT);
+    }
 }
