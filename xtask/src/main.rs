@@ -15,6 +15,8 @@ use anyhow::{Context as _, Result, bail};
 use chatservant_capture::{ChatSurface, WECHAT};
 use clap::{Parser, Subcommand};
 
+mod caps;
+
 #[derive(Parser)]
 #[command(name = "xtask", about = "chat-servant 开发者探针")]
 struct Cli {
@@ -24,6 +26,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// 采集能力体检：这台机器到底支不支持 WGC
+    Caps,
     /// 抓取与识别的诊断探针
     Probe {
         #[command(subcommand)]
@@ -57,6 +61,20 @@ fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Caps => {
+            let c = caps::probe();
+            println!("操作系统     = {}", c.os_build);
+            match &c.wgc_supported {
+                Some(Ok(true)) => println!("WGC 支持     = ✅ 系统层面支持"),
+                Some(Ok(false)) => {
+                    println!("WGC 支持     = ❌ 系统明确返回不支持");
+                    println!("                会话会静默关闭、不报任何错误——与我们的现象完全吻合");
+                }
+                Some(Err(e)) => println!("WGC 支持     = ⚠ WinRT 调用失败：{e}"),
+                None => println!("WGC 支持     = 未知"),
+            }
+            Ok(())
+        }
         Cmd::Probe { kind } => match kind {
             ProbeCmd::Frame {
                 app,
@@ -138,6 +156,13 @@ fn probe_frame(
         "printwindow" => chatservant_capture::printwindow::capture(hit.hwnd_raw)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("PrintWindow 抓帧失败")?,
+        "region" => chatservant_capture::region::capture(hit.hwnd_raw)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("区域抓屏失败")?,
+        // 诊断用：抓整个主显示器，用来区分「窗口不可捕获」和「整条 WGC 链路坏了」
+        "monitor" => {
+            chatservant_capture::wgc::capture_primary_monitor().context("显示器抓帧失败")?
+        }
         _ => chatservant_capture::capture_one_frame(hit.hwnd_raw, size).context("WGC 抓帧失败")?,
     };
     let elapsed = t0.elapsed();

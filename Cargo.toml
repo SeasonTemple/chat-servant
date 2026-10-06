@@ -16,12 +16,16 @@ chatservant-core = { path = "crates/core" }
 chatservant-capture = { path = "crates/capture" }
 
 windows = { version = "0.62", features = [
+  "Foundation",
+  "Graphics_Capture",
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_UI_HiDpi",
   "Win32_UI_WindowsAndMessaging",
   "Win32_Storage_Xps",
+  "Win32_System_SystemInformation",
+  "Win32_System_WinRT",
   "Win32_System_Threading",
 ] }
 windows-capture = "2.0"

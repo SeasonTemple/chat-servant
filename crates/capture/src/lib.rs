@@ -3,6 +3,7 @@
 pub use chatservant_core::frame::Frame;
 
 pub mod printwindow;
+pub mod region;
 pub mod surface;
 pub mod wgc;
 pub mod window;
