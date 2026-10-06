@@ -1,0 +1,20 @@
+[package]
+name = "chatservant-reason"
+description = "推理层：判断意图、起草候选、排序"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# 内部 crate，不发 crates.io。缺这一行 cargo-deny 会把
+# `deps.workspace = true` 判成通配符（allow-wildcard-paths 对公开 crate 不生效）。
+publish = false
+
+[dependencies]
+chatservant-core.workspace = true
+chatservant-perceive.workspace = true
+serde = { workspace = true }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

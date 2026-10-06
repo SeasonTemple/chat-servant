@@ -406,6 +406,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "chatservant-reason"
+version = "0.1.0"
+dependencies = [
+ "chatservant-core",
+ "chatservant-perceive",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"

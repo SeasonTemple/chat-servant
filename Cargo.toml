@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/capture", "crates/perceive", "xtask", "ui/src-tauri"]
+members = ["crates/core", "crates/capture", "crates/perceive", "crates/reason", "xtask", "ui/src-tauri"]
 # Tauri 的 Android/iOS 目标在 ui/src-tauri/gen 下生成，独立于本工作区构建，
 # 排除掉免得门禁去扫它的 target。
 exclude = ["ui/src-tauri/gen"]
@@ -18,6 +18,7 @@ license = "MIT OR Apache-2.0"
 chatservant-core = { path = "crates/core" }
 chatservant-capture = { path = "crates/capture" }
 chatservant-perceive = { path = "crates/perceive" }
+chatservant-reason = { path = "crates/reason" }
 
 windows = { version = "0.62", features = [
   "Foundation",
@@ -48,6 +49,8 @@ wgc = "2.0"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
