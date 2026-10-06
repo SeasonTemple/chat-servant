@@ -28,6 +28,8 @@ struct Cli {
 enum Cmd {
     /// 采集能力体检：这台机器到底支不支持 WGC
     Caps,
+    /// 遮挡检测体检：目标窗口现在能不能用第 ③ 级抓到
+    Occluded,
     /// 抓取与识别的诊断探针
     Probe {
         #[command(subcommand)]
@@ -75,6 +77,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Occluded => probe_occluded("wechat"),
         Cmd::Probe { kind } => match kind {
             ProbeCmd::Frame {
                 app,
@@ -84,6 +87,101 @@ fn main() -> Result<()> {
             } => probe_frame(&app, hwnd, &method, out),
         },
     }
+}
+
+/// 遮挡检测体检。
+///
+/// 第 ③ 级（区域抓屏）读的是屏幕坐标处的像素，所以「这个窗口现在能不能
+/// 抓」这件事必须**如实测出来**，不能靠"抓一次没报错"来判断——之前那次
+/// 抓回的其实是被盖住窗口的像素，机制上完全成功，内容完全错误。
+fn probe_occluded(app: &str) -> Result<()> {
+    set_dpi_aware();
+    let surface = surface_for(app)?;
+    let hit =
+        chatservant_capture::find_chat_window(&surface).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let (x0, y0, x1, y1) = window_rect(hit.hwnd_raw)?;
+    println!(
+        "窗口 = {} ({})  0x{:X}",
+        surface.label, hit.exe, hit.hwnd_raw
+    );
+    println!(
+        "屏幕矩形 = ({x0}, {y0}) - ({x1}, {y1})   {}x{}",
+        x1 - x0,
+        y1 - y0
+    );
+
+    // 采样点：四角内缩 + 中心 + 三等分。够覆盖"只被盖住一角"的情况。
+    let inset = 24i32;
+    let w = x1 - x0;
+    let h = y1 - y0;
+    let samples: Vec<(&str, i32, i32)> = vec![
+        ("左上", x0 + inset, y0 + inset),
+        ("右上", x1 - inset, y0 + inset),
+        ("左下", x0 + inset, y1 - inset),
+        ("右下", x1 - inset, y1 - inset),
+        ("中心", x0 + w / 2, y0 + h / 2),
+        ("上中", x0 + w / 2, y0 + inset),
+        ("下中", x0 + w / 2, y1 - inset),
+        ("左中", x0 + inset, y0 + h / 2),
+        ("右中", x1 - inset, y0 + h / 2),
+    ];
+
+    println!();
+    println!("采样点命中检查（9 个点）：");
+    let mut covered = 0;
+    for (name, x, y) in &samples {
+        let hit_hwnd = top_window_at(*x, *y);
+        let is_target = hit_hwnd == hit.hwnd_raw;
+        if !is_target {
+            covered += 1;
+        }
+        println!(
+            "  {:<4} ({:>5},{:>5})  命中 0x{:X}  {}",
+            name,
+            x,
+            y,
+            hit_hwnd,
+            if is_target {
+                "目标窗口"
+            } else {
+                "← 被别的窗口盖住"
+            }
+        );
+    }
+
+    println!();
+    let verdict = if covered == 0 {
+        "✅ 全部采样点都命中目标窗口，第 ③ 级可以抓"
+    } else {
+        "❌ 有采样点被遮挡，第 ③ 级抓到的会是盖在上面的东西"
+    };
+    println!("{verdict}   （{covered}/{} 被遮挡）", samples.len());
+    println!(
+        "is_occluded() 判定 = {}",
+        chatservant_capture::region::is_occluded(
+            hit.hwnd_raw,
+            &samples.iter().map(|&(_, x, y)| (x, y)).collect::<Vec<_>>()
+        )
+    );
+    Ok(())
+}
+
+/// 某一点命中的顶层窗口句柄。取不到时返回 0。
+fn top_window_at(x: i32, y: i32) -> isize {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
+    let h = unsafe { WindowFromPoint(POINT { x, y }) };
+    if h.is_invalid() { 0 } else { h.0 as isize }
+}
+
+fn window_rect(hwnd_raw: isize) -> Result<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(hwnd, &raw mut r) }.context("GetWindowRect 失败")?;
+    Ok((r.left, r.top, r.right, r.bottom))
 }
 
 fn surface_for(key: &str) -> Result<ChatSurface> {
