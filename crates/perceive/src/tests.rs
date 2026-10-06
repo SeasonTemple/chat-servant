@@ -15,9 +15,10 @@ use crate::pixels::{Rgb, chroma, near};
 const PANEL: [u8; 3] = [30, 30, 31];
 /// 实测我方微信气泡色（`cargo xtask measure`）
 const MY_BUBBLE: [u8; 3] = [114, 205, 144];
-/// ⚠ 对方气泡的实测色值**尚未拿到**。这里用近灰色占位，
-/// 它的意义只是验证「近灰 → 判为对方」这条规则能跑通，不代表真值。
-const THEIR_BUBBLE: [u8; 3] = [58, 58, 62];
+/// 实测对方（小号）微信气泡色 `rgb(47,47,48)`——**纯灰，彩度 0**
+const THEIR_BUBBLE: [u8; 3] = [47, 47, 48];
+/// 对方气泡里的字是**白字**（与面板上的标题同色），对比 178.4
+const THEIR_INK: [u8; 3] = [225, 225, 229];
 const DARK_INK: [u8; 3] = [22, 22, 22];
 const GRAY_INK: [u8; 3] = [123, 123, 128];
 const WHITE_INK: [u8; 3] = [225, 225, 229];
@@ -69,7 +70,7 @@ fn two_sided_frame() -> Frame {
     // 合成时必须还原这个稀疏性，否则测出来的数字没有意义。
     stripes(&mut px, 255, 370, 48, DARK_INK); // 我方气泡第一行
     stripes(&mut px, 255, 370, 68, DARK_INK); // 我方气泡第二行
-    stripes(&mut px, 35, 145, 128, DARK_INK); // 对方气泡里的字
+    stripes(&mut px, 35, 145, 128, THEIR_INK); // 对方气泡里的字（实测是白字）
 
     Frame::from_rgb(W, H, px).expect("frame")
 }
@@ -136,7 +137,7 @@ fn two_sided_frame_classifies_into_speakers() {
 
     let lines = vec![
         line("我说的", Rect::new(250, 50, 370, 64), DARK_INK),
-        line("他说的", Rect::new(30, 130, 150, 144), DARK_INK),
+        line("他说的", Rect::new(30, 130, 150, 144), THEIR_INK),
         line("昨天 20:00", Rect::new(190, 182, 222, 190), GRAY_INK),
         line("群公告", Rect::new(30, 17, 110, 25), WHITE_INK),
     ];
@@ -197,6 +198,18 @@ fn consecutive_lines_from_same_speaker_merge() {
     let msgs = group(&classify_all(&lines, &f, &palette));
     assert_eq!(msgs.len(), 1, "同一气泡的相邻两行应并成一条");
     assert!(msgs[0].text.contains("第一行") && msgs[0].text.contains("第二行"));
+}
+
+#[test]
+fn merge_adds_space_between_latin_words_only() {
+    // 实测踩到的：日文句子按行断在 "...Bloomer de" + "KOjin Lesson..."
+    // 直接拼会得到 "deKOjin"。
+    assert!(crate::merge::needs_space("Bloomer de", "KOjin"));
+    // 中文按字断行，补空格反而错
+    assert!(!crate::merge::needs_space("他是我的", "朋友"));
+    // 只有一侧是拉丁字符时也不补
+    assert!(!crate::merge::needs_space("中文结尾", "English"));
+    assert!(!crate::merge::needs_space("English", "中文开头"));
 }
 
 #[test]

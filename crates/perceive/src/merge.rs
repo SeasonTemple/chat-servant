@@ -41,6 +41,9 @@ pub fn group(attrs: &[Attribution]) -> Vec<Message> {
 
         match out.last_mut() {
             Some(m) if can_merge => {
+                if needs_space(&m.text, &a.text) {
+                    m.text.push(' ');
+                }
                 m.text.push_str(&a.text);
                 m.rect.x0 = m.rect.x0.min(a.rect.x0);
                 m.rect.x1 = m.rect.x1.max(a.rect.x1);
@@ -54,4 +57,17 @@ pub fn group(attrs: &[Attribution]) -> Vec<Message> {
         }
     }
     out
+}
+
+/// 拼接处要不要补一个空格。
+///
+/// 中文按字断行，直接拼是对的；英文/数字断在词中间，不补空格会粘成
+/// `Bloomer deKOjin`。判据：拼接两侧**都**是拉丁字母或数字时才补——
+/// 只看一侧会在「中文…English」和「English…中文」上补出多余空格。
+pub(crate) fn needs_space(left: &str, right: &str) -> bool {
+    let is_word_char = |c: char| c.is_ascii_alphanumeric();
+    match (left.chars().next_back(), right.chars().next()) {
+        (Some(a), Some(b)) => is_word_char(a) && is_word_char(b),
+        _ => false,
+    }
 }
