@@ -30,6 +30,8 @@
    * 而「点了没反应」正是这个项目反复在修的东西。
    */
   let relockPending = $state(false);
+  /** 手动刷新中。按钮要有状态。 */
+  let refreshing = $state(false);
   /** 重锁请求进行中。**按钮要有状态**——点了没反馈等于没点。 */
   let locking = $state(false);
 
@@ -126,6 +128,39 @@
   });
 
   /**
+   * 手动读一次当前快照。
+   *
+   * 面板是**纯推送**的：循环只在有变化时 emit，静态窗口里它一直沉默。
+   * 用户怀疑漏了消息时没有补救手段——这个按钮是那条出路，
+   * 也让 `latest_readout` 不再是一个没人调用的命令。
+   */
+  async function refresh() {
+    refreshing = true;
+    try {
+      const r = await invoke<{
+        messages: Message[];
+        candidates: Candidate[];
+        reason: string;
+        peer: string;
+        counts: CallCounts | null;
+      } | null>('latest_readout');
+      if (!r) {
+        reason = '观察循环还没跑出第一帧。';
+        return;
+      }
+      messages = r.messages ?? [];
+      candidates = r.candidates ?? [];
+      reason = r.reason;
+      peer = r.peer ?? '';
+      counts = r.counts ?? null;
+    } catch (e) {
+      reason = `读快照失败：${String(e)}`;
+    } finally {
+      refreshing = false;
+    }
+  }
+
+  /**
    * 改档。**用 Rust 回传的真实生效值覆盖**——
    * 硬约束第 5 条「默认档最低」，所以 Rust 有可能在解析失败时把档位
    * 夹回 Manual。界面必须显示程序认定的那个，不是用户点过的那个。
@@ -198,6 +233,14 @@
         会话：没认出来
       {/if}
     </span>
+    <button
+      class="cs-peer-lock"
+      onclick={refresh}
+      disabled={refreshing}
+      title="手动读一次当前快照。面板是纯推送的，静态窗口里它不会自己说话。"
+    >
+      {refreshing ? '读取中…' : '刷新'}
+    </button>
     <button
       class="cs-peer-lock"
       onclick={relock}
