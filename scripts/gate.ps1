@@ -42,6 +42,7 @@ if (Get-Command cargo-deny -ErrorAction SilentlyContinue) {
 if (Test-Path "ui\node_modules") {
   Step "ui svelte-check" { Push-Location ui; pnpm check 2>&1 | Select-Object -Last 40; Pop-Location }
   Step "ui lint"         { Push-Location ui; pnpm lint 2>&1 | Select-Object -Last 40; Pop-Location }
+  Step "ui svelte-autofixer" { Push-Location ui; & pwsh -NoProfile -File scripts/autofixer.ps1 2>&1 | Select-Object -Last 30; Pop-Location }
   Step "ui build"        { Push-Location ui; pnpm build 2>&1 | Select-Object -Last 25; Pop-Location }
 } else {
   Write-Output ""
