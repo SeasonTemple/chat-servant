@@ -6,6 +6,7 @@
 
 pub mod attribute;
 pub mod fixture;
+pub mod identity;
 pub mod mask;
 pub mod media;
 pub mod merge;

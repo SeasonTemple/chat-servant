@@ -654,18 +654,33 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
     }
 
     println!();
-    // 会话名是**安全闸的判据**，必须在这里看得见。
+    // 会话身份：闸认的是**像素指纹**，不是这段文字。
     // 头部的**归类**（NoiseClass::Header）与头部的**文字读得对不对**
     // 是两件事：真实帧上分类是对的，OCR 却可能把「小号」读成别的。
-    // 只打印归类不打印文字，会让人以为闸一定认得出人。
+    // 两边都打出来，才能看出闸到底认的是什么。
     match chatservant_perceive::conversation_name(&r.attributions) {
-        Some(name) => {
-            println!("== 会话名 ==");
-            println!("  {name}");
-            println!("  ⚠ 这就是会话名闸拿去比对的**那串文字**。");
-            println!("     锁定名是编译期常量，所以 OCR 认错一个字，闸就会永远拒绝动手。");
-        }
-        None => println!("== 会话名 ==\n  （没读出标题行）"),
+        Some(name) => println!("  OCR 读到的会话名：{name}"),
+        None => println!("  OCR 读到的会话名：（没读出标题行）"),
+    }
+    // 指纹来自**锚点给出的固定头带**，与观察循环用的是同一块——
+    // 不依赖 OCR 认得准，所以就算上面那串字是错的，闸照样认得出人。
+    let band = chatservant_core::frame::Rect::new(
+        r.anchor.chat.x0,
+        r.anchor.header_top,
+        r.anchor.chat.x0 + (r.anchor.chat.x1 - r.anchor.chat.x0).min(400),
+        r.anchor.header_top + 40,
+    );
+    if let Some(pane) = frame.crop(r.anchor.chat)
+        && let Some(p) = chatservant_perceive::identity::HeaderPrint::of(&pane, band)
+    {
+        println!(
+            "  闸用的像素指纹：{} px（区域 {}x{}，阈值 {:.2}）",
+            p.pixels(),
+            band.width(),
+            band.height(),
+            chatservant_perceive::identity::SAME_THRESHOLD
+        );
+        println!("  ⚠ 认的是这块**像素**，不是上面那串文字。");
     }
 
     println!();

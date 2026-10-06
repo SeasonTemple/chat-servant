@@ -210,6 +210,8 @@ struct Scratch {
     locked_peer: String,
     /// 当前窗口里认出的会话名。**空串 = 没认出来**。
     peer: String,
+    /// 锁定的那一个会话的头部像素指纹。**第一帧读到时建立。**
+    locked_print: Option<chatservant_perceive::identity::HeaderPrint>,
     /// 图片外发总闸。**默认关**——见 [`ImagesOut`]。
     images_out: ImagesOut,
     /// 单张图片的 token 预算。循环每圈读一次。
@@ -235,6 +237,7 @@ impl Scratch {
             vision: chatservant_reason::VisionBridge::off(),
             locked_peer: String::new(),
             peer: String::new(),
+            locked_print: None,
             images_out: ImagesOut::off(),
             token_budget: TokenBudget::new(crate::commands::BUDGET_DEFAULT),
             provider: chatservant_reason::Provider::OpenAi,
@@ -536,30 +539,45 @@ fn step(
     let attrs = chatservant_perceive::classify_all(&lines, &full, &palette);
     let messages = chatservant_perceive::group(&attrs);
 
-    // **会话名闸。** 窗口顶部的白字大标题就是当前会话的名字。
-    //
-    // 认不出、或与锁定目标不符 → **本轮不推理、不投递**。
-    // 这不是「读个名字显示一下」：认错人就会把 A 的对话当成 B 的来处理，
-    // 而误发的代价是别人收到一句不该收到的话。
-    // OCR 认错名字的概率不为零，所以「认不出」和「对不上」都归到同一侧。
     let peer_name = chatservant_perceive::conversation_name(&attrs);
-    // 存进 Scratch，`spawn` 那边要拿它往 UI 推。**认不出来存空串**——
-    // 界面据此显示「没认出会话」，不显示空白。
+    // **会话身份闸。** 认的是**头部区域的像素指纹**，不是 OCR 读出来的名字。
+    //
+    // 为什么不比名字：实测真实帧上头部的**归类**是对的（`NoiseClass::Header`），
+    // 但 OCR 把「小号」读成了 `G8W`。按文字锁的话，闸在真实环境上**永远是关的**
+    // ——不误发，但也永远不工作。
+    //
+    // 为什么指纹可靠：文字是 OCR 的产物，那一小块像素不是。
+    // 换会话像素必然变；同一会话在帧之间基本不变（阈值吸收角标抖动）。
+    let print = header_print(&full, &anchor);
     s.peer = peer_name.clone().unwrap_or_default();
-    let peer_ok = match (peer_name.as_deref(), s.locked_peer.as_str()) {
-        (_, "") => false, // 没锁 → 不动。宁可不做，也不猜对谁。
-        (Some(got), want) => got == want,
-        (None, _) => false,
+    let peer_ok = match (&s.locked_print, &print) {
+        // 还没锁过：拿**第一帧读到的**当基准，并把名字报给用户看。
+        // ⚠ 这意味着「启动时开着的那个会话」就是被锁的那个。
+        //   所以界面上必须显示这个名字——用户要能一眼看出锁错了没有。
+        (None, Some(p)) => {
+            s.locked_print = Some(p.clone());
+            true
+        }
+        // 锁过但这帧认不出 → **关**。认不出不等于「是同一个」。
+        // `(None, None)` 也落到这里：连基准都还没有，更不能动手。
+        (_, None) => false,
+        (Some(a), Some(b)) => a.is_same(b),
     };
     if !peer_ok {
         s.candidates.clear();
-        s.reason = format!(
-            "当前会话是 {}，不是要处理的「{}」——本轮不动手",
-            peer_name.as_deref().unwrap_or("（没读出会话名）"),
-            s.locked_peer
-        );
-        // **不推进水位线**：这样下一帧会重试同一个会话，
-        // 用户切回「小号」之后能立刻接上，而不是要重新发一条消息。
+        s.reason = match (&s.locked_print, &print) {
+            (Some(_), None) => format!(
+                "没读出当前会话的头部，无法确认还是不是「{}」——本轮不动手",
+                s.locked_peer
+            ),
+            // `(None, Some(_))` 到不了这里：那一支已经在上面建锁并放行了。
+            (None, None) => "还没读到任何会话头部，先不动手".into(),
+            _ => format!(
+                "当前会话已经不是锁定的那一个（锁定时显示为「{}」）——本轮不动手",
+                s.locked_peer
+            ),
+        };
+        // **不推进水位线**：这样下一帧会重试，用户切回锁定会话后能立刻接上。
         return Ok(None);
     }
 
@@ -569,7 +587,7 @@ fn step(
         anchor.chat,
         frame.width(),
         frame.height(),
-        &attrs,
+        attrs.as_slice(),
     ));
 
     // 只有真的有**对方说的话**才推进水位线。
@@ -700,6 +718,44 @@ fn collect_images(
         .collect()
 }
 
+/// 头部区域的像素指纹。**认不出就返回 `None`**——
+/// 调用方必须把 `None` 当成「认不出」而不是「是同一个」。
+///
+/// ## 用**固定头带**，不用 OCR 给的框
+///
+/// 早先用「最靠上那条 `Header` 的 rect」。实测那个框只有 **33×11**，
+/// 而且它是**跟着 OCR 结果走的**：名字一个字还是三个字，框就多宽少宽。
+/// 后果有两个——指纹薄得不足以区分会话；短名字直接掉到
+/// `MIN_PIXELS` 以下，闸**永远建不起来**。
+///
+/// 头带由锚点给出，不依赖 OCR 认得认得准。
+///
+/// ⚠ `frame` 必须是**消息区坐标系**（`frame.crop(anchor.chat)` 之后的那块）。
+/// `classify_all` 是在裁剪区上跑的，传整帧会取到完全无关的区域，
+/// 而它照样算得出一个「看起来合理」的指纹。
+fn header_print(
+    pane: &chatservant_capture::Frame,
+    anchor: &chatservant_capture::anchor::PaneAnchor,
+) -> Option<chatservant_perceive::identity::HeaderPrint> {
+    let chat = anchor.chat;
+    // 宽度封顶：右半边是空面板，纳入只会稀释指纹。
+    let w = (chat.x1 - chat.x0).min(HEAD_BAND_W);
+    let r = chatservant_core::frame::Rect::new(
+        chat.x0,
+        anchor.header_top,
+        chat.x0 + w,
+        anchor.header_top + HEAD_BAND_H,
+    );
+    chatservant_perceive::identity::HeaderPrint::of(pane, r)
+}
+
+/// 头带高度 40 px。实测标题行只有 11 px 高，多留一点是为了
+/// 框住整条标题栏（含右侧图标），而不是只框那行字。
+const HEAD_BAND_H: i32 = 40;
+/// 头带宽度上限 400 px。够装下会话名与右侧几个图标，
+/// 又不至于把大片空面板算进来——那会稀释指纹。
+const HEAD_BAND_W: i32 = 400;
+
 /// 这个循环在用哪家供应商的**视觉**计费规则。
 ///
 /// 判断模型 A 不发图，只有回复模型 B 发——而 B 的多模态能力决定了图
@@ -741,6 +797,7 @@ fn shift(r: chatservant_core::frame::Rect, dx: i32, dy: i32) -> chatservant_core
 mod tests {
     use super::{
         BUDGET_MAX, BUDGET_MIN, ImagesOut, RecentN, Scratch, TierCell, TokenBudget, collect_images,
+        header_print,
     };
     use chatservant_reason::context;
 
@@ -884,5 +941,61 @@ mod tests {
         // 直接往格子里塞一个不存在的编码，模拟存坏的值。
         cell.0.store(200, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(cell.get(), Dispatch::Manual, "认不出来的档位一律当最低档");
+    }
+
+    /// **闸认的是头带像素，不是 OCR 文字。**
+    ///
+    /// 真实帧上 OCR 把「小号」读成 `G8W`（实测），所以任何按文字比对的锁定
+    /// 在真实环境上永远是关的。这条用两个**只有标题不同**的帧证明闸分得开，
+    /// 而且全程**不需要任何 OCR 结果**。
+    #[test]
+    fn the_gate_reads_the_header_pixels_not_the_ocr_text() {
+        use chatservant_capture::Frame;
+        use chatservant_capture::anchor::PaneAnchor;
+        use chatservant_core::frame::Rect;
+
+        const W: u32 = 500;
+        const H: u32 = 300;
+
+        /// 顶部 40 px 是头带；`tint` 代表会话名画成什么样。
+        fn frame_with(tint: u8) -> Frame {
+            let mut px = vec![30u8; (W * H * 3) as usize];
+            for y in 0..40u32 {
+                for x in 0..W {
+                    let i = ((y * W + x) * 3) as usize;
+                    // 头带里放几段不同粗细的「字」，其余是面板底色
+                    if x > 20 && x < 200 && (x / 7) % 3 == 0 {
+                        px[i] = tint;
+                        px[i + 1] = tint;
+                        px[i + 2] = tint;
+                    }
+                }
+            }
+            Frame::from_rgb(W, H, px).expect("尺寸一致")
+        }
+
+        // 锚点给的是**帧坐标**，而 `header_print` 收的是**消息区**，
+        // 这里让 chat 从 (0,0) 开始，两套坐标才一致。
+        let anchor = PaneAnchor {
+            chat: Rect::new(0, 0, W as i32, H as i32),
+            panel_bg: [30, 30, 31],
+            panel: Rect::new(0, 0, W as i32, H as i32),
+            header_top: 0,
+            input_top: H as i32,
+        };
+
+        let a = frame_with(225);
+        let b = frame_with(120);
+        let pa = header_print(&a, &anchor).expect("取得到");
+        let pb = header_print(&b, &anchor).expect("取得到");
+        assert!(!pa.is_same(&pb), "两个不同会话被判成同一个");
+
+        let again = header_print(&a, &anchor).expect("取得到");
+        assert!(pa.is_same(&again), "同一帧被误判成换人了");
+        assert!(
+            pa.pixels() > 5_000,
+            "头带只有 {} px，太薄不足以当身份",
+            pa.pixels()
+        );
     }
 }
