@@ -52,7 +52,7 @@ pub fn run(path: PathBuf) -> Result<()> {
         palette.panel_bg[0], palette.panel_bg[1], palette.panel_bg[2]
     );
 
-    let found = chatservant_perceive::find(&frame, pane, &palette);
+    let found = chatservant_perceive::find(&frame, pane);
     println!();
     if found.regions.is_empty() {
         println!("没有检出媒体区域");

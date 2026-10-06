@@ -25,25 +25,14 @@
 
 use chatservant_core::frame::{Frame, Rect};
 
-use crate::attribute::Palette;
 use crate::mask::{FLAT_MAX_COLORS, distinct_colors};
-use crate::pixels::{dist, dominant_ratio};
+use crate::pixels::dominant_ratio;
 
 /// 横条的条高（像素）。取 6 是为了比正文行高（实测 11~14 px）细：
 /// 行与行之间才有空隙可分。
 /// ⚠ **未实测**：行高 11~14 是实测的，条高 6 本身是按它推的，没有在含媒体的
 /// 帧上量过。拿到后用 `cargo xtask media <png>` 重新量。
 pub const BAND_H: i32 = 6;
-
-/// 一条横条里「非面板底色」像素占比超过此值，这条就算「有东西」。
-/// ⚠ **未实测**：取值保守（0.05）是为了让浅色气泡边框、抗锯齿边缘也能触发
-/// 一条，避免图片边缘被削掉。
-pub const BAND_MIN_INK: f32 = 0.05;
-
-/// 像素算不算「面板底色」的距离容差。
-/// 实测面板底色在帧内**完全一致**（`rgb(30,30,31)` 到处一样），12 有很大余量
-/// （与 `pixels::COLOR_TOL` 同源）。
-pub const BG_TOL: f32 = 12.0;
 
 /// 允许合并的两条「有东西的条」之间最多空几条。
 /// ⚠ **未实测**：文字行之间会有空隙，取 2 是保守值。
@@ -115,9 +104,15 @@ pub struct Found {
 
 /// 在聊天区里找媒体区域。
 ///
-/// 流程：切横条 → 找「有东西」的条 → 合并（允许 ≤ `BAND_GAP` 条间隔）
+/// 流程：切横条 → 找**不平直**的条 → 合并（允许 ≤ `BAND_GAP` 条间隔）
 /// → 丢掉过小的 → **条带探针排除纯文字气泡** → 归类。
-pub fn find(frame: &Frame, pane: Rect, palette: &Palette) -> Found {
+///
+/// ## 不收 `Palette`
+///
+/// 早先的签名收 `&Palette`、内部按「异于面板底色」判占用。那条判据在真实帧
+/// 上**整张图漏检**（照片的深色背景与底色几乎一样），所以两处都换成了
+/// 平直度判据，`panel_bg` 也就没有用处了——**留一个用不到的参数比删掉更糟**。
+pub fn find(frame: &Frame, pane: Rect) -> Found {
     let mut regions = Vec::new();
     let y_start = pane.y0.max(0);
     let y_end = pane.y1.min(frame.height() as i32);
@@ -132,16 +127,11 @@ pub fn find(frame: &Frame, pane: Rect, palette: &Palette) -> Found {
     let mut y = y_start;
     while y < y_end {
         let band = Rect::new(x_start, y, x_end, (y + BAND_H).min(y_end));
-        if band_ink_ratio(frame, band, palette.panel_bg) > BAND_MIN_INK {
+        if band_is_content(frame, band) {
             match open {
                 // 上一条候选已经结束，且空隙超过 BAND_GAP：先收口再开新的。
                 Some((b0, b1)) if y - b1 > BAND_GAP * BAND_H => {
-                    push_region(
-                        frame,
-                        Rect::new(x_start, b0, x_end, b1),
-                        palette,
-                        &mut regions,
-                    );
+                    push_region(frame, Rect::new(x_start, b0, x_end, b1), &mut regions);
                     open = Some((y, band.y1));
                 }
                 Some((b0, _)) => open = Some((b0, band.y1)),
@@ -151,22 +141,40 @@ pub fn find(frame: &Frame, pane: Rect, palette: &Palette) -> Found {
         y += BAND_H;
     }
     if let Some((b0, b1)) = open {
-        push_region(
-            frame,
-            Rect::new(x_start, b0, x_end, b1),
-            palette,
-            &mut regions,
-        );
+        push_region(frame, Rect::new(x_start, b0, x_end, b1), &mut regions);
     }
 
     Found { regions }
 }
 
+/// 一条横条里有没有**内容**——判据是「这条不平直」。
+///
+/// ## 为什么不能用「异于面板底色」
+///
+/// 早先的版本数「与 `panel_bg` 距离超过 `BG_TOL` 的像素占比」。在真实帧上
+/// （`target/probe/text-chat.png`，`scripts/scancol.ps1` 实测）**整张图漏检**：
+///
+/// | Y 区间 | 精确色种数 | 是什么 |
+/// |--------|-----------|--------|
+/// | 240–320 | 50 ~ 125 | 照片本体（高约 85px） |
+/// | 330–370 | 3 | 照片自己的深色背景 |
+/// | 其余 | 1 ~ 11 | 文字行 |
+///
+/// 照片**内部**那些只有 3 种色的深色背景，与面板底色 `rgb(30,30,31)` 几乎
+/// 一样，于是被判成空带，区域被切成碎片，每片都够不到 [`MIN_MEDIA_H`]。
+///
+/// 这与票 07 早就记下的「图片区 51% 纯黑背景」是**同一个病根**：
+/// **平直度判据在图片上很灵，「异于底色」在图片上很钝**，
+/// 两条判据不能共用一个思路。色种数是实测里唯一单调的信号。
+fn band_is_content(frame: &Frame, r: Rect) -> bool {
+    distinct_colors(frame, r).is_some_and(|n| n > FLAT_MAX_COLORS)
+}
+
 /// 4+5+6：过小就丢；顶部/底部 20% 两条都平就丢；剩下才归类。
-fn push_region(frame: &Frame, banded: Rect, palette: &Palette, out: &mut Vec<MediaRegion>) {
+fn push_region(frame: &Frame, banded: Rect, out: &mut Vec<MediaRegion>) {
     // 候选横条是整条消息区宽度，真实图片只占一部分。先把「有东西」的
     // 横向范围收出来——否则一次统计会覆盖整个面板宽度，色种数必然爆炸。
-    let r = match content_bounds(frame, banded, palette.panel_bg) {
+    let r = match content_bounds(frame, banded) {
         Some(r) => r,
         None => return,
     };
@@ -210,49 +218,28 @@ fn push_region(frame: &Frame, banded: Rect, palette: &Palette, out: &mut Vec<Med
     });
 }
 
-/// 候选条里「与面板底色不同」的像素占比。
-fn band_ink_ratio(frame: &Frame, r: Rect, panel_bg: [u8; 3]) -> f32 {
+/// 候选条里「有内容」的横向包围盒。整条都平返回 `None`。
+///
+/// 同样**不能用「异于面板底色」**：照片左右两侧的深色背景与底色几乎一样，
+/// 用那种判据算包围盒会把照片**裁掉一截**。逐列判「这一列平不平直」，
+/// 对深色背景免疫——照片里的一列再暗也是花的（几十种色），
+/// 而纯底色的一列只有 1 种。
+fn content_bounds(frame: &Frame, r: Rect) -> Option<Rect> {
     let x1 = (r.x1.max(0) as u32).min(frame.width());
     let y1 = (r.y1.max(0) as u32).min(frame.height());
-    let mut inked = 0usize;
-    let mut total = 0usize;
-    for y in (r.y0.max(0) as u32)..y1 {
-        for x in (r.x0.max(0) as u32)..x1 {
-            if let Some(p) = frame.pixel(x, y) {
-                total += 1;
-                if dist(p, panel_bg) > BG_TOL {
-                    inked += 1;
-                }
-            }
-        }
-    }
-    if total == 0 {
-        return 0.0;
-    }
-    inked as f32 / total as f32
-}
-
-/// 候选条里「有东西」的横向包围盒。整条都平返回 `None`。
-fn content_bounds(frame: &Frame, r: Rect, panel_bg: [u8; 3]) -> Option<Rect> {
-    let x1 = (r.x1.max(0) as u32).min(frame.width());
-    let y1 = (r.y1.max(0) as u32).min(frame.height());
-    let mut min_x = x1;
+    let y0 = r.y0.max(0) as u32;
+    let mut min_x: Option<u32> = None;
     let mut max_x = 0u32;
-    for y in (r.y0.max(0) as u32)..y1 {
-        for x in (r.x0.max(0) as u32)..x1 {
-            let Some(p) = frame.pixel(x, y) else {
-                continue;
-            };
-            if dist(p, panel_bg) > BG_TOL {
-                min_x = min_x.min(x);
-                max_x = max_x.max(x + 1);
-            }
+    for x in (r.x0.max(0) as u32)..x1 {
+        if band_is_content(
+            frame,
+            Rect::new(x as i32, y0 as i32, x as i32 + 1, y1 as i32),
+        ) {
+            min_x = min_x.or(Some(x));
+            max_x = x + 1;
         }
     }
-    if min_x >= max_x {
-        return None;
-    }
-    Some(Rect::new(min_x as i32, r.y0, max_x as i32, r.y1))
+    min_x.map(|m| Rect::new(m as i32, r.y0, max_x as i32, r.y1))
 }
 
 #[cfg(test)]
@@ -314,17 +301,13 @@ mod tests {
         })
     }
 
-    fn palette() -> Palette {
-        Palette { panel_bg: PANEL }
-    }
-
     /// **不变量**：纯文字气泡绝不能被判成媒体。
     ///
     /// 把用户自己的文字气泡当成「图」送进外部模型是隐私事故。
     #[test]
     fn a_text_bubble_is_never_media() {
         let f = text_bubble();
-        let found = find(&f, PANE, &palette());
+        let found = find(&f, PANE);
         assert!(
             found.regions.is_empty(),
             "纯文字气泡被误判成媒体了：{:?}",
@@ -335,7 +318,7 @@ mod tests {
     #[test]
     fn a_noisy_block_is_media() {
         let f = photo();
-        let found = find(&f, PANE, &palette());
+        let found = find(&f, PANE);
         assert_eq!(found.regions.len(), 1, "噪声方块应被检出：{found:?}");
         assert_eq!(found.regions[0].kind, MediaKind::Photo);
     }
@@ -343,7 +326,7 @@ mod tests {
     #[test]
     fn an_empty_pane_finds_nothing() {
         let f = frame_of(|_, _| PANEL);
-        let found = find(&f, PANE, &palette());
+        let found = find(&f, PANE);
         assert!(
             found.regions.is_empty(),
             "空面板不该检出媒体：{:?}",
@@ -355,7 +338,7 @@ mod tests {
     #[test]
     fn every_region_carries_its_evidence() {
         let f = photo();
-        let found = find(&f, PANE, &palette());
+        let found = find(&f, PANE);
         for r in &found.regions {
             assert!(
                 r.colors >= MEDIA_MIN_COLORS,
@@ -386,7 +369,7 @@ mod tests {
                 PANEL
             }
         });
-        let found = find(&f, PANE, &palette());
+        let found = find(&f, PANE);
         assert!(
             found.regions.is_empty(),
             "20x20 的方块低于最小尺寸 {}x{}，不该被检出：{found:?}",
@@ -404,8 +387,7 @@ mod tests {
         let (w, h) = img.dimensions();
         let frame = Frame::from_rgb(w, h, img.into_rgb8().into_raw()).expect("尺寸一致");
         let chat = Rect::new(304, 31, 1260, 683);
-        let pal = Palette::learn(&frame, chat).expect("学得到配色");
-        let found = find(&frame, chat, &pal);
+        let found = find(&frame, chat);
         assert!(
             found.regions.is_empty(),
             "纯文字真实帧检出了 {} 个媒体区域，是误判：{:?}",
