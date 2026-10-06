@@ -490,7 +490,15 @@ fn step(
 ) -> Result<Option<PaneAnchor>, String> {
     // ① 找窗口 + 抓帧
     let hit = find_chat_window(&WECHAT).map_err(|e| format!("找窗口失败：{e}"))?;
-    let frame = capture_one_frame(hit.hwnd_raw).map_err(|e| format!("抓帧失败：{e}"))?;
+    let frame = capture_one_frame(hit.hwnd_raw).map_err(|e| {
+        // ⚠ 抓不到时**必须说清为什么**。原来只有「抓帧失败」四个字，
+        // 用户看不出是自己把微信压在别的窗口底下了，于是只会干等。
+        // 这里补一句可执行的原因——省掉一整类「程序是不是坏了」的困惑。
+        match chatservant_capture::region::why_unreadable(hit.hwnd_raw) {
+            Some(why) => format!("抓帧失败：{e}。{why}"),
+            None => format!("抓帧失败：{e}"),
+        }
+    })?;
     if frame.is_black() {
         return Err("抓到全黑帧——GPU 合成窗口的已知失败模式".into());
     }

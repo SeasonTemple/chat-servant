@@ -152,6 +152,67 @@ pub fn is_occluded(hwnd_raw: isize, sample_points: &[(i32, i32)]) -> bool {
     })
 }
 
+/// 窗口**屏幕**矩形上的 3×3 采样点。给 [`is_occluded`] 用。
+///
+/// 单独抽出来是因为调用方不该自己算——它得是**屏幕坐标**，
+/// 用窗口内的坐标去 `WindowFromPoint` 会命中窗口自己，永远返回 false，
+/// 于是那道闸形同虚设却看不出来。算错一次就会得到一个永远为假的检查。
+///
+/// 窗口不可见或取不到矩形时返回空 `Vec`——那时 `is_occluded` 天然返回
+/// `false`，而**真实的**失败原因由 `capture` 报出来。
+pub fn occlusion_samples(hwnd_raw: isize) -> Vec<(i32, i32)> {
+    let hwnd = HWND(hwnd_raw as *mut c_void);
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &raw mut rect) }.is_err() {
+        return Vec::new();
+    }
+    let (l, t, r, b) = (rect.left, rect.top, rect.right, rect.bottom);
+    if r <= l || b <= t {
+        return Vec::new();
+    }
+    // 取边长 1/4 与 3/4 处，避开标题栏这类「本来就是目标窗口」的边条。
+    let xs = [l + (r - l) / 4, l + (r - l) / 2, l + (r - l) * 3 / 4];
+    let ys = [t + (b - t) / 4, t + (b - t) / 2, t + (b - t) * 3 / 4];
+    let mut out = Vec::with_capacity(9);
+    for &y in &ys {
+        for &x in &xs {
+            out.push((x, y));
+        }
+    }
+    out
+}
+
+/// 一句话说明「为什么现在读不到」，给日志和界面用。**读得到就返回 `None`。**
+///
+/// 存在的理由：WGC 抓不到时，错误信息只有「抓帧失败」四个字，
+/// 用户看不出是自己把窗口压在别的窗口底下了。这句提示比重试一千次有用。
+pub fn why_unreadable(hwnd_raw: isize) -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible, WindowFromPoint};
+    let hwnd = HWND(hwnd_raw as *mut c_void);
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return Some("窗口不可见（可能在别的虚拟桌面或已最小化到托盘）".into());
+    }
+    if unsafe { IsIconic(hwnd) }.as_bool() {
+        return Some("窗口已最小化——还原它才能抓到".into());
+    }
+    let pts = occlusion_samples(hwnd_raw);
+    let covered = pts
+        .iter()
+        .filter(|&&(x, y)| {
+            let hit = unsafe { WindowFromPoint(POINT { x, y }) };
+            !hit.is_invalid() && hit != hwnd
+        })
+        .count();
+    if covered == 0 {
+        return None;
+    }
+    Some(format!(
+        "窗口被别的窗口盖住了（{}/{} 个采样点命中的是别的窗口）——把它露出来",
+        covered,
+        pts.len()
+    ))
+}
+
 unsafe fn read_rgb(
     mem_dc: HDC,
     bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
