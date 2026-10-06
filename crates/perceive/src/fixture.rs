@@ -244,25 +244,23 @@ pub fn keep_colors(
     // 边框只有 1 px。按 `edge-2 .. edge+1` 取 4 行的众色是错的——
     // 里面 3 行是面板底色，取到的就是面板底色，边框色根本没被采到
     // （保留色里 rgb(30,30,31) 重复出现三次就是证据）。
+    // 边框线：取 `edge` 与 `edge+1` 两行的**众数**，不做任何排除。
+    //
+    // 实测（1262×958 的小号会话帧，x 310..1254）：
+    //   y=683   rgb(39,39,40)  占 97.9%
+    //   y=684   rgb(44,44,45)
+    //   y=685   rgb(47,47,48)
+    // 输入框上边框是**抗锯齿的圆角矩形描边**，三层渐变，不是单色线。
+    //
+    // 关键是**不能排除面板底色**：rgb(39,39,40) 离面板色 rgb(30,30,31) 只有 9，
+    // 在 COLOR_TOL=12 内会被当成「就是面板色」滤掉——那样就把占 97.9% 的
+    // 真边框扔了，只剩 1.8% 的杂色，边框等于完全没采到，input_top 就塌。
     for edge in [header_top, input_top] {
-        let line = Rect::new(chat.x0, edge, chat.x1, edge + 1);
-        let h = scan(frame, line, |p| !near_color(p, panel_bg));
-        let total: usize = h.values().sum();
-        let min = (total as f64 * BORDER_AREA_RATIO) as usize;
-        if let Some((c, _)) = h
-            .into_iter()
-            .filter(|(_, n)| *n >= min)
-            .max_by_key(|(_, n)| *n)
-        {
-            keep.push(c);
-        }
+        let line = Rect::new(chat.x0, edge, chat.x1, edge + 2);
+        keep.extend(dominant_in(frame, line, 2));
     }
     keep
 }
-
-/// 边框行里保留颜色的最小面积占比。输入框上边框是圆角矩形的一线，
-/// 该行大部分仍是面板底色，所以阈值要低。
-const BORDER_AREA_RATIO: f64 = 0.02;
 
 #[cfg(test)]
 mod tests {
