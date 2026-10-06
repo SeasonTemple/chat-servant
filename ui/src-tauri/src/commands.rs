@@ -31,6 +31,8 @@ struct AppState {
     recent_n: RecentN,
     /// 图片 token 预算。同样必须与循环共用。
     token_budget: TokenBudget,
+    /// 图片外发总闸。**默认关。**
+    images_out: crate::watch::ImagesOut,
 }
 
 /// 取全局状态。**锁中毒不算致命**——状态还在，继续用比崩掉好。
@@ -391,11 +393,31 @@ fn budget_view(budget: u32, provider: &chatservant_reason::Provider) -> BudgetVi
         budget,
         min: crate::watch::BUDGET_MIN,
         max: crate::watch::BUDGET_MAX,
-        // 没有图会外发 → 滑块不出现。
-        visible: true,
+        // ⚠ **这里不能写死 true。**
+        // 早先的版本恒返回 true，理由是「模型 B 多模态，图随文本进 B」——
+        // 但图片链路**根本没接进观察循环**，一张图也出不去。
+        // 那正是同一段注释里批评的「调了没反应的控制项」，自己却犯了一遍。
+        // 现在它读总闸：闸关着就不显示滑块。
+        visible: with_state(|s| s.images_out.get()).unwrap_or(false),
         provider_base,
         provider: provider.key().to_string(),
     }
+}
+
+/// 读图片外发总闸。
+#[tauri::command]
+pub fn get_images_out() -> Result<bool, String> {
+    with_state(|s| s.images_out.get()).ok_or_else(|| "观察循环还没起来，读不到设置".to_string())
+}
+
+/// 改图片外发总闸。
+///
+/// ⚠ **这是个危险开关**：打开之后，对方发来的图片区域会被裁出、缩放、
+/// base64 编码，然后发给第三方模型。媒体检测的准确率尚未在真实帧上
+/// 完整验证，所以这里**只允许显式开启**，没有「自动」档。
+#[tauri::command]
+pub fn set_images_out(on: bool) -> Result<bool, String> {
+    with_state(|s| s.images_out.set(on)).ok_or_else(|| "观察循环还没起来，改不了设置".to_string())
 }
 
 /// 读预算。
@@ -459,6 +481,7 @@ pub fn start(app: &AppHandle) {
     // 值，循环下一圈就能读到。少这一步，滑块就是个摆设。
     let recent_n = cfg.recent_n.clone();
     let token_budget = cfg.token_budget.clone();
+    let images_out = cfg.images_out.clone();
 
     let watcher = crate::watch::spawn(cfg);
     if let Ok(mut g) = STATE.lock() {
@@ -467,6 +490,7 @@ pub fn start(app: &AppHandle) {
             candidates: Vec::new(),
             recent_n,
             token_budget,
+            images_out,
         });
     }
 
@@ -523,6 +547,7 @@ fn build_loop_config() -> LoopConfig {
                 transport_ready: true,
                 recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
                 token_budget: TokenBudget::new(BUDGET_DEFAULT),
+                images_out: crate::watch::ImagesOut::off(),
             };
         }
     }
@@ -533,6 +558,7 @@ fn build_loop_config() -> LoopConfig {
         transport_ready: false,
         recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
         token_budget: TokenBudget::new(BUDGET_DEFAULT),
+        images_out: crate::watch::ImagesOut::off(),
     }
 }
 

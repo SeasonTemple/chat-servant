@@ -30,6 +30,8 @@ fn main() {
             commands::set_recent_n,
             commands::get_token_budget,
             commands::set_token_budget,
+            commands::get_images_out,
+            commands::set_images_out,
         ])
         .run(tauri::generate_context!())
         .expect("启动失败");

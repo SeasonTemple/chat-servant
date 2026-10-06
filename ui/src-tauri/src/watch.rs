@@ -164,6 +164,8 @@ pub struct LoopConfig {
     pub recent_n: RecentN,
     /// 单张图片的视觉 token 预算。**共享句柄**。
     pub token_budget: TokenBudget,
+    /// 图片外发总闸。**默认关**——见 [`ImagesOut`]。
+    pub images_out: ImagesOut,
 }
 
 /// 一轮里的**可变会话状态**。合成一个结构体，而不是给 `step` 递九个 `&mut`。
@@ -206,6 +208,36 @@ impl Scratch {
             recent,
             vision: chatservant_reason::VisionBridge::off(),
         }
+    }
+}
+
+/// 「图片外发总闸」。**默认关。**
+///
+/// ## 为什么单独一个闸
+///
+/// 媒体检测的准确率还没在真实帧上验证过（票 07 记着 4 条检出里只有 1 条
+/// 有独立交叉验证）。但检测器不准这件事**不该由检测器自己负责兜底**——
+/// 兜底的正确位置是**出网之前**：闸关着的时候，不管检测器报出什么，
+/// 一张图都出不去。
+///
+/// 这与投递档位是同一个思路：默认最低档，升级必须显式。区别在于
+/// **投递错了是发错话，图片外发错了是把别人的内容交给外部模型**，
+/// 所以这里连「自动」这一档都不给，只有开和关。
+#[derive(Clone)]
+pub struct ImagesOut(Arc<std::sync::atomic::AtomicBool>);
+
+impl ImagesOut {
+    pub fn off() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    pub fn set(&self, v: bool) -> bool {
+        self.0.store(v, Ordering::Relaxed);
+        v
     }
 }
 
@@ -511,7 +543,7 @@ fn shift(r: chatservant_core::frame::Rect, dx: i32, dy: i32) -> chatservant_core
 
 #[cfg(test)]
 mod tests {
-    use super::RecentN;
+    use super::{BUDGET_MAX, BUDGET_MIN, ImagesOut, RecentN, TokenBudget};
     use chatservant_reason::context;
 
     /// **clone 出来的句柄和本体读的是同一个格子。**
@@ -546,5 +578,35 @@ mod tests {
         let r = RecentN::new(0);
         assert_eq!(r.get(), context::MIN_RECENT);
         assert_eq!(RecentN::new(usize::MAX).get(), context::MAX_RECENT);
+    }
+
+    #[test]
+    fn budget_clamps_on_construction_and_on_set() {
+        let b = TokenBudget::new(0);
+        assert_eq!(b.get(), BUDGET_MIN, "0 要夹到下界");
+        assert_eq!(TokenBudget::new(u32::MAX).get(), BUDGET_MAX);
+        assert_eq!(b.set(999_999), BUDGET_MAX, "set 也要夹，且回夹后的值");
+        assert_eq!(b.get(), BUDGET_MAX);
+    }
+
+    /// **图片外发默认关。**
+    ///
+    /// 这是隐私底线。媒体检测的准确率还没在真实帧上验证完
+    /// （4 条检出里只有 1 条有独立交叉验证），所以**检测器报什么都不该
+    /// 有图出得去**。兜底的位置是**出网之前**，不是让检测器自己保证。
+    #[test]
+    fn image_egress_is_off_by_default() {
+        assert!(!ImagesOut::off().get(), "默认必须是关的");
+    }
+
+    /// 总闸的 clone 与本体共用一个格子——设置页改了循环得知道。
+    #[test]
+    fn the_image_gate_is_shared() {
+        let in_loop = ImagesOut::off();
+        let in_settings = in_loop.clone();
+        in_settings.set(true);
+        assert!(in_loop.get(), "循环必须能读到设置打开的总闸");
+        in_loop.set(false);
+        assert!(!in_settings.get(), "关闭也要能同步回去");
     }
 }

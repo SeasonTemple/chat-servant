@@ -33,6 +33,9 @@
   /** 单张图片的视觉 token 预算。**Rust 侧算好该不该出现**，前端不自己判断。 */
   let budget = $state<BudgetView | null>(null);
   let budgetNote = $state<string | null>(null);
+  /** 图片外发总闸。**读不出来时按「关」处理**——失败方向必须偏保守。 */
+  let imagesOut = $state(false);
+  let imagesNote = $state<string | null>(null);
   let view = $state<SettingsView | null>(null);
   /**
    * 「展开输入框」的哨兵值。
@@ -115,8 +118,35 @@
       } catch {
         // 同上。预算读不到就整块不显示，别摆一个半死的滑块。
       }
+      try {
+        imagesOut = await invoke<boolean>('get_images_out');
+      } catch {
+        // 读不到就当关着。**失败方向要偏保守**——总闸读不出来时
+        // 宁可当成关着，也不能当成开着。
+      }
     })();
   });
+
+  /**
+   * 切换图片外发总闸。
+   *
+   * ⚠ 这是整个设置里唯一一个**危险开关**：打开之后，对方发来的图片区域
+   * 会被裁出、缩放、编码，然后发给第三方模型。媒体检测的准确率尚未在
+   * 真实帧上完整验证，所以没有「自动」档，只有开和关。
+   */
+  async function toggleImagesOut(next: boolean) {
+    try {
+      imagesOut = await invoke<boolean>('set_images_out', { on: next });
+      // 开关变了，预算滑块的可显示性也跟着变——**重新读一次**，
+      // 不在前端自己推导。
+      budget = await invoke<BudgetView>('get_token_budget');
+      imagesNote = imagesOut
+        ? '已打开：对方发来的图片会被裁出并发给模型。'
+        : '已关闭：一张图都不会外发。';
+    } catch (e) {
+      imagesNote = String(e);
+    }
+  }
 
   /**
    * 提交图片预算。
@@ -192,10 +222,28 @@
     <p class="cs-note" role="status">{recentNote}</p>
   {/if}
 
+  <h2 class="cs-h2">图片</h2>
+  <section class="cs-row">
+    <span class="cs-label">把对方发的图片发给模型</span>
+    <div>
+      <button class="cs-btn" class:primary={imagesOut} onclick={() => toggleImagesOut(!imagesOut)}>
+        {imagesOut ? '已打开' : '关闭'}
+      </button>
+    </div>
+  </section>
+  <p class="cs-note cs-warn">
+    <strong>默认关闭。</strong>打开后，对方发来的图片区域会被裁出、缩放、编码，
+    然后发给第三方模型。图片区域的识别目前**只在 1 张真实样本上验证过**，
+    其余情况可能误判——误判的代价是把你看到的画面交给外部模型。
+  </p>
+  {#if imagesNote}
+    <p class="cs-note" role="status">{imagesNote}</p>
+  {/if}
+
   <!--
-    图片 token 预算。**`budget.visible` 由 Rust 决定**，前端不自己判断
-    「模型 B 是不是多模态」。默认多模态配置下没有一张图会外发，
-    此时摆滑块就是「调了没反应的控制项」——ticket 11 刚拆掉过一个同类的。
+    图片 token 预算。**`budget.visible` 由 Rust 读总闸算出来**，前端不自己判断。
+    总闸关着时没有一张图会外发，摆滑块就是「调了没反应的控制项」——
+    ticket 11 刚拆掉过一个同类的。
   -->
   {#if budget?.visible}
     <h2 class="cs-h2">图片成本</h2>
