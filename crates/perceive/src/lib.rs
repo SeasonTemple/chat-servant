@@ -6,6 +6,7 @@
 
 pub mod attribute;
 pub mod fixture;
+pub mod mask;
 pub mod merge;
 pub mod pipeline;
 pub mod pixels;
@@ -13,6 +14,7 @@ pub mod stream;
 
 pub use attribute::{Attribution, Evidence, NoiseClass, Palette, Speaker, classify, classify_all};
 pub use fixture::{keep_colors, redact_with};
+pub use mask::{Masked, Rejection, SurfaceVerdict, judge_surface, mask, reject_image_text};
 pub use merge::{Message, group};
 pub use pipeline::{LineSource, Read, ReadError, SystemOcr, read};
 pub use pixels::{

@@ -84,7 +84,10 @@ pub fn read(frame: &Frame, source: &impl LineSource) -> Result<Read, ReadError> 
     let palette = Palette::learn(frame, anchor.chat).ok_or(ReadError::NoPalette)?;
     let pane = frame.crop(anchor.chat).ok_or(ReadError::NoPane)?;
     let ocr = source.read(&pane)?;
-    let attributions = crate::attribute::classify_all(&ocr.lines, &pane, &palette);
+    let mut attributions = crate::attribute::classify_all(&ocr.lines, &pane, &palette);
+    // 语义遮罩（ADR-0002 第 3 级）：**准确率**手段，不是成本手段。
+    // 图里的字绝不能算成任何一方说的话。
+    crate::mask::reject_image_text(&mut attributions);
     let messages = merge::group(&attributions);
     Ok(Read {
         anchor,
@@ -295,6 +298,73 @@ mod tests {
             r.messages.iter().all(|m| m.text != "昨天 13:44"),
             "灰字不该进消息流"
         );
+    }
+
+    /// **语义遮罩的端到端验收**：聊天区里贴一张「图片」，
+    /// 图片里有 OCR 读出来的字——那行字不许进 `Message[]`。
+    ///
+    /// 这是 ADR-0002 第 3 级的验收标准，**不是成本指标**：
+    /// 「送出的像素变少了」衡量不了它，只有「图里的字没进消息流」才能。
+    #[test]
+    fn text_inside_an_embedded_photo_never_reaches_the_message_stream() {
+        let mut px = vec![0u8; (W * H * 3) as usize];
+        for y in 0..H {
+            for x in 0..W {
+                let i = ((y * W + x) * 3) as usize;
+                let base = if x < SIDEBAR_W {
+                    SIDEBAR
+                } else if y < HEADER_H || y == INPUT_TOP {
+                    CHROME
+                } else {
+                    PANEL
+                };
+                px[i..i + 3].copy_from_slice(&base);
+            }
+        }
+        // 在对方气泡的位置贴一张"照片"：大片深色背景 + 散乱的色
+        for y in 160..320u32 {
+            for x in 224..420u32 {
+                let i = ((y * W + x) * 3) as usize;
+                let h = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503);
+                px[i..i + 3].copy_from_slice(&[
+                    (h & 0xff) as u8,
+                    ((h >> 8) & 0xff) as u8,
+                    ((h >> 16) & 0xff) as u8,
+                ]);
+            }
+        }
+        // 图片里的一道"文字"
+        let photo_text = Rect {
+            x0: 260,
+            y0: 220,
+            x1: 400,
+            y1: 232,
+        };
+        for y in [223u32, 227] {
+            for x in 266..396u32 {
+                let i = ((y * W + x) * 3) as usize;
+                px[i..i + 3].copy_from_slice(&THEIR_INK);
+            }
+        }
+        let frame = Frame::from_rgb(W, H, px).expect("frame");
+
+        let origin = anchor::derive(&frame).expect("锚点").chat;
+        let pane_line = OcrLine {
+            text: "图片里的字".to_string(),
+            rect: to_pane(photo_text, origin),
+            words: vec![],
+        };
+        let src = RecordedLines(vec![pane_line]);
+        let r = read(&frame, &src).expect("整条链跑通");
+
+        assert!(
+            r.messages.is_empty(),
+            "图里的字进了消息流：{:?}",
+            r.messages
+        );
+        let a = &r.attributions[0];
+        assert_eq!(a.noise, NoiseClass::ImageText, "依据：{}", a.evidence);
+        assert_eq!(a.speaker, Speaker::System, "图里的字不能算任何一方说的");
     }
 
     /// 说话人判据的三个数必须来自**实测**，不能是拍脑袋。

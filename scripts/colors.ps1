@@ -22,7 +22,7 @@ try {
         }
     }
     $total = $W * $H
-    Write-Output ("{0}  [{1},{2}] {3}x{4} = {5} px" -f $Image, $X, $Y, $W, $H, $total)
+    Write-Output ("{0}  [{1},{2}] {3}x{4} = {5} px  bitmap={6}x{7}" -f $Image, $X, $Y, $W, $H, $total, $img.Width, $img.Height)
     $hist.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 20 | ForEach-Object {
         Write-Output ("  {0}  {1,6} px  {2,6:P2}" -f $_.Key, $_.Value, ($_.Value / $total))
     }
