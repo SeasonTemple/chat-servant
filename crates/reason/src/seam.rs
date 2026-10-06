@@ -226,10 +226,7 @@ mod tests {
     }
 
     fn ctx() -> TurnContext {
-        TurnContext {
-            messages: vec!["在吗".into(), "今晚有空吗".into()],
-            peer: "小号".into(),
-        }
+        TurnContext::text(vec!["在吗".into(), "今晚有空吗".into()], "小号".into())
     }
 
     /// 正常路径：三段都跑，推荐条概率最高。

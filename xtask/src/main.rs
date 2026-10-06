@@ -18,6 +18,7 @@ use clap::{Parser, Subcommand};
 mod caps;
 mod e2e;
 mod inject_probe;
+mod media_probe;
 mod secret_probe;
 
 #[derive(Parser)]
@@ -58,6 +59,15 @@ enum Cmd {
         /// 对已有的 PNG 标定；不给就现场抓一帧
         #[arg(long)]
         file: Option<PathBuf>,
+    },
+    /// 媒体区域探针：在一张 PNG 上找「这里有一张图」的区域
+    ///
+    /// `media.rs` 里的阈值多数标着「未实测」——**这个命令就是标定入口**。
+    /// 拿到含媒体的真实帧跑一遍，屏幕上的数字就是更新阈值的依据。
+    /// 纯文字帧预期输出「没有检出媒体区域」，那是防误判的基线。
+    Media {
+        /// 要检测的 PNG 路径
+        file: PathBuf,
     },
     /// 取证一帧的像素结构，为 PaneAnchor 的阈值提供依据
     ///
@@ -140,6 +150,7 @@ fn main() -> Result<()> {
         Cmd::Perceive { file } => probe_perceive(file),
         Cmd::Measure { file } => probe_measure(file),
         Cmd::Layout { file } => probe_layout(file),
+        Cmd::Media { file } => media_probe::run(file),
         Cmd::SecretScan => secret_probe::run(),
         Cmd::InjectProbe => inject_probe::run().map_err(|e| anyhow::anyhow!("{e}")),
         Cmd::E2e { inject } => e2e_cmd(inject),

@@ -228,10 +228,10 @@ pub fn run<R: Reasoner + ?Sized, I: Injector, B: Readback>(
     passed.push(Stage::Classify);
 
     // ── 6 判断 + 起草 ──
-    let ctx = TurnContext {
-        messages: messages.iter().map(|m| m.text.clone()).collect(),
-        peer: hit.title.clone(),
-    };
+    let ctx = TurnContext::text(
+        messages.iter().map(|m| m.text.clone()).collect(),
+        hit.title.clone(),
+    );
     let turn = match turn(reasoner, &ctx) {
         Ok(t) => t,
         // 静默期不是失败——这一轮没新消息而已

@@ -13,6 +13,7 @@ pub mod peer;
 pub mod seam;
 pub mod transport;
 pub mod ureq_http;
+pub mod vision;
 
 #[cfg(test)]
 mod gate;
@@ -20,8 +21,9 @@ mod gate;
 mod quiet;
 
 pub use context::{Context, Summarizer, Trimmed};
-pub use model::{Candidate, DraftSet, Intent, ReasonError, Reasoner, TurnContext};
+pub use model::{Candidate, DraftSet, Intent, ReasonError, Reasoner, StageCalls, TurnContext};
 pub use peer::{same_peer, similarity};
 pub use seam::{Turn, turn};
 pub use transport::{Http, HttpReasoner, Provider};
 pub use ureq_http::UreqHttp;
+pub use vision::{Describer, ImagePayload, VisionBridge, VisionMode};

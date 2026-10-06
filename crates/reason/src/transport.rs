@@ -18,7 +18,8 @@
 
 use std::time::Duration;
 
-use crate::model::{Candidate, DraftSet, Intent, ReasonError, Reasoner, TurnContext};
+use crate::model::{Candidate, DraftSet, Intent, ReasonError, Reasoner, StageCalls, TurnContext};
+use crate::vision::ImagePayload;
 
 /// 一个最小 HTTP 接口。**只留真正需要的**，不留「以后可能用得上」的。
 pub trait Http {
@@ -66,22 +67,61 @@ impl Provider {
         }
     }
 
-    fn build_body(self, system: &str, user: &str) -> serde_json::Value {
+    /// 拼请求体。**带图时两家结构完全不同，所以这里不是一个模版。**
+    ///
+    /// ⚠ **Anthropic 官方建议图放在文字之前**（原文：*"Claude works best when
+    /// images come before text … prefer an image-then-text structure."*），
+    /// 所以这家的 content 是 `[图…, 文字]`。顺序不是随手排的。
+    fn build_body(self, system: &str, user: &str, images: &[ImagePayload]) -> serde_json::Value {
         match self {
-            Self::OpenAi => serde_json::json!({
-                "model": MODEL_JUDGE,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.2,
-            }),
-            Self::Anthropic => serde_json::json!({
-                "model": MODEL_JUDGE,
-                "system": system,
-                "max_tokens": 256,
-                "messages": [{"role": "user", "content": user}],
-            }),
+            Self::OpenAi => {
+                // OpenAI 这边文字在前、图在后即可，与它的 chat 文档示例一致。
+                let mut content = vec![serde_json::json!({
+                    "type": "text",
+                    "text": user,
+                })];
+                for i in images {
+                    content.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{};base64,{}", i.media_type, i.base64),
+                        },
+                    }));
+                }
+                serde_json::json!({
+                    "model": MODEL_JUDGE,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": content},
+                    ],
+                    "temperature": 0.2,
+                })
+            }
+            Self::Anthropic => {
+                let mut content: Vec<serde_json::Value> = images
+                    .iter()
+                    .map(|i| {
+                        serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": i.media_type,
+                                "data": i.base64,
+                            },
+                        })
+                    })
+                    .collect();
+                content.push(serde_json::json!({
+                    "type": "text",
+                    "text": user,
+                }));
+                serde_json::json!({
+                    "model": MODEL_JUDGE,
+                    "system": system,
+                    "max_tokens": 256,
+                    "messages": [{"role": "user", "content": content}],
+                })
+            }
         }
     }
 
@@ -128,6 +168,19 @@ pub struct HttpReasoner {
     draft_model: String,
     timeout: Duration,
     calls: std::cell::Cell<u32>,
+    /// 分段计数。**和 `calls` 分开存**，因为界面要分开显示，
+    /// 而只有一个总数的话，任何一段挂了都分不清是哪段。
+    judge_calls: std::cell::Cell<u32>,
+    draft_calls: std::cell::Cell<u32>,
+    rank_calls: std::cell::Cell<u32>,
+}
+
+/// 哪一段在发请求。**只为计数用**，不进请求体。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Judge,
+    Draft,
+    Rank,
 }
 
 impl std::fmt::Debug for HttpReasoner {
@@ -158,6 +211,9 @@ impl HttpReasoner {
             draft_model: MODEL_DRAFT.to_string(),
             timeout: Duration::from_secs(20),
             calls: std::cell::Cell::new(0),
+            judge_calls: std::cell::Cell::new(0),
+            draft_calls: std::cell::Cell::new(0),
+            rank_calls: std::cell::Cell::new(0),
         }
     }
 
@@ -165,7 +221,14 @@ impl HttpReasoner {
         self.calls.get()
     }
 
-    fn ask(&self, system: &str, user: &str, model: &str) -> Result<String, String> {
+    fn ask(
+        &self,
+        system: &str,
+        user: &str,
+        model: &str,
+        stage: Stage,
+        images: &[ImagePayload],
+    ) -> Result<String, String> {
         let url = match self.provider {
             Provider::OpenAi => {
                 format!("https://api.openai.com/v1/chat/completions?model={model}")
@@ -173,8 +236,15 @@ impl HttpReasoner {
             Provider::Anthropic => "https://api.anthropic.com/v1/messages".to_string(),
         };
         let headers = self.provider.headers(&self.api_key, model);
-        let body = self.provider.build_body(system, user);
+        let body = self.provider.build_body(system, user, images);
         self.calls.set(self.calls.get() + 1);
+        // 分段计数。**先加再发**——发失败也算一次尝试，
+        // 界面上「调用了几次」要是用户实际掏的钱，不是成功次数。
+        match stage {
+            Stage::Judge => self.judge_calls.set(self.judge_calls.get() + 1),
+            Stage::Draft => self.draft_calls.set(self.draft_calls.get() + 1),
+            Stage::Rank => self.rank_calls.set(self.rank_calls.get() + 1),
+        }
         let resp = self.http.post_json(&url, &headers, &body, self.timeout)?;
         self.provider.extract_text(&resp).ok_or_else(|| {
             // 上游契约变了。**只截响应、不带请求体**——请求体里有用户的
@@ -188,8 +258,15 @@ impl HttpReasoner {
     }
 
     /// 拿一段 JSON 文本。**剥掉模型爱加的代码块围栏。**
-    fn ask_json(&self, system: &str, user: &str, model: &str) -> Result<serde_json::Value, String> {
-        let raw = self.ask(system, user, model)?;
+    fn ask_json(
+        &self,
+        system: &str,
+        user: &str,
+        model: &str,
+        stage: Stage,
+        images: &[ImagePayload],
+    ) -> Result<serde_json::Value, String> {
+        let raw = self.ask(system, user, model, stage, images)?;
         let cleaned = strip_code_fence(&raw);
         serde_json::from_str(&cleaned).map_err(|e| {
             format!(
@@ -215,7 +292,13 @@ impl HttpReasoner {
 impl Reasoner for HttpReasoner {
     fn judge(&mut self, ctx: &TurnContext) -> Result<Intent, ReasonError> {
         let v = self
-            .ask_json(SYS_JUDGE, &Self::render_ctx(ctx), &self.judge_model)
+            .ask_json(
+                SYS_JUDGE,
+                &Self::render_ctx(ctx),
+                &self.judge_model,
+                Stage::Judge,
+                &[],
+            )
             .map_err(|e| ReasonError::Judge(redact(&e)))?;
         // 逐字段兜底：模型少给一个字段不该让整轮失败——
         // 缺 tension 就当 0，缺文字就留空（Intent::summary 会显示出来）。
@@ -245,7 +328,13 @@ impl Reasoner for HttpReasoner {
             intent.summary()
         );
         let v = self
-            .ask_json(SYS_DRAFT, &user, &self.draft_model)
+            .ask_json(
+                SYS_DRAFT,
+                &user,
+                &self.draft_model,
+                Stage::Draft,
+                &ctx.images,
+            )
             .map_err(|e| ReasonError::Draft(redact(&e)))?;
         let mut candidates = Vec::new();
         if let Some(arr) = v.get("candidates").and_then(|c| c.as_array()) {
@@ -281,7 +370,7 @@ impl Reasoner for HttpReasoner {
             lines.push('\n');
         }
         let v = self
-            .ask_json(SYS_RANK, &lines, &self.judge_model)
+            .ask_json(SYS_RANK, &lines, &self.judge_model, Stage::Rank, &[])
             .map_err(|e| ReasonError::Rank(redact(&e)))?;
         let Some(order) = v.get("order").and_then(|o| o.as_array()) else {
             return Err(ReasonError::Rank("响应里没有 order 数组".into()));
@@ -305,6 +394,16 @@ impl Reasoner for HttpReasoner {
 
     fn calls(&self) -> u32 {
         self.calls.get()
+    }
+
+    /// 三段分别计数。**视觉调用不在这三个数里**——
+    /// 它属于 `VisionBridge`，默认配置下恒为 0。
+    fn stage_calls(&self) -> StageCalls {
+        StageCalls {
+            judge: self.judge_calls.get(),
+            draft: self.draft_calls.get(),
+            rank: self.rank_calls.get(),
+        }
     }
 }
 
@@ -436,10 +535,7 @@ mod tests {
         ]));
         let mut r = HttpReasoner::new(http.clone(), Provider::OpenAi, KEY.into());
 
-        let ctx = TurnContext {
-            messages: vec!["今晚有空吗".into()],
-            peer: "小号".into(),
-        };
+        let ctx = TurnContext::text(vec!["今晚有空吗".into()], "小号".into());
         let t = crate::turn(&mut r, &ctx).expect("推理成功");
 
         assert!(t.judged);

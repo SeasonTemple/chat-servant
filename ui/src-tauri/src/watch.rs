@@ -360,10 +360,10 @@ fn step(
             }
         };
 
-        let ctx = TurnContext {
-            messages: rendered.lines().map(str::to_string).collect(),
-            peer: String::new(),
-        };
+        let ctx = TurnContext::text(
+            rendered.lines().map(str::to_string).collect(),
+            String::new(),
+        );
         match chatservant_reason::turn(reasoner.as_mut(), &ctx) {
             Ok(t) => {
                 s.candidates = t

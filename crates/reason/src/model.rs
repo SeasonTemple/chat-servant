@@ -113,15 +113,60 @@ pub trait Reasoner {
     fn calls(&self) -> u32 {
         0
     }
+
+    /// **分段的**调用次数。界面上要显示「判断 2 次 / 起草 1 次 / 视觉 0 次」。
+    ///
+    /// 只有一个总数是不够的：三段里任何一段挂掉都会让总数变化，
+    /// 分不开就看不出是哪一段出的问题。**默认全 0**，预置传输不发请求。
+    fn stage_calls(&self) -> StageCalls {
+        StageCalls::default()
+    }
+}
+
+/// 三段式各自的调用次数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub struct StageCalls {
+    pub judge: u32,
+    pub draft: u32,
+    pub rank: u32,
+}
+
+impl StageCalls {
+    /// 界面显示的一行字。**三段都报，包括 0**——
+    /// 「视觉 0 次」是默认配置下的正常状态，不报出来用户会以为没统计。
+    pub fn explain(&self) -> String {
+        format!(
+            "判断 {} 次 · 起草 {} 次 · 排序 {} 次",
+            self.judge, self.draft, self.rank
+        )
+    }
 }
 
 /// 一轮对话的输入。**上下文裁剪的结果**（ticket 11 负责裁，这里只收）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TurnContext {
     /// 参与本轮的消息，已裁剪。
     pub messages: Vec<String>,
     /// 对端名，可能为空（未识别出会话）。
     pub peer: String,
+    /// 要随文本一起送模型的图。**已经缩放并编码好**。
+    ///
+    /// ## 默认必须是空的
+    ///
+    /// 绝大多数轮次对方发的是文字，这时候这里是空的，一条视觉请求都不该发。
+    /// 「默认多模态配置下永远是 2 + 1 + 0」那条断言就是对这个字段的。
+    pub images: Vec<crate::vision::ImagePayload>,
+}
+
+impl TurnContext {
+    /// 纯文本上下文。**绝大多数轮次都走这个构造。**
+    pub fn text(messages: Vec<String>, peer: String) -> Self {
+        Self {
+            messages,
+            peer,
+            images: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]

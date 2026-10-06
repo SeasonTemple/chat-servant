@@ -40,10 +40,7 @@ fn messages() -> Vec<Message> {
 #[test]
 fn quiet_period_makes_zero_model_calls() {
     let mut r = counted(GateReasoner::new());
-    let ctx = TurnContext {
-        messages: vec![],
-        peer: "小号".into(),
-    };
+    let ctx = TurnContext::text(vec![], "小号".into());
     let err = turn(&mut r, &ctx).expect_err("静默期不该产出候选");
     assert_eq!(err, ReasonError::NothingToDo);
     assert_eq!(
@@ -60,10 +57,10 @@ fn quiet_period_makes_zero_model_calls() {
 #[test]
 fn a_new_message_makes_exactly_three_calls() {
     let mut r = counted(GateReasoner::new());
-    let ctx = TurnContext {
-        messages: messages().iter().map(|m| m.text.clone()).collect(),
-        peer: "小号".into(),
-    };
+    let ctx = TurnContext::text(
+        messages().iter().map(|m| m.text.clone()).collect(),
+        "小号".into(),
+    );
     let t = turn(&mut r, &ctx).expect("推理成功");
     assert_eq!(r.calls(), 3, "判断+起草+排序 = 3 次，实际 {} 次", r.calls());
     assert!(t.recommended().is_some(), "该有推荐");
@@ -75,10 +72,7 @@ fn a_new_message_makes_exactly_three_calls() {
 #[test]
 fn degradation_does_not_retry_more() {
     let mut r = counted(GateReasoner::judge_fails());
-    let ctx = TurnContext {
-        messages: vec!["在吗".into()],
-        peer: "小号".into(),
-    };
+    let ctx = TurnContext::text(vec!["在吗".into()], "小号".into());
     let t = turn(&mut r, &ctx).expect("判断失败不该让整轮失败");
     assert!(!t.judged);
     assert_eq!(r.calls(), 3, "降级路径不该额外调用，实际 {} 次", r.calls());
@@ -92,10 +86,7 @@ fn degradation_does_not_retry_more() {
 /// 根本不进到这里，而不是在推理层缓存。
 #[test]
 fn each_turn_calls_the_models_again_on_purpose() {
-    let ctx = TurnContext {
-        messages: vec!["在吗".into()],
-        peer: "小号".into(),
-    };
+    let ctx = TurnContext::text(vec!["在吗".into()], "小号".into());
     let mut r = counted(GateReasoner::new());
     for _ in 0..3 {
         let _ = turn(&mut r, &ctx).expect("推理成功");
@@ -110,10 +101,7 @@ fn each_turn_calls_the_models_again_on_purpose() {
 #[test]
 fn the_seam_only_depends_on_the_trait_not_on_any_client() {
     let mut r: Box<dyn Reasoner> = Box::new(GateReasoner::new());
-    let ctx = TurnContext {
-        messages: vec!["在吗".into()],
-        peer: "小号".into(),
-    };
+    let ctx = TurnContext::text(vec!["在吗".into()], "小号".into());
     // `turn` 收 `&mut R` 且 `R: ?Sized`，所以直接传 `&mut dyn Reasoner`
     // （`r.as_mut()`）——**不用**传 `&mut r`。`Box<dyn T>` 本身不实现 `T`，
     // 传 `&mut Box<dyn T>` 会因为多了一层引用而找不到实现。
