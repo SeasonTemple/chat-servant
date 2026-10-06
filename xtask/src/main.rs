@@ -32,6 +32,15 @@ enum Cmd {
     Occluded,
     /// 抓一帧（默认 wgc）并立刻本地 OCR，把读到的文字打出来
     Read,
+    /// 生成脱敏后的回归夹具
+    Fixture {
+        /// 夹具名，同时作为文件名
+        #[arg(long)]
+        name: String,
+        /// 源 PNG；不给就现场抓一帧
+        #[arg(long)]
+        source: Option<PathBuf>,
+    },
     /// 感知层探针：归类每一行并归并成消息，跑在真实帧上
     Perceive {
         /// 对已有的 PNG 跑；不给就现场抓一帧
@@ -105,6 +114,7 @@ fn main() -> Result<()> {
         }
         Cmd::Occluded => probe_occluded("wechat"),
         Cmd::Read => probe_read(),
+        Cmd::Fixture { name, source } => make_fixture(&name, source),
         Cmd::Perceive { file } => probe_perceive(file),
         Cmd::Measure { file } => probe_measure(file),
         Cmd::Layout { file } => probe_layout(file),
@@ -258,6 +268,134 @@ fn probe_read() -> Result<()> {
 /// 数字（那是别人机器、别人微信版本的实测值）。所以这个命令只打印
 /// 像素分布，不推导任何结论——结论由人看着数据定，写进 PaneAnchor 的测试里。
 /// 感知层探针：从聊天区学配色 → 归类每一行 → 归并成消息。
+/// 生成脱敏后的回归夹具。
+///
+/// **真实帧绝不能直接入库**——里面有真实联系人名和消息正文。
+/// 脱敏按**面积**保留布局色（底色/气泡/边框），把小面积高频色（文字/头像）
+/// 吸附掉。不能用亮度阈值：我方气泡底色亮度 205，比任何白字都高。
+///
+/// 关键：**脱敏前后锚点与配色必须完全一致**，否则这张夹具锁不住几何，
+/// 命令直接拒收。
+fn make_fixture(name: &str, source: Option<PathBuf>) -> Result<()> {
+    use chatservant_perceive::Palette;
+
+    let dir = std::path::Path::new("crates/capture/fixtures");
+    std::fs::create_dir_all(dir).ok();
+    let out_png = dir.join(format!("{name}.png"));
+    if out_png.exists() {
+        bail!(
+            "夹具 {} 已存在。覆盖会让回归基线悄悄变掉——确认要更新就手动删掉再跑。",
+            out_png.display()
+        );
+    }
+
+    let frame = match source {
+        Some(p) => {
+            let img = image::open(&p).context("打开源 PNG 失败")?.to_rgb8();
+            let (w, h) = img.dimensions();
+            println!("来源 = {}", p.display());
+            chatservant_capture::Frame::from_rgb(w, h, img.into_raw())
+                .context("源 PNG 尺寸与缓冲区不匹配")?
+        }
+        None => {
+            set_dpi_aware();
+            let hit = chatservant_capture::find_chat_window(&WECHAT)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("来源 = 现场抓帧 0x{:X}", hit.hwnd_raw);
+            chatservant_capture::wgc_alt::capture_one_frame(hit.hwnd_raw)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+                .context("wgc 抓帧失败")?
+        }
+    };
+
+    let before_anchor = chatservant_capture::anchor::derive(&frame);
+    let before_palette = before_anchor
+        .as_ref()
+        .ok()
+        .and_then(|a| Palette::learn(&frame, a.chat));
+
+    let redacted = {
+        let a = before_anchor.as_ref().ok();
+        let p = before_palette.ok_or_else(|| anyhow::anyhow!("学不到配色，无法脱敏"))?;
+        let a = a.ok_or_else(|| anyhow::anyhow!("锚点推不出来，无法确定要保留哪些颜色"))?;
+        let keep = chatservant_perceive::keep_colors(
+            &frame,
+            a.chat,
+            p.panel_bg,
+            a.header_top,
+            a.input_top,
+        );
+        println!("保留色（{} 个）：{:?}", keep.len(), keep);
+        chatservant_perceive::redact_with(&frame, &keep)
+    };
+
+    let after_anchor = chatservant_capture::anchor::derive(&redacted);
+    let after_palette = after_anchor
+        .as_ref()
+        .ok()
+        .and_then(|a| Palette::learn(&redacted, a.chat));
+
+    match (&before_anchor, &after_anchor) {
+        (Ok(a), Ok(b)) if a.chat == b.chat => {}
+        _ => bail!("脱敏改变了锚点（{before_anchor:?} → {after_anchor:?}），这张夹具锁不住几何"),
+    }
+    if before_palette != after_palette {
+        bail!("脱敏改变了配色（{before_palette:?} → {after_palette:?}），气泡判定会跟着漂");
+    }
+    let a = after_anchor.expect("上面已校验");
+    let p = after_palette.expect("上面已校验");
+
+    image::RgbImage::from_raw(
+        redacted.width(),
+        redacted.height(),
+        redacted.as_bytes().to_vec(),
+    )
+    .context("构造脱敏图失败")?
+    .save(&out_png)
+    .context("写夹具 PNG 失败")?;
+
+    let manifest = format!(
+        "# 夹具 {name}\n\
+         #\n\
+         # 由 `cargo xtask fixture --name {name} --source <png>` 生成。\n\
+         # 已脱敏：按**面积**保留布局色，小面积高频色（文字/头像/图片）吸附到最近保留色。\n\
+         # 原始帧含真实联系人名与消息正文，**不入库**。\n\
+         # 更新基线需手动删掉 png 再重跑——不允许静默覆盖。\n\
+         #\n\
+         # 锁的是几何与配色，不锁 OCR 读出的文字内容。\n\
+         \n\
+         width = {}\n\
+         height = {}\n\
+         chat_x0 = {}\n\
+         chat_y0 = {}\n\
+         chat_x1 = {}\n\
+         chat_y1 = {}\n\
+         panel_bg = [{}, {}, {}]\n",
+        redacted.width(),
+        redacted.height(),
+        a.chat.x0,
+        a.chat.y0,
+        a.chat.x1,
+        a.chat.y1,
+        p.panel_bg[0],
+        p.panel_bg[1],
+        p.panel_bg[2],
+    );
+    std::fs::write(dir.join(format!("{name}.toml")), manifest)?;
+
+    println!();
+    println!("✅ 夹具 {}", name);
+    println!(
+        "   锚点 ({}, {}) - ({}, {})",
+        a.chat.x0, a.chat.y0, a.chat.x1, a.chat.y1
+    );
+    println!(
+        "   配色 rgb({},{},{})",
+        p.panel_bg[0], p.panel_bg[1], p.panel_bg[2]
+    );
+    Ok(())
+}
+
 fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
     use chatservant_perceive::{NoiseClass, Palette, Speaker, classify_all, group};
 

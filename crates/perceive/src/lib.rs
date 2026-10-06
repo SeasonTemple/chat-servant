@@ -5,10 +5,12 @@
 //! **连同判定依据**——依据可追，认错了才能一眼看出是哪一步的锅。
 
 pub mod attribute;
+pub mod fixture;
 pub mod merge;
 pub mod pixels;
 
 pub use attribute::{Attribution, Evidence, NoiseClass, Palette, Speaker, classify, classify_all};
+pub use fixture::{keep_colors, redact_with};
 pub use merge::{Message, group};
 pub use pixels::{
     BubbleHit, dominant_color, dominant_ratio, ink_ratio, mean_color, near, probe_bubble_bg,
