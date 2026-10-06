@@ -434,7 +434,7 @@ pub struct BudgetView {
 }
 
 /// 预算默认值。取标准档上限 1568 的约 3/4，够看清一张聊天图。
-const BUDGET_DEFAULT: u32 = 1200;
+pub const BUDGET_DEFAULT: u32 = 1200;
 
 fn budget_view(budget: u32, provider: &chatservant_reason::Provider) -> BudgetView {
     use chatservant_reason::Provider;
@@ -626,6 +626,7 @@ fn build_loop_config() -> LoopConfig {
                 token_budget: TokenBudget::new(BUDGET_DEFAULT),
                 images_out: crate::watch::ImagesOut::off(),
                 tier: crate::watch::TierCell::default_manual(),
+                provider,
             };
         }
     }
@@ -639,6 +640,7 @@ fn build_loop_config() -> LoopConfig {
         token_budget: TokenBudget::new(BUDGET_DEFAULT),
         images_out: crate::watch::ImagesOut::off(),
         tier: crate::watch::TierCell::default_manual(),
+        provider: chatservant_reason::Provider::OpenAi,
     }
 }
 

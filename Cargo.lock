@@ -383,7 +383,9 @@ dependencies = [
 name = "chatservant-capture"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chatservant-core",
+ "image",
  "serde",
  "thiserror 2.0.21",
  "tracing",

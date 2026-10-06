@@ -17,3 +17,7 @@ tracing.workspace = true
 windows.workspace = true
 windows-capture.workspace = true
 wgc.workspace = true
+# 图片链路：重采样交给 `image`，不自己实现插值（票 07 明确写了这一条）。
+image.workspace = true
+# API 的图块要 base64。只取编码那一半，不引解码与全部算法。
+base64 = { version = "0.22", default-features = false, features = ["std"] }

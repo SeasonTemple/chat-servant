@@ -38,7 +38,7 @@ use chatservant_capture::surface::WECHAT;
 use chatservant_capture::wgc_alt::capture_one_frame;
 use chatservant_capture::window::find_chat_window;
 use chatservant_perceive::{Decision, Message, PaneWatcher, Speaker};
-use chatservant_reason::{Reasoner, TurnContext};
+use chatservant_reason::{Provider, Reasoner, TurnContext};
 use serde::Serialize;
 
 /// 循环的节奏。**慢一点没关系**——静默期本来就不该做事，
@@ -179,6 +179,9 @@ pub struct LoopConfig {
     /// （只处理自己有权查看的对话）在**运行时**的体现：
     /// 程序会一直核对窗口顶部的会话名，对不上就**不推理也不投递**。
     pub locked_peer: String,
+    /// 当前回复模型是哪一家。**视觉计费随它变**——
+    /// gpt-4o-mini 的底账是 2833，Claude 的 patch 计费是 0。
+    pub provider: Provider,
 }
 
 /// 一轮里的**可变会话状态**。合成一个结构体，而不是给 `step` 递九个 `&mut`。
@@ -207,6 +210,12 @@ struct Scratch {
     locked_peer: String,
     /// 当前窗口里认出的会话名。**空串 = 没认出来**。
     peer: String,
+    /// 图片外发总闸。**默认关**——见 [`ImagesOut`]。
+    images_out: ImagesOut,
+    /// 单张图片的 token 预算。循环每圈读一次。
+    token_budget: TokenBudget,
+    /// 视觉计费规则。跟推理用的是同一家供应商。
+    provider: Provider,
     /// 与设置页共用一个格子的条数。循环每圈读一次。
     recent: RecentN,
     /// 视觉桥。**默认关闭**——`VisionBridge::off()` 不发任何请求，
@@ -226,6 +235,9 @@ impl Scratch {
             vision: chatservant_reason::VisionBridge::off(),
             locked_peer: String::new(),
             peer: String::new(),
+            images_out: ImagesOut::off(),
+            token_budget: TokenBudget::new(crate::commands::BUDGET_DEFAULT),
+            provider: chatservant_reason::Provider::OpenAi,
         }
     }
 }
@@ -382,6 +394,10 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
             // 会话名闸的目标。**从 LoopConfig 拷进 Scratch**，
             // 这样 `step` 不用再收第七个参数。
             s.locked_peer = cfg.locked_peer.clone();
+            // 总闸与预算也要**共用同一份**，否则设置页改了循环读不到。
+            s.images_out = cfg.images_out.clone();
+            s.token_budget = cfg.token_budget.clone();
+            s.provider = cfg.provider;
             let mut last_calls = 0u32;
             let mut ticks = 0u64;
             let mut anchor: Option<PaneAnchor> = None;
@@ -581,12 +597,13 @@ fn step(
             }
         };
 
-        let ctx = TurnContext::text(
-            rendered.lines().map(str::to_string).collect(),
+        let ctx = TurnContext {
+            messages: rendered.lines().map(str::to_string).collect(),
             // 过了闸才填对端名。**这里不是空串了**——早先一直留空占位，
             // 判据是「还没接识别会话名」，现在接上了。
-            peer_name.clone().unwrap_or_default(),
-        );
+            peer: peer_name.clone().unwrap_or_default(),
+            images: collect_images(&frame, &anchor, s),
+        };
         match chatservant_reason::turn(reasoner.as_mut(), &ctx) {
             Ok(t) => {
                 s.candidates = t
@@ -628,6 +645,61 @@ fn step(
 /// 现在只有一个键。等 `peer::same_peer` 接上观察循环后换成真的对端名。
 const SESSION: &str = "current";
 
+/// 把媒体区域变成要送模型的图。**总闸关着时一律返回空。**
+///
+/// ## 为什么第一行就短路
+///
+/// 图片外发是整个产品里**唯一会把对话画面发到第三方**的动作。
+/// 所以闸必须在这里、在任何裁剪/编码/算 token 之前就拦住——
+/// 闸关着的时候，**一张图连字节都不该被编码出来**。
+///
+/// ## 为什么这层没有再判「是不是图」
+///
+/// `perceive::media::find` 已经判过了。这里再判一遍就是两套判据，
+/// 两套判据迟早会分叉。误检的后果已被实测压到「多发一张卡片」
+/// 的量级（票 07 记着：文字气泡 30 色 / 12px，候选 830+ 色 / 84px+，
+/// 高度差 7~10 倍、色种数差 28~88 倍），不值得为它加一层。
+fn collect_images(
+    frame: &chatservant_capture::Frame,
+    anchor: &chatservant_capture::anchor::PaneAnchor,
+    s: &Scratch,
+) -> Vec<chatservant_reason::ImagePayload> {
+    if !s.images_out.get() {
+        return Vec::new();
+    }
+    let found = chatservant_perceive::find(frame, anchor.chat);
+    let billing = s.billing();
+    found
+        .regions
+        .iter()
+        .filter_map(|r| {
+            chatservant_capture::media::encode_region(frame, r.rect, &billing, s.token_budget.get())
+        })
+        .map(|e| chatservant_reason::ImagePayload {
+            media_type: e.media_type.to_string(),
+            base64: e.base64,
+            tokens: e.tokens,
+            width: e.width,
+            height: e.height,
+        })
+        .collect()
+}
+
+/// 这个循环在用哪家供应商的**视觉**计费规则。
+///
+/// 判断模型 A 不发图，只有回复模型 B 发——而 B 的多模态能力决定了图
+/// 是「随文本进 B」还是「先描述再进」。两条路花的视觉 token 一样，
+/// 所以这里取当前生效的那一个。
+impl Scratch {
+    fn billing(&self) -> chatservant_core::scale::Billing {
+        use chatservant_core::scale::Billing;
+        match self.provider {
+            Provider::Anthropic => Billing::ANTHROPIC_PATCH,
+            Provider::OpenAi => Billing::OPENAI_GPT4O_MINI,
+        }
+    }
+}
+
 /// 不做摘要的占位实现。
 ///
 /// **它让摘要这一步不花钱**，也**不让这一步悄悄失败**——
@@ -652,7 +724,9 @@ fn shift(r: chatservant_core::frame::Rect, dx: i32, dy: i32) -> chatservant_core
 
 #[cfg(test)]
 mod tests {
-    use super::{BUDGET_MAX, BUDGET_MIN, ImagesOut, RecentN, TierCell, TokenBudget};
+    use super::{
+        BUDGET_MAX, BUDGET_MIN, ImagesOut, RecentN, Scratch, TierCell, TokenBudget, collect_images,
+    };
     use chatservant_reason::context;
 
     /// **clone 出来的句柄和本体读的是同一个格子。**
@@ -739,7 +813,54 @@ mod tests {
         assert_eq!(cell.get(), Dispatch::Auto, "设置页升档，主面板必须看到");
     }
 
-    /// **档位能被夹回 Manual。** 硬约束第 5 条「程序自己不会升档」——
+    /// **总闸关着时，一张图都不产出。**
+    ///
+    /// 这条不是「设置默认是关的」——那只是初值。这条测的是
+    /// **`collect_images` 在关着时真的返回空**：哪怕窗格里真的有图，
+    /// 哪怕预算够、哪怕模型能看图。它是整个图片链路的安全底线，
+    /// 一旦有人把短路那行删掉，这条会立刻红。
+    #[test]
+    fn a_closed_gate_produces_no_images_even_when_media_is_present() {
+        use chatservant_capture::anchor::PaneAnchor;
+        use chatservant_core::frame::{Frame, Rect};
+
+        // 一块纯色帧：没有媒体区域，所以本条测的不是「检不出」，
+        // 而是「检不检都无所谓——闸关着就是空」。
+        let mut px = vec![30u8; (200 * 200 * 3) as usize];
+        // 中间放一块花的，模拟「窗格里确实有图」。
+        for y in 60..140u32 {
+            for x in 60..140u32 {
+                let i = ((y * 200 + x) * 3) as usize;
+                px[i] = (x % 251) as u8;
+                px[i + 1] = (y % 253) as u8;
+                px[i + 2] = ((x * y) % 247) as u8;
+            }
+        }
+        let frame = Frame::from_rgb(200, 200, px).expect("尺寸一致");
+        let anchor = PaneAnchor {
+            chat: Rect::new(0, 0, 200, 200),
+            panel_bg: [30, 30, 31],
+            panel: Rect::new(0, 0, 200, 200),
+            header_top: 0,
+            input_top: 200,
+        };
+
+        let mut s = Scratch::new(RecentN::new(12));
+        s.images_out = ImagesOut::off();
+        let closed = collect_images(&frame, &anchor, &s);
+        assert!(closed.is_empty(), "总闸关着却产出了 {} 张图", closed.len());
+
+        // 打开之后同一帧应该有产出——否则上面那条就只是「检不出媒体」。
+        s.images_out.set(true);
+        s.provider = chatservant_reason::Provider::Anthropic;
+        let opened = collect_images(&frame, &anchor, &s);
+        assert!(
+            !opened.is_empty(),
+            "总闸打开却一张图都没有——那说明上一条是假通过"
+        );
+    }
+
+    /// 认不出来的档位一律降回 Manual。硬约束第 5 条「程序自己不会升档」——
     /// 一个存坏了的格子值只能降回最低档，绝不能被解释成别的档。
     #[test]
     fn an_unrecognised_tier_value_falls_back_to_manual() {
