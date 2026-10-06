@@ -49,19 +49,73 @@ pub fn dispatch(candidate_id: String, action: String, tier: String) -> DispatchR
     let mut d = Dispatcher::new();
     d.set_tier(tier);
 
-    // 注入还没接（ticket 09）。这里如实说没送出去，
-    // 而不是假装成功——`Sent` 会让上层认为不需要回读。
-    let receipt = DeliveryReceipt::NotSent;
-    let next = d.next(receipt.clone(), 0);
-
-    DispatchReply {
-        outcome: "NotSent",
-        detail: format!(
-            "注入尚未接线（ticket 09）。候选 {candidate_id}，动作 {action}，档位 {tier}。{}｜下一步：{}",
-            receipt.explain(),
-            next.explain()
-        ),
+    // Confirm 档：**没确认就不发送**。这条是硬约束，程序不许替人省这一步。
+    if action == "confirm" && tier == Dispatch::Confirm {
+        let reply = DispatchReply {
+            outcome: "NotSent",
+            detail: "Confirm 档：已准备好，等你在面板上再点一次「确认发送」。".into(),
+        };
+        return reply;
     }
+
+    let receipt = deliver(&candidate_id, &action, tier);
+
+    // 让档位守则跑一遍，把下一步该做什么告诉前端。
+    let next = d.next(receipt.clone(), 0);
+    DispatchReply {
+        outcome: outcome_name(&receipt),
+        detail: format!("{}｜下一步：{}", receipt.explain(), next.explain()),
+    }
+}
+
+/// 找微信主窗口的 `HWND`。找不到就**如实报找不到**。
+///
+/// `WindowHit::hwnd_raw` 故意是 `isize`（跨 crate 只传不透明整数），
+/// 这里按句柄反过来查窗口——`IsWindow` 是唯一可靠的验法：
+/// 句柄被复用时它立刻返回 false。
+fn find_wechat() -> Option<windows::Win32::Foundation::HWND> {
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+
+    let surface = chatservant_capture::surface::WECHAT;
+    let hit = chatservant_capture::find_chat_window(&surface).ok()?;
+    let hwnd = windows::Win32::Foundation::HWND(hit.hwnd_raw as *mut core::ffi::c_void);
+    unsafe { IsWindow(Some(hwnd)).as_bool().then_some(hwnd) }
+}
+
+/// 真正去送一次。**目前只有 Manual 档能走到这里。**
+fn deliver(candidate_id: &str, action: &str, tier: Dispatch) -> DeliveryReceipt {
+    let Some(hwnd) = find_wechat() else {
+        return DeliveryReceipt::Failed("找不到微信窗口（已退出？换了进程名？）".into());
+    };
+
+    // ⚠ 候选取文本这一步还没接（ticket 10 起草层）。
+    // 在那之前**不能**拿占位文本去注入——那会把一句假话送进别人的聊天框。
+    let Some(text) = candidate_text(candidate_id) else {
+        return DeliveryReceipt::Failed(format!(
+            "候选 {candidate_id} 的正文还没接起草层（ticket 10），不注入占位文本"
+        ));
+    };
+
+    let _ = (action, tier);
+    chatservant_capture::inject::fill_input_box(&text, hwnd)
+}
+
+/// 回执 → 前端认得的字符串。
+fn outcome_name(r: &DeliveryReceipt) -> &'static str {
+    match r {
+        DeliveryReceipt::NotSent => "NotSent",
+        DeliveryReceipt::Sent => "Sent",
+        DeliveryReceipt::PossiblySent => "PossiblySent",
+        DeliveryReceipt::Failed(_) => "Failed",
+        DeliveryReceipt::TimedOut => "TimedOut",
+    }
+}
+
+/// 候选正文。ticket 10 接上起草层后，这里读真实的 `Candidate[]`。
+///
+/// **现在恒返回 `None`**——宁可报「没接」也不送占位文本。
+fn candidate_text(_id: &str) -> Option<String> {
+    None
 }
 
 #[tauri::command]

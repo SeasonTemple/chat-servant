@@ -16,6 +16,7 @@ use chatservant_capture::{ChatSurface, WECHAT};
 use clap::{Parser, Subcommand};
 
 mod caps;
+mod inject_probe;
 mod secret_probe;
 
 #[derive(Parser)]
@@ -71,6 +72,11 @@ enum Cmd {
     /// key 从环境变量 `CHATSERVANT_PROBE_KEY` 读，**不进命令行**
     /// （进命令行就会留在 shell 历史和进程列表里）。
     SecretScan,
+    /// 实机验证注入：剪贴板逐字节往返 + 证明鼠标指针没动过
+    ///
+    /// **不碰微信**——只验剪贴板通路与「不动鼠标」这两件事。
+    /// 真往输入框里打字需要目标窗口在前台，那是人工验证。
+    InjectProbe,
     /// 抓取与识别的诊断探针
     Probe {
         #[command(subcommand)]
@@ -125,6 +131,7 @@ fn main() -> Result<()> {
         Cmd::Measure { file } => probe_measure(file),
         Cmd::Layout { file } => probe_layout(file),
         Cmd::SecretScan => secret_probe::run(),
+        Cmd::InjectProbe => inject_probe::run().map_err(|e| anyhow::anyhow!("{e}")),
         Cmd::Probe { kind } => match kind {
             ProbeCmd::Frame {
                 app,

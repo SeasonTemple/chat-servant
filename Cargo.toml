@@ -37,6 +37,10 @@ windows = { version = "0.62", features = [
     # Windows 凭据管理器（API key 只存这里，绝不落普通文件）。
     "Win32_Security_Credentials",
     "Win32_Foundation",
+    # 输入注入与剪贴板：按 UTF-16 码位打键、不移动鼠标、回读校验。
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
 ] }
 windows-capture = "2.0"
 wgc = "2.0"

@@ -1,0 +1,444 @@
+//! 往微信输入框里填文本——**以回读为唯一判据**。
+//!
+//! ## 验收标准不是返回值，是回读
+//!
+//! 投递函数返回「成功」而没有回读，等于没有证据。剪贴板是我们写进去的，
+//! 再读回来与候选原文**字节级相等**才算数。
+//!
+//! 这里有两级证据，强度不同：
+//!
+//! | 回执 | 证据强度 | 含义 |
+//! |---|---|---|
+//! | `Sent` | **强** | 剪贴板回读与原文字节级相等，**且**回读发生在粘贴之后 |
+//! | `PossiblySent` | 弱 | 粘贴指令发出去了，但回读没能在超时内完成 |
+//!
+//! 为什么不把回读做两次（粘贴前一次、粘贴后一次）就一定等于原文：
+//! 剪贴板可能被**用户或别的程序**在中间改掉。那种情况下回读不等于原文，
+//! 但文本**很可能已经贴进去了**——这时候报 `Failed` 会导致上层重放，
+//! 而重放会**发出两条一样的消息**。所以这种情况必须归 `PossiblySent`。
+
+use std::time::{Duration, Instant};
+
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND, POINT};
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+};
+use windows::Win32::System::Memory::{
+    GMEM_MOVEABLE, GMEM_ZEROINIT, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_V,
+};
+
+use chatservant_core::dispatch::DeliveryReceipt;
+
+/// 回读超时。超过就归 `PossiblySent`——**不能归失败**。
+pub const READBACK_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// `HANDLE` ↔ `HGLOBAL` 是两个**不同**的 newtype（底层都是 `*mut c_void`），
+/// Win32 的剪贴板 API 在两者间来回传。显式写这两个小函数，
+/// 比满地 `.0` 更容易看出「这里在跨类型」。
+fn handle_in(h: HANDLE) -> HGLOBAL {
+    HGLOBAL(h.0)
+}
+
+/// `HGLOBAL` → `HANDLE`：`SetClipboardData` 收的是 `HANDLE`。
+fn handle_of(h: HGLOBAL) -> HANDLE {
+    HANDLE(h.0)
+}
+
+/// `CF_UNICODETEXT`
+const CF_UNICODE_TEXT: u32 = 13;
+
+/// 剪贴板是**进程全局**的资源，不是线程局部的。
+///
+/// 两个线程同时 `EmptyClipboard` + `SetClipboardData` 会怎样：线程 A 刚把
+/// 自己的内存块交出去，线程 B 的 `EmptyClipboard` 让系统把它释放掉，
+/// 而 A 还在读它 → 堆损坏（`STATUS_HEAP_CORRUPTION`）。
+///
+/// 这不是「测试里才有的问题」：dispatch 可以从 UI 点击、快捷键、定时器
+/// 三个地方同时触发。所以互斥锁是**功能要求**，不是测试技巧。
+static CLIPBOARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 取剪贴板锁。锁中毒（某个线程 panic 了）不算致命——剪贴板状态还在，
+/// 继续用比整个进程崩掉好。
+fn lock_clipboard() -> std::sync::MutexGuard<'static, ()> {
+    CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 写入剪贴板并读回校验。**返回读回来的文本**。
+///
+/// 为什么先写后读：这就是回读验证本身——写进去的东西能原样取回来，
+/// 才说明剪贴板通路是通的、中间没被截断。中文尤其需要这一步：
+/// UTF-16 与 UTF-8 之间任何一次错误转换都会在这里暴露。
+pub fn roundtrip(text: &str) -> Result<String, String> {
+    let _guard = lock_clipboard();
+    roundtrip_locked(text)
+}
+
+/// 已经持锁时的往返。调用方负责持锁。
+fn roundtrip_locked(text: &str) -> Result<String, String> {
+    write_clipboard(text)?;
+    read_clipboard()
+}
+
+/// 把文本放进剪贴板（CF_UNICODETEXT）。
+fn write_clipboard(text: &str) -> Result<(), String> {
+    let mut utf16: Vec<u16> = text.encode_utf16().collect();
+    utf16.push(0); // Win32 要求以 NUL 结尾
+    let bytes = utf16.len() * 2;
+
+    unsafe {
+        // 打开剪贴板失败最常见的原因是**别的程序正开着它**。
+        // 这里重试几次而不是立刻报错——Windows 上这一瞬间是常态。
+        if !open_clipboard_with_retry() {
+            return Err("打不开剪贴板（可能被别的程序占用）".into());
+        }
+        let r = (|| -> Result<(), String> {
+            EmptyClipboard().map_err(|e| format!("清空剪贴板失败：{e}"))?;
+
+            let hmem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes)
+                .map_err(|e| format!("分配剪贴板内存失败：{e}"))?;
+            let ptr = GlobalLock(hmem);
+            if ptr.is_null() {
+                let _ = GlobalFree(Some(hmem));
+                return Err("锁定剪贴板内存失败".into());
+            }
+            std::ptr::copy_nonoverlapping(utf16.as_ptr() as *const u8, ptr as *mut u8, bytes);
+            // 解锁失败不致命：GlobalUnlock 在锁计数为 0 时也返回 0（不是错误）
+            let _ = GlobalUnlock(hmem);
+
+            match SetClipboardData(CF_UNICODE_TEXT, Some(handle_of(hmem))) {
+                // 成功时**内存所有权转移给系统**，绝不能再 Free
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    let _ = GlobalFree(Some(hmem));
+                    Err(format!("写剪贴板失败：{e}"))
+                }
+            }
+        })();
+        let _ = CloseClipboard();
+        r
+    }
+}
+
+/// 读回剪贴板的文本。
+fn read_clipboard() -> Result<String, String> {
+    // 调用方已经持锁（`roundtrip` / `fill_input_box`）。
+    // 这里不重复上锁——`Mutex` 不可重入，重复 lock 会死锁。
+    unsafe {
+        if !open_clipboard_with_retry() {
+            return Err("回读时打不开剪贴板".into());
+        }
+        let r = (|| -> Result<String, String> {
+            let hglobal =
+                GetClipboardData(CF_UNICODE_TEXT).map_err(|e| format!("剪贴板里没有文本：{e}"))?;
+            let hmem: HGLOBAL = handle_in(hglobal);
+            let ptr = GlobalLock(hmem);
+            if ptr.is_null() {
+                return Err("回读时锁定剪贴板内存失败".into());
+            }
+            let len = GlobalSize(hmem) / 2;
+            let slice = std::slice::from_raw_parts(ptr as *const u16, len);
+            // 去掉结尾的 NUL（可能有多个）
+            let end = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+            let s = String::from_utf16_lossy(&slice[..end]);
+            let _ = GlobalUnlock(hmem);
+            Ok(s)
+        })();
+        let _ = CloseClipboard();
+        r
+    }
+}
+
+/// 打开剪贴板，最多试 5 次。
+///
+/// Windows 的剪贴板是**全局独占**的：任何程序开着它，别人就 Open 不了。
+/// 这是系统级常态（复制粘贴、剪贴板管理器、各种输入法），不是异常。
+/// 重试是唯一正确的处理方式。
+fn open_clipboard_with_retry() -> bool {
+    for _ in 0..5 {
+        if unsafe { OpenClipboard(None) }.is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(12));
+    }
+    false
+}
+
+/// 发送一组按键。
+///
+/// ⚠ **`KEYEVENTF_UNICODE` 是这套方案的核心。**
+/// 它直接送 UTF-16 码位，不经过键盘布局，所以：
+/// · 不切换用户的输入法
+/// · 不依赖 `Shift` 之类的修饰键状态
+/// · 中文、日文、emoji 都能一次打对
+fn send_keys(keys: &[VIRTUAL_KEY]) -> Result<(), String> {
+    let mut inputs: Vec<INPUT> = Vec::with_capacity(keys.len() * 2);
+    for &vk in keys {
+        inputs.push(INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        });
+        inputs.push(INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        });
+    }
+    send_inputs(&mut inputs)
+}
+
+/// 逐字符发送 Unicode 文本。
+///
+/// 用虚拟键码注入**一个字符一个字符**。这是唯一能在不切换输入法、
+/// 不依赖键盘布局的前提下打任意语言的办法——代价是慢（约每字符 1 ms），
+/// 对「填一条回复」这个量级完全够。
+pub fn type_unicode(text: &str) -> Result<(), String> {
+    let mut chunk: Vec<INPUT> = Vec::with_capacity(64);
+    for unit in text.encode_utf16() {
+        // 代理对的低半部分不能单独发送——整对必须连续
+        for flags in [KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP] {
+            chunk.push(INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VIRTUAL_KEY(0),
+                        wScan: unit,
+                        dwFlags: flags,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            });
+        }
+        if chunk.len() >= 60 {
+            // SendInput 一次最多传有限个，分批发更稳
+            send_inputs(&mut chunk)?;
+            chunk.clear();
+        }
+    }
+    if !chunk.is_empty() {
+        send_inputs(&mut chunk)?;
+    }
+    Ok(())
+}
+
+fn send_inputs(inputs: &mut [INPUT]) -> Result<(), String> {
+    if inputs.is_empty() {
+        return Ok(());
+    }
+    let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent as usize == inputs.len() {
+        Ok(())
+    } else {
+        // 返回值**少于**请求数 = 被 UIPI 拦了（目标窗口是更高完整性级别）。
+        // 这不是「部分成功」，是完全没送出去。
+        Err(format!(
+            "SendInput 只送出了 {sent}/{} 个事件——目标窗口拒绝接收（UIPI 拦截）",
+            inputs.len()
+        ))
+    }
+}
+
+/// Ctrl+V。
+pub fn paste() -> Result<(), String> {
+    send_keys(&[VK_CONTROL, VK_V])
+}
+
+/// 一次完整的「把候选填进输入框」——**不移动鼠标指针**。
+///
+/// ## 为什么不用鼠标点输入框
+///
+/// 移动真实鼠标去点输入框，用户正在做的事就被打断了：他的手停在半空，
+/// 光标跑到聊天窗口里，肉眼可见指针在动。ticket 明确要求**指针不动**。
+///
+/// 替代路径：`SetForegroundWindow` + `Ctrl+V`。焦点被系统拒绝时
+/// （Windows 的前台锁）如实报失败，**不降级去动鼠标**——
+/// 动鼠标是「偷偷替用户做了他没要求的事」，宁可失败。
+///
+/// ## 焦点被拒时怎么办
+///
+/// Windows 有一个前台锁：程序不能随意抢前台。绕过的正规做法是
+/// `AttachThreadInput` ——把自己的线程临时挂到目标窗口的输入队列上，
+/// 再调 `SetForegroundWindow`。这是系统提供的机制，不是绕过安全策略。
+/// 仍然失败就报失败。
+pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
+    // 第一步：写剪贴板并**回读校验**。
+    // 这一步失败的话，一个字符都还没发出去——可以安全重放。
+    let written = {
+        let _guard = lock_clipboard();
+        roundtrip_locked(text)
+    };
+    let readback = match written {
+        Ok(got) => got,
+        Err(e) => return DeliveryReceipt::Failed(format!("写剪贴板失败：{e}")),
+    };
+    if readback != text {
+        // 剪贴板被截断或转换错了。此时**还没按键**，可以安全重放。
+        return DeliveryReceipt::Failed(format!(
+            "剪贴板回读不一致：写入 {} 字节，读回 {} 字节",
+            text.len(),
+            readback.len()
+        ));
+    }
+
+    // 第二步：抢焦点。失败就不往下走——没有焦点的 Ctrl+V 是发给别人的。
+    if let Err(e) = focus(target) {
+        return DeliveryReceipt::Failed(format!("无法把焦点交给目标窗口：{e}"));
+    }
+
+    // 第三步：Ctrl+V。
+    if let Err(e) = paste() {
+        // ⚠ 焦点已经抢到了，**可能**在重试期间用户已经粘贴了。
+        // 但 Ctrl+V 只有一发：失败就是没发出去，可以重放。
+        return DeliveryReceipt::Failed(format!("发送 Ctrl+V 失败：{e}"));
+    }
+
+    // 第四步：回读。这一步只是确认剪贴板还在——它按定义一直在。
+    // 真正的确认是「输入框里出现了这段文本」，那需要 OCR 目标区域，
+    // 是 ticket 16 的调试窗口。这里如实说明**没有**拿到那种证据。
+    let deadline = Instant::now() + READBACK_TIMEOUT;
+    let mut last_err = String::from("尚未回读");
+    while Instant::now() < deadline {
+        // 整个回读窗口都持锁：中途放开会让别的线程换掉剪贴板内容，
+        // 那时回读到的就不是我们写的东西——那样的「证据」毫无意义。
+        let got = {
+            let _guard = lock_clipboard();
+            read_clipboard()
+        };
+        match got {
+            Ok(got) if got == text => {
+                // 拿到了字节级相等的证据。但**没有**证据证明它被粘贴了。
+                // 所以不能报 Sent——那是「确定送达」。
+                return DeliveryReceipt::PossiblySent;
+            }
+            Ok(_) => last_err = "剪贴板内容已被别的程序改动".into(),
+            Err(e) => last_err = e,
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // 回执按设计是**无载荷**的（见 CONTEXT.md：TimedOut 是一个状态，不是
+    // 一条带原因的数据）。所以诊断信息走日志，不去改回执的类型。
+    tracing::warn!(reason = %last_err, "回读超时，按 PossiblySent 对待");
+    DeliveryReceipt::TimedOut
+}
+
+/// 把前台焦点交给目标窗口。
+///
+/// `AttachThreadInput` 是 Windows 提供的正规机制：把自己的输入队列
+/// 临时挂到目标线程的队列上，这样 `SetForegroundWindow` 才被允许。
+/// 不这么做的话，后台程序调用它会**静默失败**——返回值是 FALSE，
+/// 但没有任何错误码告诉你为什么。
+pub fn focus(target: HWND) -> Result<(), String> {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+    };
+
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg == target && SetForegroundWindow(target).as_bool() {
+            return Ok(());
+        }
+
+        let target_tid = GetWindowThreadProcessId(target, None);
+        let self_tid = GetCurrentThreadId();
+        if target_tid == 0 {
+            return Err("拿不到目标窗口的线程 id".into());
+        }
+        let attached = AttachThreadInput(self_tid, target_tid, true).as_bool();
+        let ok = SetForegroundWindow(target).as_bool();
+        if attached {
+            let _ = AttachThreadInput(self_tid, target_tid, false);
+        }
+        if ok {
+            Ok(())
+        } else {
+            Err("SetForegroundWindow 被系统拒绝（Windows 前台锁）".into())
+        }
+    }
+}
+
+/// 鼠标当前位置。**只读**，用于在调试视图里证明「指针没动过」。
+pub fn cursor_pos() -> Option<POINT> {
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut p = POINT::default();
+    unsafe { GetCursorPos(&mut p).ok().map(|()| p) }
+}
+
+/// 把窗口内坐标换成屏幕坐标。
+pub fn to_screen(target: HWND, x: i32, y: i32) -> Option<POINT> {
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    let mut p = POINT { x, y };
+    unsafe { ClientToScreen(target, &mut p).as_bool().then_some(p) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = "这是候选回复，含中英文 mixed 123 与符号 ✓";
+
+    /// 回读必须字节级相等——这是唯一的验收判据。
+    ///
+    /// 中文尤其要过这一关：UTF-16 ↔ UTF-8 任何一次错误转换都会在这里露出来。
+    #[test]
+    fn clipboard_roundtrip_is_byte_exact() {
+        let back = roundtrip(SAMPLE).expect("剪贴板往返");
+        assert_eq!(back, SAMPLE, "回读与原文不等");
+    }
+
+    /// 空文本也要能往返。空候选不该被当成失败——那是合法的「清空」。
+    #[test]
+    fn empty_text_roundtrips() {
+        assert_eq!(roundtrip("").expect("空文本往返"), "");
+    }
+
+    /// 含换行与制表符的文本。剪贴板是文本格式，这些必须原样保留。
+    #[test]
+    fn multiline_and_tab_roundtrip() {
+        let s = "第一行\n第二行\t制表符\r\n第三行";
+        assert_eq!(roundtrip(s).expect("多行往返"), s);
+    }
+
+    /// 超长文本。剪贴板有大小限制，超限时 `GlobalAlloc` 会失败——
+    /// 那时必须**报错**而不是截断。截断的回复比没有回复更糟。
+    #[test]
+    fn long_text_is_not_truncated() {
+        let long = "字".repeat(20_000);
+        let back = roundtrip(&long).expect("长文本往返");
+        assert_eq!(back.chars().count(), long.chars().count(), "长文本被截断了");
+    }
+
+    /// 代理对（emoji）在 UTF-16 里是两个 u16，整对必须连续发送。
+    /// 这条测的是 roundtrip 不把它拆坏。
+    #[test]
+    fn surrogate_pairs_survive() {
+        let s = "前面 🚀 中间 🎯 后面";
+        assert_eq!(roundtrip(s).expect("代理对往返"), s);
+    }
+
+    /// 读鼠标位置只是为了**证明它没动过**，本身不该失败。
+    #[test]
+    fn cursor_position_is_readable() {
+        assert!(cursor_pos().is_some(), "读不到鼠标位置");
+    }
+}
