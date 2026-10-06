@@ -79,5 +79,67 @@ pub fn run(path: PathBuf) -> Result<()> {
     println!();
     println!("阈值（BAND_H / BAND_GAP / MIN_MEDIA_* / MEDIA_MIN_COLORS / AVATAR_*）");
     println!("除 FLAT_MAX_COLORS 外均标「未实测」——把上面的数字记下来再回去改。");
+
+    encode_all(&frame, &found);
     Ok(())
+}
+
+/// 把每个检出区域**真的走一遍编码链路**，打印送出去会是什么样。
+///
+/// ## 为什么必须走到这一步
+///
+/// 只报「检出 4 个区域」只证明**检测**通了，证明不了**发送**那一段：
+/// 尺寸算得对不对、token 数得准不准、上采样了没有、base64 有多大。
+/// 这些都只有真跑一遍编码才知道，而且**不需要任何 API key**——
+/// 编码是纯本地计算。
+///
+/// 最后那一跳（HTTP 发送）才是需要 key 的部分，而这个探针到那儿为止。
+fn encode_all(frame: &chatservant_capture::Frame, found: &chatservant_perceive::media::Found) {
+    use chatservant_core::scale::Billing;
+
+    println!();
+    println!("== 编码链路（纯本地，不需要 key） ==");
+    for (name, billing, base) in [
+        ("Anthropic patch", Billing::ANTHROPIC_PATCH, 0u32),
+        ("gpt-4o-mini tile", Billing::OPENAI_GPT4O_MINI, 2833),
+    ] {
+        // 预算取默认的 1200，与设置页默认值一致。
+        const BUDGET: u32 = 1200;
+        println!("-- {name}（预算 {BUDGET}） --");
+        if base > BUDGET {
+            println!("   底账 {base} > 预算 {BUDGET}：**无解**，这张模型发不出任何图。");
+            println!("   界面必须如实这么说，而不是悄悄发一张超预算的。");
+            continue;
+        }
+        let mut total = 0u32;
+        for r in &found.regions {
+            match chatservant_capture::media::encode_region(frame, r.rect, &billing, BUDGET) {
+                Some(e) => {
+                    total += e.tokens;
+                    println!(
+                        "   ({},{})-({},{}) 原 {}x{}  ->  发 {}x{}  {} token  base64 {:.1} KB",
+                        r.rect.x0,
+                        r.rect.y0,
+                        r.rect.x1,
+                        r.rect.y1,
+                        r.rect.width(),
+                        r.rect.height(),
+                        e.width,
+                        e.height,
+                        e.tokens,
+                        e.base64.len() as f64 / 1024.0,
+                    );
+                }
+                None => println!("   ({},{}) 编码失败（区域越界？）", r.rect.x0, r.rect.y0),
+            }
+        }
+        println!("   合计 {total} token。");
+        assert!(
+            found.regions.iter().all(|r| {
+                chatservant_capture::media::encode_region(frame, r.rect, &billing, BUDGET)
+                    .is_none_or(|e| e.tokens <= BUDGET)
+            }),
+            "有图超出了预算——token 账和实际发出的字节对不上"
+        );
+    }
 }

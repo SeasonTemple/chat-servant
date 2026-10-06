@@ -445,9 +445,12 @@ fn budget_view(budget: u32, provider: &chatservant_reason::Provider) -> BudgetVi
         Provider::Anthropic => 0,
     };
     BudgetView {
-        budget,
+        budget: budget.min(budget_ceiling(provider)),
         min: crate::watch::BUDGET_MIN,
-        max: crate::watch::BUDGET_MAX,
+        // **上界按供应商给。** 早先写死 1568（Anthropic 的上限），
+        // 于是 gpt-4o-mini 上滑块永远到不了它的底账 2833，
+        // 图片功能在默认模型上完全不可用而界面看不出来。
+        max: budget_ceiling(provider),
         // ⚠ **这里不能写死 true。**
         // 早先的版本恒返回 true，理由是「模型 B 多模态，图随文本进 B」——
         // 但图片链路**根本没接进观察循环**，一张图也出不去。
@@ -473,6 +476,19 @@ pub fn get_images_out() -> Result<bool, String> {
 #[tauri::command]
 pub fn set_images_out(on: bool) -> Result<bool, String> {
     with_state(|s| s.images_out.set(on)).ok_or_else(|| "观察循环还没起来，改不了设置".to_string())
+}
+
+/// 当前供应商能接受的**单张上限**。
+///
+/// - Anthropic：标准档 token 上限 **1568**（官方文档）。
+/// - OpenAI `gpt-4o-mini`：底账 2833 + 一个 512px tile 的 5667 = **8500**。
+///   它比 Anthropic 贵 5.4 倍，因为它的底账与图的大小无关。
+fn budget_ceiling(provider: &chatservant_reason::Provider) -> u32 {
+    use chatservant_reason::Provider;
+    match provider {
+        Provider::Anthropic => 1568,
+        Provider::OpenAi => 2833 + 5667,
+    }
 }
 
 /// 读预算。
@@ -681,9 +697,54 @@ impl chatservant_reason::Reasoner for PresetReasoner {
 
     fn rank(
         &mut self,
-        _c: &TurnContext,
+        _ctx: &TurnContext,
         d: &chatservant_reason::DraftSet,
     ) -> Result<Vec<chatservant_reason::Candidate>, chatservant_reason::ReasonError> {
         Ok(d.candidates.clone())
+    }
+}
+
+#[cfg(test)]
+mod budget_ceiling_tests {
+    use super::*;
+    use chatservant_reason::Provider;
+
+    /// **上界必须按供应商不同。**
+    ///
+    /// 早先把 1568（Anthropic 的上限）当成通用值，于是 gpt-4o-mini 上
+    /// 滑块永远到不了 2833 的底账——图片功能在**默认模型**上完全不可用，
+    /// 而界面上看不出任何异常。
+    #[test]
+    fn the_ceiling_differs_per_provider() {
+        assert_eq!(budget_ceiling(&Provider::Anthropic), 1568);
+        assert_eq!(budget_ceiling(&Provider::OpenAi), 8500);
+        assert!(
+            budget_ceiling(&Provider::OpenAi) > budget_ceiling(&Provider::Anthropic),
+            "gpt-4o-mini 的底账让它必须给出更高的上界"
+        );
+    }
+
+    /// **上界必须 ≥ 该供应商的底账。**
+    ///
+    /// 上界比底账还低的话，那张模型**永远发不出任何图**，
+    /// 而用户能拖到的最大值就在底账之下——这个组合必须被挡住。
+    #[test]
+    fn the_ceiling_is_always_at_least_the_provider_base() {
+        for (p, base) in [(Provider::Anthropic, 0u32), (Provider::OpenAi, 2833)] {
+            assert!(
+                budget_ceiling(&p) >= base,
+                "{:?}: 上界 {} 低于底账 {base}，图永远发不出去",
+                p,
+                budget_ceiling(&p)
+            );
+        }
+    }
+
+    /// 夹取后显示的值必须落在滑块的可达范围内。
+    #[test]
+    fn the_reported_budget_fits_inside_the_slider_range() {
+        let v = budget_view(20_000, &Provider::OpenAi);
+        assert_eq!(v.max, 8500);
+        assert!(v.budget <= v.max && v.budget >= v.min, "超出滑块范围");
     }
 }
