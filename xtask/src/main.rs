@@ -337,7 +337,26 @@ fn make_fixture(name: &str, source: Option<PathBuf>) -> Result<()> {
 
     match (&before_anchor, &after_anchor) {
         (Ok(a), Ok(b)) if a.chat == b.chat => {}
-        _ => bail!("脱敏改变了锚点（{before_anchor:?} → {after_anchor:?}），这张夹具锁不住几何"),
+        (Ok(a), Ok(b)) => bail!(
+            "脱敏改变了锚点：chat ({},{})-({},{}) → ({},{})-({},{})；面板左右 ({},{}) → ({},{})；header {} → {}；input {} → {}",
+            a.chat.x0,
+            a.chat.y0,
+            a.chat.x1,
+            a.chat.y1,
+            b.chat.x0,
+            b.chat.y0,
+            b.chat.x1,
+            b.chat.y1,
+            a.panel.x0,
+            a.panel.x1,
+            b.panel.x0,
+            b.panel.x1,
+            a.header_top,
+            b.header_top,
+            a.input_top,
+            b.input_top
+        ),
+        _ => bail!("脱敏前后有锚点推导失败（{before_anchor:?} / {after_anchor:?}）"),
     }
     if before_palette != after_palette {
         bail!("脱敏改变了配色（{before_palette:?} → {after_palette:?}），气泡判定会跟着漂");

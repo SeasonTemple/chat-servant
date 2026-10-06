@@ -41,6 +41,11 @@ pub const COLOR_TOL: i32 = 12;
 /// 取 1% 把两者分开，且不随窗口尺寸变化（用的是比例不是绝对像素数）。
 pub const BUBBLE_AREA_RATIO: f64 = 0.01;
 
+/// 侧边栏窄带里保留颜色的最小面积占比。
+///
+/// 实测该带有 5 种色各占 3%~60%，文字墨色都在 1% 以下。取 3%。
+pub const SIDEBAR_AREA_RATIO: f64 = 0.03;
+
 /// 局部底色图的块边长。文字笔画最粗也就两三个像素，
 /// 8×8 足够分辨「这块是气泡」还是「这块是面板」，代价只有 1/64。
 const BLOCK: u32 = 8;
@@ -175,6 +180,24 @@ pub fn redact_with(frame: &Frame, keep: &[Rgb]) -> Frame {
     Frame::from_rgb(w, h, out).expect("输出尺寸与输入一致")
 }
 
+/// 矩形里占比达标的**全部**颜色。
+///
+/// 不能只取 top-1：实测侧边栏有 5 种色各占 3%~60%，
+/// 只留最多的那个会把次要的几万像素吸走，列占比剖面一变，
+/// `PaneAnchor` 的边界就漂。
+pub fn dominant_above(frame: &Frame, r: Rect, min_ratio: f64) -> Vec<Rgb> {
+    let hist = scan(frame, r, |_| true);
+    let total: usize = hist.values().sum();
+    if total == 0 {
+        return Vec::new();
+    }
+    let min = (total as f64 * min_ratio) as usize;
+    hist.into_iter()
+        .filter(|(_, n)| *n >= min)
+        .map(|(c, _)| c)
+        .collect()
+}
+
 /// 组出该保留的颜色集合：面板底色 + 侧边栏色 + 气泡色 + 两处边框色。
 ///
 /// ## 四样都必须留，缺一个锚点就塌
@@ -195,25 +218,51 @@ pub fn keep_colors(
 ) -> Vec<Rgb> {
     let mut keep = vec![panel_bg];
 
-    // 侧边栏色：取**锚点左边界正左侧那条窄带**。
+    // 侧边栏色：**扫整条侧边栏**，取面积占比达标的全部颜色。
     //
-    // 不要扫整条侧边栏取主色——里面有大片绿色高亮行（当前会话）、
-    // 头像和大量文字，主色未必是面板外的那个底色。实测就因为这个
-    // 取不到 rgb(34,34,51)，侧边栏被吸成面板色，panel.x0 直接塌掉。
-    // 这条窄带正是 `PaneAnchor` 靠它找到边界的地方，取色天然对齐。
-    if chat.x0 > 24 {
-        let strip = Rect::new(chat.x0 - 24, chat.y0, chat.x0, chat.y1);
-        keep.extend(dominant_in(frame, strip, 1));
+    // 走过两条错路，都不行：
+    // ① top-1 —— 侧边栏有 5 种色各占 3%~48%，只留一种会让其余几万像素
+    //    被吸走，列占比剖面一变，panel.x0 就漂。
+    // ② 只扫锚点左界左侧 24px 窄带 —— `rgb(37,37,38)` 占整条侧边栏 18.3%，
+    //    但它主要住在 x<280，窄带只覆盖右侧一小条，根本扫不到。
+    //
+    // 实测整条侧边栏的分布（1262×958 的小号会话帧）：
+    //   rgb(47,47,48)   48.4%  侧边栏底色（与对方气泡同色！）
+    //   rgb(37,37,38)   18.3%  次级底色
+    //   rgb(59,59,61)    9.8%
+    //   rgb(84,164,108)  7.0%  当前会话的绿色高亮行
+    //   文字墨色合计     0.7%  ← 取 3% 阈值正好把它们排除
+    if chat.x0 > 0 {
+        let sidebar = Rect::new(0, chat.y0, chat.x0, chat.y1);
+        keep.extend(dominant_above(frame, sidebar, SIDEBAR_AREA_RATIO));
     }
 
     keep.extend(find_bubble_colors(frame, chat, panel_bg));
 
+    // 边框线：只取 `edge` **那一行**，按面积阈值取、且排除面板底色。
+    //
+    // 边框只有 1 px。按 `edge-2 .. edge+1` 取 4 行的众色是错的——
+    // 里面 3 行是面板底色，取到的就是面板底色，边框色根本没被采到
+    // （保留色里 rgb(30,30,31) 重复出现三次就是证据）。
     for edge in [header_top, input_top] {
-        let strip = Rect::new(chat.x0, edge - 2, chat.x1, edge + 1);
-        keep.extend(dominant_in(frame, strip, 1));
+        let line = Rect::new(chat.x0, edge, chat.x1, edge + 1);
+        let h = scan(frame, line, |p| !near_color(p, panel_bg));
+        let total: usize = h.values().sum();
+        let min = (total as f64 * BORDER_AREA_RATIO) as usize;
+        if let Some((c, _)) = h
+            .into_iter()
+            .filter(|(_, n)| *n >= min)
+            .max_by_key(|(_, n)| *n)
+        {
+            keep.push(c);
+        }
     }
     keep
 }
+
+/// 边框行里保留颜色的最小面积占比。输入框上边框是圆角矩形的一线，
+/// 该行大部分仍是面板底色，所以阈值要低。
+const BORDER_AREA_RATIO: f64 = 0.02;
 
 #[cfg(test)]
 mod tests {
