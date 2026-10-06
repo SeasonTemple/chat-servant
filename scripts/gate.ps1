@@ -2,6 +2,11 @@ $ErrorActionPreference = "Continue"
 Set-Location $PSScriptRoot\..
 $fail = 0
 
+# 本机 target/ 在 E: 盘上，cargo 的增量编译目录偶尔会被另一个进程锁住
+# （os error 5 拒绝访问），clippy 会因此以 101 退出——那不是代码红。
+# 关掉增量编译换一个确定的缓存位置，代价是慢一点。
+$env:CARGO_INCREMENTAL = "0"
+
 function Step($name, $scriptblock) {
   Write-Output ""
   Write-Output "========== $name =========="

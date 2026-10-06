@@ -9,6 +9,7 @@ pub mod fixture;
 pub mod merge;
 pub mod pipeline;
 pub mod pixels;
+pub mod stream;
 
 pub use attribute::{Attribution, Evidence, NoiseClass, Palette, Speaker, classify, classify_all};
 pub use fixture::{keep_colors, redact_with};
@@ -17,6 +18,7 @@ pub use pipeline::{LineSource, Read, ReadError, SystemOcr, read};
 pub use pixels::{
     BubbleHit, dominant_color, dominant_ratio, ink_ratio, mean_color, near, probe_bubble_bg,
 };
+pub use stream::{Decision, PaneWatcher};
 
 #[cfg(test)]
 mod tests;
