@@ -32,6 +32,21 @@ enum Cmd {
     Occluded,
     /// 抓一帧（默认 wgc）并立刻本地 OCR，把读到的文字打出来
     Read,
+    /// 感知层探针：归类每一行并归并成消息，跑在真实帧上
+    Perceive {
+        /// 对已有的 PNG 跑；不给就现场抓一帧
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// 标定探针：逐行测出气泡底色、文字墨色与对比度。
+    ///
+    /// **归类阈值必须从这里的数据来**，不是拍脑袋。参考项目记的那组数值
+    /// 是别人机器、别人微信版本的实测值，照搬等于把别人的事实当自己的。
+    Measure {
+        /// 对已有的 PNG 标定；不给就现场抓一帧
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
     /// 取证一帧的像素结构，为 PaneAnchor 的阈值提供依据
     ///
     /// 不带 `--file` 时现场抓一帧；带 `--file` 时对已存的 PNG 重放。
@@ -90,6 +105,8 @@ fn main() -> Result<()> {
         }
         Cmd::Occluded => probe_occluded("wechat"),
         Cmd::Read => probe_read(),
+        Cmd::Perceive { file } => probe_perceive(file),
+        Cmd::Measure { file } => probe_measure(file),
         Cmd::Layout { file } => probe_layout(file),
         Cmd::Probe { kind } => match kind {
             ProbeCmd::Frame {
@@ -221,7 +238,13 @@ fn probe_read() -> Result<()> {
     println!();
     println!("---- 识别出的文字 ----");
     for (i, l) in ocr.lines.iter().enumerate() {
-        println!("{:>3} | {}", i, l);
+        println!(
+            "{:>3} | y={:>4} h={:>2} | {}",
+            i,
+            l.rect.y0,
+            l.rect.height(),
+            l.text
+        );
     }
     println!();
     println!("---- 整图 ----");
@@ -234,6 +257,233 @@ fn probe_read() -> Result<()> {
 /// 这是 PaneAnchor 的**前置**：阈值必须从真实帧里推，不能照搬参考项目的
 /// 数字（那是别人机器、别人微信版本的实测值）。所以这个命令只打印
 /// 像素分布，不推导任何结论——结论由人看着数据定，写进 PaneAnchor 的测试里。
+/// 感知层探针：从聊天区学配色 → 归类每一行 → 归并成消息。
+fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
+    use chatservant_perceive::{NoiseClass, Palette, Speaker, classify_all, group};
+
+    let frame = match file {
+        Some(p) => {
+            let img = image::open(&p).context("打开 PNG 失败")?.to_rgb8();
+            let (w, h) = img.dimensions();
+            println!("来源 = {}", p.display());
+            chatservant_capture::Frame::from_rgb(w, h, img.into_raw())
+                .context("PNG 尺寸与缓冲区不匹配")?
+        }
+        None => {
+            set_dpi_aware();
+            let hit = chatservant_capture::find_chat_window(&WECHAT)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("来源 = 现场抓帧 0x{:X}", hit.hwnd_raw);
+            chatservant_capture::wgc_alt::capture_one_frame(hit.hwnd_raw)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+                .context("wgc 抓帧失败")?
+        }
+    };
+
+    let anchor = chatservant_capture::anchor::derive(&frame)
+        .map_err(|e| anyhow::anyhow!("锚点推导失败：{e}"))?;
+    let pane = frame.crop(anchor.chat).context("裁剪消息区失败")?;
+
+    // 配色只学面板底色。「在不在气泡里」看底色是否等于它，
+    // 「我方还是对方」看彩度——两个判断都不需要先知道气泡色。
+    let palette = Palette::learn(&frame, anchor.chat).ok_or_else(|| {
+        anyhow::anyhow!("学不到配色（聊天区太平，可能是空会话）——上层应降级，不许退回硬编码颜色")
+    })?;
+    println!(
+        "配色 = 面板 rgb({},{},{})",
+        palette.panel_bg[0], palette.panel_bg[1], palette.panel_bg[2]
+    );
+
+    let ocr = chatservant_capture::ocr::recognize(&pane).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let attrs = classify_all(&ocr.lines, &pane, &palette);
+
+    println!();
+    println!(
+        "{:<3} {:<7} {:<10} {:<30} 文字",
+        "#", "说话人", "归类", "依据"
+    );
+    println!("{}", "-".repeat(110));
+    for (i, a) in attrs.iter().enumerate() {
+        println!(
+            "{:<3} {:<7} {:<10} {:<30} {}",
+            i,
+            match a.speaker {
+                Speaker::Me => "我",
+                Speaker::Them => "对方",
+                Speaker::System => "-",
+            },
+            match a.noise {
+                NoiseClass::Text => "正文",
+                NoiseClass::Header => "标题",
+                NoiseClass::Gray => "灰字",
+                NoiseClass::ImageText => "图内字",
+                NoiseClass::Fragment => "碎片",
+            },
+            a.evidence.to_string(),
+            a.text
+        );
+    }
+
+    println!();
+    println!("== 归并后的消息 ==");
+    for m in group(&attrs) {
+        println!(
+            "  [{}] ({},{})-({},{})  {}",
+            match m.speaker {
+                Speaker::Me => "我",
+                Speaker::Them => "对方",
+                Speaker::System => "系统",
+            },
+            m.rect.x0,
+            m.rect.y0,
+            m.rect.x1,
+            m.rect.y1,
+            m.text
+        );
+    }
+    Ok(())
+}
+
+/// 标定探针：把每一行 OCR 的几何与颜色测出来。
+///
+/// 输出四样东西，就是归类阈值需要的全部输入：
+/// - `bg`     文字框**外圈**的主色 = 气泡底色（框内会被文字污染）
+/// - `ink`    框内与 bg 差别最大的像素 = 文字墨色
+/// - `对比`   bg 与 ink 的感知距离，用来切「正文 / 灰字」
+/// - `pos`    相对面板中心的左右位置，用来切「我 / 对方」
+fn probe_measure(file: Option<PathBuf>) -> Result<()> {
+    let frame = match file {
+        Some(p) => {
+            let img = image::open(&p).context("打开 PNG 失败")?.to_rgb8();
+            let (w, h) = img.dimensions();
+            println!("来源 = {}", p.display());
+            chatservant_capture::Frame::from_rgb(w, h, img.into_raw())
+                .context("PNG 尺寸与缓冲区不匹配")?
+        }
+        None => {
+            set_dpi_aware();
+            let hit = chatservant_capture::find_chat_window(&WECHAT)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("来源 = 现场抓帧 0x{:X}", hit.hwnd_raw);
+            chatservant_capture::wgc_alt::capture_one_frame(hit.hwnd_raw)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+                .context("wgc 抓帧失败")?
+        }
+    };
+
+    let anchor = chatservant_capture::anchor::derive(&frame)
+        .map_err(|e| anyhow::anyhow!("锚点推导失败：{e}"))?;
+    println!(
+        "消息区 = ({}, {}) - ({}, {})",
+        anchor.chat.x0, anchor.chat.y0, anchor.chat.x1, anchor.chat.y1
+    );
+    println!(
+        "面板底色 = rgb({}, {}, {})",
+        anchor.panel_bg[0], anchor.panel_bg[1], anchor.panel_bg[2]
+    );
+    println!();
+
+    let pane = frame.crop(anchor.chat).context("裁剪消息区失败")?;
+    let ocr = chatservant_capture::ocr::recognize(&pane).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let cx = (anchor.chat.x0 + anchor.chat.x1) as f32 / 2.0;
+    println!(
+        "{:<3} {:<28} {:>4} {:>18} {:>18} {:>7}  位置/文字",
+        "#", "rect", "h", "气泡底色", "文字墨色", "对比"
+    );
+    println!("{}", "-".repeat(120));
+    for (i, l) in ocr.lines.iter().enumerate() {
+        let Some((bg, ink, contrast)) = measure_line(&pane, l.rect) else {
+            continue;
+        };
+        let mid = l.rect.x0 as f32 + l.rect.width() as f32 / 2.0;
+        let pos = if mid > cx + anchor.chat.width() as f32 * 0.15 {
+            "右"
+        } else if mid < cx - anchor.chat.width() as f32 * 0.15 {
+            "左"
+        } else {
+            "中"
+        };
+        println!(
+            "{:<3} ({:>5},{:>4})-({:>5},{:>4}) {:>4}  rgb({:>3},{:>3},{:>3})  rgb({:>3},{:>3},{:>3})  {:>6.1}  {}  {}",
+            i,
+            l.rect.x0,
+            l.rect.y0,
+            l.rect.x1,
+            l.rect.y1,
+            l.rect.height(),
+            bg[0],
+            bg[1],
+            bg[2],
+            ink[0],
+            ink[1],
+            ink[2],
+            contrast,
+            pos,
+            l.text
+        );
+    }
+    Ok(())
+}
+
+/// 测一行：外圈主色（气泡底色）、框内最异样的像素（文字墨色）、两者感知距离。
+fn measure_line(
+    frame: &chatservant_capture::Frame,
+    r: chatservant_core::frame::Rect,
+) -> Option<([u8; 3], [u8; 3], f32)> {
+    use std::collections::HashMap;
+
+    // 外圈：文字框向外扩 6px 的一圈，避开字形本身
+    let pad = 6i32;
+    let ox0 = r.x0 - pad;
+    let oy0 = r.y0 - pad;
+    let ox1 = r.x1 + pad;
+    let oy1 = r.y1 + pad;
+    let mut hist: HashMap<[u8; 3], usize> = HashMap::new();
+    for y in oy0.max(0)..oy1.min(frame.height() as i32) {
+        for x in ox0.max(0)..ox1.min(frame.width() as i32) {
+            if x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1 {
+                continue; // 框内不算
+            }
+            if let Some(p) = frame.pixel(x as u32, y as u32) {
+                *hist.entry(p).or_insert(0) += 1;
+            }
+        }
+    }
+    let bg = hist.into_iter().max_by_key(|(_, n)| *n).map(|(c, _)| c)?;
+
+    // 框内：与 bg 距离最大的像素 = 墨色
+    let mut ink = bg;
+    let mut best = 0f32;
+    for y in r.y0.max(0)..r.y1.min(frame.height() as i32) {
+        for x in r.x0.max(0)..r.x1.min(frame.width() as i32) {
+            if let Some(p) = frame.pixel(x as u32, y as u32) {
+                let d = dist(p, bg);
+                if d > best {
+                    best = d;
+                    ink = p;
+                }
+            }
+        }
+    }
+    Some((bg, ink, best))
+}
+
+/// 感知距离：亮度项 + 色度项。单纯的欧氏距离会把「深灰 vs 纯黑」判得过近。
+fn dist(a: [u8; 3], b: [u8; 3]) -> f32 {
+    let luma = |c: [u8; 3]| 0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32;
+    let dl = luma(a) - luma(b);
+    let chroma = [
+        a[0] as f32 - b[0] as f32,
+        a[1] as f32 - b[1] as f32,
+        a[2] as f32 - b[2] as f32,
+    ];
+    // 色度去掉亮度分量后的模长 = 「有多不一样」，与亮度分开算
+    let mean = (chroma[0] + chroma[1] + chroma[2]) / 3.0;
+    let sat = (chroma[0] - mean).powi(2) + (chroma[1] - mean).powi(2) + (chroma[2] - mean).powi(2);
+    (dl * dl + sat).sqrt()
+}
+
 fn probe_layout(file: Option<PathBuf>) -> Result<()> {
     let frame = match file {
         Some(p) => {

@@ -1,0 +1,16 @@
+[package]
+name = "chatservant-perceive"
+description = "感知层：把 OCR 框归类成对话人与噪声类"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# 内部 crate，不发 crates.io。缺这一行 cargo-deny 会把
+# `deps.workspace = true` 判成通配符（allow-wildcard-paths 对公开 crate 不生效）。
+publish = false
+
+[dependencies]
+chatservant-core.workspace = true
+# OCR 的**数据结构**（带坐标的 OcrLine）放在 capture crate 里。
+# 这里只依赖它的类型，不依赖它的实现——采集层与感知层之间只过数据。
+chatservant-capture.workspace = true

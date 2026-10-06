@@ -123,6 +123,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chatservant-perceive"
+version = "0.1.0"
+dependencies = [
+ "chatservant-capture",
+ "chatservant-core",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -793,6 +801,7 @@ dependencies = [
  "anyhow",
  "chatservant-capture",
  "chatservant-core",
+ "chatservant-perceive",
  "clap",
  "image",
  "tracing",

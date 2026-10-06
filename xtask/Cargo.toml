@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 chatservant-core.workspace = true
 chatservant-capture.workspace = true
+chatservant-perceive.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 image.workspace = true
