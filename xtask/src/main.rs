@@ -16,6 +16,7 @@ use chatservant_capture::{ChatSurface, WECHAT};
 use clap::{Parser, Subcommand};
 
 mod caps;
+mod e2e;
 mod inject_probe;
 mod secret_probe;
 
@@ -77,6 +78,15 @@ enum Cmd {
     /// **不碰微信**——只验剪贴板通路与「不动鼠标」这两件事。
     /// 真往输入框里打字需要目标窗口在前台，那是人工验证。
     InjectProbe,
+    /// 端到端：抓帧 → 锚定 → OCR → 归类 → 推理 → 填入 → **回读验证**
+    ///
+    /// 需要**微信窗口开着**。失败时会指名道姓地说哪一段挂了。
+    /// 默认 `--dry-run`：只跑到起草，不碰用户的输入框。
+    E2e {
+        /// 真的往输入框里填（会抢焦点）。不给就是只跑到起草。
+        #[arg(long)]
+        inject: bool,
+    },
     /// 抓取与识别的诊断探针
     Probe {
         #[command(subcommand)]
@@ -132,6 +142,7 @@ fn main() -> Result<()> {
         Cmd::Layout { file } => probe_layout(file),
         Cmd::SecretScan => secret_probe::run(),
         Cmd::InjectProbe => inject_probe::run().map_err(|e| anyhow::anyhow!("{e}")),
+        Cmd::E2e { inject } => e2e_cmd(inject),
         Cmd::Probe { kind } => match kind {
             ProbeCmd::Frame {
                 app,
@@ -148,6 +159,102 @@ fn main() -> Result<()> {
 /// 第 ③ 级（区域抓屏）读的是屏幕坐标处的像素，所以「这个窗口现在能不能
 /// 抓」这件事必须**如实测出来**，不能靠"抓一次没报错"来判断——之前那次
 /// 抓回的其实是被盖住窗口的像素，机制上完全成功，内容完全错误。
+/// 端到端命令的实现。**默认 dry-run**：不碰用户的输入框。
+///
+/// 真实传输还没接（ticket 10 的 `Reasoner` 实现），所以这里用一个
+/// **明确标注的预置传输**——它会返回可辨识的假候选。
+/// 返回假候选时命令**必须失败**，不能让用户以为链路通了。
+fn e2e_cmd(inject: bool) -> Result<()> {
+    use e2e::{Stage, run};
+
+    println!(
+        "== 端到端（{}）==",
+        if inject {
+            "会填入输入框"
+        } else {
+            "dry-run：只跑到起草"
+        }
+    );
+
+    let mut reasoner = e2e::PresetReasoner::new();
+    let mut injector = ClipboardInjector;
+    let mut back = ClipboardReadback;
+
+    let out = run(&mut reasoner, &mut injector, &mut back, inject)?;
+
+    println!("✅ 全链通过，用时 {:?}", out.elapsed);
+    println!(
+        "  锚点     ({},{})-({},{})",
+        out.anchor.chat.x0, out.anchor.chat.y0, out.anchor.chat.x1, out.anchor.chat.y1
+    );
+    println!(
+        "  判定     {} 条消息 / {} 条归类",
+        out.messages.len(),
+        out.attributions.len()
+    );
+    println!(
+        "  判断     {}{}",
+        out.intent.summary(),
+        if out.judged {
+            ""
+        } else {
+            "  ← 盲拟，没读懂"
+        }
+    );
+    println!("  候选     {} 条", out.candidates.len());
+    for (i, c) in out.draft_view() {
+        println!("    {}. {:>3.0}%  {}", i + 1, c.probability * 100.0, c.text);
+    }
+
+    // 进度清单：**只点亮真正走过的段**。
+    // 全亮的清单在 dry-run 下是骗人的——第 7、8 段根本没跑。
+    println!("  段位");
+    for s in Stage::ALL {
+        let done = out.passed.contains(&s);
+        println!(
+            "    [{}] {} {}",
+            if done { "✓" } else { " " },
+            s as u32,
+            s.name()
+        );
+    }
+
+    if out.injected_and_read_back {
+        println!(
+            "  回读     与注入内容**字节级相等**（{} 字节）",
+            out.injected.len()
+        );
+    } else {
+        println!("  回读     **没跑**（dry-run：没有注入，也就没有回读证据）");
+    }
+    Ok(())
+}
+
+/// 真的往目标窗口输入框里填。
+struct ClipboardInjector;
+
+impl e2e::Injector for ClipboardInjector {
+    fn fill(&mut self, hwnd: isize, text: &str) -> Result<(), String> {
+        let h = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
+        // inject::fill_input_box 内部会做剪贴板回读与焦点处理
+        match chatservant_capture::inject::fill_input_box(text, h) {
+            chatservant_core::dispatch::DeliveryReceipt::PossiblySent
+            | chatservant_core::dispatch::DeliveryReceipt::Sent => Ok(()),
+            chatservant_core::dispatch::DeliveryReceipt::Failed(e) => Err(e),
+            other => Err(format!("投递状态 {other:?}——不能当作成功")),
+        }
+    }
+}
+
+/// 从系统剪贴板读回。
+struct ClipboardReadback;
+
+impl e2e::Readback for ClipboardReadback {
+    fn read(&mut self) -> Result<String, String> {
+        chatservant_capture::inject::read_clipboard_public()
+    }
+}
+
 fn probe_occluded(app: &str) -> Result<()> {
     set_dpi_aware();
     let surface = surface_for(app)?;

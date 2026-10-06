@@ -152,6 +152,13 @@ fn read_clipboard() -> Result<String, String> {
     }
 }
 
+/// 读回剪贴板的文本。**公开**是因为端到端命令的 `Readback` 要用它——
+/// 「回读」是投递验收的一环，不该只能由投递函数自己调用。
+pub fn read_clipboard_public() -> Result<String, String> {
+    let _guard = lock_clipboard();
+    read_clipboard()
+}
+
 /// 打开剪贴板，最多试 5 次。
 ///
 /// Windows 的剪贴板是**全局独占**的：任何程序开着它，别人就 Open 不了。

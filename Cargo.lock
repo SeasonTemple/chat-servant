@@ -4475,6 +4475,7 @@ dependencies = [
  "chatservant-capture",
  "chatservant-core",
  "chatservant-perceive",
+ "chatservant-reason",
  "clap",
  "image",
  "tracing",

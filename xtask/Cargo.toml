@@ -11,6 +11,7 @@ publish = false
 chatservant-core.workspace = true
 chatservant-capture.workspace = true
 chatservant-perceive.workspace = true
+chatservant-reason.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 image.workspace = true
