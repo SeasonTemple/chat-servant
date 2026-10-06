@@ -110,6 +110,7 @@ dependencies = [
  "chatservant-core",
  "thiserror",
  "tracing",
+ "wgc",
  "windows",
  "windows-capture",
 ]
@@ -494,6 +495,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 
 [[package]]
+name = "smart-default"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0eb01866308440fc64d6c44d9e86c5cc17adfe33c4d6eed55da9145044d0ffc1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -628,6 +640,19 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "wgc"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb62b0f4ff1d85c8c9e7e819aa9db233f89495056e9ff1e294efd96c00cd8d33"
+dependencies = [
+ "smart-default",
+ "thiserror",
+ "tracing",
+ "windows",
+ "windows-future",
+]
 
 [[package]]
 name = "windows"

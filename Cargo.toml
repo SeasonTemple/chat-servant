@@ -18,6 +18,9 @@ chatservant-capture = { path = "crates/capture" }
 windows = { version = "0.62", features = [
   "Foundation",
   "Graphics_Capture",
+  "Graphics_Imaging",
+  "Media_Ocr",
+  "Storage_Streams",
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
@@ -29,6 +32,7 @@ windows = { version = "0.62", features = [
   "Win32_System_Threading",
 ] }
 windows-capture = "2.0"
+wgc = "2.0"
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

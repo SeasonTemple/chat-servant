@@ -30,6 +30,8 @@ enum Cmd {
     Caps,
     /// 遮挡检测体检：目标窗口现在能不能用第 ③ 级抓到
     Occluded,
+    /// 抓一帧（默认 wgc）并立刻本地 OCR，把读到的文字打出来
+    Read,
     /// 抓取与识别的诊断探针
     Probe {
         #[command(subcommand)]
@@ -78,6 +80,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Occluded => probe_occluded("wechat"),
+        Cmd::Read => probe_read(),
         Cmd::Probe { kind } => match kind {
             ProbeCmd::Frame {
                 app,
@@ -184,6 +187,38 @@ fn window_rect(hwnd_raw: isize) -> Result<(i32, i32, i32, i32)> {
     Ok((r.left, r.top, r.right, r.bottom))
 }
 
+/// 抓一帧 + 本地 OCR 读文字，一条命令走完「像素 → 文字」。
+///
+/// 这是目标判据的验证入口：帧从**被遮挡的窗口**抓来，文字能读出来，
+/// 就说明「遮挡下抓到的帧内容正确」这条链是通的。
+fn probe_read() -> Result<()> {
+    set_dpi_aware();
+    let hit = chatservant_capture::find_chat_window(&WECHAT).map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!("窗口 = {}  0x{:X}", hit.exe, hit.hwnd_raw);
+
+    let t0 = std::time::Instant::now();
+    let frame = chatservant_capture::wgc_alt::capture_one_frame(hit.hwnd_raw)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("wgc 抓帧失败")?;
+    let grab_ms = t0.elapsed().as_millis();
+
+    let t1 = std::time::Instant::now();
+    let ocr = chatservant_capture::ocr::recognize(&frame).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ocr_ms = t1.elapsed().as_millis();
+
+    println!("抓帧 {}ms  {}x{}", grab_ms, frame.width(), frame.height());
+    println!("OCR  {}ms  逐行 {} 行", ocr_ms, ocr.lines.len());
+    println!();
+    println!("---- 识别出的文字 ----");
+    for (i, l) in ocr.lines.iter().enumerate() {
+        println!("{:>3} | {}", i, l);
+    }
+    println!();
+    println!("---- 整图 ----");
+    println!("{}", ocr.text);
+    Ok(())
+}
+
 fn surface_for(key: &str) -> Result<ChatSurface> {
     match key {
         "wechat" => Ok(WECHAT),
@@ -251,6 +286,9 @@ fn probe_frame(
 
     let t0 = std::time::Instant::now();
     let frame = match method {
+        "wgc2" => {
+            chatservant_capture::wgc_alt::capture_one_frame(hit.hwnd_raw).context("wgc 抓帧失败")?
+        }
         "printwindow" => chatservant_capture::printwindow::capture(hit.hwnd_raw)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("PrintWindow 抓帧失败")?,

@@ -1,142 +1,114 @@
-# ADR-0004：捕获路径分级与本机实测结论
+# ADR-0004：捕获路径定案——用 `wgc`，并附本机实测证据
 
 - 状态：已接受
 - 日期：2026-10-06
-- 相关：[ADR-0002](0002-frame-conditioning-pipeline.md)（调理管线依赖捕获输出）
+- 相关：[ADR-0002](0002-frame-conditioning-pipeline.md)（调理管线依赖捕获输出）、
+  [ADR-0003](0003-dependency-strategy.md)（依赖策略）
 
-## 背景
+## 结论
 
-参考项目 `examples/jev-chat-windows` 记录了一条三级捕获分级。本 ticket
-的任务就是**在这台机器上逐级实测**，看哪一级真的能用。
+**采用 `wgc` 2.0.1 作为唯一的窗口捕获路径。**
 
-结论先行：**第 1、2 级不可用，第 3 级能用但有硬限制。**
+微信窗口在**被完全遮挡**时仍能抓到内容正确的帧，帧内 OCR 能读出与
+窗口实际一致的中文文字。产品承诺的「被其他窗口盖住也能读」得以保留，
+不需要向用户降级。
 
-## 三级分级与实测结果
+`windows-capture` 2.0.1 与第 ③ 级区域抓屏保留为诊断手段，不作产品默认。
+
+## 分级与实测结果
 
 | 级别 | 手段 | 能否抓被遮挡 | 本机结果 |
 | --- | --- | --- | --- |
-| ① | Windows Graphics Capture | ✅ 能 | ❌ **不工作** |
-| ② | `PrintWindow` + `PW_RENDERFULL_CONTENT` | ⚠️ 部分 | ❌ 微信拒绝（返回 0） |
-| ③ | 屏幕 DC + `BitBlt` 抠矩形 | ❌ 不能 | ✅ **可用，94 ms** |
+| ① | `wgc` 2.0.1（Windows Graphics Capture） | ✅ | ✅ **可用，322 ms** |
+| ①′ | `windows-capture` 2.0.1（同一个 WGC） | ✅ | ❌ 会话启动即关闭且无错 |
+| ② | `PrintWindow` + `PW_RENDERFULL_CONTENT` | ⚠️ | ❌ 微信拒绝（返回 0） |
+| ③ | 屏幕 DC + `BitBlt` 抠矩形 | ❌ | ✅ 94 ms，但内容可能错 |
 
-## ① WGC：本机不工作（原因未查明）
+## ①′ 的问题不在环境，在那个实现
 
-**已验证的事实**：
+`windows-capture` 2.0.1 在本机对**微信窗口、记事本窗口、主显示器**
+三者表现完全一致：会话启动后立刻关闭、不报错、一帧不来，而
+`GraphicsCaptureSession::IsSupported()` 明确返回 `true`
+（`cargo xtask caps` 可复现，OS = 10.0.22631）。
 
-- 系统层面**支持**：`GraphicsCaptureSession::IsSupported()` 返回 `true`，
-  OS = Windows 10.0.22631。`cargo xtask caps` 一次问出来。
-- 会话启动后**立刻关闭且不报错**，一帧都不送。
-- 对**三个完全不同的目标表现一致**：微信窗口、记事本窗口、**主显示器**。
-- 会话线程返回 `Ok(())`，不是错误路径。
+当时排除掉的：目标特殊、`CreateForWindow`、系统不支持、目标不可见、
+光标/边框设置兼容性。代码落点在它的 `run_message_loop`——
+`GetMessageW` 一上来就返回 0，消息循环从未阻塞。WM_QUIT 来源至今未定位，
+但**这已经不影响决策**。
 
-**由此可以排除的**：
+**换 `wgc` 2.0.1（github.com/Atliac/wgc，另一个独立实现）后立刻工作。**
+两者用同一个 `windows` crate 的 `HWND`，但事件循环、D3D 设备创建、
+会话管理各自独立实现、无代码关联。所以这是**那个 crate 的问题**。
 
-- 不是微信的问题（记事本一样失败）
-- 不是 `CreateForWindow` 的问题（主显示器也失败）
-- 不是系统不支持（`IsSupported()` 为 true）
-- 不是"目标不可见"（主显示器总是可见）
-- 不是光标/边框设置的兼容性问题（改成 `Default` 后现象不变）
+> 方法论：区分「环境问题」和「某个实现的问题」，唯一可靠的手段是
+> **换一个独立实现复测**。这一条已并入 ADR-0003。
 
-**代码层面的线索**：`windows-capture` 2.0.1 的 `run_message_loop` 是
+## 证据
 
-```rust
-match unsafe { GetMessageW(&mut message, None, 0, 0).0 } {
-    -1 => return Err(FailedToRunMessageLoop),
-    0  => return Ok(()),          // ← 我们观察到的就是这条
-    _  => { TranslateMessage; DispatchMessageW }
-}
+**1. 部分遮挡（6/9 采样点被盖）**：抓到微信窗口，322 ms，1262×958。
+
+**2. 完全遮挡（8/9 采样点被最大化的记事本盖住）**：仍抓到微信窗口。
+
+两种遮挡状态下抓到的帧 **SHA256 完全相同**：
+
+```
+frame-…2518.png  195474 bytes  1733FEC97F11A5A2E229AA832857A082…
+frame-…2549.png  195474 bytes  1733FEC97F11A5A2E229AA832857A082…
 ```
 
-我们看到的是 `Ok(())`，即 `GetMessageW` 返回 0（WM_QUIT）而消息循环从未
-真正阻塞。**谁往那个线程 post 了 WM_QUIT，目前没有定位到。**
+遮挡状态变了，捕获内容字节级不变——**抓的是窗口，不是屏幕**。
+对照：第 ③ 级区域抓屏那张哈希 `6ED52939…` 不同，因为它抓到的是
+被盖在上面的另一个窗口。
 
-未排除的嫌疑（按可能性排序）：
+**3. 帧内 OCR**（`cargo xtask read`，Windows.Media.Ocr，224 ms，26 行）：
 
-1. 机器上装了 **MuMu 虚拟显示器驱动** + Intel 核显 + NVIDIA 独显三块适配器，
-   WGC 内部挑合成器的方式可能出问题
-2. `CreateDispatcherQueueController` 在本进程环境下的行为
-3. 该 crate 在这个环境下的固有 bug（可换 `wgc` crate 2.0.1 交叉验证）
+```
+文 件 传 输 助 手          ← 会话名
+G8W / HXH / 微 信 支 付     ← 联系人名
+什 邡 项 目 组   @广发裉行   昨 天
+04 ： 25                   ← 时间戳
+```
 
-**决策**：不阻塞主线。第 ③ 级已能出帧，先用它推进；① 留作后续专项。
+与抓到的画面逐项对得上。个别字有误（嘢/秘、裉/银），属识别率问题，
+留给 ticket 03 的阈值调优；字间空格是引擎在深色小字号上的分词行为。
 
-## ② PrintWindow：被微信拒绝，属于预期内
+## 尺寸差异：PaneAnchor 必须处理
 
-`PrintWindow` 返回 0。这正是参考项目 `KICKOFF.md` 预测的症状——微信把界面
-自绘在 GPU 合成画布上（`MMUIRenderSubWindowHW`），这类窗口会拒绝 `WM_PRINT`，
-连 `PW_RENDERFULL_CONTENT` 也不吃。
+WGC 抓到的是 **1262×958**，`GetWindowRect` 给的是 **1276×965**。
+差 14 px / 7 px——阴影与不可见缩放边框。
 
-**这个结论本身是有价值的**：它独立证实了参考项目"为什么走 OCR 而不是
-UIA/控件树"的判断在微信上依然成立。
+**`PaneAnchor`（ticket 02）的坐标换算要把这个偏移算进去**，否则框整体偏移。
 
-## ③ 区域抓屏：能用，但必须配套遮挡检测
+## 仍然保留的两级，以及为什么
 
-`GetDC(NULL)` + `BitBlt(..., SRCCOPY)` 按窗口矩形抠一块，实测 **94 ms**，
-尺寸格式正确、非黑。**机制上完全可用。**
+**② `PrintWindow`**：微信返回 0 拒绝重绘。这独立证实了参考项目
+`KICKOFF.md` 的判断——微信把界面自绘在 GPU 合成画布上，这类窗口拒绝
+`WM_PRINT`，连 `PW_RENDERFULL_CONTENT` 都不吃。
+保留它的理由是**诊断价值**：用来区分「窗口拒绝重绘」和「会话起不来」。
 
-### 但它有一条会致命的前提
+**③ 区域抓屏**：`region::is_occluded` 的配套兜底。有了 ① 之后它不是必需的，
+但保留两个理由：一是多一层保险，二是 `is_occluded` 本身要在 UI 上用来
+告诉用户「这个窗口我读不到」——**这与抓不抓得到是两件事**。
 
-**读到的是屏幕坐标处的像素。窗口被别的应用盖住时，抓到的是盖在上面的东西。**
+> 第 ③ 级有个陷阱值得记住：抓到**非黑的、尺寸正确的**帧，
+> **不等于**抓到的是目标窗口。它读的是屏幕坐标处的像素。
+> 「动作返回成功」不构成结果证明——这与 ADR 里 `PossiblySent`
+> 禁止重放是同一条原则。
 
-实测时微信窗口 hwnd `0x10AFC` 明明存在，但那个位置上是 MCode 自己的窗口，
-抓回来的是 MCode 界面。**一个非黑的、尺寸正确的"成功"帧，内容完全是错的。**
+## 实现约束
 
-这与产品承诺的"被其他窗口盖住也能读"直接冲突。因此第 ③ 级**不能单独使用**，
-必须配套：
-
-- **`region::is_occluded(hwnd, sample_points)`** —— 用 `WindowFromPoint`
-  在窗口内取几个采样点，比对命中的顶层窗口。任一点被别的窗口占据即判定被遮挡。
-- **内容校验** —— 抓到非黑帧**不等于**抓到的是目标窗口。`PaneAnchor`
-  推导出的消息区位置必须与预期布局吻合，对不上就是抓错了。
-- **UI 上如实提示** —— 被遮挡时要告诉用户"把聊天窗口露出来"，
-  而不是默默用错误内容继续。
-
-**「没报错」在第 ③ 级不构成有效帧的证据。** 这和 ADR 里
-`PossiblySent` 禁止重放是同一条原则：不能拿"动作返回成功"当结果证明。
+`wgc` 与 `windows-capture` 都要求 `windows 0.62.2`，版本锁死
+（ADR-0003 已说明）。`windows-core 0.62.2` 的 `NonNull<c_void>` 不是 `Send`，
+所以 **WGC 会话对象不能跨线程 move**：必须在目标线程内部创建会话、
+跑迭代器，只把 `(w, h, Vec<u8>)` 这种纯数据传出来。
+`wgc_alt.rs` 就是这个形状。
 
 ## 影响
 
-- 捕获层对外暴露**三档 + 一个能力探测**，而不是单一 `capture()`：
-  `capture_one_frame`（WGC）/ `printwindow::capture` / `region::capture`，
-  外加 `xtask caps` 一次性问出系统支持情况。
-- **生产路径暂定第 ③ 级**，但必须带 `is_occluded` + 内容校验双重守卫。
-  这意味着 v1 的"被遮挡也能读"承诺要打折，UI 上要明确说明。
-- 第 ① 级的 WGC 保留代码但不作为默认。后续单独开一条去查 WM_QUIT 的来源，
-  以及换 `wgc` crate 交叉验证。
-- ADR-0002 的五级调理管线**不受影响**——它作用在 `Frame` 上，
-  帧从哪来与调理策略正交。但第 1 级（变化门控）依赖可靠的变化检测，
-  第 ③ 级在窗口被遮挡时"内容不变"反而是好事（盖住的窗口区域像素不变），
-  这一点在实测中正好被验证了。
-
-## 遮挡检测已实测有效
-
-`cargo xtask occluded` 在本机跑出的真实数据：
-
-```
-窗口 = 微信 (weixin.exe)  0x10AFC
-屏幕矩形 = (700, 251) - (1976, 1216)   1276x965
-
-  左上  ( 724,  275)  命中 0x8F0C70  ← 被别的窗口盖住
-  右上  (1952,  275)  命中 0x10AC6  ← 被别的窗口盖住
-  中心  (1338,  733)  命中 0x10AFC   目标窗口
-  ...（9 点中 6 点被遮挡，只有中间一列命中目标）
-
-❌ 有采样点被遮挡    is_occluded() 判定 = true
-```
-
-判定与实际一致。**同时也解释了那次"抓到了但内容全错"**：
-左侧被 `0x8F0C70`、右侧被 `0x10AC6` 盖住，只有中间一列是微信。
-
-## 遗留
-
-- **`wgc` crate 2.0.1 交叉验证 WGC** —— 值得做。它用的是
-  **`os::windows-apis` 而不是 `windows`**，是一套完全独立的绑定和实现，
-  所以 `windows-capture` 的问题它可能不受影响。API 已确认：
-  `wgc::window::new_item_from_hwnd(hwnd) -> GraphicsCaptureItem`，
-  `Wgc::new(item, WgcSettings)` 之后 `Wgc` 本身就是 `Iterator`，
-  `Frame::size()` / `Frame::pixels()` 取数据。
-  接入要跨两套 `HWND` 类型做桥接（两者都包 `*mut c_void`），
-  本轮上下文不够做完，依赖已回退，树里不留半截实验。
-  **如果它能工作，v1 就能保住"被遮挡也能读"，不用在 UI 上给用户降级提示。**
-- 给 `region::is_occluded` 补单元测试（现在只有实机数据，没有回归测试）。
-- `PaneAnchor`（ticket 02）落地后，它就是内容校验那一环——
-  推导出的消息区位置与预期布局对不上，就说明抓到的是别的窗口。
+- 捕获层对外以 `wgc_alt::capture_one_frame` 为默认实现。
+- `windows-capture` 降级为「用于对照的诊断实现」，其失败不影响产品。
+- OCR 走 `Windows.Media.Ocr`（系统自带、离线、零 token），
+  像素路径为 `Frame(RGB8) → BGRA8 → DataWriter::DetachBuffer
+  → SoftwareBitmap::CreateCopyFromBuffer → RecognizeAsync`，
+  **不经过任何文件**。
+- 下一步 ticket 02（`PaneAnchor`）在此基础上开工。

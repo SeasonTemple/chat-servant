@@ -2,10 +2,12 @@
 
 pub use chatservant_core::frame::Frame;
 
+pub mod ocr;
 pub mod printwindow;
 pub mod region;
 pub mod surface;
 pub mod wgc;
+pub mod wgc_alt;
 pub mod window;
 
 pub use surface::{ALL, ChatSurface, WECHAT};
