@@ -2,6 +2,8 @@
 
 pub mod dispatch;
 pub mod frame;
+pub mod scale;
 
 pub use dispatch::{DeliveryReceipt, Dispatch, Dispatcher, Next};
 pub use frame::{Frame, Rect};
+pub use scale::{Billing, Fitted, Unfit, fit, logical_size};
