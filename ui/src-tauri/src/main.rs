@@ -28,6 +28,8 @@ fn main() {
             commands::probe_key,
             commands::get_recent_n,
             commands::set_recent_n,
+            commands::get_token_budget,
+            commands::set_token_budget,
         ])
         .run(tauri::generate_context!())
         .expect("启动失败");

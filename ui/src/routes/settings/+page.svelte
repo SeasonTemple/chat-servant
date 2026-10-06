@@ -2,7 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
   import TierSwitch from '$lib/TierSwitch.svelte';
-  import type { Tier } from '$lib/types';
+  import type { BudgetView, Tier } from '$lib/types';
 
   interface ProviderView {
     id: string;
@@ -30,6 +30,9 @@
   let recentMin = $state(4);
   let recentMax = $state(40);
   let recentNote = $state<string | null>(null);
+  /** 单张图片的视觉 token 预算。**Rust 侧算好该不该出现**，前端不自己判断。 */
+  let budget = $state<BudgetView | null>(null);
+  let budgetNote = $state<string | null>(null);
   let view = $state<SettingsView | null>(null);
   /**
    * 「展开输入框」的哨兵值。
@@ -107,8 +110,30 @@
         // 读不到就用默认档，**不报错打断设置页**。
         // 滑块仍可拖——写了就可能有值，读不到只是看不到当前值。
       }
+      try {
+        budget = await invoke<BudgetView>('get_token_budget');
+      } catch {
+        // 同上。预算读不到就整块不显示，别摆一个半死的滑块。
+      }
     })();
   });
+
+  /**
+   * 提交图片预算。
+   *
+   * ⚠ 用回包覆盖：值被夹过的话界面必须显示夹完的数。
+   * 只显示拖到的那格，界面就变成了一个说谎的控件——ticket 11 刚为
+   * 同一类问题付过代价。
+   */
+  async function commitBudget() {
+    if (!budget) return;
+    try {
+      budget = await invoke<BudgetView>('set_token_budget', { budget: budget.budget });
+      budgetNote = `已设为每张 ${budget.budget} token，下一张图就会用上`;
+    } catch (e) {
+      budgetNote = String(e);
+    }
+  }
 
   /** 把 Rust 回的**真实生效值**铺到界面上。 */
   function apply(v: RecentView) {
@@ -165,6 +190,44 @@
   </div>
   {#if recentNote}
     <p class="cs-note" role="status">{recentNote}</p>
+  {/if}
+
+  <!--
+    图片 token 预算。**`budget.visible` 由 Rust 决定**，前端不自己判断
+    「模型 B 是不是多模态」。默认多模态配置下没有一张图会外发，
+    此时摆滑块就是「调了没反应的控制项」——ticket 11 刚拆掉过一个同类的。
+  -->
+  {#if budget?.visible}
+    <h2 class="cs-h2">图片成本</h2>
+    <p class="cs-note">
+      送进模型的**单张**图片上限。超出就把图缩到预算内——小图不放大， 放大只会更贵更糊。
+    </p>
+    <div class="cs-slider">
+      <input
+        type="range"
+        min={budget.min}
+        max={budget.max}
+        step="32"
+        value={budget.budget}
+        oninput={(e) => (budget = budget && { ...budget, budget: Number(e.currentTarget.value) })}
+        onchange={commitBudget}
+      />
+      <output>{budget.budget} token</output>
+    </div>
+    {#if budget.provider_base > budget.budget}
+      <!-- 无解要**明说**。悄悄发一张然后超支，比报错糟得多。 -->
+      <p class="cs-note cs-warn" role="alert">
+        {budget.provider} 发任何一张图都要 {budget.provider_base} token 的底账， 预算 {budget.budget}
+        无解——再调小也不会更省。
+      </p>
+    {:else if budget.provider_base > 0}
+      <p class="cs-note">
+        {budget.provider} 的固定底账是 {budget.provider_base} token，与图片大小无关； 剩下的是按图缩放后另外算的。
+      </p>
+    {/if}
+    {#if budgetNote}
+      <p class="cs-note" role="status">{budgetNote}</p>
+    {/if}
   {/if}
 
   <h2 class="cs-h2">模型 key</h2>
@@ -313,6 +376,12 @@
     font-size: 0.7rem;
     border-radius: 7px;
     background: color-mix(in srgb, var(--cs-danger) 18%, transparent);
+  }
+
+  /* 预算无解时的提示。用警告色而不是正文色——这不是「已保存」，
+     是「你调的这个值不起作用」。 */
+  .cs-warn {
+    color: var(--cs-danger);
   }
 
   .cs-prov {

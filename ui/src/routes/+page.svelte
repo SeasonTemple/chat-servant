@@ -5,13 +5,16 @@
   import MessageStream from '$lib/MessageStream.svelte';
   import ReasonBar from '$lib/ReasonBar.svelte';
   import TierSwitch from '$lib/TierSwitch.svelte';
-  import type { Candidate, DispatchReply, Message, Tier } from '$lib/types';
+  import type { CallCounts, Candidate, DispatchReply, Message, Tier } from '$lib/types';
 
   /** Rust 侧推过来的消息流。**前端不自己算**——`Message[]` 是 Rust 判完发过来的。 */
   let messages = $state<Message[]>([]);
   let candidates = $state<Candidate[]>([]);
   let tier = $state<Tier>('Manual');
   let reason = $state('等待第一条消息');
+  /** 分段调用次数。**Rust 侧算好推过来**，前端不自己累加——
+   *  四个数是「静默期零调用」那条硬约束的唯一可视证据，自己数一遍就可能数错。 */
+  let counts = $state<CallCounts | null>(null);
   let busy = $state(false);
   /** 紧凑模式：面板窄于阈值时切。**不靠媒体查询**——
    *  窗口可以被用户拖到任意宽度，媒体查询只看视口。 */
@@ -60,10 +63,12 @@
         messages: Message[];
         candidates: Candidate[];
         reason: string;
+        counts: CallCounts | null;
       }>('readout', (e) => {
         messages = e.payload.messages;
         candidates = e.payload.candidates ?? [];
         reason = e.payload.reason;
+        counts = e.payload.counts ?? null;
       });
       if (cancelled) {
         un();
@@ -119,7 +124,7 @@
     </div>
   </header>
 
-  <ReasonBar {reason} />
+  <ReasonBar {reason} {counts} />
 
   <MessageStream {messages} />
 

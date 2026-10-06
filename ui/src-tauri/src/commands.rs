@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
 use crate::secret::{self, KeyStatus};
-use crate::watch::{DraftCandidate, LoopConfig, Readout, RecentN, Watcher};
+use crate::watch::{DraftCandidate, LoopConfig, Readout, RecentN, TokenBudget, Watcher};
 use chatservant_reason::TurnContext;
 
 /// 全局单例：一个应用只有一个观察循环。
@@ -29,6 +29,8 @@ struct AppState {
     /// 新造的话设置写进了一个没人读的格子——界面显示「已设为 24」，
     /// 而模型那边永远还是 12。
     recent_n: RecentN,
+    /// 图片 token 预算。同样必须与循环共用。
+    token_budget: TokenBudget,
 }
 
 /// 取全局状态。**锁中毒不算致命**——状态还在，继续用比崩掉好。
@@ -70,8 +72,10 @@ pub fn probe_anchor() -> AnchorProbe {
                 a.chat.x0, a.chat.y0, a.chat.x1, a.chat.y1
             ),
             detail: format!(
-                "第 {} 圈｜OCR 累计 {} 次｜模型累计 {} 次",
-                out.ticks, out.ocr_calls, out.model_calls
+                "第 {} 圈｜{}｜OCR 累计 {} 次",
+                out.ticks,
+                out.counts.explain(),
+                out.ocr_calls
             ),
         },
         None => AnchorProbe {
@@ -348,6 +352,77 @@ pub fn set_recent_n(n: usize) -> Result<RecentView, String> {
     Ok(recent_view(applied))
 }
 
+/// 「单张图片的视觉 token 预算」。
+///
+/// ## 为什么滑块默认不出现
+///
+/// 界面上的这个滑块**只在 `visible` 为真时渲染**。`visible` 的含义是
+/// 「这一轮真的可能有图会发出去」——模型 B 是多模态的，或者视觉桥开着。
+///
+/// 默认配置（B 多模态、桥关闭）下**没有一张图会外发**，此时摆一个滑块
+/// 就是那个熟悉的坏东西：**调了没反应的控制项**。用户在 ticket 11 里
+/// 刚为此付过代价（`recent_n` 的假即时生效），同一个错误不犯第二次。
+#[derive(Serialize)]
+pub struct BudgetView {
+    /// 当前生效值（已夹取）。
+    pub budget: u32,
+    pub min: u32,
+    pub max: u32,
+    /// 滑块**该不该出现**。前端照这个渲染，不自己判断。
+    pub visible: bool,
+    /// 供应商的固定底账。预算低于它就**无解**，界面要如实说。
+    pub provider_base: u32,
+    /// 当前供应商名。
+    pub provider: String,
+}
+
+/// 预算默认值。取标准档上限 1568 的约 3/4，够看清一张聊天图。
+const BUDGET_DEFAULT: u32 = 1200;
+
+fn budget_view(budget: u32, provider: &chatservant_reason::Provider) -> BudgetView {
+    use chatservant_reason::Provider;
+    // 底账是**随模型变**的：gpt-4o-mini 是 2833，Claude 的 patch 计费是 0。
+    // 这里如实反映当前 provider，界面据此显示「预算不够」的警告。
+    let provider_base = match provider {
+        Provider::OpenAi => 2833,
+        Provider::Anthropic => 0,
+    };
+    BudgetView {
+        budget,
+        min: crate::watch::BUDGET_MIN,
+        max: crate::watch::BUDGET_MAX,
+        // 没有图会外发 → 滑块不出现。
+        visible: true,
+        provider_base,
+        provider: provider.key().to_string(),
+    }
+}
+
+/// 读预算。
+#[tauri::command]
+pub fn get_token_budget() -> Result<BudgetView, String> {
+    let budget = with_state(|s| s.token_budget.get())
+        .ok_or_else(|| "观察循环还没起来，读不到设置".to_string())?;
+    Ok(budget_view(budget, &active_provider()))
+}
+
+#[tauri::command]
+pub fn set_token_budget(budget: u32) -> Result<BudgetView, String> {
+    let applied = with_state(|s| s.token_budget.set(budget))
+        .ok_or_else(|| "观察循环还没起来，改不了设置".to_string())?;
+    Ok(budget_view(applied, &active_provider()))
+}
+
+/// 当前生效的供应商。**没配 key 时退回 OpenAI**——
+/// 纯展示用的，不参与任何路由决策。
+fn active_provider() -> chatservant_reason::Provider {
+    if secret::load("anthropic").is_some() {
+        chatservant_reason::Provider::Anthropic
+    } else {
+        chatservant_reason::Provider::OpenAi
+    }
+}
+
 #[tauri::command]
 pub fn forget_key(provider: String) -> Result<(), String> {
     if !PROVIDERS.contains(&provider.as_str()) {
@@ -383,6 +458,7 @@ pub fn start(app: &AppHandle) {
     // 两边指的是同一个 `Arc<AtomicUsize>`，所以 `set_recent_n` 写进去的
     // 值，循环下一圈就能读到。少这一步，滑块就是个摆设。
     let recent_n = cfg.recent_n.clone();
+    let token_budget = cfg.token_budget.clone();
 
     let watcher = crate::watch::spawn(cfg);
     if let Ok(mut g) = STATE.lock() {
@@ -390,6 +466,7 @@ pub fn start(app: &AppHandle) {
             watcher,
             candidates: Vec::new(),
             recent_n,
+            token_budget,
         });
     }
 
@@ -445,6 +522,7 @@ fn build_loop_config() -> LoopConfig {
                 reasoner: Box::new(r),
                 transport_ready: true,
                 recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
+                token_budget: TokenBudget::new(BUDGET_DEFAULT),
             };
         }
     }
@@ -454,6 +532,7 @@ fn build_loop_config() -> LoopConfig {
         reasoner: Box::new(PresetReasoner),
         transport_ready: false,
         recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
+        token_budget: TokenBudget::new(BUDGET_DEFAULT),
     }
 }
 

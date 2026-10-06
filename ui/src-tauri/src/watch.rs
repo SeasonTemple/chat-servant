@@ -53,6 +53,30 @@ pub fn debug_pane() -> Option<crate::debug::DebugPane> {
     LAST_BOXES.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// 一次观察里各段各调了几次模型。**四个都要报，包括 0。**
+///
+/// 界面上要能看出「判断 2 · 起草 1 · 排序 1 · 视觉 0」——
+/// 只给一个总数的话，三段里任何一段挂了都分不清是哪段。
+/// **视觉恒为 0 是正常状态**（默认多模态配置下图片随文本进 B，不额外调），
+/// 不报出来用户会以为没统计。
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct CallCounts {
+    pub judge: u32,
+    pub draft: u32,
+    pub rank: u32,
+    /// 额外视觉模型的调用次数。**只有 B 是纯文本且开了桥时才可能非 0。**
+    pub vision: u32,
+}
+
+impl CallCounts {
+    pub fn explain(&self) -> String {
+        format!(
+            "判断 {} · 起草 {} · 排序 {} · 视觉 {}",
+            self.judge, self.draft, self.rank, self.vision
+        )
+    }
+}
+
 /// 往 UI 推的一份完整快照。
 #[derive(Debug, Clone, Serialize)]
 pub struct Readout {
@@ -63,6 +87,8 @@ pub struct Readout {
     pub reason: String,
     /// 这一轮调了几次模型。静默期必须是 0。
     pub model_calls: u32,
+    /// 分段计数。界面上要分开显示。
+    pub counts: CallCounts,
     /// 循环已经跑了多少圈。
     pub ticks: u64,
     /// 累计 OCR 调用次数。
@@ -136,6 +162,8 @@ pub struct LoopConfig {
     pub transport_ready: bool,
     /// 「参考上下文」条数。**共享句柄**——改它下一圈就生效，不用重启。
     pub recent_n: RecentN,
+    /// 单张图片的视觉 token 预算。**共享句柄**。
+    pub token_budget: TokenBudget,
 }
 
 /// 一轮里的**可变会话状态**。合成一个结构体，而不是给 `step` 递九个 `&mut`。
@@ -162,6 +190,9 @@ struct Scratch {
     history: Vec<String>,
     /// 与设置页共用一个格子的条数。循环每圈读一次。
     recent: RecentN,
+    /// 视觉桥。**默认关闭**——`VisionBridge::off()` 不发任何请求，
+    /// `calls()` 恒为 0。接上视觉链路时换掉这个类型即可。
+    vision: chatservant_reason::VisionBridge,
 }
 
 impl Scratch {
@@ -173,7 +204,40 @@ impl Scratch {
             context: chatservant_reason::Context::new(),
             history: Vec::new(),
             recent,
+            vision: chatservant_reason::VisionBridge::off(),
         }
+    }
+}
+
+/// 预算下界。低于 64 token 连一张缩略图都放不下，那不是「更省」。
+pub const BUDGET_MIN: u32 = 64;
+/// 预算上界。Anthropic 标准档的硬上限就是 1568，再高没有意义。
+pub const BUDGET_MAX: u32 = 1568;
+
+/// 「单张图片视觉 token 预算」的可改句柄。形状与 [`RecentN`] 一样：
+/// 命令层和观察循环共用一个格子，改完下一圈生效。
+///
+/// 上下界定义在**这里**而不是命令层：夹取发生在这个类型里，
+/// 边界就该和夹取它的代码住在一起，否则改一处忘另一处是迟早的事。
+#[derive(Clone)]
+pub struct TokenBudget(Arc<std::sync::atomic::AtomicU32>);
+
+impl TokenBudget {
+    pub fn new(v: u32) -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicU32::new(
+            v.clamp(BUDGET_MIN, BUDGET_MAX),
+        )))
+    }
+
+    pub fn get(&self) -> u32 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// 返回**夹取后的真实生效值**——界面上要显示这个，不是用户拖的那个。
+    pub fn set(&self, v: u32) -> u32 {
+        let applied = v.clamp(BUDGET_MIN, BUDGET_MAX);
+        self.0.store(applied, Ordering::Relaxed);
+        applied
     }
 }
 
@@ -221,12 +285,22 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                     Ok(Some(a)) => {
                         anchor = Some(a);
                         last_calls = reasoner.calls();
+                        let st = reasoner.stage_calls();
                         let out = Readout {
                             anchor,
                             messages: Vec::new(),
                             candidates: s.candidates.clone(),
                             reason: s.reason.clone(),
                             model_calls: last_calls,
+                            counts: CallCounts {
+                                judge: st.judge,
+                                draft: st.draft,
+                                rank: st.rank,
+                                // 视觉桥**默认关闭**（ticket 15 第 1 条），
+                                // 循环里没接桥之前这里恒为 0——这是正确值，
+                                // 不是占位符。
+                                vision: s.vision.calls(),
+                            },
                             ticks,
                             ocr_calls: s.ocr_calls,
                             error: None,
@@ -239,12 +313,20 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         // 什么都没变。**不发**——前端不需要知道「循环还活着」。
                     }
                     Err(e) => {
+                        // 失败这一轮也要报分段计数——**出错的段就在数字里**。
+                        let st = reasoner.stage_calls();
                         let out = Readout {
                             anchor,
                             messages: Vec::new(),
                             candidates: s.candidates.clone(),
                             reason: "这一轮没跑通".into(),
                             model_calls: last_calls,
+                            counts: CallCounts {
+                                judge: st.judge,
+                                draft: st.draft,
+                                rank: st.rank,
+                                vision: s.vision.calls(),
+                            },
                             ticks,
                             ocr_calls: s.ocr_calls,
                             error: Some(e),
