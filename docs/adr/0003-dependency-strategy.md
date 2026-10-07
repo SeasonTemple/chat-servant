@@ -134,17 +134,28 @@ crates.io 实际结果（`/api/v1/crates` 搜索 + 逐个核对）：
 **`genai` 就是「泛用 provider 接入」那个**，许可证也过关。
 **LiteLLM 没有 Rust 实现**（Python/TS 代理层），**Vercel AI SDK 没有官方 Rust 移植**（TS）。
 
-不换的两个理由：
+不换的**决定性**理由（复核时才发现的）：
 
-1. **`genai` / `rig-core` / `async-openai` 全是 async（tokio）**，
-   而推理层是**刻意同步**的：`ureq` 阻塞、每条新消息最多 3 次串行调用、
-   `reason` 是核心 crate 不引 tauri。接它们 = 把 tokio 引进核心依赖树，
-   连带改线程模型、取消语义与错误类型。`rig-core` 更重，它想拥有整个推理层。
-2. **Anthropic 侧官方 SDK 两年零更新**（2024-09-03），
-   那半边手写反而是当前唯一选择。
+1. **两条 TLS 路线都撞门。** `deny.toml` 明确 `{ name = "openssl-sys" }`
+   ——「需要 OpenSSL C 库，会让 Windows 构建变脆。统一走 rustls」。
+   - `genai` 的 `native-tls` → 要 OpenSSL → **直接撞上这条 deny**
+   - `genai` 默认的 `rustls-tls` → reqwest/rustls → 拖进 **webpki-roots（MPL-2.0）**，
+     而现有 6 条 MPL 豁免全是 Tauri 的 CSS 解析 crate（`cssparser` / `selectors` /
+     `dtoa-short` / `option-ext` 及两个宏），**不含它**
 
-**复审条件**：genai 出稳定 async-free 通道，或项目决定接受 tokio 时，
-本节作废并改用它。**不要因为"忘了为什么"就再查一遍**——那是本节存在的理由。
+   也就是说：采用 genai 必须**先往一个刻意收紧的许可证门里新增 copyleft 豁免**。
+   这与「先查成熟 crate」不冲突——查过了，结论是「用它的代价是破自己的许可证底线」。
+   **要换的话，先改 `deny.toml` 并单独论证那一条豁免，不要在接依赖时顺手放行。**
+
+2. **核心 crate 仍要保持同步。** `Reasoner` 是同步 trait，而 genai 是 async。
+   Tauri 本身构建在 tokio 上，所以**在 app 层包一个 runtime 桥接是可行的**
+   ——这条我先前说错过：说成「接它 = 把 tokio 引进核心依赖树」，代价说重了。
+   真要换，桥接放 `src-tauri`，`reason` 核心不动。
+
+3. **Anthropic 侧官方 SDK 两年零更新**（2024-09-03），那半边手写是当前唯一选择。
+
+**复审条件**：`deny.toml` 愿意为 webpki-roots 单独论证一条 MPL-2.0 豁免时，
+本节作废并改用 genai。**不要因为「忘了为什么」就再查一遍**——那是本节存在的理由。
 
 ## 加一家兼容方是加一行，不是加五个 arm
 
