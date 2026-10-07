@@ -51,23 +51,25 @@ pub trait Http {
 /// 测连通性用的只读端点。**两家都有 `/v1/models`**，
 /// 且它既不需要模型、也不产生 token 费用。
 impl Provider {
+    /// 测连通性用的只读端点。**不调用模型、不产生 token 费用。**
     pub fn models_url(self) -> &'static str {
         match self {
-            Self::OpenAi => "https://api.openai.com/v1/models",
             Self::Anthropic => "https://api.anthropic.com/v1/models",
+            Self::OpenAi => "https://api.openai.com/v1/models",
+            Self::MiniMax => "https://api.minimaxi.com/v1/models",
         }
     }
 
     /// 端点需要的 header。与 [`Provider::headers`] 同源，但**不带**模型名——
     /// `anthropic-default` 那个头是本项目自己加的，上游的 models 端点不认。
     pub fn probe_headers(self, api_key: &str) -> Vec<(String, String)> {
-        match self {
-            Self::OpenAi => vec![("Authorization".into(), format!("Bearer {api_key}"))],
-            Self::Anthropic => vec![
-                ("x-api-key".into(), api_key.to_string()),
-                ("anthropic-version".into(), "2023-06-01".into()),
-            ],
+        if self.is_openai_compatible() {
+            return vec![("Authorization".into(), format!("Bearer {api_key}"))];
         }
+        vec![
+            ("x-api-key".into(), api_key.to_string()),
+            ("anthropic-version".into(), "2023-06-01".into()),
+        ]
     }
 }
 
@@ -76,6 +78,18 @@ impl Provider {
 pub enum Provider {
     OpenAi,
     Anthropic,
+    /// MiniMax，走 **OpenAI 兼容**接口。
+    ///
+    /// ## 为什么它是「另一种协议」而不是「OpenAi 换个 URL」
+    ///
+    /// 请求体、鉴权头、响应结构三样都和 OpenAI 一致（实测 `abab6.5s-chat`
+    /// 在 `https://api.minimaxi.com/v1/chat/completions` 返回 HTTP 200 并
+    /// 正常回话）。**但差异只有端点与模型名两项**——把它们也变成
+    /// 数据（[`Provider::chat_url`] / [`Provider::models`]），
+    /// 加上家就是加一行，而不是在 `headers` / `build_body` /
+    /// `extract_text` / `models_url` / `probe_headers` 每处都加一个 arm。
+    /// 以后接 Groq、DeepSeek、硅基流动同理。
+    MiniMax,
 }
 
 impl Provider {
@@ -83,100 +97,137 @@ impl Provider {
         match self {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+            Self::MiniMax => "minimax",
+        }
+    }
+
+    /// 是不是走 **OpenAI 兼容**协议（请求体 / 鉴权 / 响应结构全一致）。
+    ///
+    /// 本文件里所有「分协议」的地方都判这个，**而不是**逐个列 variant。
+    /// 少写一个 arm 就少一处「新 provider 忘了改这里」的坑。
+    pub fn is_openai_compatible(self) -> bool {
+        !matches!(self, Self::Anthropic)
+    }
+
+    /// 聊天补全端点。**OpenAI 把模型放 query，MiniMax 放请求体**——
+    /// 这是两者唯一的请求侧差别，各自的 `build_body` 已经照顾到了。
+    pub fn chat_url(self, model: &str) -> String {
+        match self {
+            Self::Anthropic => "https://api.anthropic.com/v1/messages".to_string(),
+            Self::OpenAi => format!("https://api.openai.com/v1/chat/completions?model={model}"),
+            Self::MiniMax => "https://api.minimaxi.com/v1/chat/completions".to_string(),
+        }
+    }
+
+    /// 判断模型 / 起草模型。
+    ///
+    /// ⚠ **只填实测过能通的模型名。** 填一个没验过的名字，表现会是
+    /// 「设置成功、一调用就 404」，比明确不支持更难查。
+    /// 三个都是实测/官方文档确认的：gpt-4o-mini、claude-sonnet-5、abab6.5s-chat。
+    pub fn models(self) -> (&'static str, &'static str) {
+        match self {
+            Self::OpenAi => ("gpt-4o-mini", "gpt-4o-mini"),
+            Self::Anthropic => ("claude-sonnet-5", "claude-sonnet-5"),
+            Self::MiniMax => ("abab6.5s-chat", "abab6.5s-chat"),
         }
     }
 
     fn headers(self, api_key: &str, model: &str) -> Vec<(String, String)> {
-        match self {
-            Self::OpenAi => vec![
+        if self.is_openai_compatible() {
+            return vec![
                 ("Authorization".into(), format!("Bearer {api_key}")),
                 ("Content-Type".into(), "application/json".into()),
-            ],
-            Self::Anthropic => vec![
-                ("x-api-key".into(), api_key.to_string()),
-                ("anthropic-version".into(), "2023-06-01".into()),
-                ("Content-Type".into(), "application/json".into()),
-                // 用假模型名会被 404；显式声明模型避免歧义
-                ("anthropic-default".into(), model.to_string()),
-            ],
+            ];
         }
+        vec![
+            ("x-api-key".into(), api_key.to_string()),
+            ("anthropic-version".into(), "2023-06-01".into()),
+            ("Content-Type".into(), "application/json".into()),
+            // 用假模型名会被 404；显式声明模型避免歧义
+            ("anthropic-default".into(), model.to_string()),
+        ]
     }
 
-    /// 拼请求体。**带图时两家结构完全不同，所以这里不是一个模版。**
+    /// 拼请求体。**带图时两种协议结构完全不同，所以这里不是一个模版。**
+    ///
+    /// `model` 必须**传进来**而不是在这里取常量：各家模型名不同，
+    /// 早先的版本在这里写死 `gpt-4o-mini`，于是**选 Anthropic 时请求体里
+    /// 发的也是 `gpt-4o-mini`**——而 `anthropic-default` 那个头只是我们
+    /// 自己加的，上游认的是 body。症状会是「配置成功、一调用就 400」。
     ///
     /// ⚠ **Anthropic 官方建议图放在文字之前**（原文：*"Claude works best when
     /// images come before text … prefer an image-then-text structure."*），
     /// 所以这家的 content 是 `[图…, 文字]`。顺序不是随手排的。
-    fn build_body(self, system: &str, user: &str, images: &[ImagePayload]) -> serde_json::Value {
-        match self {
-            Self::OpenAi => {
-                // OpenAI 这边文字在前、图在后即可，与它的 chat 文档示例一致。
-                let mut content = vec![serde_json::json!({
-                    "type": "text",
-                    "text": user,
-                })];
-                for i in images {
-                    content.push(serde_json::json!({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": format!("data:{};base64,{}", i.media_type, i.base64),
-                        },
-                    }));
-                }
-                serde_json::json!({
-                    "model": MODEL_JUDGE,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": content},
-                    ],
-                    "temperature": 0.2,
-                })
-            }
-            Self::Anthropic => {
-                let mut content: Vec<serde_json::Value> = images
-                    .iter()
-                    .map(|i| {
-                        serde_json::json!({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": i.media_type,
-                                "data": i.base64,
-                            },
-                        })
-                    })
-                    .collect();
+    fn build_body(
+        self,
+        system: &str,
+        user: &str,
+        model: &str,
+        images: &[ImagePayload],
+    ) -> serde_json::Value {
+        if self.is_openai_compatible() {
+            // OpenAI 兼容这边文字在前、图在后即可，与它的 chat 文档示例一致。
+            let mut content = vec![serde_json::json!({
+                "type": "text",
+                "text": user,
+            })];
+            for i in images {
                 content.push(serde_json::json!({
-                    "type": "text",
-                    "text": user,
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", i.media_type, i.base64),
+                    },
                 }));
-                serde_json::json!({
-                    "model": MODEL_JUDGE,
-                    "system": system,
-                    "max_tokens": 256,
-                    "messages": [{"role": "user", "content": content}],
-                })
             }
+            return serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": content},
+                ],
+                "temperature": 0.2,
+            });
         }
+
+        // 到这里只可能是 Anthropic（原生协议）。
+        let mut content: Vec<serde_json::Value> = images
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": i.media_type,
+                        "data": i.base64,
+                    },
+                })
+            })
+            .collect();
+        content.push(serde_json::json!({
+            "type": "text",
+            "text": user,
+        }));
+        serde_json::json!({
+            "model": model,
+            "system": system,
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": content}],
+        })
     }
 
-    /// 从响应里取「模型说的那段文字」。两家的响应结构完全不同。
+    /// 从响应里取「模型说的那段文字」。**两种协议结构不同。**
     fn extract_text(self, v: &serde_json::Value) -> Option<String> {
-        match self {
-            Self::OpenAi => v
+        if self.is_openai_compatible() {
+            return v
                 .pointer("/choices/0/message/content")
                 .and_then(|c| c.as_str())
-                .map(str::to_string),
-            Self::Anthropic => v
-                .pointer("/content/0/text")
-                .and_then(|c| c.as_str())
-                .map(str::to_string),
+                .map(str::to_string);
         }
+        v.pointer("/content/0/text")
+            .and_then(|c| c.as_str())
+            .map(str::to_string)
     }
 }
-
-const MODEL_JUDGE: &str = "gpt-4o-mini";
-const MODEL_DRAFT: &str = "gpt-4o-mini";
 
 const SYS_JUDGE: &str = "\
 你在读一段聊天记录。只输出 JSON，不要任何解释或代码块标记。格式：
@@ -242,8 +293,8 @@ impl HttpReasoner {
             http,
             provider,
             api_key,
-            judge_model: MODEL_JUDGE.to_string(),
-            draft_model: MODEL_DRAFT.to_string(),
+            judge_model: provider.models().0.to_string(),
+            draft_model: provider.models().1.to_string(),
             timeout: Duration::from_secs(20),
             calls: std::cell::Cell::new(0),
             judge_calls: std::cell::Cell::new(0),
@@ -264,14 +315,9 @@ impl HttpReasoner {
         stage: Stage,
         images: &[ImagePayload],
     ) -> Result<String, String> {
-        let url = match self.provider {
-            Provider::OpenAi => {
-                format!("https://api.openai.com/v1/chat/completions?model={model}")
-            }
-            Provider::Anthropic => "https://api.anthropic.com/v1/messages".to_string(),
-        };
+        let url = self.provider.chat_url(model);
         let headers = self.provider.headers(&self.api_key, model);
-        let body = self.provider.build_body(system, user, images);
+        let body = self.provider.build_body(system, user, model, images);
         self.calls.set(self.calls.get() + 1);
         // 分段计数。**先加再发**——发失败也算一次尝试，
         // 界面上「调用了几次」要是用户实际掏的钱，不是成功次数。

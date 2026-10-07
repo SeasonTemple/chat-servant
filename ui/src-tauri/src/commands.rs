@@ -303,7 +303,7 @@ pub fn park_settings(app: &AppHandle) {
 ///
 /// 换供应商只需在这里加一项，**不用重配整个应用**——
 /// 设置页按这个列表渲染，每个供应商的 key 独立存在凭据管理器里。
-pub const PROVIDERS: &[&str] = &["openai", "anthropic"];
+pub const PROVIDERS: &[&str] = &["openai", "anthropic", "minimax"];
 
 /// 设置页要读的状态。**这里没有任何 key。**
 #[derive(Serialize)]
@@ -443,8 +443,13 @@ fn budget_view(budget: u32, provider: &chatservant_reason::Provider) -> BudgetVi
     // 底账是**随模型变**的：gpt-4o-mini 是 2833，Claude 的 patch 计费是 0。
     // 这里如实反映当前 provider，界面据此显示「预算不够」的警告。
     let provider_base = match provider {
-        Provider::OpenAi => 2833,
         Provider::Anthropic => 0,
+        Provider::OpenAi => 2833,
+        // ⚠ **MiniMax 的视觉 token 计费没有实测过。**
+        // 拿不到权威数字时**不许编一个**——编出来的预算会让用户以为
+        // 花了那个数，实际账单却是别的。这里如实报 0 并标「未核实」，
+        // 让界面把图片外发说成「成本未知」而不是给个假精确的数。
+        Provider::MiniMax => 0,
     };
     BudgetView {
         budget: budget.min(budget_ceiling(provider)),
@@ -490,6 +495,9 @@ fn budget_ceiling(provider: &chatservant_reason::Provider) -> u32 {
     match provider {
         Provider::Anthropic => 1568,
         Provider::OpenAi => 2833 + 5667,
+        // MiniMax 的视觉计费未核实（见上面 `budget_view` 的说明），
+        // 所以给 Anthropic 同级的保守上界，**并让界面标「成本未知」**。
+        Provider::MiniMax => 1568,
     }
 }
 
@@ -545,6 +553,7 @@ pub fn probe_key(provider: String) -> Result<bool, String> {
     let p = match provider.as_str() {
         "openai" => Provider::OpenAi,
         "anthropic" => Provider::Anthropic,
+        "minimax" => Provider::MiniMax,
         // 认不出来的一律拒绝，**不静默接受**。
         _ => return Err(format!("未知的供应商 {provider}")),
     };
@@ -640,6 +649,7 @@ fn build_loop_config() -> LoopConfig {
     for (name, provider) in [
         ("openai", Provider::OpenAi),
         ("anthropic", Provider::Anthropic),
+        ("minimax", Provider::MiniMax),
     ] {
         if let Some(key) = secret::load(name) {
             // `Box<dyn Reasoner>` 不是 `Send` 的边界——循环自己起线程，

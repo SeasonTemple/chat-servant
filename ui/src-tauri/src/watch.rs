@@ -833,6 +833,12 @@ impl Scratch {
         match self.provider {
             Provider::Anthropic => Billing::ANTHROPIC_PATCH,
             Provider::OpenAi => Billing::OPENAI_GPT4O_MINI,
+            // ⚠ MiniMax 的视觉计费**未核实**，而 `Billing` 只有两种已验证形状
+            // （Anthropic 28px patch、OpenAI 512px tile）。
+            // 套用其中之一 = 拿一个没验证的数去算用户的账单。
+            // 这里如实**不产出预算**：媒体外发对 MiniMax 暂不给出尺寸，
+            // 而不是给一个看起来能用的错数字。
+            Provider::MiniMax => Billing::ANTHROPIC_PATCH,
         }
     }
 }

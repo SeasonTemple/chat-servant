@@ -115,6 +115,53 @@ Evergreen 版本免费可再分发，但如果将来要做离线分发包，需�
 - `Attribution` 的说话人/噪声判定——同上
 - `DeliveryReceipt` 状态机与派发策略——安全不变量，必须自己锁住
 
+## LLM 客户端：为什么没有换成成熟 crate（2026-10-07 复核）
+
+**这一节是补记，不是新结论——本项目的纪律是"先查 crates.io 再考虑自己写"，
+而我第一版 `transport.rs` 跳过了这步。复核之后理由成立，但它是**取舍**，
+不是"没有依赖"。**
+
+crates.io 实际结果（`/api/v1/crates` 搜索 + 逐个核对）：
+
+| crate | 下载 | 稳定版 | 许可 | 更新 |
+| --- | --- | --- | --- | --- |
+| `rig-core` | 3,329,504 | 0.44.0 | MIT | 2026-10-07 |
+| `async-openai` | 9,000,107 | 0.42.1 | MIT | 2026-09-28 |
+| `genai` | 452,291 | 0.6.5 | MIT OR Apache-2.0 | 2026-10-05 |
+| `anthropic`（官方 SDK） | 32,481 | 0.0.8 | MIT | **2024-09-03** |
+| `openai-api-rs` | 759,038 | 10.0.2 | MIT | 2026-10-03 |
+
+**`genai` 就是「泛用 provider 接入」那个**，许可证也过关。
+**LiteLLM 没有 Rust 实现**（Python/TS 代理层），**Vercel AI SDK 没有官方 Rust 移植**（TS）。
+
+不换的两个理由：
+
+1. **`genai` / `rig-core` / `async-openai` 全是 async（tokio）**，
+   而推理层是**刻意同步**的：`ureq` 阻塞、每条新消息最多 3 次串行调用、
+   `reason` 是核心 crate 不引 tauri。接它们 = 把 tokio 引进核心依赖树，
+   连带改线程模型、取消语义与错误类型。`rig-core` 更重，它想拥有整个推理层。
+2. **Anthropic 侧官方 SDK 两年零更新**（2024-09-03），
+   那半边手写反而是当前唯一选择。
+
+**复审条件**：genai 出稳定 async-free 通道，或项目决定接受 tokio 时，
+本节作废并改用它。**不要因为"忘了为什么"就再查一遍**——那是本节存在的理由。
+
+## 加一家兼容方是加一行，不是加五个 arm
+
+`Provider` 收敛成两种协议：OpenAI 兼容 与 Anthropic 原生。
+分协议的地方一律判 `is_openai_compatible()`，**不逐个列 variant**；
+端点与模型名是 `Provider::chat_url()` / `Provider::models()` 的数据。
+
+逐个列 variant 的写法会让每加一家就在
+`headers` / `build_body` / `extract_text` / `models_url` / `probe_headers`
+各漏一处——漏掉的那处症状是"配置成功、一调用就 400"，
+和 `anthropic-default` 那个头把模型名带偏是同一类错误。
+
+**实测**：MiniMax 的 `abab6.5s-chat` 在
+`https://api.minimaxi.com/v1/chat/completions` 返回 HTTP 200 并正常回话
+（密钥只从环境变量读，未打印、未落盘）。**模型名只填实测能通的**——
+填一个没验过的名字，表现同样是 404，比明确不支持更难查。
+
 ## 影响
 
 - 新增依赖前先确认三件事：许可证、维护活跃度、是否覆盖我们要的那一个能力
