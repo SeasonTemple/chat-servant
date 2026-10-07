@@ -21,3 +21,6 @@ thiserror.workspace = true
 [dev-dependencies]
 # 黄金测试要读 crates/capture/fixtures/*.png。只开 png 特性，不引其他编解码器。
 image.workspace = true
+# 夹具自证：manifest 里记 sha256，测试启动时校验字节没被改过。
+# RustCrypto 的 `sha2` 是 MIT OR Apache-2.0，符合本仓库的许可门槛。
+sha2 = "0.10"

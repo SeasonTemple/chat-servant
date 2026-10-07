@@ -15,6 +15,8 @@ chatservant-reason.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 image.workspace = true
+# 夹具 manifest 记 sha256，黄金测试据此报出「是哪一个夹具被改坏了」。
+sha2.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 windows.workspace = true

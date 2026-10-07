@@ -49,6 +49,9 @@ wgc = "2.0"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+# 夹具 manifest 记 sha256，黄金测试据此报出「是哪一个夹具被改坏了」。
+# RustCrypto 的 `sha2` 是 MIT OR Apache-2.0，符合本仓库的许可门槛（ADR-0003）。
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

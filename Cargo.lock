@@ -410,6 +410,7 @@ dependencies = [
  "chatservant-core",
  "image",
  "serde",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
@@ -4582,6 +4583,7 @@ dependencies = [
  "chatservant-reason",
  "clap",
  "image",
+ "sha2",
  "tracing",
  "tracing-subscriber",
  "windows",

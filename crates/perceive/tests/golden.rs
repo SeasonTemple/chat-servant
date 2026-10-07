@@ -92,12 +92,45 @@ const MY_SIDE: Golden = Golden {
 };
 
 fn load(name: &str) -> Frame {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../capture/fixtures")
-        .join(format!("{name}.png"));
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../capture/fixtures");
+    let path = dir.join(format!("{name}.png"));
+    verify_digest(&dir, name, &path);
     let img = image::open(&path).unwrap_or_else(|e| panic!("读夹具 {} 失败：{e}", path.display()));
     let (w, h) = img.dimensions();
     Frame::from_rgb(w, h, img.to_rgb8().into_raw()).expect("尺寸与缓冲区一致")
+}
+
+/// 夹具的字节必须与 manifest 里记的 sha256 相符。
+///
+/// ## 为什么要有这道
+///
+/// 夹具是**像素级**的黄金基线。文件被改坏（截断、换工具重存、被 git
+/// 的换行设置悄悄改写）时，黄金测试不会报「夹具坏了」，而是报
+/// 「色种数 843 变成 812」——那是一条**看不出根因**的失败。
+/// 这里直接报出**是哪一个夹具**、期望多少、实际多少。
+fn verify_digest(dir: &Path, name: &str, png: &Path) {
+    let manifest = std::fs::read_to_string(dir.join(format!("{name}.toml")))
+        .unwrap_or_else(|e| panic!("读夹具 manifest {name}.toml 失败：{e}"));
+    let want = manifest
+        .lines()
+        .find_map(|l| l.strip_prefix("sha256 = \"")?.strip_suffix('"'))
+        .unwrap_or_else(|| {
+            panic!("{name}.toml 里没有 sha256 字段——夹具无法自证没有被改坏");
+        });
+    let got = sha256_of(png);
+    assert_eq!(
+        got, want,
+        "夹具 {name}.png 的 sha256 不符：\n  期望 {want}\n  实际 {got}\n\
+         夹具是像素级黄金基线，被改坏会让黄金测试报出看不出根因的差异。"
+    );
+}
+
+fn sha256_of(path: &Path) -> String {
+    use sha2::{Digest as _, Sha256};
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("读 {} 失败：{e}", path.display()));
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// 区域里的精确色直方图，降序。

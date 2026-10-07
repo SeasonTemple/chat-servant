@@ -34,6 +34,8 @@ enum Cmd {
     Caps,
     /// 遮挡检测体检：目标窗口现在能不能用第 ③ 级抓到
     Occluded,
+    /// 把目标窗口提到前台。**这会抢焦点**——抓帧失败时的救急手段
+    Focus,
     /// 抓一帧（默认 wgc）并立刻本地 OCR，把读到的文字打出来
     Read,
     /// 生成脱敏后的回归夹具
@@ -145,6 +147,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Occluded => probe_occluded("wechat"),
+        Cmd::Focus => probe_focus("wechat"),
         Cmd::Read => probe_read(),
         Cmd::Fixture { name, source } => make_fixture(&name, source),
         Cmd::Perceive { file } => probe_perceive(file),
@@ -163,6 +166,50 @@ fn main() -> Result<()> {
             } => probe_frame(&app, hwnd, &method, out),
         },
     }
+}
+
+/// 把目标窗口提到前台。**会抢焦点**——命令名就叫 focus，语义明确。
+///
+/// ## 为什么需要它
+///
+/// WGC 名义上能抓被遮挡的窗口，**但这台机器上实测不行**：
+/// 窗口被别的东西盖住时，抓帧报「捕获会话在送来第一帧之前就关闭」。
+/// 所以「能不能抓到」这件事和「窗口露没露出来」直接相关，
+/// 抓不到时的第一条救急动作就是把它露出来。
+///
+/// 走的是 `inject::focus`——注入路径在用的同一套
+/// `AttachThreadInput` + `SetForegroundWindow`。不在 PowerShell 里重写一遍：
+/// 前台锁的细节（挂哪个线程、要不要先按 Alt）试过三种写法都失败，
+/// 而这段 Rust 是**在生产里跑过**的。
+fn probe_focus(app: &str) -> Result<()> {
+    set_dpi_aware();
+    let surface = surface_for(app)?;
+    let hit = chatservant_capture::find_chat_window(&surface)
+        .map_err(|e| anyhow::anyhow!("找窗口失败：{e}"))?;
+    println!("目标 0x{:X}  {}", hit.hwnd_raw, hit.title);
+
+    let hwnd = windows::Win32::Foundation::HWND(hit.hwnd_raw as *mut core::ffi::c_void);
+    match chatservant_capture::inject::focus(hwnd) {
+        Ok(()) => {
+            println!("已提到前台。等 0.5s 后复查遮挡：");
+        }
+        Err(e) => {
+            println!("提前台失败：{e}");
+            // ⚠ 别说成「产品也做不到」。前台锁只约束**调用方进程**：
+            // 只有最后收到用户输入的那个进程有资格改前台。从终端跑的这个
+            // 探针不是那个进程，所以它被拒**不代表**面板里的注入会失败——
+            // 面板是用户点过的 GUI 进程，有资格。
+            println!(
+                "这说的是**这个命令行进程**没资格改前台（它不是最后收到你输入的那个进程）。\n\
+                 面板里的注入走同一段代码，但面板是你点过的 GUI 进程，**有资格**——\n\
+                 所以这里的失败不能推断产品也不行。\n\
+                 要在真实条件下验证，请点一下微信，或直接从面板里点「填入」。"
+            );
+            return Ok(());
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    probe_occluded(app)
 }
 
 /// 遮挡检测体检。
@@ -537,6 +584,11 @@ fn make_fixture(name: &str, source: Option<PathBuf>) -> Result<()> {
     .save(&out_png)
     .context("写夹具 PNG 失败")?;
 
+    // PNG 落盘**之后**才算 sha256：摘要必须覆盖最终写出的那些字节，
+    // 覆盖编码前的像素是没意义的——换个编码器结果就变，那样夹具会
+    // 因为无关的原因报「被改坏」。
+    let digest = sha256_of(&out_png);
+
     let manifest = format!(
         "# 夹具 {name}\n\
          #\n\
@@ -561,7 +613,8 @@ fn make_fixture(name: &str, source: Option<PathBuf>) -> Result<()> {
          chat_y0 = {}\n\
          chat_x1 = {}\n\
          chat_y1 = {}\n\
-         panel_bg = [{}, {}, {}]\n",
+         panel_bg = [{}, {}, {}]\n\
+         sha256 = \"{}\"\n",
         redacted.width(),
         redacted.height(),
         a.chat.x0,
@@ -571,6 +624,7 @@ fn make_fixture(name: &str, source: Option<PathBuf>) -> Result<()> {
         p.panel_bg[0],
         p.panel_bg[1],
         p.panel_bg[2],
+        digest,
     );
     std::fs::write(dir.join(format!("{name}.toml")), manifest)?;
 
@@ -584,7 +638,17 @@ fn make_fixture(name: &str, source: Option<PathBuf>) -> Result<()> {
         "   配色 rgb({},{},{})",
         p.panel_bg[0], p.panel_bg[1], p.panel_bg[2]
     );
+    println!("   sha256 {digest}");
     Ok(())
+}
+
+/// 文件字节的 sha256，小写十六进制。
+fn sha256_of(path: &Path) -> String {
+    use sha2::{Digest as _, Sha256};
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("读 {} 失败：{e}", path.display()));
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// 感知层探针：走**真正的生产接缝** `chatservant_perceive::read`，
