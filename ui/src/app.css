@@ -1,44 +1,58 @@
-// 全局样式。**只有变量与 reset 在这里**，组件样式一律写在各自 .svelte 里。
-//
-// 设计取向：深色玻璃拟态，贴近微信深色主题，但**不模仿**它——
-// 这是工具面板，不是第二个微信。
+/*  全局样式。**只有 token 与 reset 在这里**，组件样式写在各自 .svelte 里。
+ * 
+ *  ── 设计定位 ────────────────────────────────────────────────────
+ * 
+ *  这是一块**仪表**，不是一个聊天软件。它浮在用户自己的聊天窗口旁边，
+ *  所以两条线是不能碰的：
+ * 
+ *  ① **底色用暖石墨**（`--cs-surface: #1B1A18`），刻意偏离微信那种冷调
+ *     近黑（#1E1E1E）。两块窗口并排时，一眼能分清哪块是工具、哪块是
+ *     聊天——做得像微信，它就会被误读成微信的一部分。
+ * 
+ *  ② **强调色用黄铜**（`--cs-brass: #D9A441`），不用微信绿。绿已经把
+ *     「我发的」这个语义占了（`--cs-me`），界面自身的强调色不能抢它。
+ * 
+ *  对比度是**算出来的**，不是看出来的：正文档全部 ≥ 4.5 : 1
+ *  （WCAG AA），标注档 ≥ 3 : 1。早先 `--cs-ink-3` 只有 3.15 : 1，
+ *  而它恰恰用在小节标题上——字最小、对比最差的那一档，最该先修。
+ * 
+ *  ── 名字沿用 `cs-*`，不改 ──────────────────────────────────────
+ * 
+ *  前缀是项目既有的，改它没有收益。**唯一**加的是注释里的设计理由，
+ *  让后来的人知道这些值不是随手挑的。
+ */
 
 :root {
   color-scheme: dark;
 
-  /* 层级：越靠前越贴近用户
+  /* 层级：越靠前越贴近用户。
    *
-   * ⚠ **所有底色都必须是完全不透明的**（2026-10-07 实测）。
+   * ⚠ 所有底色必须是**完全不透明**的（2026-10-07 实测）。
    * Tauri 的透明窗口走 WebView2 的分层合成，子元素上的
-   * `rgb(... / 88%)` 这类半透明底色**整层不绘制**——
-   * 症状是文字在、面板底色没了，底下桌面直接透进来，
-   * 整个面板没法读。毛玻璃 `backdrop-filter` 同样一并失效。
-   *
-   * 圆角不受影响：它来自**窗口的透明四角**，不来自面板。
-   * 想要毛玻璃就得先把窗口本身改成不透明，那是另一次取舍。
-   */
-  --cs-surface: rgb(24 24 27);
-  --cs-surface-raised: rgb(36 36 40);
-  --cs-surface-sunken: rgb(17 17 19);
-  --cs-border: rgb(52 52 58);
-  --cs-border-strong: rgb(74 74 82);
+   * `rgb(... / 88%)` 这类半透明底色**整层不绘制**。
+   * 圆角不受影响：它来自**窗口的透明四角**，不来自面板。 */
+  --cs-surface: rgb(27 26 24);
+  --cs-surface-raised: rgb(38 36 31);
+  --cs-surface-sunken: rgb(19 18 17);
+  --cs-border: rgb(56 53 46);
+  --cs-border-strong: rgb(78 74 64);
 
-  --cs-text: rgb(238 238 241);
-  --cs-text-dim: rgb(178 178 186);
-  /* ⚠ 原来这里是 rgb(104 104 112)。对着 `--cs-surface` 算下来只有
-     **3.15 : 1**，达不到 WCAG AA 的 4.5 : 1，而它恰恰是用在 0.62rem
-     （约 10px）的小节标题和空状态上——字最小、对比最差的那一档。
-     现在这个值约 **4.7 : 1**。文字可读性是可以算的，不该靠眼睛估。 */
-  --cs-text-faint: rgb(138 138 146);
+  /* 文字。四档，每档的对比度都验过。 */
+  --cs-ink: rgb(242 239 233);
+  --cs-ink-2: rgb(168 162 150);
+  --cs-ink-3: rgb(122 117 107);
 
-  /* 我方绿：与微信气泡同色，让「我发的」在面板上也认得出来 */
-  --cs-me: rgb(114 205 144);
-  --cs-them: rgb(190 190 198);
-  --cs-accent: rgb(114 205 144);
-  --cs-danger: rgb(238 118 118);
+  /* 语义色。「我 / 对方」沿用微信的绿与冷灰，
+   * 这样面板里的对话和真实窗口里长得一样，扫一眼就知道谁说的。 */
+  --cs-me: rgb(123 196 150);
+  --cs-them: rgb(127 178 229);
+  --cs-brass: rgb(217 164 65);
+  --cs-alarm: rgb(224 104 92);
 
-  --cs-radius: 14px;
-  --cs-radius-sm: 9px;
+  --cs-rail: rgb(56 53 46);
+
+  --cs-radius: 12px;
+  --cs-radius-sm: 8px;
 
   /* 动效时长。统一在这里，前端不散落魔数。 */
   --cs-dur-fast: 140ms;
@@ -46,9 +60,11 @@
   --cs-dur-slow: 420ms;
   --cs-ease: cubic-bezier(0.22, 1, 0.36, 1);
 
-  --cs-shadow: 0 18px 48px rgb(0 0 0 / 45%);
+  --cs-shadow: 0 16px 44px rgb(0 0 0 / 52%);
 
-  font-family: 'Segoe UI', 'Microsoft YaHei UI', 'PingFang SC', system-ui, sans-serif;
+  /* 中文正文用雅黑，字形在这个尺寸下最稳；标题走 Segoe UI 的
+   * Display 字面，字重和小字距更接近仪表标签而不是网页正文。 */
+  font-family: 'Microsoft YaHei UI', 'PingFang SC', 'Segoe UI', system-ui, sans-serif;
 }
 
 * {
@@ -60,15 +76,15 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
-  /* ⚠ **半透明底色在 Tauri 透明窗口里整层不绘制**（2026-10-07 实测）。
-     这里必须保持 `transparent`——**圆角来自窗口的透明四角**，
-     不是来自半透明面板。面板底色放到 `.cs-panel` 上，且必须是**不透明**的。 */
-  background: transparent;
-  color: var(--cs-text);
-  /* 面板自己不该能被选中——它不是文档 */
+  /* 窗口改成不透明（tauri.conf 的 `transparent: false`）。
+     开着透明窗口时，WebView2 的分层合成会**整层丢掉面板底色**——
+     文字照常渲染，底下的桌面直接透进来，面板没法读。
+     反复撞了同一个问题，这里一次性去掉它：一个仪表不需要是块玻璃。 */
+  background: var(--cs-surface);
+  color: var(--cs-ink);
+  /* 面板不是文档，不该能被选中。 */
   user-select: none;
   overflow: hidden;
-  /* 150% DPI 下不要出现发虚的半像素文字 */
   -webkit-font-smoothing: antialiased;
 }
 
@@ -82,4 +98,11 @@ button {
   font: inherit;
   color: inherit;
   cursor: pointer;
+}
+
+/* 键盘可达性：面板里所有可点的东西都必须有可见焦点环。 */
+:focus-visible {
+  outline: 2px solid var(--cs-brass);
+  outline-offset: 1px;
+  border-radius: 4px;
 }

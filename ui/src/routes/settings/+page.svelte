@@ -425,7 +425,7 @@
     margin: 0.3rem 0 0;
     font-size: 0.8rem;
     font-weight: 600;
-    color: var(--cs-text-dim);
+    color: var(--cs-ink-2);
   }
 
   .cs-close {
@@ -436,12 +436,12 @@
     border: 1px solid var(--cs-border);
     border-radius: 7px;
     background: transparent;
-    color: var(--cs-text-dim);
+    color: var(--cs-ink-2);
   }
 
   .cs-close:hover {
     background: rgb(255 255 255 / 6%);
-    color: var(--cs-text);
+    color: var(--cs-ink);
   }
 
   .cs-row {
@@ -453,14 +453,14 @@
 
   .cs-label {
     font-size: 0.78rem;
-    color: var(--cs-text-dim);
+    color: var(--cs-ink-2);
   }
 
   .cs-note {
     margin: 0;
     font-size: 0.7rem;
     line-height: 1.6;
-    color: var(--cs-text-faint);
+    color: var(--cs-ink-3);
     white-space: pre-line;
   }
 
@@ -468,7 +468,7 @@
     margin: 0.25rem 0 0;
     font-size: 0.68rem;
     line-height: 1.55;
-    color: var(--cs-text-dim);
+    color: var(--cs-ink-2);
     /* 指引可能有换行，要原样显示 */
     white-space: pre-line;
   }
@@ -478,13 +478,13 @@
     padding: 0.4rem 0.5rem;
     font-size: 0.7rem;
     border-radius: 7px;
-    background: color-mix(in srgb, var(--cs-danger) 18%, transparent);
+    background: color-mix(in srgb, var(--cs-alarm) 18%, transparent);
   }
 
   /* 预算无解时的提示。用警告色而不是正文色——这不是「已保存」，
      是「你调的这个值不起作用」。 */
   .cs-warn {
-    color: var(--cs-danger);
+    color: var(--cs-alarm);
   }
 
   .cs-prov {
@@ -512,17 +512,17 @@
   }
 
   .cs-badge.ok {
-    color: var(--cs-accent);
-    background: color-mix(in srgb, var(--cs-accent) 16%, transparent);
+    color: var(--cs-brass);
+    background: color-mix(in srgb, var(--cs-brass) 16%, transparent);
   }
 
   .cs-badge.ok.env {
-    color: var(--cs-text-dim);
+    color: var(--cs-ink-2);
     background: rgb(255 255 255 / 8%);
   }
 
   .cs-badge.miss {
-    color: var(--cs-text-faint);
+    color: var(--cs-ink-3);
     background: rgb(255 255 255 / 6%);
   }
 
@@ -538,7 +538,7 @@
     padding: 0.3rem 0.45rem;
     font-size: 0.72rem;
     font-family: ui-monospace, 'Cascadia Mono', monospace;
-    color: var(--cs-text);
+    color: var(--cs-ink);
     background: rgb(0 0 0 / 28%);
     border: 1px solid var(--cs-border-strong);
     border-radius: 7px;
@@ -546,7 +546,7 @@
 
   .cs-input:focus {
     outline: none;
-    border-color: color-mix(in srgb, var(--cs-accent) 60%, transparent);
+    border-color: color-mix(in srgb, var(--cs-brass) 60%, transparent);
   }
 
   .cs-btn {
@@ -568,12 +568,12 @@
   }
 
   .cs-btn.primary {
-    border-color: color-mix(in srgb, var(--cs-accent) 55%, transparent);
-    color: var(--cs-accent);
+    border-color: color-mix(in srgb, var(--cs-brass) 55%, transparent);
+    color: var(--cs-brass);
   }
 
   .cs-btn.danger {
-    border-color: color-mix(in srgb, var(--cs-danger) 45%, transparent);
-    color: var(--cs-danger);
+    border-color: color-mix(in srgb, var(--cs-alarm) 45%, transparent);
+    color: var(--cs-alarm);
   }
 </style>

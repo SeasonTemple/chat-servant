@@ -129,7 +129,7 @@
     height: 100%;
     padding: 0.75rem;
     background: var(--cs-surface);
-    color: var(--cs-text);
+    color: var(--cs-ink);
   }
 
   .cs-head {
@@ -149,7 +149,7 @@
     align-items: center;
     gap: 0.3rem;
     font-size: 0.7rem;
-    color: var(--cs-text-dim);
+    color: var(--cs-ink-2);
   }
 
   .cs-legend {
@@ -166,7 +166,7 @@
     border-radius: 999px;
     border: 1px solid var(--cs-border);
     font-size: 0.65rem;
-    color: var(--cs-text-dim);
+    color: var(--cs-ink-2);
   }
 
   .cs-chip i {
@@ -232,7 +232,7 @@
 
   .cs-evidence {
     margin: 0.2rem 0;
-    color: var(--cs-text-dim);
+    color: var(--cs-ink-2);
   }
 
   .cs-text {
@@ -243,10 +243,10 @@
   .cs-empty,
   .cs-fail {
     font-size: 0.7rem;
-    color: var(--cs-text-faint);
+    color: var(--cs-ink-3);
   }
 
   .cs-fail {
-    color: var(--cs-danger);
+    color: var(--cs-alarm);
   }
 </style>

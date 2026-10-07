@@ -107,8 +107,8 @@
   /* 推荐条：视觉上要比其它候选更突出，但**不靠更亮**——
      面板是半透明的，亮色会盖住底下用户的聊天窗口。 */
   .cs-cand.rec {
-    border-color: color-mix(in srgb, var(--cs-accent) 45%, transparent);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cs-accent) 14%, transparent);
+    border-color: color-mix(in srgb, var(--cs-brass) 45%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cs-brass) 14%, transparent);
   }
 
   .cs-cand.busy {
@@ -121,7 +121,7 @@
     width: calc(var(--pct) * 1%);
     background: linear-gradient(
       90deg,
-      color-mix(in srgb, var(--cs-accent) 24%, transparent),
+      color-mix(in srgb, var(--cs-brass) 24%, transparent),
       transparent
     );
     pointer-events: none;
@@ -138,11 +138,11 @@
     align-items: center;
     gap: 0.4rem;
     font-size: 0.62rem;
-    color: var(--cs-text-faint);
+    color: var(--cs-ink-3);
   }
 
   .cs-star {
-    color: var(--cs-accent);
+    color: var(--cs-brass);
     /* 星标不用图标字体，直接一个字更省，也不会有字体缺失的方块 */
     font-weight: 600;
   }
@@ -160,7 +160,7 @@
     margin: 0.2rem 0 0;
     font-size: 0.78rem;
     line-height: 1.55;
-    color: var(--cs-text);
+    color: var(--cs-ink);
     /* 面板可以很窄。宁可换行，不要横向溢出或截断——
        截断的候选没法判断要不要用。 */
     overflow-wrap: anywhere;
@@ -179,7 +179,7 @@
     border-radius: 7px;
     border: 1px solid var(--cs-border-strong);
     background: transparent;
-    color: var(--cs-text-dim);
+    color: var(--cs-ink-2);
     /* 按下反馈留给 GSAP，这里不做 transform——两者同时写会互相打断 */
     transition:
       background var(--cs-dur-fast) var(--cs-ease),
@@ -190,7 +190,7 @@
 
   .cs-btn:hover:not(:disabled) {
     background: rgb(255 255 255 / 6%);
-    color: var(--cs-text);
+    color: var(--cs-ink);
   }
 
   .cs-btn:disabled {
@@ -199,11 +199,11 @@
   }
 
   .cs-btn.primary {
-    border-color: color-mix(in srgb, var(--cs-accent) 55%, transparent);
-    color: var(--cs-accent);
+    border-color: color-mix(in srgb, var(--cs-brass) 55%, transparent);
+    color: var(--cs-brass);
   }
 
   .cs-btn.primary:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--cs-accent) 12%, transparent);
+    background: color-mix(in srgb, var(--cs-brass) 12%, transparent);
   }
 </style>

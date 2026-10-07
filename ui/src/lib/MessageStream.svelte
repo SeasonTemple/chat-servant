@@ -45,7 +45,7 @@
       <p class="cs-text selectable">{m.text}</p>
     </article>
   {:else}
-    <p class="cs-empty">还没有消息。窗口静止时这里不会刷新。</p>
+    <p class="cs-empty">还没有消息</p>
   {/each}
 </section>
 
@@ -53,21 +53,25 @@
   .cs-stream {
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: 0.3rem;
+    padding: 0.5rem 0 0;
     overflow-y: auto;
     scrollbar-width: thin;
-    min-height: 3rem;
+    min-height: 2.4rem;
     /* GSAP 改 scrollTop，这里不能再给 transition，否则会互相拖慢 */
   }
 
+  /* 每条消息只用**左边一条 2px 的色条**区分说话人，不做气泡、不做头像。
+     面板很窄，气泡会把正文的行宽压到读不下去；色条够了——
+     「谁说的」是二元信息，不需要更多像素。 */
   .cs-msg {
     display: flex;
     flex-direction: column;
-    gap: 0.12rem;
-    padding: 0.38rem 0.5rem;
+    gap: 0.1rem;
+    padding: 0.35rem 0.5rem;
     border-radius: var(--cs-radius-sm);
     background: var(--cs-surface-raised);
-    border-left: 2px solid transparent;
+    border-left: 2px solid var(--cs-them);
   }
 
   .cs-msg.me {
@@ -76,7 +80,7 @@
 
   .cs-msg.sys {
     opacity: 0.7;
-    border-left-color: var(--cs-text-faint);
+    border-left-color: var(--cs-ink-3);
   }
 
   .cs-msg-head {
@@ -88,13 +92,13 @@
 
   .cs-who {
     font-size: 0.62rem;
-    color: var(--cs-text-faint);
+    color: var(--cs-ink-3);
     flex: 0 0 auto;
   }
 
   .cs-ev {
     font-size: 0.58rem;
-    color: var(--cs-text-faint);
+    color: var(--cs-ink-3);
     opacity: 0.8;
     text-align: right;
     /* 依据可能很长：限制一行 + 保留 title。
@@ -116,7 +120,7 @@
     margin: 0;
     padding: 0.75rem 0.25rem;
     font-size: 0.72rem;
-    color: var(--cs-text-faint);
+    color: var(--cs-ink-3);
     text-align: center;
   }
 </style>

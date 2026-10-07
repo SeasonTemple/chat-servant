@@ -3,9 +3,8 @@
   import { onMount } from 'svelte';
   import CandidateCard from '$lib/CandidateCard.svelte';
   import MessageStream from '$lib/MessageStream.svelte';
-  import ReasonBar from '$lib/ReasonBar.svelte';
   import TierSwitch from '$lib/TierSwitch.svelte';
-  import type { CallCounts, Candidate, DispatchReply, Message, Tier } from '$lib/types';
+  import type { Candidate, DispatchReply, Message, Tier } from '$lib/types';
 
   /** Rust 侧推过来的消息流。**前端不自己算**——`Message[]` 是 Rust 判完发过来的。 */
   let messages = $state<Message[]>([]);
@@ -14,7 +13,6 @@
   let reason = $state('等待第一条消息');
   /** 分段调用次数。**Rust 侧算好推过来**，前端不自己累加——
    *  四个数是「静默期零调用」那条硬约束的唯一可视证据，自己数一遍就可能数错。 */
-  let counts = $state<CallCounts | null>(null);
   /** 当前窗口里的会话名。
    *
    * 这是**会话身份闸**的判据，必须显眼：程序只对锁定会话动手，
@@ -86,6 +84,23 @@
   );
   const bestId = $derived(sorted[0]?.id ?? '');
 
+  /**
+   * **只在真出事时才说的话。**
+   *
+   * 原来有一整条状态栏常驻，显示「判断 0 · 起草 0 · 排序 0 · 视觉 0」
+   * 和各种说明文字。它的问题是：**大部分时候说的都是「没事」**——
+   * 一条一直显示「一切正常」的横幅，会让真的异常变得不显眼。
+   *
+   * 所以这里只挑真正要人动手的情况：
+   * - 认不出会话 → 程序不会动手，硬约束第 1 条生效中
+   * - Rust 说推过来的那一轮出了错
+   */
+  const problem = $derived.by(() => {
+    if (!peer) return '没认出会话，本轮不动手 —— 确认微信窗口开着、没有被缩到托盘';
+    if (/失败|错误|抓不到|收不到/.test(reason)) return reason;
+    return '';
+  });
+
   onMount(() => {
     // 一次 invoke 打通 Rust → 前端。**不轮询**：`readout` 是 Rust 推过来的。
     let dispose: (() => void) | null = null;
@@ -104,7 +119,6 @@
           messages: Message[];
           candidates: Candidate[];
           reason: string;
-          counts: CallCounts | null;
           /** 当前窗口里的会话名。**空串 = 没认出来**。 */
           peer: string;
           /** 重锁请求是否还在等着被下一轮取走。 */
@@ -113,7 +127,6 @@
           messages = e.payload.messages ?? [];
           candidates = e.payload.candidates ?? [];
           reason = e.payload.reason;
-          counts = e.payload.counts ?? null;
           peer = e.payload.peer ?? '';
           relockPending = e.payload.relock_pending ?? false;
         });
@@ -148,7 +161,6 @@
         candidates: Candidate[];
         reason: string;
         peer: string;
-        counts: CallCounts | null;
       } | null>('latest_readout');
       if (!r) {
         reason = '观察循环还没跑出第一帧。';
@@ -158,7 +170,6 @@
       candidates = r.candidates ?? [];
       reason = r.reason;
       peer = r.peer ?? '';
-      counts = r.counts ?? null;
     } catch (e) {
       reason = `读快照失败：${String(e)}`;
     } finally {
@@ -207,76 +218,54 @@
 </script>
 
 <main {@attach watchWidth} class="cs-panel" class:compact>
-  <!-- 标题栏：只做「我是谁 + 两个次要入口」。
-       ⚠ 发送档位**不在这里**（2026-10-07 改）——
-       它是最需要慎重的一步，却原来和标题挤在一起、看着像随手点的。
-       档位现在固定在**底部**，和候选区隔开，让「先看内容、再决定怎么发」
-       成为视觉上的自然顺序。 -->
+  <span class="cs-rail" aria-hidden="true"></span>
+  <!-- 标题栏 = 「我现在看着谁」。
+       会话名是这一屏最重要的一个事实：程序只对它动手（硬约束第 1 条）。
+       原来它缩在一张小卡片里、字号还比旁边按钮小，「我看的到底是谁」
+       这件事被埋掉了。现在它就是标题本身。 -->
   <header class="cs-head">
-    <span class="cs-title">副驾</span>
+    <span class="cs-dot" class:idle={!peer} aria-hidden="true"></span>
+    <span class="cs-peer" class:unknown={!peer} title={peer || '没认出会话'}>
+      {peer || '没认出会话'}
+    </span>
     <div class="cs-head-tools">
       <button
-        class="cs-tool"
-        title="打开识别画布：每个框按归类结果上色"
-        onclick={() => invoke('open_debug').catch(() => {})}
+        class="cs-icon"
+        title="把当前这个会话锁成要处理的那个"
+        onclick={relock}
+        disabled={locking || relockPending}
       >
-        画布
+        {locking || relockPending ? '…' : '锁'}
       </button>
       <button
-        class="cs-tool"
-        title="打开设置"
-        onclick={() => invoke('open_settings').catch(() => {})}
+        class="cs-icon"
+        title="识别画布：每个框按归类结果上色"
+        onclick={() => invoke('open_debug').catch(() => {})}
       >
-        设置
+        画
+      </button>
+      <button class="cs-icon" title="设置" onclick={() => invoke('open_settings').catch(() => {})}>
+        设
+      </button>
+      <button class="cs-icon" title="手动读一次快照" onclick={refresh} disabled={refreshing}>
+        {refreshing ? '…' : '新'}
       </button>
     </div>
   </header>
 
-  <!-- 会话闸：只对锁定会话动手。这是**当前状态**，所以放在最上面做成卡片：
-       用户任何时候一眼都能看出「它现在看着谁」，不对就会点下面的锁定。 -->
-  <section class="cs-peer" class:unknown={!peer} aria-label="当前会话">
-    <span class="cs-peer-bar" aria-hidden="true"></span>
-    <span class="cs-peer-text">
-      <span class="cs-peer-label">正在处理</span>
-      <span class="cs-peer-name">{peer || '没认出来'}</span>
-    </span>
-    <div class="cs-peer-actions">
-      <button
-        class="cs-peer-lock"
-        onclick={refresh}
-        disabled={refreshing}
-        title="手动读一次当前快照。面板是纯推送的，静态窗口里它不会自己说话。"
-      >
-        {refreshing ? '读取中' : '刷新'}
-      </button>
-      <button
-        class="cs-peer-lock"
-        onclick={relock}
-        disabled={locking || relockPending}
-        title="把当前这个会话锁成要处理的那个。程序只对它动手。"
-      >
-        {locking || relockPending ? '等下一轮' : '改锁这个'}
-      </button>
-    </div>
-  </section>
-
-  <!-- 为什么不动手：只在有事发生时说一句话。认不出会话的时候，
-       它取代所有其它内容——那时候显示「候选」是在骗人。 -->
-  {#if !peer && messages.length === 0 && candidates.length === 0}
-    <p class="cs-note">{reason}</p>
-  {:else}
-    <ReasonBar {reason} {counts} />
+  <!-- 只在**真出事**时出现：认不出会话、抓不到帧、推理失败。
+       正常时不占地方——一个一直挂在那儿刷新的状态条，会把「真的
+       出事了」这件事稀释掉。这正是硬约束第 1 条要求的可见性。 -->
+  {#if problem}
+    <p class="cs-alarm">{problem}</p>
   {/if}
 
   <MessageStream {messages} />
 
-  <!-- 候选区。**它是这个面板的产出**，所以拿走所有剩余空间；
-       没有候选时，空状态就落在这块地方里，不再另外插一段灰字。
-       原来「还没有消息」「窗口静止时不会刷新」「没有新消息不会起草」
-       三行灰字说的其实是同一件事，读起来像出了三个问题。 -->
+  <!-- 候选是这个面板的**产出**。没有候选时不该有一大块空白顶在中间，
+       看起来像界面坏了——空状态只占它该占的那点地方。 -->
   <section class="cs-cands" aria-label="候选回复">
     {#if sorted.length > 0}
-      <h2 class="cs-section">候选回复</h2>
       {#each sorted as c, i (c.id)}
         <CandidateCard
           {c}
@@ -288,265 +277,227 @@
         />
       {/each}
     {:else}
-      <h2 class="cs-section">候选回复</h2>
       <div class="cs-empty">
-        <p class="cs-empty-lead">
-          {#if !peer}
-            没认出会话，动不了手
-          {:else if messages.length === 0}
-            窗口静止时这里不会刷新
-          {:else}
-            等对方那条先到
-          {/if}
-        </p>
-        <p class="cs-empty-sub">对方发来新消息才会起草。</p>
+        {#if !peer}
+          <span class="cs-empty-lead">没认出会话，不动手</span>
+          <span class="cs-empty-sub">点上面的「锁」，换成你正在看的那个会话</span>
+        {:else}
+          <span class="cs-empty-lead">对方还没发新消息</span>
+          <span class="cs-empty-sub">发来了才会起草候选</span>
+        {/if}
       </div>
     {/if}
   </section>
 
-  <!-- 发送档位。固定在底部，和候选区之间有一条分隔线：
-       「看完再决定怎么发」这个顺序要在视觉上成立。 -->
+  <!-- 发送档位固定在**底部**：它是这个界面上最需要慎重的一步，
+       不该和标题挤在一起、看着像随手点的一档。 -->
   <footer class="cs-foot">
     <span class="cs-foot-label">发送方式</span>
-    <TierSwitch bind:tier onchange={changeTier} />
+    <span class="cs-switch" data-tier={tier}><TierSwitch bind:tier onchange={changeTier} /></span>
   </footer>
 </main>
 
 <style>
+  /* ══════════════════════════════════════════════════════════════
+     设计定位：**仪表，不是第二个聊天软件**。
+
+     它浮在用户自己的聊天窗口旁边。如果做得像微信，它就会被
+     误读成微信的一部分——所以底色用**暖石墨**（#1B1A18），
+     刻意偏离微信那种冷调近黑，两块窗口并排时能一眼分清。
+
+     强调色用**黄铜**（#D9A441），不用微信绿——绿要留给「我发的」
+     这一条语义，界面自身的强调色不能抢掉它。
+
+     面板唯一的「签名元素」是**左侧导轨**：从顶到底一条 3px 的竖条，
+     顶端是状态点，通体带当前档位。它不是装饰——它编码的是
+     「程序现在是活着 / 在等 / 可能发出去」这个事实。
+     ══════════════════════════════════════════════════════════════ */
+
   .cs-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 0.55rem;
+    /* 导轨是绝对定位的，需要面板自己当包含块。 */
+    position: relative;
+    display: grid;
+    /* 四段：标题栏 / 消息 / 候选 / 档位。
+       `1fr` 给候选——它是这个面板的产出，理应拿走最多的地方；
+       消息与档位按内容伸缩，不参与抢占。 */
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
     height: 100%;
-    padding: 0.75rem 0.75rem 0;
-    /* ⚠ 底色必须**完全不透明**（2026-10-07 实测）。
-       原来这里是 `rgb(28 28 30 / 88%)` + `backdrop-filter: blur(18px)`，
-       结果整块底色不绘制——文字在、面板没了，底下桌面直接透进来，
-       完全没法读。`backdrop-filter` 一并去掉。
-       圆角不受影响：它来自**窗口的透明四角**，不来自面板。 */
-    background: rgb(26 26 29);
+    padding: 0 0.7rem;
+    background: var(--cs-surface);
     border: 1px solid var(--cs-border);
     border-radius: var(--cs-radius);
     box-shadow: var(--cs-shadow);
     overflow: hidden;
   }
 
-  /* ── 标题栏：安静，让位给内容 ── */
+  /* ── 导轨 ───────────────────────────────────────────────── */
+  .cs-rail {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--cs-rail);
+    transition: background var(--cs-dur) var(--cs-ease);
+  }
+  /* 档位越高，导轨越亮——「可能真的发出去」要有物理上的警示。 */
+  .cs-panel:has(.cs-switch[data-tier='Confirm']) .cs-rail {
+    background: var(--cs-brass);
+  }
+  .cs-panel:has(.cs-switch[data-tier='Auto']) .cs-rail {
+    background: var(--cs-alarm);
+  }
+
+  /* ── 标题栏 = 「我现在看着谁」 ─────────────────────────────── */
   .cs-head {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
+    gap: 0.45rem;
+    /* 标题栏自身带导轨的宽度，避免文字贴到竖条上 */
+    padding: 0.6rem 0 0.45rem 0.6rem;
+    border-bottom: 1px solid var(--cs-border);
+  }
+
+  .cs-dot {
     flex: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--cs-brass);
+    box-shadow: 0 0 0 3px rgb(217 164 65 / 14%);
+  }
+  .cs-dot.idle {
+    background: var(--cs-ink-3);
+    box-shadow: none;
   }
 
-  .cs-title {
-    font-size: 0.78rem;
-    font-weight: 600;
-    letter-spacing: 0.14em;
-    color: var(--cs-text-dim);
-    white-space: nowrap;
-  }
-
-  .cs-head-tools {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-  }
-
-  .cs-tool {
-    padding: 0.18rem 0.5rem;
-    font-size: 0.68rem;
-    border-radius: 7px;
-    border: 1px solid var(--cs-border);
-    background: var(--cs-surface-raised);
-    color: var(--cs-text-dim);
-    transition: background var(--cs-dur-fast) var(--cs-ease);
-  }
-
-  .cs-tool:hover {
-    color: var(--cs-text);
-    background: var(--cs-border);
-  }
-
-  /* ── 会话卡：当前状态，面板里最重要的一个「事实」 ── */
+  /* 会话名是这一屏最重要的一个「事实」：程序只对它动手。
+     所以它最大、最重；原来是 0.82rem 的小字，缩在一张卡片里。 */
   .cs-peer {
-    display: flex;
-    align-items: center;
-    gap: 0.55rem;
-    flex: none;
-    padding: 0.5rem 0.6rem;
-    border-radius: var(--cs-radius-sm);
-    background: var(--cs-surface-raised);
-    border: 1px solid var(--cs-border);
-  }
-
-  .cs-peer.unknown {
-    border-color: var(--cs-danger);
-  }
-
-  .cs-peer-bar {
-    flex: none;
-    width: 3px;
-    align-self: stretch;
-    border-radius: 2px;
-    background: var(--cs-accent);
-  }
-
-  .cs-peer.unknown .cs-peer-bar {
-    background: var(--cs-danger);
-  }
-
-  .cs-peer-text {
-    display: flex;
-    flex-direction: column;
-    gap: 0.05rem;
-    min-width: 0;
     flex: 1;
-  }
-
-  .cs-peer-label {
-    font-size: 0.6rem;
-    letter-spacing: 0.1em;
-    color: var(--cs-text-faint);
-  }
-
-  .cs-peer-name {
-    font-size: 0.82rem;
+    min-width: 0;
+    font-size: 1.02rem;
     font-weight: 600;
-    color: var(--cs-text);
+    letter-spacing: 0.01em;
+    color: var(--cs-ink);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-
-  .cs-peer.unknown .cs-peer-name {
-    color: var(--cs-danger);
+  .cs-peer.unknown {
+    color: var(--cs-ink-3);
+    font-weight: 500;
   }
 
-  .cs-peer-actions {
+  .cs-head-tools {
     display: flex;
-    gap: 0.25rem;
+    gap: 0.2rem;
     flex: none;
   }
 
-  .cs-peer-lock {
-    padding: 0.2rem 0.45rem;
-    font-size: 0.64rem;
-    border: 1px solid var(--cs-border-strong);
-    border-radius: 7px;
-    background: var(--cs-surface-sunken);
-    color: var(--cs-text-dim);
-    white-space: nowrap;
-    transition: background var(--cs-dur-fast) var(--cs-ease);
+  /* 单字图标按钮。中文一个字比图标更容易在这么窄的面板里辨认，
+     也省掉一整套图标依赖。 */
+  .cs-icon {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--cs-ink-3);
+    background: transparent;
+    border: 1px solid var(--cs-border);
+    border-radius: 6px;
+    transition:
+      color var(--cs-dur-fast) var(--cs-ease),
+      border-color var(--cs-dur-fast) var(--cs-ease),
+      background var(--cs-dur-fast) var(--cs-ease);
   }
-
-  .cs-peer-lock:hover:not(:disabled) {
-    background: var(--cs-border);
-    color: var(--cs-text);
+  .cs-icon:hover:not(:disabled) {
+    color: var(--cs-ink);
+    border-color: var(--cs-border-strong);
+    background: rgb(255 255 255 / 4%);
   }
-
-  .cs-peer-lock:disabled {
-    opacity: 0.4;
+  .cs-icon:disabled {
+    opacity: 0.35;
     cursor: default;
   }
 
-  /* ── 状态行 ── */
-  .cs-note {
-    margin: 0;
-    padding: 0.5rem 0.6rem;
-    font-size: 0.72rem;
+  /* ── 异常条：只在真出事时出现 ─────────────────────────────── */
+  .cs-alarm {
+    margin: 0.5rem 0 0;
+    padding: 0.45rem 0.55rem;
+    font-size: 0.7rem;
     line-height: 1.5;
-    color: var(--cs-danger);
-    background: var(--cs-surface-raised);
-    border: 1px solid var(--cs-border);
-    border-radius: var(--cs-radius-sm);
+    color: var(--cs-alarm);
+    background: rgb(224 104 92 / 10%);
+    border: 1px solid rgb(224 104 92 / 34%);
+    border-radius: 8px;
   }
 
-  /* 小节标题。让「候选回复」这几个字真正成为一个标题，
-     而不是漂浮的又一个灰字。 */
-  .cs-section {
-    margin: 0.15rem 0 0;
-    font-size: 0.62rem;
-    font-weight: 600;
-    letter-spacing: 0.14em;
-    color: var(--cs-text-faint);
-  }
-
+  /* ── 候选 ─────────────────────────────────────────────────── */
   .cs-cands {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: 0.35rem;
+    min-height: 0;
+    padding-top: 0.55rem;
     overflow-y: auto;
     scrollbar-width: thin;
-    /* 拿走全部剩余空间——面板的产出在这里，不该让中段空一大块。 */
-    flex: 1 1 auto;
-    min-height: 0;
+    /* 没有候选时让空状态**在候选区里垂直居中**。
+       之前它顶在框的上沿、下面空一大片，看着像界面只加载了一半。 */
+    justify-content: flex-start;
   }
 
-  /* 空状态：两行，一行说结论一行说下一步。居中占住这块地方，
-     免得上面一条状态下面一大片黑，看着像坏了。 */
+  .cs-cands:has(.cs-empty) {
+    justify-content: center;
+  }
+
+  /* 空状态只占它该占的那点地方。之前它 `flex:1` 撑满中段，
+     看起来像界面坏了——其实只是「还没有候选」。 */
   .cs-empty {
-    flex: 1 1 auto;
     display: flex;
     flex-direction: column;
+    gap: 0.15rem;
     align-items: center;
     justify-content: center;
-    gap: 0.3rem;
-    margin: 0;
-    padding: 1.2rem 0.8rem;
+    padding: 1.1rem 0.6rem;
+    text-align: center;
     border: 1px dashed var(--cs-border);
     border-radius: var(--cs-radius-sm);
-    background: var(--cs-surface-sunken);
-    text-align: center;
   }
-
   .cs-empty-lead {
-    margin: 0;
-    font-size: 0.78rem;
-    color: var(--cs-text-dim);
+    font-size: 0.76rem;
+    color: var(--cs-ink-2);
   }
-
   .cs-empty-sub {
-    margin: 0;
-    font-size: 0.68rem;
-    color: var(--cs-text-faint);
+    font-size: 0.66rem;
+    color: var(--cs-ink-3);
   }
 
-  /* ── 底部：发送档位 ── */
+  /* ── 档位 = 推子 ──────────────────────────────────────────── */
   .cs-foot {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
-    flex: none;
-    margin-top: auto;
-    padding: 0.55rem 0 0.65rem;
+    padding: 0.5rem 0 0.6rem;
     border-top: 1px solid var(--cs-border);
   }
-
   .cs-foot-label {
-    font-size: 0.62rem;
-    letter-spacing: 0.1em;
-    color: var(--cs-text-faint);
+    font-size: 0.6rem;
+    letter-spacing: 0.12em;
+    color: var(--cs-ink-3);
     white-space: nowrap;
   }
 
-  /* 紧凑模式：面板窄的时候收紧间距与字号，
-     而不是让文字挤成两行。挤成两行的可读性远低于更小但单行的字。 */
+  /* ── 紧凑模式：面板窄的时候收紧，不让文字挤成两行 ─────────── */
   .cs-panel.compact {
-    padding: 0.55rem 0.55rem 0;
-    gap: 0.4rem;
+    padding: 0 0.5rem;
   }
-
-  .cs-panel.compact .cs-title {
-    font-size: 0.72rem;
+  .cs-panel.compact .cs-head {
+    padding-left: 0.5rem;
   }
-
-  .cs-panel.compact .cs-peer-name {
-    font-size: 0.76rem;
+  .cs-panel.compact .cs-peer {
+    font-size: 0.9rem;
   }
-
   .cs-panel.compact .cs-foot-label {
     display: none;
   }

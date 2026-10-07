@@ -61,7 +61,7 @@
     border-radius: 6px;
     font-size: 0.68rem;
     line-height: 1.45;
-    color: var(--cs-text-dim);
+    color: var(--cs-ink-2);
     /* 单行 + 省略号：理由通常很长，但不该占据整块面板。
        完整内容在 title 里。 */
     overflow: hidden;
@@ -75,6 +75,6 @@
     font-size: 0.62rem;
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.02em;
-    color: var(--cs-text-faint);
+    color: var(--cs-ink-3);
   }
 </style>

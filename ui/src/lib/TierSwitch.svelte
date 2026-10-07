@@ -121,7 +121,7 @@
     left: 0;
     width: 0;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--cs-accent) 22%, transparent);
+    background: color-mix(in srgb, var(--cs-brass) 22%, transparent);
     pointer-events: none;
   }
 
@@ -133,13 +133,13 @@
     border: none;
     border-radius: 999px;
     background: transparent;
-    color: var(--cs-text-dim);
+    color: var(--cs-ink-2);
     transition: color var(--cs-dur) var(--cs-ease);
     white-space: nowrap;
   }
 
   .cs-seg-btn.on {
-    color: var(--cs-accent);
+    color: var(--cs-brass);
   }
 
   /* 切到 Auto 时的红色警示闪。只闪一次且极快——
@@ -148,7 +148,7 @@
     position: absolute;
     inset: -2px;
     border-radius: 999px;
-    border: 1px solid var(--cs-danger);
+    border: 1px solid var(--cs-alarm);
     opacity: 0;
     pointer-events: none;
   }
@@ -156,7 +156,7 @@
   .cs-hint {
     margin: 0;
     font-size: 0.6rem;
-    color: var(--cs-text-faint);
+    color: var(--cs-ink-3);
     max-width: 16rem;
     text-align: right;
     /* 窄面板下提示语要能换行，不能横向溢出 */
