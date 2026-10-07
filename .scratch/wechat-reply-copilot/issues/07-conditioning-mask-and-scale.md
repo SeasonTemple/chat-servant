@@ -259,7 +259,32 @@ chat: Rect::new(x0 as i32, header_top, x1 as i32, input_top)
 **未做。** 现在闸的行为是**安全方向**（拒绝动手），不会误发，
 但它会一直拒绝——从「能用」的角度看仍然是坏的。
 
-## 否定结果：彩度**不能**用来区分「照片」与「卡片」
+## WGC 抓帧失败：已收窄到具体一步
+
+**症状**：`捕获会话在送来第一帧之前就关闭了。会话线程没报错`，
+对应的错误变体是 **`wgc_alt::AltCaptureError::IteratorEndedImmediately`**——
+即 `wgc.next()` **立刻返回 `None`**。
+
+这**不是**超时（不是「线程卡住等不到帧」），也**不是**
+`GraphicsCaptureItem::CreateForWindow` 失败（那会是 `CreateItem`）。
+
+**已排除的四个维度**（`cargo xtask occluded` 一次全报）：
+
+| 维度 | 实测 |
+| --- | --- |
+| `IsWindowVisible` | ✓ true |
+| `IsIconic` | ✓ false |
+| `is_cloaked`（DWM 藏起来 / 另一虚拟桌面） | ✓ false |
+| `is_occluded`（被别的窗口盖住） | ✓ **0/9**（此前是 6/9，已被 `xtask focus` 的 z-order 抬升解决） |
+
+**所以「被遮挡导致 WGC 失败」是错的**——遮挡解除了，WGC 照样失败。
+上一提交已更正该结论。
+
+**未验证的候选方向**（写下来是为了下次不重想，**不是结论**）：
+抓帧线程由 `thread::spawn` 新建，从未有过消息队列，而 WGC 的事件泵
+假设队列已在；症状「会话刚建好就关闭且不报错」与「队列没建出来」吻合。
+试过在 `next()` 前加 `PeekMessageW(PM_NOREMOVE)` 预热——**当时微信窗口
+已被最小化到托盘，无法验证，故未提交**。窗口重新露出来后应当先复测这一条。
 
 试过一条不需要看聊天正文就能判定的路子：彩度 = `max(r,g,b) - min(r,g,b)`。
 灰度内容恒为 0，照片必然有彩色——看起来正好能分开。
