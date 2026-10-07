@@ -376,6 +376,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tracing",
+ "tracing-subscriber",
  "windows",
 ]
 

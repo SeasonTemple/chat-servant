@@ -81,131 +81,193 @@ enum RawCapture {
 
 /// 抓取 `hwnd_raw` 的一帧，用 `wgc` 实现。全程不落盘。
 ///
-/// **整个 WGC 会话都活在那个线程里**，一个 D3D/WinRT 对象都不跨线程。
-/// 跨边界的只有 `(w, h, Vec<u8>)` 和错误。
-/// （`Wgc` / `GraphicsCaptureItem` / `Frame` 都含 `NonNull<c_void>`，不是 `Send`，
-/// 把它们 move 进 `thread::spawn` 编译不过。）
+/// ## 会话是长驻的，不是每帧新建
+///
+/// WGC 会话包含 DispatcherQueue、D3D11 设备、Direct2D 上下文、帧池与捕获会话
+/// ——**一整套**。早先这里每次调用都 `thread::spawn` 一个线程、在这条线程上
+/// 建一整套会话、取一帧就退出。
+///
+/// 实测（2026-10-07，`cargo xtask thread-probe`，无 UI / 无模型 / 无 OCR）：
+///
+/// ```text
+/// 抓帧前线程数 = 4
+/// 第 1 帧 … 22      第 6 帧 … 82
+/// 第 10 帧 … 130    ← 每帧 +12，线性增长，永不回收
+/// ```
+///
+/// **每抓一帧泄漏 12 个线程。** 应用每秒抓一帧，跑十几分钟就会到
+/// 两千多个线程。现在改成**一条长驻工作线程 + 一个会话**，
+/// 会话只在目标窗口变化或会话失效时才重建。
+///
+/// 会话对象不是 `Send`，所以它必须**待在**那条线程上不出来——
+/// 跨边界的仍然只有 `(w, h, Vec<u8>)` 和错误。
 pub fn capture_one_frame(hwnd_raw: isize) -> Result<Frame, AltCaptureError> {
     let (tx, rx) = mpsc::channel::<RawCapture>();
-    // 抓帧线程要先把**自己的线程号**报回来——超时时我们靠它把这个线程叫醒。
-    let (tid_tx, tid_rx) = mpsc::channel::<u32>();
+    worker()
+        .send(Job {
+            hwnd_raw,
+            reply: tx,
+        })
+        .map_err(|e| AltCaptureError::Frame(format!("抓帧工作线程不在：{e}")))?;
 
-    let handle = std::thread::spawn(move || {
-        use windows::Win32::System::Threading::GetCurrentThreadId;
-        let _ = tid_tx.send(unsafe { GetCurrentThreadId() });
-        let _ = tx.send(capture_inside(hwnd_raw));
-    });
-    let tid = tid_rx.recv_timeout(TID_TIMEOUT).ok();
-
-    let out = match rx.recv_timeout(FIRST_FRAME_TIMEOUT) {
+    match rx.recv_timeout(FIRST_FRAME_TIMEOUT) {
         Ok(RawCapture::Err(e)) => Err(e),
         Ok(RawCapture::Ok {
             width,
             height,
             rgba,
         }) => assemble(width, height, rgba),
+        // 超时时把工作线程从消息循环里叫醒。它醒来后会**丢弃当前会话**
+        // 并重新建一个——被叫醒的代价是重建一次会话，远小于泄漏 12 个线程。
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            // ⚠ **必须把抓帧线程收回来，否则它会永久泄漏。**
-            //
-            // 早先这里直接 `return Err(Timeout)`，把线程丢下不管。
-            // 而它此刻正卡在 `next()` 里的 `GetMessageW` 循环上——
-            // 那个循环只在取到 WM_QUIT 时才退出。这样每次超时的捕获都会
-            // **永久留下一个线程和一个活着的 WGC 会话**。
-            //
-            // 实测（2026-10-07）：观察循环跑了几分钟后进程有 **2000+ 线程**，
-            // 增速 **9 个/秒**，全是等待态。线程和捕获会话都会无限累积。
-            reap_capture_thread(&handle, tid);
-            return Err(AltCaptureError::Timeout {
+            worker().poke();
+            Err(AltCaptureError::Timeout {
                 secs: FIRST_FRAME_TIMEOUT.as_secs(),
-            });
+            })
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(AltCaptureError::Frame(
-            "抓帧线程提前结束且没有回传结果".into(),
+            "抓帧工作线程提前结束且没有回传结果".into(),
         )),
-    };
-    // 正常返回时线程已经结束，直接回收。
-    let _ = handle.join();
-    out
+    }
 }
 
-/// 等抓帧线程报上线程号的上限。它只做一件事，超过这个时间就当拿不到。
-const TID_TIMEOUT: Duration = Duration::from_millis(500);
+/// 一次抓帧请求。**只传纯数据**，WGC 对象一律不过这个边界。
+struct Job {
+    hwnd_raw: isize,
+    reply: mpsc::Sender<RawCapture>,
+}
 
-/// 把卡在消息循环里的抓帧线程叫醒并回收。
-///
-/// `GetMessageW` 只在收到 **WM_QUIT** 时返回 0，而 `next()` 随即返回 `None`
-/// （见 `wgc-2.0.1/src/capture.rs:203`）。所以给那个线程投一条 WM_QUIT
-/// 就能让它正常退出——这是 Win32 自己定义的退出方式，不是强杀。
-fn reap_capture_thread(handle: &std::thread::JoinHandle<()>, tid: Option<u32>) {
-    use windows::Win32::Foundation::{LPARAM, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+/// 长驻抓帧线程的句柄。
+struct Worker {
+    jobs: mpsc::Sender<Job>,
+    /// 工作线程自己的线程号——超时时靠它投 WM_QUIT 把人叫醒。
+    /// 用共享格子而不是 `Receiver`：`Receiver` 不是 `Sync`，静态里放不了。
+    tid: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
+}
 
-    if let Some(t) = tid {
-        unsafe {
-            let _ = PostThreadMessageW(t, WM_QUIT, WPARAM(0), LPARAM(0));
+static WORKER: std::sync::OnceLock<Worker> = std::sync::OnceLock::new();
+
+fn worker() -> &'static Worker {
+    WORKER.get_or_init(spawn_worker)
+}
+
+fn spawn_worker() -> Worker {
+    let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
+    let tid_cell = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let tid_cell_bg = tid_cell.clone();
+    std::thread::Builder::new()
+        .name("cs-capture".into())
+        .spawn(move || run_worker(jobs_rx, tid_cell_bg))
+        .expect("起抓帧工作线程失败");
+    Worker {
+        jobs: jobs_tx,
+        tid: tid_cell,
+    }
+}
+
+impl Worker {
+    fn send(&self, job: Job) -> Result<(), mpsc::SendError<Job>> {
+        self.jobs.send(job)
+    }
+
+    /// 给工作线程投一条 WM_QUIT，让它退出 `GetMessage` 循环。
+    ///
+    /// `GetMessageW` 只在收到 WM_QUIT 时返回 0，而 `next()` 随即返回 `None`
+    /// （`wgc-2.0.1/src/capture.rs:203`）。工作线程醒来后会**丢弃并重建会话**，
+    /// 下一帧自然又能抓。
+    fn poke(&self) {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+        let tid = *self.tid.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tid) = tid {
+            unsafe {
+                let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
+            }
         }
     }
-    // 给它一点时间走完退出流程；还不走也不能无限等——那会把调用方也卡住。
-    let deadline = std::time::Instant::now() + Duration::from_millis(500);
-    while !handle.is_finished() && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
+}
+
+/// 工作线程的主体：**一个会话，反复取帧**。
+fn run_worker(jobs: mpsc::Receiver<Job>, tid_cell: std::sync::Arc<std::sync::Mutex<Option<u32>>>) {
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    *tid_cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(unsafe { GetCurrentThreadId() });
+
+    // 当前会话绑在哪个窗口上。窗口变了（微信重开、句柄被复用）就重建。
+    let mut session: Option<(isize, wgc::Wgc)> = None;
+
+    while let Ok(job) = jobs.recv() {
+        // 会话不存在，或者绑的不是这个窗口（微信重开、句柄被复用）→ 重建。
+        if session.as_ref().is_none_or(|(h, _)| *h != job.hwnd_raw) {
+            match open_session(job.hwnd_raw) {
+                Ok(w) => session = Some((job.hwnd_raw, w)),
+                Err(e) => {
+                    let _ = job.reply.send(RawCapture::Err(e));
+                    session = None;
+                    continue;
+                }
+            }
+        }
+        // `take_one_frame` 需要 `&mut`，借完之后才能改 `session`，
+        // 所以先把结果算出来，再决定要不要丢会话。
+        let taken = session.as_mut().map(|(_, w)| take_one_frame(w));
+        match taken {
+            Some(Some(raw)) => {
+                let _ = job.reply.send(raw);
+            }
+            _ => {
+                // `next()` 返回 None：会话失效（item 被 Closed，或被人叫醒）。
+                // 丢掉它，下一轮重建。
+                tracing::debug!(target: "chatservant_capture::wgc", "会话结束，准备重建");
+                session = None;
+                let _ = job
+                    .reply
+                    .send(RawCapture::Err(AltCaptureError::IteratorEndedImmediately));
+            }
+        }
     }
 }
 
-/// 必须在目标线程内调用：创建会话、跑迭代器、取出纯数据。
-fn capture_inside(hwnd_raw: isize) -> RawCapture {
+/// 建会话。**与原先一样在建之前就把 border/cursor 关掉**。
+fn open_session(hwnd_raw: isize) -> Result<wgc::Wgc, AltCaptureError> {
     use std::ffi::c_void;
     use windows::Win32::Foundation::HWND;
 
     let hwnd = HWND(hwnd_raw as *mut c_void);
-    let item = match wgc::window::new_item_from_hwnd(hwnd) {
-        Ok(i) => i,
-        Err(e) => return RawCapture::Err(AltCaptureError::CreateItem(e.to_string())),
-    };
+    let item = wgc::window::new_item_from_hwnd(hwnd)
+        .map_err(|e| AltCaptureError::CreateItem(e.to_string()))?;
 
-    // WgcSettings 派生 SmartDefault，`None` = **系统默认行为**。
-    // 那两个默认值都会出问题，必须显式关掉：
-    //
-    // · `display_border = None` → WGC 会在**被捕获的窗口上画一圈绿/黄边框**
-    //   （系统的隐私提示）。观察循环每秒建一次会话，于是用户的微信窗口上
-    //   每秒闪一次黄框（实机 2026-10-07，用户先发现的）。
-    //
-    // · `capture_cursor = None` → **鼠标指针会被画进帧里**。指针正好压在
-    //   聊天区上时，OCR 会读到箭头形状的噪声，归类也就跟着错。
-    //
-    // 两项都依赖 `is_border_configurable()` / `is_cursor_configurable()`
-    // 这两个能力检查；老版本 Windows 上不支持时**不设置**，而不是报错——
-    // 不支持就退回系统默认，仍然能抓到，只是不那么干净。
     let mut settings = wgc::WgcSettings::default();
     settings.pixel_format = wgc::PixelFormat::RGBA8;
+    // `None` = 系统默认 = **在用户窗口上画捕获边框** + **把鼠标指针画进帧里**。
+    // 观察循环每秒建一次会话，于是用户的微信窗口每秒闪一次黄框（用户先发现的）。
     if wgc::capabilities::is_border_configurable().unwrap_or(false) {
         settings.display_border = Some(false);
     }
     if wgc::capabilities::is_cursor_configurable().unwrap_or(false) {
         settings.capture_cursor = Some(false);
     }
+    wgc::Wgc::new(item, settings).map_err(|e| AltCaptureError::Open(e.to_string()))
+}
 
-    let mut wgc = match wgc::Wgc::new(item, settings) {
-        Ok(w) => w,
-        Err(e) => return RawCapture::Err(AltCaptureError::Open(e.to_string())),
-    };
-
-    // next() 返回 None = 消息循环立刻退出；Some(Err) = 迭代器内部出错。
-    match wgc.next() {
-        None => RawCapture::Err(AltCaptureError::IteratorEndedImmediately),
-        Some(Err(e)) => RawCapture::Err(AltCaptureError::Frame(e.to_string())),
+/// 从会话里取一帧并转成纯数据。`None` = 会话结束。
+fn take_one_frame(w: &mut wgc::Wgc) -> Option<RawCapture> {
+    match w.next() {
+        None => None,
+        Some(Err(e)) => Some(RawCapture::Err(AltCaptureError::Frame(e.to_string()))),
         Some(Ok(frame)) => {
             let size = match frame.size() {
                 Ok(s) => s,
-                Err(e) => return RawCapture::Err(AltCaptureError::Frame(e.to_string())),
+                Err(e) => {
+                    return Some(RawCapture::Err(AltCaptureError::Frame(e.to_string())));
+                }
             };
             match frame.pixels() {
-                Ok(rgba) => RawCapture::Ok {
+                Ok(rgba) => Some(RawCapture::Ok {
                     width: size.width,
                     height: size.height,
                     rgba,
-                },
-                Err(e) => RawCapture::Err(AltCaptureError::Frame(e.to_string())),
+                }),
+                Err(e) => Some(RawCapture::Err(AltCaptureError::Frame(e.to_string()))),
             }
         }
     }

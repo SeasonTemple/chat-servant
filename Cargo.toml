@@ -35,6 +35,8 @@ windows = { version = "0.62", features = [
   "Win32_System_SystemInformation",
   "Win32_System_WinRT",
   "Win32_System_Threading",
+    # ToolHelp 线程快照——`xtask thread-probe` 数进程线程数，用来定位线程泄漏。
+    "Win32_System_Diagnostics_ToolHelp",
     # Windows 凭据管理器（API key 只存这里，绝不落普通文件）。
     "Win32_Security_Credentials",
     "Win32_Foundation",

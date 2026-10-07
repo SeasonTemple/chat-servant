@@ -120,6 +120,17 @@ enum Cmd {
         #[arg(long)]
         preset: bool,
     },
+    /// 连抓 N 帧并**逐次打印进程线程数**——用来定位线程泄漏到底出在
+    /// 「抓帧」这一步，还是出在别的地方。
+    ///
+    /// 起因：实机观察到 Tauri 应用 1300+ 线程、增速 9 个/秒。
+    /// 循环每秒只抓 1 帧，对不上，说明泄漏源不在抓帧线程本身。
+    /// 但这需要**没有 UI、没有模型、没有 OCR** 的隔离环境才能确认。
+    ThreadProbe {
+        /// 抓多少帧
+        #[arg(long, default_value_t = 10)]
+        n: u32,
+    },
     /// 抓取与识别的诊断探针
     Probe {
         #[command(subcommand)]
@@ -186,6 +197,7 @@ fn main() -> Result<()> {
             provider,
             preset,
         } => e2e_cmd(inject, provider, preset),
+        Cmd::ThreadProbe { n } => probe_threads(n),
         Cmd::Probe { kind } => match kind {
             ProbeCmd::Frame {
                 app,
@@ -589,6 +601,78 @@ fn key_from_env(p: chatservant_reason::Provider) -> Option<String> {
         }
     }
     None
+}
+
+/// 连抓 N 帧，逐次打印**本进程线程数**。
+///
+/// ## 它回答什么
+///
+/// 实机观察到 Tauri 应用 1300+ 线程、增速 9 个/秒，而观察循环每秒只抓
+/// 一帧——对不上。两种可能：抓帧本身泄漏，或者泄漏在 UI/模型那条路上。
+/// 这个命令把其它全部拿掉（没有 webview、没有模型、没有 OCR），
+/// **线程数还涨就是抓帧的锅**，不涨就别再往抓帧上找。
+///
+/// 线程数用 ToolHelp 快照数——Rust 稳定版没有「进程线程总数」的 API。
+fn probe_threads(n: u32) -> Result<()> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+
+    /// 数**本进程**当前的线程。
+    ///
+    /// ⚠ `CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)` 的 pid 传 0 是
+    /// **全系统**所有线程——本机轻松七千多。必须再按
+    /// `th32OwnerProcessID` 过滤，否则会把整台机器的增长算到自己头上。
+    fn threads() -> u32 {
+        use windows::Win32::System::Threading::GetCurrentProcessId;
+        unsafe {
+            let me = GetCurrentProcessId();
+            let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) else {
+                return 0;
+            };
+            let mut e = THREADENTRY32 {
+                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            let mut n = 0u32;
+            if Thread32First(snap, &mut e).is_ok() {
+                loop {
+                    if e.th32OwnerProcessID == me {
+                        n += 1;
+                    }
+                    if Thread32Next(snap, &mut e).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snap);
+            n
+        }
+    }
+
+    set_dpi_aware();
+    let hit = chatservant_capture::find_chat_window(&WECHAT)
+        .map_err(|e| anyhow::anyhow!("找窗口失败：{e}"))?;
+    println!("窗口 = {}  0x{:X}", hit.title, hit.hwnd_raw);
+    println!("抓帧前线程数 = {}", threads());
+
+    for i in 1..=n {
+        let t0 = std::time::Instant::now();
+        match chatservant_capture::wgc_alt::capture_one_frame(hit.hwnd_raw) {
+            Ok(f) => println!(
+                "第 {i} 帧 ok {}x{}  {}ms  线程数 {}",
+                f.width(),
+                f.height(),
+                t0.elapsed().as_millis(),
+                threads()
+            ),
+            Err(e) => println!("第 {i} 帧 失败：{e}  线程数 {}", threads()),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    println!("抓完线程数 = {}", threads());
+    Ok(())
 }
 
 /// 抓一帧 + 本地 OCR 读文字，一条命令走完「像素 → 文字」。

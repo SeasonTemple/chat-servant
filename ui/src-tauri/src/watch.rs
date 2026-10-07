@@ -479,6 +479,20 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
 
             while !stop_bg.load(Ordering::Relaxed) {
                 ticks += 1;
+                // 每 20 圈打一行**实测线程数**。
+                //
+                // 起因：实机观察到进程 2300+ 线程、增速 9 个/秒，全是等待态。
+                // 抓帧线程每秒只该有 1 个，对不上——说明还有别的东西在开线程。
+                // 没有这行就只能靠猜；有了它，泄漏源被定位到哪一段一目了然。
+                if ticks % 20 == 1 {
+                    tracing::info!(
+                        target: "chat-servant::watch",
+                        "tick={ticks} peer={:?} candidates={}",
+                        s.peer,
+                        s.candidates.len()
+                    );
+                }
+                let t_round = std::time::Instant::now();
                 match step(&mut watcher, &mut reasoner, &mut s, &LAST_BOXES) {
                     Ok(Some(a)) => {
                         anchor = Some(a);
@@ -541,6 +555,11 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                     }
                 }
                 std::thread::sleep(TICK);
+                tracing::debug!(
+                    target: "chat_servant::watch",
+                    "一轮 {ms}ms",
+                    ms = t_round.elapsed().as_millis()
+                );
             }
         })
         .expect("起观察线程失败");

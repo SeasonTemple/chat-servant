@@ -33,6 +33,11 @@ chatservant-reason = { path = "../../crates/reason" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing.workspace = true
+# ⚠ 以前**没有**这个依赖，也**从来没初始化过 subscriber**——
+# 于是 `commands.rs` / `watch.rs` 里所有 `tracing::info!` / `warn!`
+# 全部打进了虚空，应用**一行日志都没输出过**。它完全不可观测，
+# 出了事只能靠猜。没有它，观察循环里的诊断语句等于没写。
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Windows 凭据管理器。必须与工作区里的 windows 版本一致——
 # 同一个 HWND / CREDENTIAL 跨 crate 版本传指针是不安全的。
 windows = { workspace = true }
