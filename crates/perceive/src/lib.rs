@@ -19,7 +19,7 @@ pub use fixture::{keep_colors, redact_with};
 pub use mask::{Masked, Rejection, SurfaceVerdict, judge_surface, mask, reject_image_text};
 pub use media::{Found, MediaKind, MediaRegion, find};
 pub use merge::{Message, conversation_name, group};
-pub use pipeline::{LineSource, Read, ReadError, SystemOcr, read};
+pub use pipeline::{LineSource, OCR_UPSCALE, Read, ReadError, SystemOcr, read, read_lines};
 pub use pixels::{
     BubbleHit, dominant_color, dominant_ratio, ink_ratio, mean_color, near, probe_bubble_bg,
 };

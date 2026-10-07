@@ -138,6 +138,33 @@ impl Frame {
         }
         Frame::from_rgb(w as u32, h as u32, out)
     }
+
+    /// 最近邻放大 `n` 倍。
+    ///
+    /// ## 为什么必须是最近邻
+    ///
+    /// 这个方法存在的唯一目的是喂给 OCR 的**诊断与补救**。
+    /// 如果用双线性/双三次，字形边缘会被插值抹平——那样即使 OCR
+    /// 「变好了」，也说不清是字号问题还是插值把笔画糊掉了。
+    /// 最近邻只复制像素，放大前后字形完全一致，结论才站得住。
+    ///
+    /// `n <= 1` 原样返回自己。
+    pub fn upscaled_nearest(&self, n: u32) -> Option<Self> {
+        if n <= 1 {
+            return Some(self.clone());
+        }
+        let (w, h) = (self.width.checked_mul(n)?, self.height.checked_mul(n)?);
+        let mut out = Vec::with_capacity((w as usize).checked_mul(h as usize)?.checked_mul(3)?);
+        for y in 0..h {
+            let src_row = ((y / n) as usize) * (self.width as usize) * 3;
+            for x in 0..w {
+                let sx = (x / n) as usize;
+                let s = src_row + sx * 3;
+                out.extend_from_slice(&self.rgb[s..s + 3]);
+            }
+        }
+        Frame::from_rgb(w, h, out)
+    }
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@
 
 use chatservant_capture::anchor::{self, AnchorError, PaneAnchor};
 use chatservant_capture::ocr::{self, OcrError, OcrText};
-use chatservant_core::frame::Frame;
+use chatservant_core::frame::{Frame, Rect};
 
 use crate::attribute::{Attribution, Palette};
 use crate::merge::{self, Message};
@@ -65,17 +65,129 @@ pub enum ReadError {
 /// 抽出来只有一个理由：**它是整条链路上唯一带隐私的步骤**。
 /// 其余每一步都在读像素，而像素是可以脱敏后提交的。
 pub trait LineSource {
-    /// `pane` 是**按锚点裁好的消息区**，行框坐标以它为原点。
-    fn read(&self, pane: &Frame) -> Result<OcrText, OcrError>;
+    /// `view` 是**给 OCR 看的画面**，行框坐标以它为原点。
+    ///
+    /// ⚠ 它**不是**消息区裁剪件，原因见 [`OCR_UPSCALE`] 与 [`read`]。
+    /// 行坐标必须换算回消息区、并按消息区过滤之后才轮到下游。
+    fn read(&self, view: &Frame) -> Result<OcrText, OcrError>;
 }
 
 /// 真的调 Windows OCR。纯本地，不出网。
 pub struct SystemOcr;
 
 impl LineSource for SystemOcr {
-    fn read(&self, pane: &Frame) -> Result<OcrText, OcrError> {
-        ocr::recognize(pane)
+    fn read(&self, view: &Frame) -> Result<OcrText, OcrError> {
+        ocr::recognize(view)
     }
+}
+
+/// OCR 前的最近邻放大倍数。
+///
+/// ## 实测（2026-10-07，微信深色主题，真实帧 1161x893）
+///
+/// 对方那条只有一个「乐」的气泡，19x19 px 白字灰底，**放大前一律读不到**，
+/// 放大后稳定读到。1x 时同一张图上 h=12~14 的行却能正常读出来——
+///
+/// ```text
+/// 整帧 1x   26 行  无「乐」
+/// 整帧 2x   40 行  有「乐」    <- 产品用的就是这一档
+/// 整帧 3x   37 行  有「乐」
+/// 整帧 4x   32 行  有「乐」   （4644x3572，没撞上任何尺寸上限）
+/// ```
+///
+/// 所以不是「字太小」那么简单。但**放大是必要条件**这一点，
+/// 在所有被测配置下都成立。
+pub const OCR_UPSCALE: u32 = 2;
+
+/// 把 OCR 读到的行换算回**消息区坐标**，并丢掉落在消息区之外的行。
+///
+/// ## 为什么必须丢掉区外的行
+///
+/// OCR 现在吃的是整帧，于是侧边栏的联系人名、标题栏、输入框里的字
+/// 全都会被读出来。它们绝不能进消息流——联系人名混进消息里，
+/// 产品就会凭空「听到」对方说的话。那是正确性事故，不是精度问题。
+/// 按消息区矩形裁掉是唯一干净的做法。
+fn lines_into_pane(ocr: OcrText, chat: Rect, scale: u32) -> OcrText {
+    let s = scale as i32;
+    let lines = ocr
+        .lines
+        .into_iter()
+        .filter_map(|mut line| {
+            // 放大后的坐标先退回整帧坐标，再平移到消息区原点。
+            let local = Rect::new(
+                line.rect.x0 / s - chat.x0,
+                line.rect.y0 / s - chat.y0,
+                line.rect.x1 / s - chat.x0,
+                line.rect.y1 / s - chat.y0,
+            );
+            // 与消息区没有重叠 = 在侧边栏 / 标题栏 / 输入框里，丢掉。
+            if local.x1 <= 0
+                || local.y1 <= 0
+                || local.x0 >= chat.width()
+                || local.y0 >= chat.height()
+            {
+                return None;
+            }
+            line.rect = local;
+            for w in &mut line.words {
+                w.rect = Rect::new(
+                    w.rect.x0 / s - chat.x0,
+                    w.rect.y0 / s - chat.y0,
+                    w.rect.x1 / s - chat.x0,
+                    w.rect.y1 / s - chat.y0,
+                );
+            }
+            Some(line)
+        })
+        .collect();
+    OcrText {
+        text: String::new(),
+        lines,
+    }
+}
+
+/// 按产品规则取文本框：**放大后的整帧**喂给 OCR，行坐标换算回消息区，
+/// 落在消息区之外的行丢掉。
+///
+/// ## 为什么要抽出来
+///
+/// 端到端探针（`xtask e2e`）本来是**自己复制了一遍**裁剪 + OCR 的，
+/// 于是产品链路改了它没跟着改，探针还在测一条已经不存在的旧路——
+/// 和 `probe frame` 默认路径指向坏实现是同一类病：
+/// **诊断命令必须和产品走同一条代码路径**，否则它证明不了任何事。
+///
+/// 两个调用方现在共用这一个入口。
+pub fn read_lines(
+    frame: &Frame,
+    chat: Rect,
+    source: &impl LineSource,
+) -> Result<OcrText, ReadError> {
+    // OCR 吃**放大后的整帧**，不是裁好的消息区。两条都是实测逼出来的：
+    //
+    // 1. 不放大：对方短消息稳定读不到（见 [`OCR_UPSCALE`]）。
+    // 2. 只给裁好的消息区：同样读不到。同一帧、同为 2x，把左侧
+    //    侧边栏裁掉之后「乐」就消失；用纯色补白模拟不出来，
+    //    必须是真实文字才生效。
+    //
+    // ```text
+    // 裁剪 x0=0    （含侧边栏）2x -> 有「乐」
+    // 裁剪 x0=190  （含侧边栏）2x -> 有「乐」
+    // 裁剪 x0=210  （含侧边栏）2x -> 无「乐」
+    // 裁剪 x0=304  （纯消息区）2x -> 无「乐」   <- 原来是这一档
+    // ```
+    //
+    // ⚠ **代价**：OCR 输入变大、变慢（实测 223ms -> 480ms）。但观察循环
+    // 只在画面**变化**时才 OCR（`PaneWatcher` 逐字节比对，没变就
+    // `Quiet`），所以静默期不付这份成本。
+    //
+    // ⚠ **Windows OCR 为什么这样，没查清。** 上面这些数据只支持
+    // 「放大 + 左侧有文字上下文」两个条件同时成立，机制本身未知。
+    // 这是按实测兜住的行为，不是按原理推出来的结论。
+    let view = frame
+        .upscaled_nearest(OCR_UPSCALE)
+        .ok_or(ReadError::NoPane)?;
+    let ocr = source.read(&view)?;
+    Ok(lines_into_pane(ocr, chat, OCR_UPSCALE))
 }
 
 /// 跑完整条链路。`source` 只负责取文本框，其余全真跑。
@@ -83,7 +195,8 @@ pub fn read(frame: &Frame, source: &impl LineSource) -> Result<Read, ReadError> 
     let anchor = anchor::derive(frame)?;
     let palette = Palette::learn(frame, anchor.chat).ok_or(ReadError::NoPalette)?;
     let pane = frame.crop(anchor.chat).ok_or(ReadError::NoPane)?;
-    let ocr = source.read(&pane)?;
+    let ocr = read_lines(frame, anchor.chat, source)?;
+
     let mut attributions = crate::attribute::classify_all(&ocr.lines, &pane, &palette);
     // 语义遮罩（ADR-0002 第 3 级）：**准确率**手段，不是成本手段。
     // 图里的字绝不能算成任何一方说的话。
@@ -216,14 +329,14 @@ mod tests {
         }
     }
 
-    /// 把帧坐标换算成**消息区坐标**（锚点裁剪之后坐标系变了）。
-    fn to_pane(r: Rect, origin: Rect) -> Rect {
-        Rect::new(
-            r.x0 - origin.x0,
-            r.y0 - origin.y0,
-            r.x1 - origin.x0,
-            r.y1 - origin.y0,
-        )
+    /// 把帧坐标换算成**OCR 视图坐标**（放大后的整帧）。
+    ///
+    /// 注入契约跟着 [`LineSource::read`] 一起变了：测试给的行框现在
+    /// 必须落在**放大后的整帧**坐标系里，换算回消息区是 `read()` 的事。
+    /// 夹具本身仍按真实帧坐标书写，只是过一遍这个函数。
+    fn to_view(r: Rect) -> Rect {
+        let s = OCR_UPSCALE as i32;
+        Rect::new(r.x0 * s, r.y0 * s, r.x1 * s, r.y1 * s)
     }
 
     struct RecordedLines(Vec<OcrLine>);
@@ -237,7 +350,7 @@ mod tests {
         }
     }
 
-    fn recorded(origin: Rect) -> RecordedLines {
+    fn recorded() -> RecordedLines {
         RecordedLines(
             [
                 (MY_TEXT, "我方那条"),
@@ -245,13 +358,10 @@ mod tests {
                 (GRAY_TEXT, "昨天 13:44"),
             ]
             .into_iter()
-            .map(|(r, text)| {
-                let p = to_pane(r, origin);
-                OcrLine {
-                    text: text.to_string(),
-                    rect: p,
-                    words: vec![],
-                }
+            .map(|(r, text)| OcrLine {
+                text: text.to_string(),
+                rect: to_view(r),
+                words: vec![],
             })
             .collect(),
         )
@@ -270,8 +380,7 @@ mod tests {
     #[test]
     fn frame_in_messages_out() {
         let frame = synthetic_frame();
-        let origin = anchor::derive(&frame).expect("锚点").chat;
-        let r = read(&frame, &recorded(origin)).expect("整条链跑通");
+        let r = read(&frame, &recorded()).expect("整条链跑通");
 
         assert_eq!(r.anchor.chat, expected_chat(), "锚点不对");
         assert_eq!(r.palette.panel_bg, PANEL, "面板底色学错了");
@@ -348,13 +457,12 @@ mod tests {
         }
         let frame = Frame::from_rgb(W, H, px).expect("frame");
 
-        let origin = anchor::derive(&frame).expect("锚点").chat;
-        let pane_line = OcrLine {
+        let view_line = OcrLine {
             text: "图片里的字".to_string(),
-            rect: to_pane(photo_text, origin),
+            rect: to_view(photo_text),
             words: vec![],
         };
-        let src = RecordedLines(vec![pane_line]);
+        let src = RecordedLines(vec![view_line]);
         let r = read(&frame, &src).expect("整条链跑通");
 
         assert!(
@@ -379,8 +487,7 @@ mod tests {
     #[test]
     fn every_attribution_carries_the_measured_numbers() {
         let frame = synthetic_frame();
-        let origin = anchor::derive(&frame).expect("锚点").chat;
-        let r = read(&frame, &recorded(origin)).expect("整条链跑通");
+        let r = read(&frame, &recorded()).expect("整条链跑通");
         let by_text = |t: &str| {
             r.attributions
                 .iter()
@@ -413,6 +520,75 @@ mod tests {
             gray.contrast < 140.0,
             "灰字对比 {} 应低于标题阈值 140",
             gray.contrast
+        );
+    }
+
+    /// ── 2026-10-07 实机回归：OCR 视野改成整帧之后的两条不变量 ──
+    ///
+    /// OCR 现在吃放大后的整帧，所以侧边栏的联系人名也会被读出来。
+    /// 它们**绝不能**进消息流——否则产品会凭空「听到」并不存在的话。
+
+    #[test]
+    fn sidebar_text_never_reaches_the_message_stream() {
+        // 一行「联系人名」落在侧边栏里（帧坐标 x < SIDEBAR_W）。
+        let sidebar_line = OcrLine {
+            text: "某个联系人".to_string(),
+            rect: to_view(Rect::new(80, 120, 200, 136)),
+            words: vec![],
+        };
+        let mut src = recorded();
+        src.0.push(sidebar_line);
+        let frame = synthetic_frame();
+        let r = read(&frame, &src).expect("整条链跑通");
+
+        assert!(
+            !r.messages.iter().any(|m| m.text.contains("某个联系人")),
+            "侧边栏的联系人名混进消息流了：{:?}",
+            r.messages.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn input_box_text_never_reaches_the_message_stream() {
+        // 输入框在消息区**下方**（y >= INPUT_TOP），是用户自己打的字。
+        let typed = OcrLine {
+            text: "我正在打的字".to_string(),
+            rect: to_view(Rect::new(400, 450, 600, 470)),
+            words: vec![],
+        };
+        let mut src = recorded();
+        src.0.push(typed);
+        let frame = synthetic_frame();
+        let r = read(&frame, &src).expect("整条链跑通");
+
+        assert!(
+            !r.messages.iter().any(|m| m.text.contains("我正在打的字")),
+            "输入框里的字混进消息流了：{:?}",
+            r.messages.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn view_coordinates_are_mapped_back_into_the_pane() {
+        // 换算必须精确：`THEIR_TEXT` 在消息区里的位置要和帧坐标减掉
+        // 消息区原点完全一致。差一个像素都会让归类读到错的地方。
+        let frame = synthetic_frame();
+        let r = read(&frame, &recorded()).expect("整条链跑通");
+        let chat = r.anchor.chat;
+        let a = r
+            .attributions
+            .iter()
+            .find(|a| a.text == "对方那条")
+            .expect("对方那条应被归类");
+        assert_eq!(
+            a.rect,
+            Rect::new(
+                THEIR_TEXT.x0 - chat.x0,
+                THEIR_TEXT.y0 - chat.y0,
+                THEIR_TEXT.x1 - chat.x0,
+                THEIR_TEXT.y1 - chat.y0
+            ),
+            "坐标没从视图坐标系换算回消息区"
         );
     }
 

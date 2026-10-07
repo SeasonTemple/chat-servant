@@ -190,16 +190,22 @@ pub fn run<R: Reasoner + ?Sized, I: Injector, B: Readback>(
     passed.push(Stage::Anchor);
 
     // ── 4 OCR ──
+    // ⚠ **必须走 `read_lines`，不能自己裁一块再调 OCR。**
+    // 这里原本复制了一份「裁剪 + OCR」，产品管线改了它不跟着改，
+    // 于是探针测的还是已经不存在的旧路——诊断命令证明不了任何事。
+    // 和 `probe frame` 默认路径指向坏实现是同一类病。
     let pane = frame.crop(anchor.chat).ok_or_else(|| ChainError {
         stage: Stage::Ocr,
         detail: "按锚点裁不出消息区".into(),
         passed: passed.clone(),
     })?;
-    let ocr: OcrText = chatservant_capture::ocr::recognize(&pane).map_err(|e| ChainError {
-        stage: Stage::Ocr,
-        detail: format!("{e}"),
-        passed: passed.clone(),
-    })?;
+    let ocr: OcrText =
+        chatservant_perceive::read_lines(&frame, anchor.chat, &chatservant_perceive::SystemOcr)
+            .map_err(|e| ChainError {
+                stage: Stage::Ocr,
+                detail: format!("{e}"),
+                passed: passed.clone(),
+            })?;
     passed.push(Stage::Ocr);
 
     // ── 5 归类 ──
@@ -219,8 +225,13 @@ pub fn run<R: Reasoner + ?Sized, I: Injector, B: Readback>(
         return Err(ChainError {
             stage: Stage::Classify,
             detail: format!(
-                "OCR 读到 {} 行，但没有任何一条被判成「对方正文」——归类阈值在这台机器上失效了",
-                ocr.lines.len()
+                "OCR 读到 {} 行，但没有任何一条被判成「对方正文」。\n\
+                 \x20     注意：这**不能**直接判定为归类阈值失效——也可能是 OCR \
+                 压根没读到对方那几条。\n\
+                 \x20     先用 `cargo xtask ocr <帧.png> --scale {}` 确认那一行在不在 \
+                 OCR 结果里，再谈阈值。",
+                ocr.lines.len(),
+                chatservant_perceive::OCR_UPSCALE
             ),
             passed: passed.clone(),
         });

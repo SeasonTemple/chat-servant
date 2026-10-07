@@ -53,6 +53,20 @@ enum Cmd {
         #[arg(long)]
         file: Option<PathBuf>,
     },
+    /// 只跑 OCR，把读到的行原样打出来——**不做锚定、不做归类**
+    ///
+    /// 为什么要有这个：`perceive` 里 OCR 和归类是串在一起的，
+    /// 一旦「没读到对方消息」，分不清是**识别器没读出来**，
+    /// 还是**读出来了但被判成了别的类**。这个命令把那一层剥掉。
+    /// `--scale` 会在 OCR 前把图放大，用来验证「字太小识别器不收」
+    /// 这类假设。
+    Ocr {
+        /// 要识别的 PNG 路径
+        file: PathBuf,
+        /// OCR 前的放大倍数。1 = 原尺寸
+        #[arg(long, default_value_t = 1)]
+        scale: u32,
+    },
     /// 标定探针：逐行测出气泡底色、文字墨色与对比度。
     ///
     /// **归类阈值必须从这里的数据来**，不是拍脑袋。参考项目记的那组数值
@@ -154,6 +168,7 @@ fn main() -> Result<()> {
         Cmd::Read => probe_read(),
         Cmd::Fixture { name, source } => make_fixture(&name, source),
         Cmd::Perceive { file } => probe_perceive(file),
+        Cmd::Ocr { file, scale } => probe_ocr(&file, scale),
         Cmd::Measure { file } => probe_measure(file),
         Cmd::Layout { file } => probe_layout(file),
         Cmd::Media { file } => media_probe::run(file),
@@ -425,6 +440,65 @@ fn window_rect(hwnd_raw: isize) -> Result<(i32, i32, i32, i32)> {
     let mut r = RECT::default();
     unsafe { GetWindowRect(hwnd, &raw mut r) }.context("GetWindowRect 失败")?;
     Ok((r.left, r.top, r.right, r.bottom))
+}
+
+/// 只跑 OCR：不做锚定、不做归类，原样打印识别到的行。
+///
+/// 存在的理由是**分层定位**。`perceive` 把锚定、OCR、归类串在一起，
+/// 「没读到对方消息」这个现象至少有两个完全不同的成因：
+///
+/// - 识别器根本没读出来（像素/字号/对比度问题）
+/// - 读出来了但被判成了别的类（阈值问题）
+///
+/// 两者对应的修法完全不同，混在一起报「归类阈值失效」会把人引向错误方向。
+/// 这个命令把归类那层剥掉，只回答第一个问题。
+///
+/// `--scale` 在 OCR **之前**最近邻放大，用来检验「字太小识别器不收」
+/// 这类假设——放大必须是最近邻，插值会把字形边缘抹掉，掩盖真实问题。
+fn probe_ocr(file: &Path, scale: u32) -> Result<()> {
+    set_dpi_aware();
+    let img = image::open(file)
+        .with_context(|| format!("打开 PNG 失败：{}", file.display()))?
+        .to_rgb8();
+    let (w, h) = img.dimensions();
+
+    let frame = if scale <= 1 {
+        chatservant_capture::Frame::from_rgb(w, h, img.into_raw())
+            .context("源图尺寸与缓冲区不匹配")?
+    } else {
+        let base = chatservant_capture::Frame::from_rgb(w, h, img.into_raw())
+            .context("源图尺寸与缓冲区不匹配")?;
+        base.upscaled_nearest(scale).context("放大后的尺寸溢出")?
+    };
+
+    println!("来源   = {}", file.display());
+    println!(
+        "尺寸   = {}x{}  放大 {}x -> {}x{}",
+        w,
+        h,
+        scale,
+        frame.width(),
+        frame.height()
+    );
+
+    let t0 = std::time::Instant::now();
+    let ocr = chatservant_capture::ocr::recognize(&frame).map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!(
+        "OCR {} ms  逐行 {} 行",
+        t0.elapsed().as_millis(),
+        ocr.lines.len()
+    );
+
+    for (i, l) in ocr.lines.iter().enumerate() {
+        println!(
+            "{i:>3} | y={:>4} h={:>2} | {}",
+            l.rect.y0,
+            l.height(),
+            l.text
+        );
+    }
+    println!("\n---- 整图 ----\n{}", ocr.text);
+    Ok(())
 }
 
 /// 抓一帧 + 本地 OCR 读文字，一条命令走完「像素 → 文字」。
