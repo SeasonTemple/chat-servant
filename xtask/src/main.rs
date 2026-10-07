@@ -342,8 +342,16 @@ fn e2e_cmd(inject: bool, provider: Option<String>, preset: bool) -> Result<()> {
 
     if out.injected_and_read_back {
         println!(
-            "  回读     与注入内容**字节级相等**（{} 字节）",
+            "  剪贴板   与注入内容**字节级相等**（{} 字节，没被别的程序换走）",
             out.injected.len()
+        );
+        println!(
+            "  输入框   像素回读：「{}」",
+            if out.input_box_text.is_empty() {
+                "（空）"
+            } else {
+                &out.input_box_text
+            }
         );
     } else {
         println!("  回读     **没跑**（dry-run：没有注入，也就没有回读证据）");

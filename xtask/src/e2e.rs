@@ -117,9 +117,161 @@ pub struct ChainOutput {
     pub injected: String,
     /// **真正走到过的段**。dry-run 停在起草，最后两段**不在里面**。
     pub passed: Vec<Stage>,
+    /// 注入之后在**输入框像素里**读到的东西。给界面/报告看。
+    pub input_box_text: String,
     /// 是否真的注入并回读过。**没注入就不能说「回读相等」**。
     pub injected_and_read_back: bool,
     pub elapsed: Duration,
+}
+
+/// 注入之后从**输入框那块像素**里读到的结果。
+///
+/// ## 为什么不能只回读剪贴板
+///
+/// 剪贴板是我们自己写进去的。拿它跟自己比是**恒等**的：不管 Ctrl+V 有没有
+/// 真的落进输入框，只要没有别的程序抢走剪贴板，它就等于我们写的原文。
+/// 那种「证据」长得像证据、却证明不了任何事——比没有证据更糟。
+///
+/// 所以这里**再抓一帧**，OCR 输入框所在的那条带子。OCR 会认错字，
+/// 所以判据是「期望文本的字符在读到的文字里占多大比例」，
+/// 而不是字节级相等。
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputVerdict {
+    /// 读到了，且和期望文本足够像。
+    Confirmed { got: String, ratio: f32 },
+    /// 抓帧或 OCR 失败。**不算「没投递成功」**——是没证据。
+    NoEvidence { why: String },
+    /// 读到了东西，但和期望对不上。
+    Mismatch { got: String, ratio: f32 },
+}
+
+impl InputVerdict {
+    pub fn confirms(&self) -> bool {
+        matches!(self, Self::Confirmed { .. })
+    }
+
+    pub fn explain(&self) -> String {
+        match self {
+            Self::Confirmed { got, ratio } => {
+                format!(
+                    "输入框像素里读到「{got}」（与候选相似度 {:.0}%）",
+                    ratio * 100.0
+                )
+            }
+            Self::NoEvidence { why } => {
+                format!("**拿不到证据**（不是「投递失败」）：{why}")
+            }
+            Self::Mismatch { got, ratio } => format!(
+                "输入框里读到的是「{got}」，与候选相似度只有 {:.0}%。\n\
+                 \x20     Ctrl+V 很可能没落进输入框。",
+                ratio * 100.0
+            ),
+        }
+    }
+}
+
+/// 再抓一帧，OCR 输入框那条带子，判断候选是不是真的出现在输入框里。
+fn read_input_box(hwnd: isize, anchor: PaneAnchor, expect: &str) -> InputVerdict {
+    use chatservant_core::frame::Rect;
+
+    let frame = match capture_one_frame(hwnd) {
+        Ok(f) => f,
+        Err(e) => {
+            return InputVerdict::NoEvidence {
+                why: format!("注入后重新抓帧失败：{e}"),
+            };
+        }
+    };
+    // 输入框在消息区**下方**，从 `chat` 的下沿一直到窗口底部。
+    let band = Rect::new(
+        anchor.chat.x0,
+        anchor.chat.y1,
+        anchor.chat.x1,
+        frame.height() as i32,
+    );
+    let strip = match frame.crop(band) {
+        Some(s) => s,
+        None => {
+            return InputVerdict::NoEvidence {
+                why: "按锚点裁不出输入框那条带子".into(),
+            };
+        }
+    };
+    // 放大后再 OCR：与管线同一个理由（见 ADR-0002 补记）——小字识别器不收。
+    let Some(view) = strip.upscaled_nearest(chatservant_perceive::OCR_UPSCALE) else {
+        return InputVerdict::NoEvidence {
+            why: "输入框条带放大失败".into(),
+        };
+    };
+    let ocr = match chatservant_capture::ocr::recognize(&view) {
+        Ok(o) => o,
+        Err(e) => {
+            return InputVerdict::NoEvidence {
+                why: format!("输入框条带 OCR 失败：{e}"),
+            };
+        }
+    };
+
+    // 工具栏和「发送」按钮也会被读到。只看**候选文本本身**像不像。
+    verdict_for(&ocr.text, expect)
+}
+
+/// 拿 OCR 到的输入框文字与候选比对，出判定。
+///
+/// 抽成独立函数是为了让测试**跑真代码**——抄一份判定逻辑进测试，
+/// 测的就不是线上那一段了。
+fn verdict_for(got_raw: &str, expect: &str) -> InputVerdict {
+    let got = squash(got_raw);
+    let want = squash(expect);
+    if want.is_empty() {
+        return InputVerdict::NoEvidence {
+            why: "候选文本去掉空白后是空的，没法比对".into(),
+        };
+    }
+    let ratio = similarity(&want, &got);
+    if ratio >= SIMILARITY_OK {
+        InputVerdict::Confirmed { got, ratio }
+    } else {
+        InputVerdict::Mismatch { got, ratio }
+    }
+}
+
+/// 相似度下限。OCR 认错字是常态，不是失败；判据必须容忍它。
+const SIMILARITY_OK: f32 = 0.6;
+
+/// 去掉所有空白与标点，只留可比对的字。
+///
+/// OCR 常在字里插空格（真实帧上「跑 了 S00 积 分 了」就是这么出来的），
+/// 不去掉就没法比。标点同理：`is_ascii_punctuation` **不管全角标点**，
+/// 所以按 `is_alphanumeric` 取补集——汉字属 Unicode 的 Alphabetic 属性，
+/// 会被保留，而 `，。！？` 会被去掉。
+fn squash(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// 候选文本有多少比例**出现在**读到的文字里。取值 0.0 ~ 1.0。
+///
+/// ## 为什么用字符重合率，不用编辑距离
+///
+/// 候选通常一二十个字，编辑距离对「个别字认错」过于敏感——差一个字
+/// 就把结果推到 0.8 以下，于是**注入成功反而报失败**。
+/// 字符重合率对个别错字宽容，对「完全是另一句话」严格。
+///
+/// ## 方向是单向的：只问「候选有没有出现」
+///
+/// 不反向计算，否则输入框里混进工具栏和「发送」两个字就会被算成
+/// 半个证据。中文二十个字里错一两个字，重合率仍在 0.9 以上；
+/// 而输入框空的时候，比值接近 0——两种结局分得很开。
+fn similarity(needle: &str, haystack: &str) -> f32 {
+    if needle.is_empty() || haystack.is_empty() {
+        return 0.0;
+    }
+    let h: Vec<char> = haystack.chars().collect();
+    let hit = needle.chars().filter(|c| h.contains(c)).count();
+    hit as f32 / needle.chars().count() as f32
 }
 
 /// 跑完整条链。**每一步都可能被指名道姓地失败。**
@@ -296,6 +448,7 @@ pub fn run<R: Reasoner + ?Sized, I: Injector, B: Readback>(
             judged,
             injected,
             passed,
+            input_box_text: String::new(),
             injected_and_read_back: false,
             elapsed: t0.elapsed(),
         });
@@ -312,7 +465,11 @@ pub fn run<R: Reasoner + ?Sized, I: Injector, B: Readback>(
     passed.push(Stage::Inject);
 
     // ── 8 回读验证 ──
-    // **字节级相等是唯一判据。** 返回成功而没有回读等于没有证据。
+    // **剪贴板相等只证明「剪贴板还是我们写的那份」，不证明粘贴落进了输入框。**
+    // 那份剪贴板是上面 `fill` 自己写的，拿它跟自己比是**恒等**的——
+    // 它证明不了的东西却长得像证据。所以这里做两件事：
+    //   ① 剪贴板回读：确认注入之后没有别的程序把它换掉；
+    //   ② **再抓一帧 OCR 输入框那块**：这才是「字真的出现在输入框里」的证据。
     let got = back.read().map_err(|e| ChainError {
         stage: Stage::Readback,
         detail: e,
@@ -322,10 +479,23 @@ pub fn run<R: Reasoner + ?Sized, I: Injector, B: Readback>(
         return Err(ChainError {
             stage: Stage::Readback,
             detail: format!(
-                "回读与注入内容不等：注入 {} 字节，回读 {} 字节",
+                "注入后剪贴板被别的程序换掉了：注入 {} 字节，回读 {} 字节",
                 injected.len(),
                 got.len()
             ),
+            passed: passed.clone(),
+        });
+    }
+
+    let verdict = read_input_box(hit.hwnd_raw, anchor, &injected);
+    let input_box_text = match &verdict {
+        InputVerdict::Confirmed { got, .. } | InputVerdict::Mismatch { got, .. } => got.clone(),
+        InputVerdict::NoEvidence { .. } => String::new(),
+    };
+    if !verdict.confirms() {
+        return Err(ChainError {
+            stage: Stage::Readback,
+            detail: verdict.explain(),
             passed: passed.clone(),
         });
     }
@@ -340,6 +510,7 @@ pub fn run<R: Reasoner + ?Sized, I: Injector, B: Readback>(
         judged,
         injected,
         passed,
+        input_box_text,
         injected_and_read_back: true,
         elapsed: t0.elapsed(),
     })
@@ -427,5 +598,66 @@ impl ChainOutput {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CANDIDATE: &str = "看起来你已经很努力了，加油，相信你会做得更好的！";
+
+    /// OCR 会在字里插空格。真实帧上「跑 了 S00 积 分 了」就是这么出来的，
+    /// 不去掉就没法比。
+    #[test]
+    fn squash_drops_whitespace_and_punctuation() {
+        assert_eq!(squash("跑 了 S00 积 分 了，"), "跑了s00积分了");
+        assert_eq!(squash("a b-c_d"), "abcd");
+    }
+
+    #[test]
+    fn identical_text_scores_one() {
+        assert!((similarity(&squash(CANDIDATE), &squash(CANDIDATE)) - 1.0).abs() < 1e-6);
+    }
+
+    /// 认错一两个字不该让注入成功被误判成失败——那会逼人去查一个没坏的东西。
+    #[test]
+    fn a_wrong_character_still_confirms() {
+        let typo = "看起来你已经很努力了，加油，相信你会做得更好啊！";
+        let r = similarity(&squash(CANDIDATE), &squash(typo));
+        assert!(r >= SIMILARITY_OK, "错一个字就只有 {r:.2}，会误报失败");
+    }
+
+    /// ⚠ **这条是整段回读逻辑的底线**：空输入框不能被判成「投递成功」。
+    ///
+    /// 实测（2026-10-07）：微信输入框为空时，OCR 只读出 `0` 和「发送」。
+    /// 若判据写成「回读剪贴板 == 注入内容」就**恒等**，空输入框照样通过——
+    /// 那种证据证明不了任何事。
+    #[test]
+    fn an_empty_input_box_never_confirms() {
+        let got = squash("0 发 送");
+        let r = similarity(&squash(CANDIDATE), &got);
+        assert!(
+            !verdict_for(&got, CANDIDATE).confirms(),
+            "空输入框居然判成投递成功了（相似度 {r:.2}）"
+        );
+    }
+
+    /// 输入框里有别人的字时也不能判成功。
+    #[test]
+    fn unrelated_text_in_the_box_never_confirms() {
+        let got = squash("明天记得开会");
+        assert!(!verdict_for(&got, CANDIDATE).confirms());
+    }
+
+    #[test]
+    fn a_matching_box_confirms() {
+        assert!(verdict_for(&squash(CANDIDATE), CANDIDATE).confirms());
+    }
+
+    /// 候选全是空白时不许判成功——那会变成「随便什么都行」。
+    #[test]
+    fn a_blank_candidate_is_no_evidence_not_success() {
+        assert!(!verdict_for(&squash(CANDIDATE), "  \n ").confirms());
     }
 }
