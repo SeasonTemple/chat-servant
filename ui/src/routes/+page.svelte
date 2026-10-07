@@ -97,28 +97,34 @@
       reason = ping.ok ? `锚点 ${ping.anchor}` : (ping.detail ?? '锚点推不出来');
 
       const { listen } = await import('@tauri-apps/api/event');
-      const un = await listen<{
-        messages: Message[];
-        candidates: Candidate[];
-        reason: string;
-        counts: CallCounts | null;
-        /** 当前窗口里的会话名。**空串 = 没认出来**。 */
-        peer: string;
-        /** 重锁请求是否还在等着被下一轮取走。 */
-        relock_pending: boolean;
-      }>('readout', (e) => {
-        messages = e.payload.messages;
-        candidates = e.payload.candidates ?? [];
-        reason = e.payload.reason;
-        counts = e.payload.counts ?? null;
-        peer = e.payload.peer ?? '';
-        relockPending = e.payload.relock_pending ?? false;
-      });
-      if (cancelled) {
-        un();
-        return;
+      // ⚠ 注册失败也要**看得见**。监听器静默挂掉时，界面会一直停在
+      // `probe_anchor` 那一行，用户和开发者都看不出是「没收到」还是「收到但没变」。
+      try {
+        const un = await listen<{
+          messages: Message[];
+          candidates: Candidate[];
+          reason: string;
+          counts: CallCounts | null;
+          /** 当前窗口里的会话名。**空串 = 没认出来**。 */
+          peer: string;
+          /** 重锁请求是否还在等着被下一轮取走。 */
+          relock_pending: boolean;
+        }>('readout', (e) => {
+          messages = e.payload.messages ?? [];
+          candidates = e.payload.candidates ?? [];
+          reason = e.payload.reason;
+          counts = e.payload.counts ?? null;
+          peer = e.payload.peer ?? '';
+          relockPending = e.payload.relock_pending ?? false;
+        });
+        if (cancelled) {
+          un();
+          return;
+        }
+        dispose = un;
+      } catch (e) {
+        reason = `**收不到 Rust 的推送**：${String(e)}`;
       }
-      dispose = un;
     })();
 
     return () => {
@@ -264,6 +270,10 @@
 
   <MessageStream {messages} />
 
+  <!-- 候选区。**它是这个面板的产出**，所以拿走所有剩余空间；
+       没有候选时，空状态就落在这块地方里，不再另外插一段灰字。
+       原来「还没有消息」「窗口静止时不会刷新」「没有新消息不会起草」
+       三行灰字说的其实是同一件事，读起来像出了三个问题。 -->
   <section class="cs-cands" aria-label="候选回复">
     {#if sorted.length > 0}
       <h2 class="cs-section">候选回复</h2>
@@ -279,13 +289,18 @@
       {/each}
     {:else}
       <h2 class="cs-section">候选回复</h2>
-      <p class="cs-empty">
-        {#if messages.length === 0}
-          窗口静止时这里不会刷新。对方发来新消息才会起草。
-        {:else}
-          读到了消息，等对方那条先到。
-        {/if}
-      </p>
+      <div class="cs-empty">
+        <p class="cs-empty-lead">
+          {#if !peer}
+            没认出会话，动不了手
+          {:else if messages.length === 0}
+            窗口静止时这里不会刷新
+          {:else}
+            等对方那条先到
+          {/if}
+        </p>
+        <p class="cs-empty-sub">对方发来新消息才会起草。</p>
+      </div>
     {/if}
   </section>
 
@@ -464,20 +479,38 @@
     gap: 0.4rem;
     overflow-y: auto;
     scrollbar-width: thin;
+    /* 拿走全部剩余空间——面板的产出在这里，不该让中段空一大块。 */
     flex: 1 1 auto;
     min-height: 0;
   }
 
+  /* 空状态：两行，一行说结论一行说下一步。居中占住这块地方，
+     免得上面一条状态下面一大片黑，看着像坏了。 */
   .cs-empty {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3rem;
     margin: 0;
-    padding: 0.9rem 0.6rem;
-    font-size: 0.72rem;
-    line-height: 1.6;
-    color: var(--cs-text-faint);
-    text-align: center;
-    background: var(--cs-surface-sunken);
+    padding: 1.2rem 0.8rem;
     border: 1px dashed var(--cs-border);
     border-radius: var(--cs-radius-sm);
+    background: var(--cs-surface-sunken);
+    text-align: center;
+  }
+
+  .cs-empty-lead {
+    margin: 0;
+    font-size: 0.78rem;
+    color: var(--cs-text-dim);
+  }
+
+  .cs-empty-sub {
+    margin: 0;
+    font-size: 0.68rem;
+    color: var(--cs-text-faint);
   }
 
   /* ── 底部：发送档位 ── */

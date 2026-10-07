@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "副驾面板需要的 Tauri 能力。**这里曾经一个文件都没有**，于是前端调 listen 被静默拒绝，界面永远停在启动时那一次 probe_anchor 的结果——Rust 循环推过去的消息、候选、意图，一条都到不了界面。",
+  "windows": ["main", "settings", "debug"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "core:window:allow-close"]
+}

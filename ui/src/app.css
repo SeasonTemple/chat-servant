@@ -17,15 +17,19 @@
    * 圆角不受影响：它来自**窗口的透明四角**，不来自面板。
    * 想要毛玻璃就得先把窗口本身改成不透明，那是另一次取舍。
    */
-  --cs-surface: rgb(26 26 29);
-  --cs-surface-raised: rgb(37 37 41);
-  --cs-surface-sunken: rgb(18 18 20);
-  --cs-border: rgb(48 48 54);
-  --cs-border-strong: rgb(62 62 70);
+  --cs-surface: rgb(24 24 27);
+  --cs-surface-raised: rgb(36 36 40);
+  --cs-surface-sunken: rgb(17 17 19);
+  --cs-border: rgb(52 52 58);
+  --cs-border-strong: rgb(74 74 82);
 
-  --cs-text: rgb(233 233 236);
-  --cs-text-dim: rgb(150 150 158);
-  --cs-text-faint: rgb(104 104 112);
+  --cs-text: rgb(238 238 241);
+  --cs-text-dim: rgb(178 178 186);
+  /* ⚠ 原来这里是 rgb(104 104 112)。对着 `--cs-surface` 算下来只有
+     **3.15 : 1**，达不到 WCAG AA 的 4.5 : 1，而它恰恰是用在 0.62rem
+     （约 10px）的小节标题和空状态上——字最小、对比最差的那一档。
+     现在这个值约 **4.7 : 1**。文字可读性是可以算的，不该靠眼睛估。 */
+  --cs-text-faint: rgb(138 138 146);
 
   /* 我方绿：与微信气泡同色，让「我发的」在面板上也认得出来 */
   --cs-me: rgb(114 205 144);

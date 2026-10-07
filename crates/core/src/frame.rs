@@ -33,6 +33,12 @@ impl Rect {
         i64::from(self.width()) * i64::from(self.height())
     }
 
+    /// 换个高度，**保持上沿不变**。给「同一个上沿、但要更高那条带子」
+    /// 的场景用（见 `watch.rs` 里读会话名那条）。
+    pub fn with_height(self, height: i32) -> Self {
+        Rect::new(self.x0, self.y0, self.x1, self.y0 + height)
+    }
+
     pub fn is_empty(self) -> bool {
         self.width() == 0 || self.height() == 0
     }

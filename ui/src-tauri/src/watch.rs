@@ -652,9 +652,13 @@ fn step(
     // 说明）。以前这里无条件 `s.peer = ...unwrap_or_default()`，于是标题栏
     // 一离开 ROI，界面上的会话名就被抹成「没认出来」，而实际上它没变过。
     // 身份是**累积确认**的事实，不该因为某一轮没看见就丢掉。
-    // 认不到就保持原样。身份是**累积确认**的事实，
-    // 不该因为某一轮的 ROI 没覆盖标题栏就被抹掉。
-    if let Some(name) = chatservant_perceive::conversation_name(&attrs, HEADER_NAME_H) {
+    // 会话名**从头带单独读**（见 `peer_name_from_header`）：增量 ROI 里
+    // 常常没有标题栏，从那里找会挑中别的行（实测认成时间戳 `22 ： 22`），
+    // 加判据之后又变成永远认不出来（`peer=""`）。
+    //
+    // 认不到就保持原样——身份是**累积确认**的事实，
+    // 不该因为某一轮没看见就被抹掉。
+    if let Some(name) = peer_name_from_header(&full, &anchor) {
         s.peer = name;
     }
     // ⚠ 重锁请求必须**在建锁判断之前**取走，否则这一轮的请求会被跳过，
@@ -863,6 +867,30 @@ fn collect_images(
         .collect()
 }
 
+/// 头带在**消息区坐标系**里的矩形。
+///
+/// ## ⚠ 这里踩过一次坑：帧坐标 ≠ 消息区坐标
+///
+/// `pane` 是 `frame.crop(anchor.chat)` 之后那块，**原点在消息区左上角**；
+/// 而 `anchor.chat` / `anchor.header_top` 都是**整帧坐标**。早先直接拿
+/// `chat.x0` 去裁 `pane`，裁出来的是消息区**右半边的中部**（x 304 起），
+/// 压根不是标题栏——于是：
+/// - 像素指纹算在了一片与「是谁」无关的区域上，两个会话的指纹几乎一样，
+///   **会话闸根本认不出切换**（硬约束第 1 条实际没生效）；
+/// - 从同一块地方 OCR 会话名当然读不出来（日志里 `peer=""`）。
+///
+/// 所以这里统一换算到消息区坐标：减去 `chat.x0` / `chat.y0`。
+fn head_band_rect(
+    anchor: &chatservant_capture::anchor::PaneAnchor,
+) -> chatservant_core::frame::Rect {
+    use chatservant_core::frame::Rect;
+    let chat = anchor.chat;
+    // 宽度封顶：右半边是空面板，纳入只会稀释指纹。
+    let w = chat.width().min(HEAD_BAND_W);
+    let top = (anchor.header_top - chat.y0).max(0);
+    Rect::new(0, top, w, top + HEAD_BAND_H)
+}
+
 /// 头部区域的像素指纹。**认不出就返回 `None`**——
 /// 调用方必须把 `None` 当成「认不出」而不是「是同一个」。
 ///
@@ -875,23 +903,59 @@ fn collect_images(
 ///
 /// 头带由锚点给出，不依赖 OCR 认得认得准。
 ///
-/// ⚠ `frame` 必须是**消息区坐标系**（`frame.crop(anchor.chat)` 之后的那块）。
+/// ⚠ `pane` 必须是**消息区坐标系**（`frame.crop(anchor.chat)` 之后的那块）。
 /// `classify_all` 是在裁剪区上跑的，传整帧会取到完全无关的区域，
 /// 而它照样算得出一个「看起来合理」的指纹。
 fn header_print(
     pane: &chatservant_capture::Frame,
     anchor: &chatservant_capture::anchor::PaneAnchor,
 ) -> Option<chatservant_perceive::identity::HeaderPrint> {
-    let chat = anchor.chat;
-    // 宽度封顶：右半边是空面板，纳入只会稀释指纹。
-    let w = (chat.x1 - chat.x0).min(HEAD_BAND_W);
-    let r = chatservant_core::frame::Rect::new(
-        chat.x0,
-        anchor.header_top,
-        chat.x0 + w,
-        anchor.header_top + HEAD_BAND_H,
-    );
-    chatservant_perceive::identity::HeaderPrint::of(pane, r)
+    chatservant_perceive::identity::HeaderPrint::of(pane, head_band_rect(anchor))
+}
+
+/// OCR 读会话名用的带高，**与指纹那块刻意不同**。
+///
+/// 实测（2026-10-07，同一块像素只改高度）：
+///
+/// ```text
+/// 40 px  0 行  ← 读不到「G8W」
+/// 60 px  1 行  ← 读到
+/// 100 px 1 行
+/// ```
+///
+/// 带子太窄、里面又只有一个小字时，`Windows.Media.Ocr` **不收**——
+/// 与「乐」气泡那次是同一类毛病：它需要周围有内容。
+/// 指纹那块继续用 [`HEAD_BAND_H`]（40 px 是照实测定的，动了会破 `MIN_PIXELS`）。
+const PEER_NAME_BAND_H: i32 = 72;
+
+/// 从**头带**里读会话名。坐标系要求同 [`header_print`]。
+///
+/// ## 为什么不能从增量 ROI 里读
+///
+/// 观察循环只对增量 ROI 跑 OCR，而水位线会把 ROI 从下往上裁——**标题栏
+/// 常常根本不在里面**。于是：
+/// - 从 ROI 找「最靠上的 Header」会挑中别的行（实测认成时间戳 `22 ： 22`）；
+/// - 加上标题栏高度判据之后，又变成永远认不出来（日志里 `peer=""`）。
+///
+/// 会话名按定义住在标题栏，所以**直接去标题栏那一块取**。头带只有
+/// 400x40，额外一次 OCR 很便宜（实测几十毫秒），而且这块区域本来
+/// 每次都要用来算像素指纹，顺手的事。
+///
+/// 取「最上面的一条非空行」：头带里除了会话名就是几个图标按钮，
+/// 图标没有文字，所以第一条就是它。
+fn peer_name_from_header(
+    pane: &chatservant_capture::Frame,
+    anchor: &chatservant_capture::anchor::PaneAnchor,
+) -> Option<String> {
+    let strip = pane.crop(head_band_rect(anchor).with_height(PEER_NAME_BAND_H))?;
+    // 小字要放大才认得准——与 `read_lines` 同一个理由（ADR-0002 补记）。
+    let view = strip.upscaled_nearest(chatservant_perceive::OCR_UPSCALE)?;
+    let ocr = chatservant_capture::ocr::recognize(&view).ok()?;
+    ocr.lines
+        .iter()
+        .map(|l| l.text.trim())
+        .find(|t| !t.is_empty())
+        .map(str::to_string)
 }
 
 /// 头带高度 40 px。实测标题行只有 11 px 高，多留一点是为了
@@ -900,13 +964,6 @@ const HEAD_BAND_H: i32 = 40;
 /// 头带宽度上限 400 px。够装下会话名与右侧几个图标，
 /// 又不至于把大片空面板算进来——那会稀释指纹。
 const HEAD_BAND_W: i32 = 400;
-
-/// 认会话名时**只看消息区顶部这么多像素**。
-///
-/// 用来挡住增量 ROI 里被误归成 `Header` 的行——实机日志里
-/// `peer` 曾被认成 `22 ： 22`（一个时间戳），因为标题栏不在 ROI 里，
-/// 剩下几行里恰好有一行被归成了 Header。会话名按定义住在标题栏。
-const HEADER_NAME_H: i32 = 80;
 
 /// 这个循环在用哪家供应商的**视觉**计费规则。
 ///

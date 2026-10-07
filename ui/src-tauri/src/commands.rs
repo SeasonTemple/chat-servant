@@ -618,6 +618,14 @@ pub fn start(app: &AppHandle) {
                         s.candidates = out.candidates.clone();
                     }
                     let _ = app2.emit("readout", &out);
+                    tracing::info!(
+                        target: "chat_servant::pump",
+                        "emit readout tick={} peer={:?} messages={} candidates={}",
+                        out.ticks,
+                        out.peer,
+                        out.messages.len(),
+                        out.candidates.len()
+                    );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
