@@ -174,42 +174,40 @@ fn open_clipboard_with_retry() -> bool {
     false
 }
 
-/// 发送一组按键。
+/// 把一组按键展开成事件序列：**先全部按下，再全部按相反顺序抬起**。
 ///
-/// ⚠ **`KEYEVENTF_UNICODE` 是这套方案的核心。**
-/// 它直接送 UTF-16 码位，不经过键盘布局，所以：
-/// · 不切换用户的输入法
-/// · 不依赖 `Shift` 之类的修饰键状态
-/// · 中文、日文、emoji 都能一次打对
-fn send_keys(keys: &[VIRTUAL_KEY]) -> Result<(), String> {
+/// 抽成独立函数是为了让测试能跑**真代码**——抄一份序列逻辑进测试，
+/// 测的就不是线上那一段了（那个坑本文件已经踩过一次）。
+fn chord_events(keys: &[VIRTUAL_KEY]) -> Vec<INPUT> {
+    let key_event = |vk: VIRTUAL_KEY, up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
     let mut inputs: Vec<INPUT> = Vec::with_capacity(keys.len() * 2);
     for &vk in keys {
-        inputs.push(INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: KEYBD_EVENT_FLAGS(0),
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        });
-        inputs.push(INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_KEYUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        });
+        inputs.push(key_event(vk, false));
     }
-    send_inputs(&mut inputs)
+    for &vk in keys.iter().rev() {
+        inputs.push(key_event(vk, true));
+    }
+    inputs
+}
+
+/// 按和弦发送按键。见 [`chord_events`] 的顺序说明。
+fn send_keys(keys: &[VIRTUAL_KEY]) -> Result<(), String> {
+    send_inputs(&mut chord_events(keys))
 }
 
 /// 逐字符发送 Unicode 文本。
@@ -348,12 +346,69 @@ pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
     DeliveryReceipt::TimedOut
 }
 
+/// 发一次**单独的 ALT 按下+抬起**，什么都不输入。
+///
+/// ## 它干什么用
+///
+/// Windows 的前台锁规定：后台进程不能随意抢前台。系统有一条正规通道——
+/// **收到一个 ALT 键事件之后，下一次 `SetForegroundWindow` 会被放行**。
+/// 这不是绕过安全策略，是 Win32 公开的前台锁释放方式。
+///
+/// ## 代价，以及为什么仍然可以接受
+///
+/// 这一发 ALT 会送到**当前前台窗口**。单按 ALT 不输入任何字符：
+/// - 在终端 / 编辑器 / 浏览器里通常什么都不发生；
+/// - 在经典 Win32 程序里可能让菜单栏闪一下，按 ESC 或松手即恢复。
+///
+/// 对比项目原本拒绝的两件事：移动鼠标指针（用户看得见指针乱跑）、
+/// 真往输入框打字。这里两样都不做——只发一个修饰键。
+///
+/// 发失败就当作没发：`focus` 的兜底步骤，不该因为它整体失败。
+fn prime_foreground_lock() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_MENU;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    };
+
+    let mut inputs = [
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(VK_MENU.0),
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(VK_MENU.0),
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+    ];
+    let _ = send_inputs(&mut inputs);
+}
+
 /// 把前台焦点交给目标窗口。
 ///
 /// `AttachThreadInput` 是 Windows 提供的正规机制：把自己的输入队列
 /// 临时挂到目标线程的队列上，这样 `SetForegroundWindow` 才被允许。
 /// 不这么做的话，后台程序调用它会**静默失败**——返回值是 FALSE，
 /// 但没有任何错误码告诉你为什么。
+///
+/// 仍然失败时走 [`prime_foreground_lock`]：先发一个 ALT 释放前台锁再试一次。
+/// 实测（2026-10-07）只做 `AttachThreadInput` 在**从后台 shell 启动**的
+/// 进程上会被拒（真实产品里用户先点了应用自己的按钮，那条路径通常已放行）。
 pub fn focus(target: HWND) -> Result<(), String> {
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -377,10 +432,26 @@ pub fn focus(target: HWND) -> Result<(), String> {
             let _ = AttachThreadInput(self_tid, target_tid, false);
         }
         if ok {
-            Ok(())
-        } else {
-            Err("SetForegroundWindow 被系统拒绝（Windows 前台锁）".into())
+            return Ok(());
         }
+
+        // 兜底：ALT 释放前台锁，再走一遍同样的正规路径。
+        prime_foreground_lock();
+        std::thread::sleep(Duration::from_millis(60));
+        let fg2 = GetForegroundWindow();
+        if fg2 != target {
+            let attached = AttachThreadInput(self_tid, target_tid, true).as_bool();
+            let ok2 = SetForegroundWindow(target).as_bool();
+            if attached {
+                let _ = AttachThreadInput(self_tid, target_tid, false);
+            }
+            if ok2 {
+                return Ok(());
+            }
+        }
+        Err("SetForegroundWindow 被系统拒绝（Windows 前台锁）：\
+             即使用 ALT 释放前台锁也没成功"
+            .into())
     }
 }
 
@@ -441,6 +512,51 @@ pub fn to_screen(target: HWND, x: i32, y: i32) -> Option<POINT> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 把一组按键的真实事件序列压成 `(虚拟键码, 是否抬起)`，便于断言。
+    fn seq(keys: &[VIRTUAL_KEY]) -> Vec<(u16, bool)> {
+        chord_events(keys)
+            .iter()
+            .map(|i| {
+                // `INPUT::Anonymous` 是 union，读字段要 unsafe。
+                let ki = unsafe { i.Anonymous.ki };
+                (ki.wVk.0, ki.dwFlags == KEYEVENTF_KEYUP)
+            })
+            .collect()
+    }
+
+    /// ⚠ **Ctrl+V 必须是和弦，不是两次独立按键。**
+    ///
+    /// 早先 `send_keys` 对每个键各发「按下+抬起」，于是实际序列是
+    /// `Ctrl↓ Ctrl↑ V↓ V↑`——Ctrl 在 V 之前就松开了，**粘贴从未发生**，
+    /// 微信输入框里敲进去的是一个字母 `v`。
+    ///
+    /// 当时的测试只验剪贴板往返，没碰按键序列，所以一路绿灯。
+    /// 这条断言就是为了钉住顺序。
+    #[test]
+    fn a_chord_presses_all_keys_before_releasing_any() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_V};
+        assert_eq!(
+            seq(&[VK_CONTROL, VK_V]),
+            vec![
+                (VK_CONTROL.0, false),
+                (VK_V.0, false),
+                (VK_V.0, true),
+                (VK_CONTROL.0, true),
+            ],
+            "修饰键必须在主键之后才松开，否则不是 Ctrl+V"
+        );
+    }
+
+    /// 单键时序列就是 down/up 一对。
+    #[test]
+    fn a_single_key_is_a_plain_down_up() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+        assert_eq!(
+            seq(&[VK_ESCAPE]),
+            vec![(VK_ESCAPE.0, false), (VK_ESCAPE.0, true)]
+        );
+    }
 
     const SAMPLE: &str = "这是候选回复，含中英文 mixed 123 与符号 ✓";
 
