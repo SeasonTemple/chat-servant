@@ -544,13 +544,15 @@ fn step(
     // ① 找窗口 + 抓帧
     let hit = find_chat_window(&WECHAT).map_err(|e| format!("找窗口失败：{e}"))?;
 
-    // ①b **先看能不能抓到，再决定要不要试。**
+    // ①b **先问能不能抓到，再决定要不要试。**
     //
-    // 这台机器实测：窗口被盖住时 WGC 直接失败（「捕获会话在送来第一帧之前
-    // 就关闭」）。也就是说每 2.5 秒重试一次是**注定失败的重试**。
-    // `why_unreadable` 只要几次 `WindowFromPoint`，比白跑一次完整抓帧
-    // 会话便宜得多，而且能立刻说出原因——用户看到的是「被别的窗口盖住了」，
-    // 而不是干等一串没头绪的「抓帧失败」。
+    // 这台机器实测：微信窗口可见、未最小化、未被遮挡、未被 cloaked
+    // （`cargo xtask occluded` 四项全过），而 WGC **仍然**报
+    // 「捕获会话在送来第一帧之前就关闭」——真因尚未查明。
+    //
+    // 一部分抓不到的情形（实测确实出现过 6/9 被遮挡），先查一遍能用
+    // 几次 `WindowFromPoint` 换来一句可执行的原因，
+    // 比白跑一次完整抓帧会话便宜。
     if let Some(why) = chatservant_capture::region::why_unreadable(hit.hwnd_raw) {
         return Err(format!("抓不到：{why}"));
     }

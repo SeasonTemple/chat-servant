@@ -189,26 +189,40 @@ fn probe_focus(app: &str) -> Result<()> {
     println!("目标 0x{:X}  {}", hit.hwnd_raw, hit.title);
 
     let hwnd = windows::Win32::Foundation::HWND(hit.hwnd_raw as *mut core::ffi::c_void);
-    match chatservant_capture::inject::focus(hwnd) {
-        Ok(()) => {
-            println!("已提到前台。等 0.5s 后复查遮挡：");
-        }
-        Err(e) => {
-            println!("提前台失败：{e}");
-            // ⚠ 别说成「产品也做不到」。前台锁只约束**调用方进程**：
-            // 只有最后收到用户输入的那个进程有资格改前台。从终端跑的这个
-            // 探针不是那个进程，所以它被拒**不代表**面板里的注入会失败——
-            // 面板是用户点过的 GUI 进程，有资格。
-            println!(
-                "这说的是**这个命令行进程**没资格改前台（它不是最后收到你输入的那个进程）。\n\
-                 面板里的注入走同一段代码，但面板是你点过的 GUI 进程，**有资格**——\n\
-                 所以这里的失败不能推断产品也不行。\n\
-                 要在真实条件下验证，请点一下微信，或直接从面板里点「填入」。"
-            );
-            return Ok(());
+    let focused = chatservant_capture::inject::focus(hwnd).is_ok();
+
+    // ⚠ **判据是「遮挡有没有解除」，不是「有没有变成前台」。**
+    //
+    // 早先只用 SetForegroundWindow，然后拿「前台窗口是不是它」当结果，
+    // 于是报了「未成功」。那是个**验错了指标的错误**：
+    // `SWP_NOACTIVATE` 的 z-order 改动**本来就不激活窗口**，
+    // 但它已经把窗口移到最上面、不再被遮挡——而 WGC 要的正是这个。
+    // 前台只是顺带的副作用，判它会把「其实已经奏效」误报成失败。
+    if !focused {
+        // 前台锁拒绝时仍然能改 z-order：临时置顶再撤下，窗口留在最前。
+        use windows::Win32::UI::WindowsAndMessaging::{
+            HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+        };
+        const TOPMOST: windows::Win32::Foundation::HWND = HWND_TOPMOST;
+        const NOTOPMOST: windows::Win32::Foundation::HWND = HWND_NOTOPMOST;
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        unsafe {
+            let _ = SetWindowPos(hwnd, Some(TOPMOST), 0, 0, 0, 0, flags);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = SetWindowPos(hwnd, Some(NOTOPMOST), 0, 0, 0, 0, flags);
         }
     }
-    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    println!(
+        "{} 已尝试提前台（激活={}）。复查遮挡：",
+        hit.title,
+        if focused {
+            "成功"
+        } else {
+            "被前台锁拒绝"
+        }
+    );
     probe_occluded(app)
 }
 
@@ -383,6 +397,13 @@ fn probe_occluded(app: &str) -> Result<()> {
             &samples.iter().map(|&(_, x, y)| (x, y)).collect::<Vec<_>>()
         )
     );
+    // 第三个维度：cloaked。可见 + 未遮挡 + 被藏起来 —— 前两个都过
+    // 而抓帧仍然失败时，就是它。
+    let cloaked = chatservant_capture::region::is_cloaked(hit.hwnd_raw);
+    println!("is_cloaked() 判定 = {cloaked}   （cloaked 的窗口不参与 DWM 合成，WGC 拿不到帧）");
+    if cloaked {
+        println!("   → 窗口很可能在**另一个虚拟桌面**上。切回那个桌面。");
+    }
     Ok(())
 }
 

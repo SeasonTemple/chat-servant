@@ -182,6 +182,36 @@ pub fn occlusion_samples(hwnd_raw: isize) -> Vec<(i32, i32)> {
     out
 }
 
+/// 窗口是不是被 DWM **cloaked**（藏起来）了。
+///
+/// ## 为什么要单独查这一项
+///
+/// `IsWindowVisible` 为 true、`IsIconic` 为 false、`WindowFromPoint` 也
+/// 命中它——**但它照样可能抓不到**。cloaked 的窗口不参与 DWM 合成，
+/// WGC 拿不到帧、PrintWindow 也拒绝重绘。触发条件之一是窗口在
+/// **另一个虚拟桌面**上。
+///
+/// 光靠「可见 / 未遮挡」两个维度会把这种状态**误判成应该能抓**。
+/// 它排在遮挡检查**前面**就是为此：被藏起来的窗口在屏幕坐标上仍然占位，
+/// `WindowFromPoint` 命中的是它自己，遮挡检查会说「没被挡」。
+///
+/// ⚠ **本机实测它是 false**，而 WGC 仍然失败——所以它是**候选原因之一**，
+/// 不是已确认的原因。别把它当成对当前故障的诊断结论。
+pub fn is_cloaked(hwnd_raw: isize) -> bool {
+    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+    let hwnd = HWND(hwnd_raw as *mut c_void);
+    let mut cloaked: i32 = 0;
+    let ok = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&raw mut cloaked).cast(),
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+    ok.is_ok() && cloaked != 0
+}
+
 /// 一句话说明「为什么现在读不到」，给日志和界面用。**读得到就返回 `None`。**
 ///
 /// 存在的理由：WGC 抓不到时，错误信息只有「抓帧失败」四个字，
@@ -194,6 +224,12 @@ pub fn why_unreadable(hwnd_raw: isize) -> Option<String> {
     }
     if unsafe { IsIconic(hwnd) }.as_bool() {
         return Some("窗口已最小化——还原它才能抓到".into());
+    }
+    // cloaked 要排在遮挡**前面**：被藏起来的窗口在屏幕坐标上仍然占位，
+    // `WindowFromPoint` 会命中它自己，于是遮挡检查说「没被挡」——
+    // 而真正的原因是它根本不参与合成。两个维度都过才谈得上「能抓」。
+    if is_cloaked(hwnd_raw) {
+        return Some("窗口被 DWM 藏起来了（多半在另一个虚拟桌面上）——切回它所在的桌面".into());
     }
     let pts = occlusion_samples(hwnd_raw);
     let covered = pts
