@@ -69,10 +69,19 @@ ADR-0002 第 3 级是五级里**唯一**以准确率为主的一级。
       （`text_inside_an_embedded_photo_never_reaches_the_message_stream` 端到端）
 - [x] 遮罩规则里颜色是判据，所以管线在这一步之前不做去色（ADR-0002 明确不做）
 - [x] 每个被丢弃的区域带着丢弃原因和判定依据（`Rejection.reason`）
-- [ ] **尺度归一**：滑块 → 视觉 token 数，按预算变化，界面显示具体数字
-- [ ] 100% / 150% DPI 下同样的逻辑布局 token 数相同
-- [ ] 最低档重要对话仍能识别出文本；最高档不出现"越大越差"
-- [x] 缩放用 `image` crate，不自己实现重采样（**尺度归一未开工，此项随它一起**）
+- [x] **尺度归一**：滑块 → 视觉 token 数，按预算变化，界面显示具体数字
+      —— 滑块只在外发总闸打开时才出现（关着时摆出来就是假控件）；
+      `the_output_always_fits_the_budget` 锁「输出一定装得进预算」；
+      `the_budget_ceiling_...` 三条锁上界必须 ≥ 该供应商底账
+      （早先把上界写死成 Anthropic 的 1568，于是 gpt-4o-mini 上图片功能**完全不可用**
+      而界面看不出异常）
+- [x] 100% / 150% DPI 下同样的逻辑布局 token 数相同
+      —— `dpi_scale_does_not_change_the_token_count`（不需要真改系统 DPI：
+      同一个逻辑矩形在 150% 下物理尺寸是 1.5 倍，除回去必须完全一致）
+- [x] 最低档重要对话仍能识别出文本；最高档不出现"越大越差"
+      —— 文本走**本地 OCR**，视觉 token 预算**完全碰不到它**（这是结构保证，
+      不是调参调出来的）；「越大越差」由 `more_budget_never_makes_the_image_smaller_or_costlier` 锁住
+- [x] 缩放用 `image` crate，不自己实现重采样 —— `capture::media::encode_region`
 
 ## 尺度归一：两条公式抄自供应商文档，不是猜的
 
