@@ -6,11 +6,22 @@
 :root {
   color-scheme: dark;
 
-  /* 层级：越靠前越贴近用户 */
-  --cs-surface: rgb(28 28 30 / 88%);
-  --cs-surface-raised: rgb(38 38 41 / 94%);
-  --cs-border: rgb(255 255 255 / 8%);
-  --cs-border-strong: rgb(255 255 255 / 14%);
+  /* 层级：越靠前越贴近用户
+   *
+   * ⚠ **所有底色都必须是完全不透明的**（2026-10-07 实测）。
+   * Tauri 的透明窗口走 WebView2 的分层合成，子元素上的
+   * `rgb(... / 88%)` 这类半透明底色**整层不绘制**——
+   * 症状是文字在、面板底色没了，底下桌面直接透进来，
+   * 整个面板没法读。毛玻璃 `backdrop-filter` 同样一并失效。
+   *
+   * 圆角不受影响：它来自**窗口的透明四角**，不来自面板。
+   * 想要毛玻璃就得先把窗口本身改成不透明，那是另一次取舍。
+   */
+  --cs-surface: rgb(26 26 29);
+  --cs-surface-raised: rgb(37 37 41);
+  --cs-surface-sunken: rgb(18 18 20);
+  --cs-border: rgb(48 48 54);
+  --cs-border-strong: rgb(62 62 70);
 
   --cs-text: rgb(233 233 236);
   --cs-text-dim: rgb(150 150 158);
@@ -45,7 +56,9 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
-  /* 悬浮窗必须能透出底下的聊天窗口 */
+  /* ⚠ **半透明底色在 Tauri 透明窗口里整层不绘制**（2026-10-07 实测）。
+     这里必须保持 `transparent`——**圆角来自窗口的透明四角**，
+     不是来自半透明面板。面板底色放到 `.cs-panel` 上，且必须是**不透明**的。 */
   background: transparent;
   color: var(--cs-text);
   /* 面板自己不该能被选中——它不是文档 */

@@ -214,6 +214,12 @@ struct Scratch {
     context: chatservant_reason::Context,
     /// 本会话的完整历史，喂给推理。**只在有新消息时追加**。
     history: Vec<String>,
+    /// 最近一次识别出的消息流。**发给界面渲染用。**
+    ///
+    /// ⚠ 它以前**根本不存在**：`step` 里算出 `messages` 只在这一轮里用，
+    /// readout 里写死 `messages: Vec::new()`。于是界面上的消息流永远是空的
+    /// ——即使识别完全正常、候选都出来了，聊天记录那一片永远是「还没有消息」。
+    messages: Vec<Message>,
     /// **只对这个会话动手。** 见 [`LoopConfig::locked_peer`]。
     locked_peer: String,
     /// 当前窗口里认出的会话名。**空串 = 没认出来**。
@@ -249,6 +255,7 @@ impl Scratch {
             ocr_calls: 0,
             context: chatservant_reason::Context::new(),
             history: Vec::new(),
+            messages: Vec::new(),
             recent,
             vision: chatservant_reason::VisionBridge::off(),
             locked_peer: String::new(),
@@ -480,7 +487,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         let out = Readout {
                             anchor,
                             peer: s.peer.clone(),
-                            messages: Vec::new(),
+                            messages: s.messages.clone(),
                             candidates: s.candidates.clone(),
                             reason: s.reason.clone(),
                             model_calls: last_calls,
@@ -511,7 +518,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         let out = Readout {
                             anchor,
                             peer: s.peer.clone(),
-                            messages: Vec::new(),
+                            messages: s.messages.clone(),
                             candidates: s.candidates.clone(),
                             reason: "这一轮没跑通".into(),
                             model_calls: last_calls,
@@ -553,14 +560,15 @@ fn step(
 
     // ①b **先问能不能抓到，再决定要不要试。**
     //
-    // 这台机器实测：微信窗口可见、未最小化、未被遮挡、未被 cloaked
-    // （`cargo xtask occluded` 四项全过），而 WGC **仍然**报
-    // 「捕获会话在送来第一帧之前就关闭」——真因尚未查明。
+    // ⚠ 这里必须用 `why_wgc_unreadable`，**不能**用区域抓屏那套判据。
+    // 区域抓屏读的是屏幕像素，被盖住就完蛋；但 **WGC 就是为抓被遮挡窗口
+    // 设计的**（实测 2026-10-07：6/9 采样点被盖住，八段 e2e 照样全通）。
     //
-    // 一部分抓不到的情形（实测确实出现过 6/9 被遮挡），先查一遍能用
-    // 几次 `WindowFromPoint` 换来一句可执行的原因，
-    // 比白跑一次完整抓帧会话便宜。
-    if let Some(why) = chatservant_capture::region::why_unreadable(hit.hwnd_raw) {
+    // 原先这里用的是带遮挡检查的 `why_unreadable`，于是**只要有任何东西
+    // 盖住微信就直接返回错误**——而那永远是常态。后果是观察循环一次帧都
+    // 没抓到过，界面上只有一句「抓不到：窗口被别的窗口盖住了」，
+    // 帧计数恒为 0，进程 CPU 恒为 0。
+    if let Some(why) = chatservant_capture::region::why_wgc_unreadable(hit.hwnd_raw) {
         return Err(format!("抓不到：{why}"));
     }
 
@@ -606,6 +614,9 @@ fn step(
         .collect();
     let attrs = chatservant_perceive::classify_all(&lines, &full, &palette);
     let messages = chatservant_perceive::group(&attrs);
+    // **存一份给界面。** 以前这里算完就丢，readout 里发的是空数组——
+    // 界面的消息流因此永远是空的。抄一份很便宜，几十条消息而已。
+    s.messages = messages.clone();
 
     let peer_name = chatservant_perceive::conversation_name(&attrs);
     // **会话身份闸。** 认的是**头部区域的像素指纹**，不是 OCR 读出来的名字。

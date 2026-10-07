@@ -201,6 +201,11 @@
 </script>
 
 <main {@attach watchWidth} class="cs-panel" class:compact>
+  <!-- 标题栏：只做「我是谁 + 两个次要入口」。
+       ⚠ 发送档位**不在这里**（2026-10-07 改）——
+       它是最需要慎重的一步，却原来和标题挤在一起、看着像随手点的。
+       档位现在固定在**底部**，和候选区隔开，让「先看内容、再决定怎么发」
+       成为视觉上的自然顺序。 -->
   <header class="cs-head">
     <span class="cs-title">副驾</span>
     <div class="cs-head-tools">
@@ -218,130 +223,114 @@
       >
         设置
       </button>
-      <TierSwitch bind:tier onchange={changeTier} />
     </div>
   </header>
 
-  <!-- 会话闸：只对锁定会话动手。徽标 + 重锁按钮都要显眼——
-       程序不动的时候，用户要能立刻看出「它看到的是哪个会话」，
-       并且能当场纠正，而不是只能关掉重开。 -->
-  <div class="cs-peer">
-    <span class="cs-peer-name" class:unknown={!peer}>
-      {#if peer}
-        会话：{peer}
-      {:else}
-        会话：没认出来
-      {/if}
+  <!-- 会话闸：只对锁定会话动手。这是**当前状态**，所以放在最上面做成卡片：
+       用户任何时候一眼都能看出「它现在看着谁」，不对就会点下面的锁定。 -->
+  <section class="cs-peer" class:unknown={!peer} aria-label="当前会话">
+    <span class="cs-peer-bar" aria-hidden="true"></span>
+    <span class="cs-peer-text">
+      <span class="cs-peer-label">正在处理</span>
+      <span class="cs-peer-name">{peer || '没认出来'}</span>
     </span>
-    <button
-      class="cs-peer-lock"
-      onclick={refresh}
-      disabled={refreshing}
-      title="手动读一次当前快照。面板是纯推送的，静态窗口里它不会自己说话。"
-    >
-      {refreshing ? '读取中…' : '刷新'}
-    </button>
-    <button
-      class="cs-peer-lock"
-      onclick={relock}
-      disabled={locking || relockPending}
-      title="把当前这个会话锁成要处理的那个。程序只对它动手。"
-    >
-      {#if locking || relockPending}
-        等下一轮…
-      {:else}
-        锁这个会话
-      {/if}
-    </button>
-  </div>
+    <div class="cs-peer-actions">
+      <button
+        class="cs-peer-lock"
+        onclick={refresh}
+        disabled={refreshing}
+        title="手动读一次当前快照。面板是纯推送的，静态窗口里它不会自己说话。"
+      >
+        {refreshing ? '读取中' : '刷新'}
+      </button>
+      <button
+        class="cs-peer-lock"
+        onclick={relock}
+        disabled={locking || relockPending}
+        title="把当前这个会话锁成要处理的那个。程序只对它动手。"
+      >
+        {locking || relockPending ? '等下一轮' : '改锁这个'}
+      </button>
+    </div>
+  </section>
 
-  <ReasonBar {reason} {counts} />
+  <!-- 为什么不动手：只在有事发生时说一句话。认不出会话的时候，
+       它取代所有其它内容——那时候显示「候选」是在骗人。 -->
+  {#if !peer && messages.length === 0 && candidates.length === 0}
+    <p class="cs-note">{reason}</p>
+  {:else}
+    <ReasonBar {reason} {counts} />
+  {/if}
 
   <MessageStream {messages} />
 
   <section class="cs-cands" aria-label="候选回复">
-    {#each sorted as c, i (c.id)}
-      <CandidateCard
-        {c}
-        rank={i + 1}
-        {busy}
-        recommended={c.id === bestId}
-        onfill={() => act(c, 'fill')}
-        onconfirm={() => act(c, 'confirm')}
-      />
+    {#if sorted.length > 0}
+      <h2 class="cs-section">候选回复</h2>
+      {#each sorted as c, i (c.id)}
+        <CandidateCard
+          {c}
+          rank={i + 1}
+          {busy}
+          recommended={c.id === bestId}
+          onfill={() => act(c, 'fill')}
+          onconfirm={() => act(c, 'confirm')}
+        />
+      {/each}
     {:else}
-      <p class="cs-empty">没有新消息时不会起草候选。</p>
-    {/each}
+      <h2 class="cs-section">候选回复</h2>
+      <p class="cs-empty">
+        {#if messages.length === 0}
+          窗口静止时这里不会刷新。对方发来新消息才会起草。
+        {:else}
+          读到了消息，等对方那条先到。
+        {/if}
+      </p>
+    {/if}
   </section>
+
+  <!-- 发送档位。固定在底部，和候选区之间有一条分隔线：
+       「看完再决定怎么发」这个顺序要在视觉上成立。 -->
+  <footer class="cs-foot">
+    <span class="cs-foot-label">发送方式</span>
+    <TierSwitch bind:tier onchange={changeTier} />
+  </footer>
 </main>
 
 <style>
-  /* 会话徽标 + 重锁按钮。认不出来时用警告色——那意味着程序**不会动手**，
-     得让人一眼看出来，而不是当成一个还没加载完的空白。 */
-  .cs-peer {
+  .cs-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    height: 100%;
+    padding: 0.75rem 0.75rem 0;
+    /* ⚠ 底色必须**完全不透明**（2026-10-07 实测）。
+       原来这里是 `rgb(28 28 30 / 88%)` + `backdrop-filter: blur(18px)`，
+       结果整块底色不绘制——文字在、面板没了，底下桌面直接透进来，
+       完全没法读。`backdrop-filter` 一并去掉。
+       圆角不受影响：它来自**窗口的透明四角**，不来自面板。 */
+    background: rgb(26 26 29);
+    border: 1px solid var(--cs-border);
+    border-radius: var(--cs-radius);
+    box-shadow: var(--cs-shadow);
+    overflow: hidden;
+  }
+
+  /* ── 标题栏：安静，让位给内容 ── */
+  .cs-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
-    margin: 0 0 0.2rem;
-  }
-
-  .cs-peer-name {
-    font-size: 0.66rem;
-    letter-spacing: 0.02em;
-    color: var(--cs-text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .cs-peer-name.unknown {
-    color: var(--cs-danger);
-  }
-
-  /* 重锁是个**小的、明确的**动作，不是主按钮——
-     免得被误当成「开始工作」。 */
-  .cs-peer-lock {
     flex: none;
-    padding: 0.12rem 0.4rem;
-    font-size: 0.62rem;
-    border: 1px solid var(--cs-border-strong);
-    border-radius: 6px;
-    background: transparent;
+  }
+
+  .cs-title {
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
     color: var(--cs-text-dim);
-  }
-
-  .cs-peer-lock:hover:not(:disabled) {
-    background: rgb(255 255 255 / 6%);
-    color: var(--cs-text);
-  }
-
-  .cs-peer-lock:disabled {
-    opacity: 0.45;
-    cursor: default;
-  }
-
-  .cs-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 0.45rem;
-    height: 100%;
-    padding: 0.7rem;
-    /* 半透明玻璃。底下是用户的聊天窗口，面板不能把它完全盖住。 */
-    background: var(--cs-surface);
-    backdrop-filter: blur(18px) saturate(1.2);
-    border: 1px solid var(--cs-border);
-    border-radius: var(--cs-radius);
-    box-shadow: var(--cs-shadow);
-    /* 面板可以被拖动——整个 main 都是拖动区，按钮自己排除。 */
-    overflow: hidden;
-  }
-
-  .cs-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 0.5rem;
+    white-space: nowrap;
   }
 
   .cs-head-tools {
@@ -351,24 +340,122 @@
   }
 
   .cs-tool {
-    padding: 0.15rem 0.4rem;
-    font-size: 0.66rem;
-    border-radius: 6px;
+    padding: 0.18rem 0.5rem;
+    font-size: 0.68rem;
+    border-radius: 7px;
     border: 1px solid var(--cs-border);
-    background: transparent;
-    color: var(--cs-text-faint);
+    background: var(--cs-surface-raised);
+    color: var(--cs-text-dim);
+    transition: background var(--cs-dur-fast) var(--cs-ease);
   }
 
   .cs-tool:hover {
     color: var(--cs-text);
-    background: rgb(255 255 255 / 6%);
+    background: var(--cs-border);
   }
 
-  .cs-title {
-    font-size: 0.8rem;
-    letter-spacing: 0.08em;
+  /* ── 会话卡：当前状态，面板里最重要的一个「事实」 ── */
+  .cs-peer {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    flex: none;
+    padding: 0.5rem 0.6rem;
+    border-radius: var(--cs-radius-sm);
+    background: var(--cs-surface-raised);
+    border: 1px solid var(--cs-border);
+  }
+
+  .cs-peer.unknown {
+    border-color: var(--cs-danger);
+  }
+
+  .cs-peer-bar {
+    flex: none;
+    width: 3px;
+    align-self: stretch;
+    border-radius: 2px;
+    background: var(--cs-accent);
+  }
+
+  .cs-peer.unknown .cs-peer-bar {
+    background: var(--cs-danger);
+  }
+
+  .cs-peer-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.05rem;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .cs-peer-label {
+    font-size: 0.6rem;
+    letter-spacing: 0.1em;
+    color: var(--cs-text-faint);
+  }
+
+  .cs-peer-name {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--cs-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cs-peer.unknown .cs-peer-name {
+    color: var(--cs-danger);
+  }
+
+  .cs-peer-actions {
+    display: flex;
+    gap: 0.25rem;
+    flex: none;
+  }
+
+  .cs-peer-lock {
+    padding: 0.2rem 0.45rem;
+    font-size: 0.64rem;
+    border: 1px solid var(--cs-border-strong);
+    border-radius: 7px;
+    background: var(--cs-surface-sunken);
     color: var(--cs-text-dim);
     white-space: nowrap;
+    transition: background var(--cs-dur-fast) var(--cs-ease);
+  }
+
+  .cs-peer-lock:hover:not(:disabled) {
+    background: var(--cs-border);
+    color: var(--cs-text);
+  }
+
+  .cs-peer-lock:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  /* ── 状态行 ── */
+  .cs-note {
+    margin: 0;
+    padding: 0.5rem 0.6rem;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--cs-danger);
+    background: var(--cs-surface-raised);
+    border: 1px solid var(--cs-border);
+    border-radius: var(--cs-radius-sm);
+  }
+
+  /* 小节标题。让「候选回复」这几个字真正成为一个标题，
+     而不是漂浮的又一个灰字。 */
+  .cs-section {
+    margin: 0.15rem 0 0;
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    color: var(--cs-text-faint);
   }
 
   .cs-cands {
@@ -377,26 +464,57 @@
     gap: 0.4rem;
     overflow-y: auto;
     scrollbar-width: thin;
-    flex: 0 1 auto;
+    flex: 1 1 auto;
     min-height: 0;
   }
 
   .cs-empty {
     margin: 0;
-    padding: 0.6rem 0.25rem;
+    padding: 0.9rem 0.6rem;
     font-size: 0.72rem;
+    line-height: 1.6;
     color: var(--cs-text-faint);
     text-align: center;
+    background: var(--cs-surface-sunken);
+    border: 1px dashed var(--cs-border);
+    border-radius: var(--cs-radius-sm);
   }
 
-  /* 紧凑模式：面板窄的时候**收紧间距与字号**，
+  /* ── 底部：发送档位 ── */
+  .cs-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    flex: none;
+    margin-top: auto;
+    padding: 0.55rem 0 0.65rem;
+    border-top: 1px solid var(--cs-border);
+  }
+
+  .cs-foot-label {
+    font-size: 0.62rem;
+    letter-spacing: 0.1em;
+    color: var(--cs-text-faint);
+    white-space: nowrap;
+  }
+
+  /* 紧凑模式：面板窄的时候收紧间距与字号，
      而不是让文字挤成两行。挤成两行的可读性远低于更小但单行的字。 */
   .cs-panel.compact {
-    padding: 0.5rem;
-    gap: 0.3rem;
+    padding: 0.55rem 0.55rem 0;
+    gap: 0.4rem;
   }
 
   .cs-panel.compact .cs-title {
     font-size: 0.72rem;
+  }
+
+  .cs-panel.compact .cs-peer-name {
+    font-size: 0.76rem;
+  }
+
+  .cs-panel.compact .cs-foot-label {
+    display: none;
   }
 </style>

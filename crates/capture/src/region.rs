@@ -216,12 +216,22 @@ pub fn is_cloaked(hwnd_raw: isize) -> bool {
     ok.is_ok() && cloaked != 0
 }
 
-/// 一句话说明「为什么现在读不到」，给日志和界面用。**读得到就返回 `None`。**
+/// WGC 的前置判据：**只查真正挡住 WGC 的东西**。
 ///
-/// 存在的理由：WGC 抓不到时，错误信息只有「抓帧失败」四个字，
-/// 用户看不出是自己把窗口压在别的窗口底下了。这句提示比重试一千次有用。
-pub fn why_unreadable(hwnd_raw: isize) -> Option<String> {
-    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible, WindowFromPoint};
+/// 不可见 / 最小化 / 被 DWM 藏起来（多半在别的虚拟桌面）——
+/// 这三种情况下 WGC 确实拿不到帧。
+///
+/// ## 刻意**不查遮挡**
+///
+/// 遮挡是第 ③ 级区域抓屏的死穴，但对 WGC 不是——**WGC 就是为抓被遮挡
+/// 窗口而存在的**。实测（2026-10-07）6/9 采样点被盖住时，
+/// e2e 照样读出了对方消息，八段全通。
+///
+/// 把遮挡当挡箭牌的后果是实际的：观察循环曾用区域抓屏的判据去挡 WGC，
+/// 结果**只要有任何东西盖住微信就直接返回错误**——而那永远是常态。
+/// 表现为面板上写着「抓不到：窗口被别的窗口盖住了」，一帧都没抓到过。
+pub fn why_wgc_unreadable(hwnd_raw: isize) -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
     let hwnd = HWND(hwnd_raw as *mut c_void);
     if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
         return Some("窗口不可见（可能在别的虚拟桌面或已最小化到托盘）".into());
@@ -235,6 +245,25 @@ pub fn why_unreadable(hwnd_raw: isize) -> Option<String> {
     if is_cloaked(hwnd_raw) {
         return Some("窗口被 DWM 藏起来了（多半在另一个虚拟桌面上）——切回它所在的桌面".into());
     }
+    None
+}
+
+/// 一句话说明「为什么现在**用区域抓屏**读不到」，给日志和界面用。
+///
+/// 存在的理由：区域抓屏失败时，错误信息只有「抓帧失败」四个字，
+/// 用户看不出是自己把窗口压在别的窗口底下了。这句提示比重试一千次有用。
+///
+/// ## ⚠ **它不适用于 WGC**
+///
+/// 遮挡对区域抓屏是致命的，但 **WGC 恰恰就是为抓被遮挡窗口设计的**。
+/// 拿它当 WGC 的前置判据，会让**只要有任何东西盖住目标窗口就直接失败**，
+/// 而那是常态。WGC 的判据是 [`why_wgc_unreadable`]。
+pub fn why_unreadable(hwnd_raw: isize) -> Option<String> {
+    if let Some(why) = why_wgc_unreadable(hwnd_raw) {
+        return Some(why);
+    }
+    use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
+    let hwnd = HWND(hwnd_raw as *mut c_void);
     let pts = occlusion_samples(hwnd_raw);
     let covered = pts
         .iter()
