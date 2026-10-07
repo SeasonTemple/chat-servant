@@ -603,6 +603,9 @@ fn key_from_env(p: chatservant_reason::Provider) -> Option<String> {
     None
 }
 
+/// 认会话名时只看消息区顶部这么多像素——与观察循环里的同名常量一致。
+const HEADER_NAME_H_PX: i32 = 80;
+
 /// 连抓 N 帧，逐次打印**本进程线程数**。
 ///
 /// ## 它回答什么
@@ -655,6 +658,12 @@ fn probe_threads(n: u32) -> Result<()> {
     let hit = chatservant_capture::find_chat_window(&WECHAT)
         .map_err(|e| anyhow::anyhow!("找窗口失败：{e}"))?;
     println!("窗口 = {}  0x{:X}", hit.title, hit.hwnd_raw);
+    // 最小化的窗口 WGC 抓不到（Windows 根本不渲染它），先无激活还原。
+    // 与 `probe frame` 同一套动作，别让「最小化」污染这个探针的结论。
+    if chatservant_capture::restore_without_activating(hit.hwnd_raw) {
+        println!("窗口原本是最小化状态：已无激活还原");
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
     println!("抓帧前线程数 = {}", threads());
 
     for i in 1..=n {
@@ -994,7 +1003,9 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
     // 头部的**归类**（NoiseClass::Header）与头部的**文字读得对不对**
     // 是两件事：真实帧上分类是对的，OCR 却可能把「小号」读成别的。
     // 两边都打出来，才能看出闸到底认的是什么。
-    match chatservant_perceive::conversation_name(&r.attributions) {
+    // 只认**标题栏那条带子**里的 Header。判据见 `conversation_name` 的说明：
+    // 实机上它曾把一个时间戳认成会话名。
+    match chatservant_perceive::conversation_name(&r.attributions, HEADER_NAME_H_PX) {
         Some(name) => println!("  OCR 读到的会话名：{name}"),
         None => println!("  OCR 读到的会话名：（没读出标题行）"),
     }

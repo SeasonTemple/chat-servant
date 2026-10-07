@@ -67,12 +67,20 @@ pub fn group(attrs: &[Attribution]) -> Vec<Message> {
 /// 多个 Header 时取**最靠上**的那一条——会话名在标题栏，别的 Header
 /// （群公告之类）在下面，取最上的那条才是会话名本身。
 ///
-/// 取不到返回 `None`，**不要退回空串**：空串和「真的没有会话名」
+/// ## `header_h`：只看标题栏那条带子
+///
+/// ⚠ 这一条是**实测逼出来的**：实机日志里 `peer` 认成了 `22 ： 22`
+/// ——一个**时间戳**。原因是调用方传进来的 `attrs` 来自**增量 ROI**，
+/// 而 ROI 被水位线从下往上裁，标题栏常常根本不在里面；剩下几行里
+/// 恰好有一行被归成 Header，就被当成了会话名。
+///
+/// 会话名按定义住在标题栏里，所以判据里必须带上这条带子的高度。
+/// 取不到就返回 `None`，**不要退回空串**：空串和「真的没有会话名」
 /// 在调用方眼里是两回事，调用方要靠它决定敢不敢动手。
-pub fn conversation_name(attrs: &[Attribution]) -> Option<String> {
+pub fn conversation_name(attrs: &[Attribution], header_h: i32) -> Option<String> {
     let mut best: Option<&Attribution> = None;
     for a in attrs {
-        if a.noise != NoiseClass::Header {
+        if a.noise != NoiseClass::Header || a.rect.y1 > header_h {
             continue;
         }
         let t = a.text.trim();
@@ -125,6 +133,37 @@ mod session_gate {
         }
     }
 
+    /// 认会话名时只看消息区顶部这么多像素。与观察循环、xtask 同值。
+    const HEADER_BAND_H: i32 = 80;
+
+    /// **标题栏之外被误归成 Header 的行，绝不能当会话名。**
+    ///
+    /// 2026-10-07 实机事故：观察循环日志里 `peer` 被认成 `22 ： 22`
+    /// ——一个**时间戳**。原因是调用方传的 `attrs` 来自增量 ROI，
+    /// 标题栏常常不在里面，剩下几行里恰好有一行被归成了 Header，
+    /// 「最靠上」就选中了它。会话名按定义住在标题栏里。
+    #[test]
+    fn a_header_below_the_title_bar_is_not_the_conversation_name() {
+        let attrs = vec![
+            line(NoiseClass::Header, "22 ： 22", 520),
+            line(NoiseClass::Header, "小号", 20),
+        ];
+        assert_eq!(
+            conversation_name(&attrs, HEADER_BAND_H).as_deref(),
+            Some("小号"),
+            "标题栏下面的 Header 不该被当成会话名"
+        );
+    }
+
+    /// 只有标题栏之外有 Header 时，宁可**认不出来**，也不猜一个。
+    ///
+    /// 猜错的后果是把 A 的对话当成 B 的处理——那是正确性事故。
+    #[test]
+    fn a_header_below_the_title_bar_alone_yields_none() {
+        let attrs = vec![line(NoiseClass::Header, "22 ： 22", 520)];
+        assert_eq!(conversation_name(&attrs, HEADER_BAND_H), None);
+    }
+
     /// 会话名取**最靠上**的那条 Header。
     #[test]
     fn the_topmost_header_is_the_conversation_name() {
@@ -132,7 +171,10 @@ mod session_gate {
             line(NoiseClass::Header, "群公告在下面", 300),
             line(NoiseClass::Header, "小号", 20),
         ];
-        assert_eq!(conversation_name(&attrs).as_deref(), Some("小号"));
+        assert_eq!(
+            conversation_name(&attrs, HEADER_BAND_H).as_deref(),
+            Some("小号")
+        );
     }
 
     /// 正文和时间戳**不算**会话名。认错人就会把 A 的对话当成 B 的处理。
@@ -142,7 +184,11 @@ mod session_gate {
             line(NoiseClass::Text, "今晚有空吗", 100),
             line(NoiseClass::Gray, "昨天 22:31", 150),
         ];
-        assert_eq!(conversation_name(&attrs), None, "只有 Header 才是会话名");
+        assert_eq!(
+            conversation_name(&attrs, HEADER_BAND_H),
+            None,
+            "只有 Header 才是会话名"
+        );
     }
 
     /// 认不出就返回 `None`，**不返回空串**。
@@ -152,7 +198,7 @@ mod session_gate {
     #[test]
     fn unreadable_header_is_none_not_empty() {
         let attrs = vec![line(NoiseClass::Header, "   ", 20)];
-        assert_eq!(conversation_name(&attrs), None);
+        assert_eq!(conversation_name(&attrs, HEADER_BAND_H), None);
     }
 
     /// 空白 Header 即使最靠上也要**跳过**，不因为位置就选它。
@@ -162,6 +208,9 @@ mod session_gate {
             line(NoiseClass::Header, " ", 10),
             line(NoiseClass::Header, "小号", 40),
         ];
-        assert_eq!(conversation_name(&attrs).as_deref(), Some("小号"));
+        assert_eq!(
+            conversation_name(&attrs, HEADER_BAND_H).as_deref(),
+            Some("小号")
+        );
     }
 }

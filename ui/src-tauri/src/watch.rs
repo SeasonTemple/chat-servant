@@ -637,7 +637,6 @@ fn step(
     // 界面的消息流因此永远是空的。抄一份很便宜，几十条消息而已。
     s.messages = messages.clone();
 
-    let peer_name = chatservant_perceive::conversation_name(&attrs);
     // **会话身份闸。** 认的是**头部区域的像素指纹**，不是 OCR 读出来的名字。
     //
     // 为什么不比名字：实测真实帧上头部的**归类**是对的（`NoiseClass::Header`），
@@ -647,7 +646,17 @@ fn step(
     // 为什么指纹可靠：文字是 OCR 的产物，那一小块像素不是。
     // 换会话像素必然变；同一会话在帧之间基本不变（阈值吸收角标抖动）。
     let print = header_print(&full, &anchor);
-    s.peer = peer_name.clone().unwrap_or_default();
+    // ⚠ **认不到就保持原样，不要清空。**
+    //
+    // `attrs` 来自增量 ROI，标题栏常常不在里面（见 `conversation_name` 的
+    // 说明）。以前这里无条件 `s.peer = ...unwrap_or_default()`，于是标题栏
+    // 一离开 ROI，界面上的会话名就被抹成「没认出来」，而实际上它没变过。
+    // 身份是**累积确认**的事实，不该因为某一轮没看见就丢掉。
+    // 认不到就保持原样。身份是**累积确认**的事实，
+    // 不该因为某一轮的 ROI 没覆盖标题栏就被抹掉。
+    if let Some(name) = chatservant_perceive::conversation_name(&attrs, HEADER_NAME_H) {
+        s.peer = name;
+    }
     // ⚠ 重锁请求必须**在建锁判断之前**取走，否则这一轮的请求会被跳过，
     // 用户点了按钮却什么也没发生——那是最难查的一种「没反应」。
     if s.relock.take() {
@@ -660,7 +669,7 @@ fn step(
         (None, Some(p)) => {
             s.locked_print = Some(p.clone());
             // 建锁这一刻认出来的名字才是「锁的是谁」。
-            s.locked_name = peer_name.clone().unwrap_or_default();
+            s.locked_name = s.peer.clone();
             true
         }
         // 锁过但这帧认不出 → **关**。认不出不等于「是同一个」。
@@ -743,7 +752,7 @@ fn step(
             messages: rendered.lines().map(str::to_string).collect(),
             // 过了闸才填对端名。**这里不是空串了**——早先一直留空占位，
             // 判据是「还没接识别会话名」，现在接上了。
-            peer: peer_name.clone().unwrap_or_default(),
+            peer: s.peer.clone(),
             images: collect_images(&frame, &anchor, s),
         };
         match chatservant_reason::turn(reasoner.as_mut(), &ctx) {
@@ -891,6 +900,13 @@ const HEAD_BAND_H: i32 = 40;
 /// 头带宽度上限 400 px。够装下会话名与右侧几个图标，
 /// 又不至于把大片空面板算进来——那会稀释指纹。
 const HEAD_BAND_W: i32 = 400;
+
+/// 认会话名时**只看消息区顶部这么多像素**。
+///
+/// 用来挡住增量 ROI 里被误归成 `Header` 的行——实机日志里
+/// `peer` 曾被认成 `22 ： 22`（一个时间戳），因为标题栏不在 ROI 里，
+/// 剩下几行里恰好有一行被归成了 Header。会话名按定义住在标题栏。
+const HEADER_NAME_H: i32 = 80;
 
 /// 这个循环在用哪家供应商的**视觉**计费规则。
 ///

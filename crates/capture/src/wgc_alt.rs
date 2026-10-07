@@ -45,7 +45,7 @@ use chatservant_core::frame::Frame;
 /// 等第一帧的超时。WGC 正常在几十毫秒内送第一帧。
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum AltCaptureError {
     #[error("为 hwnd 创建 GraphicsCaptureItem 失败：{0}")]
     CreateItem(String),
@@ -187,19 +187,54 @@ impl Worker {
     }
 }
 
+/// 连续多少轮拿不到新帧才判定会话死亡。只被人投 WM_QUIT 叫醒时，
+/// 下一轮就有帧，所以这个数不需要大。
+const STALE_LIMIT: u32 = 3;
+
+/// `RawCapture` 的进程内复制。缓存上一帧要留着——静态窗口下它就是当前画面。
+impl RawCapture {
+    fn dup(&self) -> Self {
+        match self {
+            RawCapture::Ok {
+                width,
+                height,
+                rgba,
+            } => RawCapture::Ok {
+                width: *width,
+                height: *height,
+                rgba: rgba.clone(),
+            },
+            RawCapture::Err(e) => RawCapture::Err(e.clone()),
+        }
+    }
+}
+
 /// 工作线程的主体：**一个会话，反复取帧**。
+///
+/// ## 静态窗口没有「新帧」
+///
+/// WGC **只在画面变化时送帧**。窗口静止时 `next()` 一直阻塞——
+/// 实测复用会话后第二帧直接 5 秒超时。但那恰恰是产品要的「静默期」。
+/// 正确语义是：**没有新帧 = 画面没变 = 上一帧就是当前画面**。
 fn run_worker(jobs: mpsc::Receiver<Job>, tid_cell: std::sync::Arc<std::sync::Mutex<Option<u32>>>) {
     use windows::Win32::System::Threading::GetCurrentThreadId;
     *tid_cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(unsafe { GetCurrentThreadId() });
 
     // 当前会话绑在哪个窗口上。窗口变了（微信重开、句柄被复用）就重建。
     let mut session: Option<(isize, wgc::Wgc)> = None;
+    // 上一帧的成功结果。
+    let mut last: Option<RawCapture> = None;
+    let mut stale = 0u32;
 
     while let Ok(job) = jobs.recv() {
         // 会话不存在，或者绑的不是这个窗口（微信重开、句柄被复用）→ 重建。
         if session.as_ref().is_none_or(|(h, _)| *h != job.hwnd_raw) {
             match open_session(job.hwnd_raw) {
-                Ok(w) => session = Some((job.hwnd_raw, w)),
+                Ok(w) => {
+                    session = Some((job.hwnd_raw, w));
+                    last = None;
+                    stale = 0;
+                }
                 Err(e) => {
                     let _ = job.reply.send(RawCapture::Err(e));
                     session = None;
@@ -208,20 +243,39 @@ fn run_worker(jobs: mpsc::Receiver<Job>, tid_cell: std::sync::Arc<std::sync::Mut
             }
         }
         // `take_one_frame` 需要 `&mut`，借完之后才能改 `session`，
-        // 所以先把结果算出来，再决定要不要丢会话。
+        // 所以先把结果算出来，再决定怎么处理。
         let taken = session.as_mut().map(|(_, w)| take_one_frame(w));
         match taken {
             Some(Some(raw)) => {
-                let _ = job.reply.send(raw);
+                let _ = job.reply.send(raw.dup());
+                last = Some(raw);
+                stale = 0;
             }
             _ => {
-                // `next()` 返回 None：会话失效（item 被 Closed，或被人叫醒）。
-                // 丢掉它，下一轮重建。
-                tracing::debug!(target: "chatservant_capture::wgc", "会话结束，准备重建");
-                session = None;
-                let _ = job
-                    .reply
-                    .send(RawCapture::Err(AltCaptureError::IteratorEndedImmediately));
+                // ⚠ `next()` 返回 `None` **不等于**会话死了。
+                //
+                // WGC 只在画面变化时送帧，静态窗口下它就一直阻塞；
+                // 而被人投 WM_QUIT 叫醒同样返回 `None`。两者都会走到这里。
+                //
+                // 所以先回**缓存的上一帧**，不重建会话。真的连一帧都没抓到过，
+                // 那是另一回事，报错。
+                stale += 1;
+                match last.as_ref() {
+                    Some(prev) => {
+                        let _ = job.reply.send(prev.dup());
+                    }
+                    None => {
+                        let _ = job
+                            .reply
+                            .send(RawCapture::Err(AltCaptureError::IteratorEndedImmediately));
+                    }
+                }
+                // 连着好几轮都没有新帧，才判定会话真的死了。
+                if stale >= STALE_LIMIT {
+                    tracing::debug!(target: "chatservant_capture::wgc", "会话判死，准备重建");
+                    session = None;
+                    stale = 0;
+                }
             }
         }
     }
