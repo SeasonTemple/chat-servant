@@ -220,6 +220,12 @@ struct Scratch {
     peer: String,
     /// 锁定的那一个会话的头部像素指纹。**第一帧读到时建立。**
     locked_print: Option<chatservant_perceive::identity::HeaderPrint>,
+    /// **建锁那一刻**认出来的对端名。用来在界面上说「锁的是谁」。
+    ///
+    /// 不能拿 [`Scratch::locked_peer`]（配置里的目标名，通常是写死的小号）
+    /// 代替——锁是按**第一帧看到的会话**建的，两者可能根本不是同一个。
+    /// 报错了名字，用户就看不出自己锁错了。
+    locked_name: String,
     /// 用户请求的「重新锁定当前会话」。一次性。
     relock: Relock,
     /// 图片外发总闸。**默认关**——见 [`ImagesOut`]。
@@ -248,6 +254,7 @@ impl Scratch {
             locked_peer: String::new(),
             peer: String::new(),
             locked_print: None,
+            locked_name: String::new(),
             relock: Relock::new(),
             images_out: ImagesOut::off(),
             token_budget: TokenBudget::new(crate::commands::BUDGET_DEFAULT),
@@ -614,7 +621,7 @@ fn step(
     // ⚠ 重锁请求必须**在建锁判断之前**取走，否则这一轮的请求会被跳过，
     // 用户点了按钮却什么也没发生——那是最难查的一种「没反应」。
     if s.relock.take() {
-        s.locked_print = None;
+        apply_relock(s);
     }
     let peer_ok = match (&s.locked_print, &print) {
         // 还没锁过：拿**第一帧读到的**当基准，并把名字报给用户看。
@@ -622,6 +629,8 @@ fn step(
         //   所以界面上必须显示这个名字——用户要能一眼看出锁错了没有。
         (None, Some(p)) => {
             s.locked_print = Some(p.clone());
+            // 建锁这一刻认出来的名字才是「锁的是谁」。
+            s.locked_name = peer_name.clone().unwrap_or_default();
             true
         }
         // 锁过但这帧认不出 → **关**。认不出不等于「是同一个」。
@@ -639,8 +648,12 @@ fn step(
             // `(None, Some(_))` 到不了这里：那一支已经在上面建锁并放行了。
             (None, None) => "还没读到任何会话头部，先不动手".into(),
             _ => format!(
-                "当前会话已经不是锁定的那一个（锁定时显示为「{}」）——本轮不动手",
-                s.locked_peer
+                "当前会话已经不是锁定的那一个（锁定的是「{}」）——本轮不动手",
+                if s.locked_name.is_empty() {
+                    "认不出的会话"
+                } else {
+                    &s.locked_name
+                }
             ),
         };
         // **不推进水位线**：这样下一帧会重试，用户切回锁定会话后能立刻接上。
@@ -743,6 +756,33 @@ fn step(
 /// 循环用的会话 key。**多会话路由还没做**（`Session` 按 `PeerName` 分桶），
 /// 现在只有一个键。等 `peer::same_peer` 接上观察循环后换成真的对端名。
 const SESSION: &str = "current";
+
+/// 执行一次「重新锁定当前会话」。
+///
+/// ## 为什么它必须清历史，而不只是清指纹
+///
+/// 重锁的含义是**用户在说「我现在要在这个会话里工作」**。所以它是一次
+/// 会话切换，而不只是重新取一次基准。
+///
+/// 早先这里只做 `locked_print = None`，于是出现过这么一条真实路径：
+///
+/// ```text
+/// 在会话 A 里，history 攒下 A 的全部消息
+///   → 切到会话 B（闸关着，不动手，历史不动）
+///   → 点「重新锁定当前会话」
+///   → 闸放行 → history.extend(B 的消息)
+///   → **模型收到 A 的全部历史 + B 的消息**
+/// ```
+///
+/// 它于是**看着别人的私聊内容给 B 起草回复**。这不是精度问题，
+/// 是把不该出网的内容送出了网。摘要缓存同理：`Context` 按 [`SESSION`]
+/// 这个常量分桶，不清的话上一个会话的摘要会被当成本会话的用。
+fn apply_relock(s: &mut Scratch) {
+    s.locked_print = None;
+    s.history.clear();
+    s.context.forget(SESSION);
+    s.candidates.clear();
+}
 
 /// 把媒体区域变成要送模型的图。**总闸关着时一律返回空。**
 ///
@@ -868,8 +908,8 @@ fn shift(r: chatservant_core::frame::Rect, dx: i32, dy: i32) -> chatservant_core
 #[cfg(test)]
 mod tests {
     use super::{
-        BUDGET_MAX, BUDGET_MIN, ImagesOut, RecentN, Relock, Scratch, TierCell, TokenBudget,
-        collect_images, header_print,
+        BUDGET_MAX, BUDGET_MIN, ImagesOut, RecentN, Relock, SESSION, Scratch, TierCell,
+        TokenBudget, apply_relock, collect_images, header_print,
     };
     use chatservant_reason::context;
 
@@ -942,6 +982,66 @@ mod tests {
     fn the_tier_starts_at_manual() {
         use chatservant_core::dispatch::Dispatch;
         assert_eq!(TierCell::default_manual().get(), Dispatch::Manual);
+    }
+
+    /// **重锁必须清掉历史与摘要**——否则跨会话串味。
+    ///
+    /// 这条测的是一个**真实发生过的缺陷**（2026-10-07 修）：
+    /// 重锁原本只清 `locked_print`，`history` 与 `Context` 都留着。
+    /// 于是「在 A 里攒够历史 → 切到 B → 点重锁」之后，模型收到的是
+    /// **A 的全部历史 + B 的消息**——它在看着别人的私聊给 B 起草。
+    ///
+    /// 这不是精度问题，是把不该出网的内容送出了网。
+    #[test]
+    fn relocking_drops_the_previous_conversation_history() {
+        let mut s = Scratch::new(RecentN::new(12));
+        s.images_out = ImagesOut::off();
+
+        // 会话 A 攒下历史。
+        s.history.push("A 里的私密内容".into());
+        s.history.push("A 的第二条".into());
+
+        // 用户点了「重新锁定当前会话」——这是「我现在要在这个会话里工作」。
+        s.relock.request();
+        let cleared = s.relock.take();
+
+        assert!(cleared, "重锁请求必须能被取到，否则界面上点了没反应");
+        apply_relock(&mut s);
+
+        assert!(
+            s.history.is_empty(),
+            "重锁后还留着上一个会话的历史：{:?}",
+            s.history
+        );
+    }
+
+    #[test]
+    fn relocking_forgets_the_summary_cache() {
+        let mut s = Scratch::new(RecentN::new(12));
+        let msgs: Vec<String> = (0..60)
+            .map(|i| format!("第 {i} 条消息，够长才能触发摘要分块"))
+            .collect();
+        // 先给这个会话摘要一次，把缓存填上。
+        struct Counter(u32);
+        impl chatservant_reason::Summarizer for Counter {
+            fn summarize(&mut self, older: &[String]) -> Result<String, String> {
+                self.0 += 1;
+                Ok(format!("{} 条旧消息的摘要", older.len()))
+            }
+        }
+        let mut c = Counter(0);
+        s.context.trim(SESSION, &msgs, 4, &mut c).expect("首次裁剪");
+        assert!(s.context.summary_calls(SESSION) > 0, "前提：先摘要过一次");
+
+        s.relock.request();
+        let _ = s.relock.take();
+        apply_relock(&mut s);
+
+        assert_eq!(
+            s.context.summary_calls(SESSION),
+            0,
+            "重锁后还留着上一个会话的摘要缓存"
+        );
     }
 
     /// 设置页与主面板**共用同一个档位**。
