@@ -101,6 +101,44 @@ impl Provider {
         }
     }
 
+    /// 反过来：由 [`Provider::key`] 的短名（`"openai"` 等）找回枚举值。
+    ///
+    /// 认不出来返回 `None`——**不猜**。短名会从配置、设置页、
+    /// 命令行多处进来，静默兜一个默认值只会把错带到出网那一刻。
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key.trim().to_ascii_lowercase().as_str() {
+            "openai" => Some(Self::OpenAi),
+            "anthropic" => Some(Self::Anthropic),
+            "minimax" => Some(Self::MiniMax),
+            _ => None,
+        }
+    }
+
+    /// 读 key 时**按顺序试**的环境变量名。
+    ///
+    /// 第一个是通用写法 `<PROVIDER>_API_KEY`；后面是该服务商
+    /// 自己文档里实际在用的名字，**只填确知存在的**。
+    ///
+    /// ## 为什么不能只有一个名字
+    ///
+    /// 实机核对：本机只设了 `MINIMAX_CN_API_KEY`，没有
+    /// `MINIMAX_API_KEY`。只认通用写法的话，应用会静默降级成
+    /// **预置假传输**——界面上每条候选都标着「预置」，但那意味着
+    /// 用户配好的 key 根本没被用上，而界面没有任何地方说这件事。
+    ///
+    /// 规则收在这里而不是各处 `env::var`：应用和 `xtask e2e` 必须
+    /// 用同一份，否则又会出现「诊断命令和产品读的不是同一个变量」
+    /// 这种已经犯过的病。
+    pub fn key_env_names(self) -> &'static [&'static str] {
+        match self {
+            Self::OpenAi => &["OPENAI_API_KEY"],
+            Self::Anthropic => &["ANTHROPIC_API_KEY"],
+            // `abab6.5s-chat` / `api.minimaxi.com` 走的是中国区端点，
+            // 官方文档与各家接入指南给的就是 `_CN_` 那个变量名。
+            Self::MiniMax => &["MINIMAX_API_KEY", "MINIMAX_CN_API_KEY"],
+        }
+    }
+
     /// 是不是走 **OpenAI 兼容**协议（请求体 / 鉴权 / 响应结构全一致）。
     ///
     /// 本文件里所有「分协议」的地方都判这个，**而不是**逐个列 variant。

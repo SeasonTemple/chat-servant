@@ -101,10 +101,17 @@ pub fn load(provider: &str) -> Option<String> {
     Some(key)
 }
 
-/// 从环境变量读。变量名 `<PROVIDER>_API_KEY`。
+/// 从环境变量读。变量名规则收在 [`chatservant_reason::Provider::key_env_names`]，
+/// 不在这里自己拼——应用与 `xtask e2e` 必须用同一份，否则会出现
+/// 「诊断命令和产品读的不是同一个变量」这种已经犯过的病。
 fn from_env(provider: &str) -> Option<String> {
-    let var = format!("{}_API_KEY", provider.to_uppercase());
-    std::env::var(var).ok().filter(|s| !s.trim().is_empty())
+    let p = chatservant_reason::Provider::from_key(provider)?;
+    for var in p.key_env_names() {
+        if let Some(v) = std::env::var(var).ok().filter(|s| !s.trim().is_empty()) {
+            return Some(v);
+        }
+    }
+    None
 }
 
 /// 从凭据管理器读。

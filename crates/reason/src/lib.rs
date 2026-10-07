@@ -24,6 +24,6 @@ pub use context::{Context, Summarizer, Trimmed};
 pub use model::{Candidate, DraftSet, Intent, ReasonError, Reasoner, StageCalls, TurnContext};
 pub use peer::{same_peer, similarity};
 pub use seam::{Turn, turn};
-pub use transport::{Http, HttpReasoner, Provider, probe_connectivity};
+pub use transport::{Http, HttpReasoner, Provider, probe_connectivity, redact};
 pub use ureq_http::UreqHttp;
 pub use vision::{Describer, ImagePayload, VisionBridge, VisionMode};

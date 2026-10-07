@@ -112,6 +112,13 @@ enum Cmd {
         /// 真的往输入框里填（会抢焦点）。不给就是只跑到起草。
         #[arg(long)]
         inject: bool,
+        /// 只用这一家传输（openai / anthropic / minimax）。
+        /// 不给就按产品同样的顺序，谁有 key 用谁。
+        #[arg(long)]
+        provider: Option<String>,
+        /// 强制用**预置假传输**，即使机器上有 key。
+        #[arg(long)]
+        preset: bool,
     },
     /// 抓取与识别的诊断探针
     Probe {
@@ -174,7 +181,11 @@ fn main() -> Result<()> {
         Cmd::Media { file } => media_probe::run(file),
         Cmd::SecretScan => secret_probe::run(),
         Cmd::InjectProbe => inject_probe::run().map_err(|e| anyhow::anyhow!("{e}")),
-        Cmd::E2e { inject } => e2e_cmd(inject),
+        Cmd::E2e {
+            inject,
+            provider,
+            preset,
+        } => e2e_cmd(inject, provider, preset),
         Cmd::Probe { kind } => match kind {
             ProbeCmd::Frame {
                 app,
@@ -254,7 +265,7 @@ fn probe_focus(app: &str) -> Result<()> {
 /// 真实传输还没接（ticket 10 的 `Reasoner` 实现），所以这里用一个
 /// **明确标注的预置传输**——它会返回可辨识的假候选。
 /// 返回假候选时命令**必须失败**，不能让用户以为链路通了。
-fn e2e_cmd(inject: bool) -> Result<()> {
+fn e2e_cmd(inject: bool, provider: Option<String>, preset: bool) -> Result<()> {
     use e2e::{Stage, run};
 
     println!(
@@ -266,11 +277,31 @@ fn e2e_cmd(inject: bool) -> Result<()> {
         }
     );
 
-    let mut reasoner = e2e::PresetReasoner::new();
+    // 传输选择与产品**保持一致**：谁有 key 用谁，`--preset` 才强制用假的。
+    //
+    // 早先这里无条件用 `PresetReasoner`，注释还写着「真实传输还没接」——
+    // 那条注释过期很久了。于是端到端命令**从来没有真的调过一次模型**，
+    // 却看起来像验过了整条链。诊断命令用占位实现，等于没验。
+    let mut reasoner: Box<dyn chatservant_reason::Reasoner + Send> = if preset {
+        eprintln!("传输 = 预置（显式指定。候选是假的，不代表模型通了）");
+        Box::new(e2e::PresetReasoner::new())
+    } else {
+        match real_reasoner(provider.as_deref())? {
+            Some(r) => r,
+            None => {
+                eprintln!(
+                    "传输 = 预置（没找到可用的 key）。候选是假的，不代表模型通了。\n\
+                     \x20     要验真实模型：设好环境变量后重跑，或用 --provider 指定。"
+                );
+                Box::new(e2e::PresetReasoner::new())
+            }
+        }
+    };
+
     let mut injector = ClipboardInjector;
     let mut back = ClipboardReadback;
 
-    let out = run(&mut reasoner, &mut injector, &mut back, inject)?;
+    let out = run(&mut *reasoner, &mut injector, &mut back, inject)?;
 
     println!("✅ 全链通过，用时 {:?}", out.elapsed);
     println!(
@@ -499,6 +530,57 @@ fn probe_ocr(file: &Path, scale: u32) -> Result<()> {
     }
     println!("\n---- 整图 ----\n{}", ocr.text);
     Ok(())
+}
+
+/// 按产品的规则组装真实传输。**变量名规则来自 reason crate**，
+/// 不在这里另抄一份——两处各抄一份就会漂移，而漂移出来的症状是
+/// 「应用读不到 key 却没有任何提示」。
+///
+/// 指定了 `only` 就只看那一家；没指定就按产品同样的顺序探测。
+fn real_reasoner(
+    only: Option<&str>,
+) -> Result<Option<Box<dyn chatservant_reason::Reasoner + Send>>> {
+    use chatservant_reason::{HttpReasoner, Provider, UreqHttp};
+
+    let order: Vec<Provider> = match only {
+        Some(k) => vec![Provider::from_key(k).ok_or_else(|| {
+            anyhow::anyhow!("未知的供应商 {k}（可选 openai / anthropic / minimax）")
+        })?],
+        None => vec![Provider::OpenAi, Provider::Anthropic, Provider::MiniMax],
+    };
+
+    for p in order {
+        let Some(key) = key_from_env(p) else { continue };
+        let (judge, draft) = p.models();
+        println!(
+            "传输 = {}（模型：判断 {} / 起草 {}）",
+            p.key(),
+            judge,
+            draft
+        );
+        let http = UreqHttp::new(std::time::Duration::from_secs(60));
+        return Ok(Some(Box::new(HttpReasoner::new(
+            std::sync::Arc::new(http),
+            p,
+            key,
+        ))));
+    }
+    Ok(None)
+}
+
+/// 从环境变量读 key。**只读变量名与长度，绝不打印值。**
+fn key_from_env(p: chatservant_reason::Provider) -> Option<String> {
+    for var in p.key_env_names() {
+        if let Ok(v) = std::env::var(var) {
+            if !v.trim().is_empty() {
+                // 登记给 redact：读取那一刻就是它进入本进程内存的那一刻。
+                chatservant_reason::redact(&v);
+                println!("  key 来源 = {}（长度 {}，值不显示）", var, v.len());
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 /// 抓一帧 + 本地 OCR 读文字，一条命令走完「像素 → 文字」。

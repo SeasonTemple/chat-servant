@@ -31,6 +31,15 @@ allow = [
   "Unicode-DFS-2016",
   "BSL-1.0",          # Boost，permissive
   "CC0-1.0",          # 公有领域奉献
+  # CDLA-Permissive-2.0：社区数据许可证的**宽松**变体（对照 CDLA-Sharing 是
+  # copyleft）。它就是为「数据」设计的：允许使用/修改/再分发，唯一义务是
+  # 保留声明。webpki-roots 用它装 Mozilla 的根证书集合——名副其实的数据包，
+  # 没有可审的代码逻辑，所以归进 permissive 白名单而不是 exceptions。
+  #
+  # ⚠ 早先这里按 crates.io 页面上的旧标注以为是 MPL-2.0，**是错的**：
+  #   0.26.11 与 1.0.9 的 Cargo.toml 都写的是 CDLA-Permissive-2.0。
+  #   许可证从 **crate 的 Cargo.toml 元数据**确认，不从主页推测（AGENTS.md）。
+  "CDLA-Permissive-2.0",
 ]
 
 # 明确点名拒绝——allow 里不写就默认拒绝，写出来是为了让读者一眼看到意图，

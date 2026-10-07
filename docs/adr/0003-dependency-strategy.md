@@ -155,7 +155,15 @@ crates.io 实际结果（`/api/v1/crates` 搜索 + 逐个核对）：
 | genai 路线 | 撞什么 |
 | --- | --- |
 | `native-tls` | 拖进 `openssl-sys` → **撞 `deny.toml` 的 ban**（"统一走 rustls"） |
-| `rustls-tls`（默认） | 拖进 `webpki-roots`（**MPL-2.0**）→ 现有 6 条 MPL 豁免全是 Tauri 的 CSS 解析 crate，不含它 |
+| `rustls-tls`（默认） | 拖进 `webpki-roots` —— ⚠ **本节原写「MPL-2.0，需要新豁免」，那是错的** |
+
+> **更正（2026-10-07）**：`webpki-roots` 0.26.11 与 1.0.9 的 `Cargo.toml`
+> 声明的都是 **`CDLA-Permissive-2.0`**，不是 MPL-2.0。它属于 permissive，
+> 已直接进 `deny.toml` 的 `allow` 白名单，**不需要任何豁免**。
+>
+> 于是本节「两条 TLS 路线都撞门」的结论**站不住**：`rustls-tls` 这条
+> 现在是通的。当时只看了 crates.io 页面上的旧标注，没核对 crate 的
+> `Cargo.toml` 元数据——正是 AGENTS.md 明令禁止的「不要从项目主页推测」。
 
 ⚠ 别把这个结论说成「genai 不合格」——它 45 万下载、两个月前还在更新，
 是这个领域最成熟的通用实现。**卡住它的是我们自己的门，不是它。**
@@ -171,6 +179,11 @@ crates.io 实际结果（`/api/v1/crates` 搜索 + 逐个核对）：
 **复审条件**：`deny.toml` 愿意为 webpki-roots 单独论证一条 MPL-2.0 豁免时，
 **协议层那 120 行改用 genai**（接缝层不动）。**不要因为「忘了为什么」就再查一遍**
 ——那是本节存在的理由。
+
+> **这条复审条件已经被上面那条更正解除。** `webpki-roots` 是
+> CDLA-Permissive-2.0，不需要豁免，`genai` 的 `rustls-tls` 路线**不再被
+> 许可证挡住**。换不换是另一个取舍（`genai` 是 async，接缝层要包一层
+> 桥接），不在本轮范围里——但**别再拿「许可证不允许」当理由**了。
 
 ⚠ 另一条纪律记在这：**结论要实测，别拿推理顶。**
 本节第一版写的是「接 genai = 把 tokio 引进核心依赖树」，那是**推断**，
@@ -202,3 +215,59 @@ crates.io 实际结果（`/api/v1/crates` 搜索 + 逐个核对）：
   （而不是"看起来相关"）。覆盖不全时优先在 crate 之上做薄适配，不改 crate。
 - 依赖选择写进 `Cargo.toml` 的 `[dependencies]` 注释里，附选它的理由，
   免得三个月后有人问"为什么用 genai 不用 async-openai"。
+## 补记（2026-10-07）：ureq 一直没开 TLS 后端，真实模型从来没跑通过
+
+### 现象
+
+接上真实传输后第一次实机调用，得到：
+
+    Unknown Scheme: cannot make HTTPS request because no TLS backend is configured
+
+### 原因
+
+`crates/reason/Cargo.toml` 写的是 `features = ["json", "gzip", "native-certs"]`。
+查 `ureq-2.12.1/Cargo.toml` 的特性定义：
+
+    native-certs = ["dep:rustls-native-certs"]   ← 只是**证书加载器**
+    tls          = ["dep:webpki-roots", "dep:rustls", "dep:rustls-pki-types"]
+    native-tls   = ["dep:native-tls"]
+
+**`native-certs` 自身不带任何 TLS 实现。** 真正的后端是 `tls`。
+于是这个 HTTP 层从头到尾发不出任何 HTTPS 请求——而 OpenAI / Anthropic /
+MiniMax 全都要 HTTPS。
+
+### 为什么测试没抓到
+
+`Reasoner` 的测试全部走注入的 mock `Http`，**没有一个真出过网**。
+「编译通过、单元测试全绿」和「能调用真实模型」之间隔着这一条，
+而门禁里没有任何一项会碰到它。
+
+### 为什么「用操作系统信任库」那个意图其实没实现
+
+原注释写着「rustls + 操作系统信任库（native-certs），为一份证书数据破门禁不划算」。
+但作者当时误以为 `native-certs` 自带 TLS 后端，所以特意**没有**加 `tls`，
+理由还写得很笃定。实际上：
+
+    ureq-2.12.1/src/rtls.rs
+    #[cfg(feature = "native-certs")]       fn root_certs() { load_native_certs() }
+    #[cfg(not(feature = "native-certs"))]  fn root_certs() { webpki_roots::TLS_SERVER_ROOTS }
+
+两个分支**互斥**。同时开 `tls` + `native-certs`，走的仍然是操作系统信任库，
+Mozilla 根证书那一支被 cfg 掉。**原意图是可以实现的**，只要把 `tls` 也加上。
+
+### 实测结果（2026-10-07）
+
+    传输 = minimax（判断 abab6.5s-chat / 起草 abab6.5s-chat）
+    ✅ 全链通过，用时 5.90s
+      判定 4 条消息 / 10 条归类
+      判断 意图：对方可能在分享某种积分或进度系统的情况｜建议：reply
+      候选 3 条
+        1.  70%  看起来你已经很努力了，加油，相信你会做得更好的！
+
+`cargo deny check` 四项全过：`licenses ok` / `advisories ok, bans ok, sources ok`。
+
+### 方法论
+
+> **「单元测试全绿」不等于「这条路走通过」。**
+> 凡是**依赖外部世界的接缝**（网络、剪贴板、窗口、文件系统），
+> 必须有一条**真的发生过**的证据，否则它只是编译过了。
