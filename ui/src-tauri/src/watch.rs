@@ -601,41 +601,83 @@ fn step(
         return Err("抓到全黑帧——GPU 合成窗口的已知失败模式".into());
     }
 
-    // ② 变化门控 + 增量 ROI。**静默期在这里就返回了。**
-    let Decision::Read { roi } = watcher.observe(&frame) else {
-        return Ok(None);
-    };
-
-    // ③ 只对新增带跑 OCR
-    let pane = frame
-        .crop(roi)
-        .ok_or_else(|| format!("ROI {roi:?} 裁不出图"))?;
-    let ocr = chatservant_capture::ocr::recognize(&pane).map_err(|e| format!("OCR 失败：{e}"))?;
-    s.ocr_calls += 1;
-
-    // ④ 在**整帧**上归类——行框是相对 ROI 的，要换算回去
+    // ④ 锚点与消息区。
+    //
+    // ⚠ **坐标系必须从头统一**：给 `PaneWatcher` 的必须是**消息区**，
+    // 它内部算出来的 ROI 是消息区坐标；拿整帧去喂，它会按消息区尺寸算，
+    // 于是 ROI 变成「整帧左上角起、宽 852」——把侧边栏也圈进来，
+    // 而行框又没减 `chat.x0`，**所有气泡在消息区坐标系里整体右移 304px**。
+    // 分类去采样时采到的是别的气泡的位置，于是**一条消息都判不出来**
+    // （实测：97 轮全是 `messages=0`）。
     let anchor =
         chatservant_capture::anchor::derive(&frame).map_err(|e| format!("锚点推导失败：{e}"))?;
     let full = frame
         .crop(anchor.chat)
         .ok_or_else(|| "裁不出消息区".to_string())?;
+
+    // ② 变化门控 + 增量 ROI。**静默期在这里就返回了。**
+    let Decision::Read { roi } = watcher.observe(&full) else {
+        return Ok(None);
+    };
+    // 消息区坐标 -> 整帧坐标，用整帧去裁 OCR 的输入。
+    let roi_frame = chatservant_core::frame::Rect::new(
+        roi.x0 + anchor.chat.x0,
+        roi.y0 + anchor.chat.y0,
+        roi.x1 + anchor.chat.x0,
+        roi.y1 + anchor.chat.y0,
+    );
+
+    // ③ 只对新增带跑 OCR。**必须放大**——
+    // 原分辨率下 `Windows.Media.Ocr` 会漏读，实测同一块画面：
+    // 带子按 1x 送进去只读到 4 行，放大 2x 后读全（`read_lines` 那条
+    // 路径一直这么做，见 ADR-0002 补记）。这里曾经漏了这一步，
+    // 于是对方的消息被 OCR 整段丢掉，界面上永远「没有消息」。
+    let band = frame
+        .crop(roi_frame)
+        .ok_or_else(|| format!("ROI {roi_frame:?} 裁不出图"))?;
+    let view = band
+        .upscaled_nearest(chatservant_perceive::OCR_UPSCALE)
+        .ok_or_else(|| "ROI 带放大失败".to_string())?;
+    let ocr = chatservant_capture::ocr::recognize(&view).map_err(|e| format!("OCR 失败：{e}"))?;
+    s.ocr_calls += 1;
+
     let palette = chatservant_perceive::Palette::learn(&frame, anchor.chat)
         .ok_or_else(|| "学不到配色（消息区太平）".to_string())?;
 
+    // 行框要换算三次：放大后的视图坐标 → 带子坐标（除以倍数）
+    // → 整帧坐标（加 roi_frame 原点）→ **消息区坐标**（减 chat 原点）。
+    let sc = chatservant_perceive::OCR_UPSCALE;
     let lines: Vec<chatservant_capture::ocr::OcrLine> = ocr
         .lines
         .iter()
-        .map(|l| chatservant_capture::ocr::OcrLine {
-            text: l.text.clone(),
-            rect: shift(l.rect, roi.x0, roi.y0),
-            words: vec![],
+        .map(|l| {
+            let f = |v: i32| v / sc as i32 + roi_frame.x0 - anchor.chat.x0;
+            let g = |v: i32| v / sc as i32 + roi_frame.y0 - anchor.chat.y0;
+            chatservant_capture::ocr::OcrLine {
+                text: l.text.clone(),
+                rect: chatservant_core::frame::Rect::new(
+                    f(l.rect.x0),
+                    g(l.rect.y0),
+                    f(l.rect.x1),
+                    g(l.rect.y1),
+                ),
+                words: vec![],
+            }
         })
         .collect();
     let attrs = chatservant_perceive::classify_all(&lines, &full, &palette);
     let messages = chatservant_perceive::group(&attrs);
-    // **存一份给界面。** 以前这里算完就丢，readout 里发的是空数组——
-    // 界面的消息流因此永远是空的。抄一份很便宜，几十条消息而已。
-    s.messages = messages.clone();
+    tracing::debug!(
+        target: "chat_servant::watch",
+        "roi(整帧)={roi_frame:?} ocr行={} 归类={} 消息={}",
+        ocr.lines.len(),
+        attrs.len(),
+        messages.len()
+    );
+    // **累积**给界面。直接发本轮 ROI 的那几条，面板上的聊天记录会在
+    // 「本轮那几条」和「空」之间来回跳——因为 ROI 被水位线从下往上裁，
+    // 静默时它压根不含任何消息。累积后面板显示的是这个会话最近的一段对话。
+    s.messages = chatservant_perceive::merge_into_stream(&s.messages, &messages);
 
     // **会话身份闸。** 认的是**头部区域的像素指纹**，不是 OCR 读出来的名字。
     //
@@ -1000,12 +1042,6 @@ impl chatservant_reason::Summarizer for NoSummary {
             older_len = older.len()
         ))
     }
-}
-
-/// 把行框平移到整帧坐标系。
-fn shift(r: chatservant_core::frame::Rect, dx: i32, dy: i32) -> chatservant_core::frame::Rect {
-    use chatservant_core::frame::Rect;
-    Rect::new(r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy)
 }
 
 #[cfg(test)]

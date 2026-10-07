@@ -61,8 +61,47 @@ pub fn group(attrs: &[Attribution]) -> Vec<Message> {
     out
 }
 
-/// 聊天区顶部的**会话名**。
+/// 面板里保留多少条消息。只为给人看，不参与推理——推理走 `Context`。
+pub const MESSAGE_WINDOW: usize = 24;
+
+/// 几轮之内视为「同一条重读」。
 ///
+/// 观察循环每轮只读**增量 ROI**（水位线以下那条带子），而窗口滚动会让
+/// 已经读过的内容重新落进下一轮的 ROI，rect 也跟着挪。所以要按
+/// 「同一个人 + 同一段话」去重。**只看最近这么几条**：同样的内容隔很久
+/// 再发一次是合法的对话，全量去重会把真消息吃掉。
+const DEDUP_TAIL: usize = 6;
+
+/// 把新一轮读到的消息并进已有的列表，得到面板该显示的那一份。
+///
+/// ## 为什么需要它
+///
+/// 观察循环只读**增量 ROI**，而 ROI 被水位线从下往上裁。直接把每轮的
+/// 结果整份发给界面，面板上的聊天记录就会在「本轮那几条」和「空」之间
+/// 来回跳——看起来像坏了。累积之后面板显示的是**这个会话最近的一段对话**，
+/// 跟推理用的历史是一个道理。
+///
+/// 滚动会让已读内容重进 ROI，所以要去重；否则同一条消息会一路重复下去。
+pub fn merge_into_stream(prev: &[Message], new: &[Message]) -> Vec<Message> {
+    let mut out: Vec<Message> = prev.to_vec();
+    for m in new {
+        let dup = out
+            .iter()
+            .rev()
+            .take(DEDUP_TAIL)
+            .any(|p| p.speaker == m.speaker && p.text == m.text);
+        if dup {
+            continue;
+        }
+        out.push(m.clone());
+    }
+    if out.len() > MESSAGE_WINDOW {
+        out.drain(..out.len() - MESSAGE_WINDOW);
+    }
+    out
+}
+
+/// 聊天区顶部的**会话名**。///
 /// 头部那一行白字大标题（[`NoiseClass::Header`]）就是它。
 /// 多个 Header 时取**最靠上**的那一条——会话名在标题栏，别的 Header
 /// （群公告之类）在下面，取最上的那条才是会话名本身。
@@ -136,6 +175,18 @@ mod session_gate {
     /// 认会话名时只看消息区顶部这么多像素。与观察循环、xtask 同值。
     const HEADER_BAND_H: i32 = 80;
 
+    fn msg(sp: Speaker, text: &str) -> Message {
+        msg_at(sp, text, 0)
+    }
+
+    fn msg_at(sp: Speaker, text: &str, y: i32) -> Message {
+        Message {
+            speaker: sp,
+            text: text.to_string(),
+            rect: chatservant_core::frame::Rect::new(0, y, 100, y + 12),
+        }
+    }
+
     /// **标题栏之外被误归成 Header 的行，绝不能当会话名。**
     ///
     /// 2026-10-07 实机事故：观察循环日志里 `peer` 被认成 `22 ： 22`
@@ -162,6 +213,65 @@ mod session_gate {
     fn a_header_below_the_title_bar_alone_yields_none() {
         let attrs = vec![line(NoiseClass::Header, "22 ： 22", 520)];
         assert_eq!(conversation_name(&attrs, HEADER_BAND_H), None);
+    }
+
+    /// 累积：第二轮读到新消息时，两轮都还在。
+    #[test]
+    fn merging_keeps_earlier_messages() {
+        let prev = vec![msg(Speaker::Them, "乐"), msg(Speaker::Me, "在的")];
+        let new = vec![msg(Speaker::Them, "在吗")];
+        let out = merge_into_stream(&prev, &new);
+        assert_eq!(
+            out.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+            vec!["乐", "在的", "在吗"]
+        );
+    }
+
+    /// 滚动会让已读内容**重新落进下一轮的 ROI**。不去重，面板上同一条
+    /// 消息会一路重复下去——这是最容易被忽略的那种坏。
+    #[test]
+    fn a_reread_message_is_not_repeated() {
+        let a = msg(Speaker::Them, "乐");
+        let b = msg(Speaker::Me, "在的");
+        let once = merge_into_stream(&[], &[a.clone(), b.clone()]);
+        // 第二轮 ROI 又把「乐」读到了（rect 还挪了位置）
+        let a_moved = msg_at(Speaker::Them, "乐", 40);
+        let twice = merge_into_stream(&once, &[a_moved, b.clone()]);
+        assert_eq!(
+            twice.iter().filter(|m| m.text == "乐").count(),
+            1,
+            "同一条消息被读了两遍就只该留一份"
+        );
+    }
+
+    /// 同样的内容**隔久了**再发一次是合法对话，不能当重读吃掉。
+    #[test]
+    fn a_genuine_repeat_later_is_kept() {
+        let filler: Vec<Message> = (0..DEDUP_TAIL + 2)
+            .map(|i| msg(Speaker::Me, &format!("第 {i} 条")))
+            .collect();
+        let mut prev = vec![msg(Speaker::Them, "乐")];
+        prev.extend(filler);
+        let out = merge_into_stream(&prev, &[msg(Speaker::Them, "乐")]);
+        assert_eq!(
+            out.iter().filter(|m| m.text == "乐").count(),
+            2,
+            "隔久了的同文消息是新的，不该被去重吃掉"
+        );
+    }
+
+    /// 超过窗口就丢最旧的。面板只是给人看的窗口，不是账本。
+    #[test]
+    fn the_stream_is_capped() {
+        let many: Vec<Message> = (0..MESSAGE_WINDOW + 10)
+            .map(|i| msg(Speaker::Me, &format!("第 {i} 条")))
+            .collect();
+        let out = merge_into_stream(&[], &many);
+        assert_eq!(out.len(), MESSAGE_WINDOW);
+        assert_eq!(
+            out.last().unwrap().text,
+            format!("第 {} 条", MESSAGE_WINDOW + 9)
+        );
     }
 
     /// 会话名取**最靠上**的那条 Header。

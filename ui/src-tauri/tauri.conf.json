@@ -57,7 +57,8 @@
     ],
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
-    }
+    },
+    "appDirectoriesOverride": "./app-data"
   },
   "bundle": {
     "active": true,
