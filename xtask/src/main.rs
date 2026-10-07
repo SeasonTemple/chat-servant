@@ -117,7 +117,8 @@ enum ProbeCmd {
         /// 抓不到时，对照验证"这台机器的 WGC 到底通不通"。
         #[arg(long)]
         hwnd: Option<String>,
-        /// 捕获方式：wgc（首选）或 printwindow（WGC 抓不到时的退路）
+        /// 捕获方式：wgc（默认，`wgc` crate）/ wgc1（windows-capture，本机已知失败，
+        /// 仅供复核 ADR-0004）/ printwindow / region / monitor（抓整个主显示器）
         #[arg(long, default_value = "wgc")]
         method: String,
         /// 输出路径。默认写到 target/probe/frame-<时间戳>.png
@@ -128,7 +129,9 @@ enum ProbeCmd {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter("xtask=debug,wgc=info")
+        // `wgc` 的 "Item closed, stopping capture" 是 debug!，info 级别看不到它。
+        // 排查抓帧失败要靠这一行区分「item 被系统关掉」和「帧没来」，所以开 trace。
+        .with_env_filter("xtask=debug,wgc=trace")
         .init();
     let cli = Cli::parse();
     match cli.cmd {
@@ -1040,8 +1043,15 @@ fn probe_frame(
 
     let t0 = std::time::Instant::now();
     let frame = match method {
-        "wgc2" => {
-            chatservant_capture::wgc_alt::capture_one_frame(hit.hwnd_raw).context("wgc 抓帧失败")?
+        // ⚠ **默认走 `wgc` crate 那条，不是 windows-capture。**
+        //
+        // `windows-capture` 2.0.1 在本机对所有窗口一��失败（会话送来
+        // 第一帧之前就关闭），是 ADR-0004 里记着的已知问题。产品默认路径
+        // 用的也是 `wgc` crate。诊断命令的默认值必须和产品一致——
+        // 否则每次排查都在测一条永远走不通的路。
+        // windows-capture 保留为显式的 `wgc1`，需要复核那个已知问题时再用。
+        "wgc1" => {
+            chatservant_capture::capture_one_frame(hit.hwnd_raw, size).context("WGC 抓帧失败")?
         }
         "printwindow" => chatservant_capture::printwindow::capture(hit.hwnd_raw)
             .map_err(|e| anyhow::anyhow!("{e}"))
@@ -1053,7 +1063,8 @@ fn probe_frame(
         "monitor" => {
             chatservant_capture::wgc::capture_primary_monitor().context("显示器抓帧失败")?
         }
-        _ => chatservant_capture::capture_one_frame(hit.hwnd_raw, size).context("WGC 抓帧失败")?,
+        _ => chatservant_capture::wgc_alt::capture_one_frame(hit.hwnd_raw)
+            .context("WGC(wgc crate) 抓帧失败")?,
     };
     let elapsed = t0.elapsed();
 

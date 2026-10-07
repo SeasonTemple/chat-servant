@@ -127,6 +127,22 @@ fn process_exe_name(pid: u32) -> Option<String> {
 ///
 /// 有 `main_title` 规则时按标题**精确**匹配；否则排除 `skip_titles`
 /// 之后挑面积最大的。都不命中返回 `None`，**不猜**。
+///
+/// ## 同标题时为什么还要比面积
+///
+/// 精确匹配的标题可能命中**不止一个**窗口（多开实例、
+/// 主窗口 + 通知窗）。枚举顺序是 z-order，不是「哪个是主窗口」，
+/// 所以取 `find()` 的第一个等于让 z-order 决定。
+/// 同标题之间取面积最大的，标题规则判定「是哪一类」，面积只定主次。
+///
+/// ## ⚠ 别拿最小化窗口的 `GetWindowRect` 判大小
+///
+/// 实测（2026-10-07）：微信主窗口最小化后 `GetWindowRect` 返回
+/// **160x28**，还原后是 **1175x900**——最小化时给的是图标矩形，
+/// 不是窗口真实尺寸。曾据此误判「选中的是托盘气泡窗口」，
+/// 并加了一道尺寸下限，结果把最小化的主窗口一起挡掉，
+/// 害得 `restore_without_activating` 的还原路径永远走不到。
+/// 要判大小必须先 `GetWindowPlacement` 取还原尺寸。
 pub fn select_main(surface: &ChatSurface, candidates: &[WindowHit]) -> Option<WindowHit> {
     let mine: Vec<&WindowHit> = candidates
         .iter()
@@ -139,7 +155,11 @@ pub fn select_main(surface: &ChatSurface, candidates: &[WindowHit]) -> Option<Wi
     if let Some(want) = surface.main_title {
         // 标题规则没命中时不退回面积：宁可报"没找到"，也不要抓一个
         // 工具窗或看图窗回来——那会让人以为程序在正常工作。
-        return mine.iter().find(|c| c.title == want).map(|c| (*c).clone());
+        return mine
+            .iter()
+            .filter(|c| c.title == want)
+            .max_by_key(|c| c.area)
+            .map(|c| (*c).clone());
     }
 
     mine.iter()
@@ -260,5 +280,16 @@ mod tests {
             select_main(&surface, &cands).map(|c| c.title),
             Some("chat".into())
         );
+    }
+
+    #[test]
+    fn same_title_picks_largest_not_first_enumerated() {
+        // 精确匹配可能命中多个窗口。枚举顺序是 z-order，不能让它决定主次。
+        let big = hit("weixin.exe", "微信", 1_057_500);
+        let small = hit("weixin.exe", "微信", 100);
+        for cands in [vec![big.clone(), small.clone()], vec![small, big.clone()]] {
+            let picked = select_main(&WECHAT, &cands).expect("应当选中");
+            assert_eq!(picked.area, 1_057_500, "同标题里应当取面积最大的");
+        }
     }
 }

@@ -1,8 +1,10 @@
 //! `PrintWindow` 兜底捕获路径。
 //!
-//! WGC 是首选（能抓被遮挡和 GPU 合成窗口），但在这台机器上实测：
-//! WGC 会话起来后会**立刻关闭且不报错**，微信和记事本表现一致。
-//! 见 docs/adr/0004-capture-strategy.md。
+//! WGC 是首选（能抓被遮挡和 GPU 合成窗口），本机用 `wgc` crate 实测可用
+//! （342 ms，见 `docs/adr/0004-capture-strategy.md`）。走不通的是
+//! `windows-capture` 2.0.1 那个实现——它在本机对所有窗口都是「会话送来
+//! 第一帧之前就关闭且无错」，**同一个 WGC API 换实现就正常**，所以那是
+//! 实现的问题，不是环境或目标窗口的问题。
 //!
 //! 按分级往下走：`PrintWindow` + `PW_RENDERFULL_CONTENT`。
 //! 这个标志让窗口自己重绘进我们给的 DC，对 DirectComposition / Direct2D

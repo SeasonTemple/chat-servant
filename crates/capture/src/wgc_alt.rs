@@ -16,15 +16,26 @@
 //! ## 它的迭代器语义正好适合诊断
 //!
 //! `Wgc` 自己实现 `Iterator`，`next()` 内部跑 `GetMessage` 消息循环。
-//! 于是有两个可区分的结局：
 //!
-//! - `next()` 立刻返回 `None` → 消息循环同样没阻塞，**两个实现同一个病**，
-//!   那就是环境问题，换谁都一样。
-//! - `next()` 阻塞住（我们超时了） → 消息循环是活的，之前的病是
-//!   `windows-capture` 自己的。
+//! ## `next()` 返回 `None` 到底意味着什么（2026-10-07 查明）
 //!
-//! 所以这里用**带超时的等待**而不是直接 `.next()`：超时时说明它阻塞了。
-//! 这两种结局都能推进决策，所以超时也是一种有效结果。
+//! 读源码定死：`next()` 返回 `None` 的**唯一**分支是 `GetMessageW`
+//! 返回 0，也就是消息队列里取到了 **WM_QUIT**（`capture.rs:203`）。
+//! 而本文件用到的这条路径里，WM_QUIT 的**唯一来源**是 `Wgc::new` 给
+//! `GraphicsCaptureItem` 注册的 `Closed` 事件回调——
+//! 回调体第一句就是 `PostQuitMessage(0)`（`capture.rs:137-143`）。
+//!
+//! 所以这个症状的正确解读是：**capture item 被系统 Closed 了**，
+//! 不是「帧还没来」，也不是 COM 初始化或消息循环有问题。
+//!
+//! ⚠ **别把它当成「环境失效」的证据。** 曾据此推断「两个实现同病，
+//! 所以是环境问题」，并一路追到窗口选择上，全错。真正的原因是
+//! `cargo xtask probe frame` 的默认方法指向 `windows-capture` 那条
+//! 已知不工作的路——同一个窗口、同一台机器，换 `wgc` crate 立刻正常
+//! （342 ms，ADR-0004）。
+//!
+//! 想直接看见这一行，开 `wgc=trace`：`Item closed, stopping capture`
+//! 是 `debug!`，`info` 级别看不到。
 
 use std::sync::mpsc;
 use std::time::Duration;
