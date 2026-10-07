@@ -131,31 +131,54 @@ crates.io 实际结果（`/api/v1/crates` 搜索 + 逐个核对）：
 | `anthropic`（官方 SDK） | 32,481 | 0.0.8 | MIT | **2024-09-03** |
 | `openai-api-rs` | 759,038 | 10.0.2 | MIT | 2026-10-03 |
 
-**`genai` 就是「泛用 provider 接入」那个**，许可证也过关。
+**`genai` 就是「泛用 provider 接入」那个**，许可证也过关，
+覆盖 OpenAI / Gemini / Anthropic / **DeepSeek / Groq** / Bedrock / Vertex 等。
 **LiteLLM 没有 Rust 实现**（Python/TS 代理层），**Vercel AI SDK 没有官方 Rust 移植**（TS）。
 
-不换的**决定性**理由（复核时才发现的）：
+## 哪些该外包，哪些该自己写
 
-1. **两条 TLS 路线都撞门。** `deny.toml` 明确 `{ name = "openssl-sys" }`
-   ——「需要 OpenSSL C 库，会让 Windows 构建变脆。统一走 rustls」。
-   - `genai` 的 `native-tls` → 要 OpenSSL → **直接撞上这条 deny**
-   - `genai` 默认的 `rustls-tls` → reqwest/rustls → 拖进 **webpki-roots（MPL-2.0）**，
-     而现有 6 条 MPL 豁免全是 Tauri 的 CSS 解析 crate（`cssparser` / `selectors` /
-     `dtoa-short` / `option-ext` 及两个宏），**不含它**
+**`transport.rs` 里的两类东西，性质完全不同：**
 
-   也就是说：采用 genai 必须**先往一个刻意收紧的许可证门里新增 copyleft 豁免**。
-   这与「先查成熟 crate」不冲突——查过了，结论是「用它的代价是破自己的许可证底线」。
-   **要换的话，先改 `deny.toml` 并单独论证那一条豁免，不要在接依赖时顺手放行。**
+| 部分 | 规模 | 该不该外包 |
+| --- | --- | --- |
+| 协议层：请求体拼装 / 响应解析 / 鉴权头 / 端点 / 错误分类 | ≈120 行 | **本应交给 genai**。上游改协议时它会跟着改，手写要自己跟 |
+| 接缝层：`Reasoner` 三段 / 降级路径 / `redact` / 同步 trait | ≈300 行 | **该自己写**。genai 一点不做这些；`rig-core` 会想接管整层（它要 async、要拥有推理层） |
 
-2. **核心 crate 仍要保持同步。** `Reasoner` 是同步 trait，而 genai 是 async。
-   Tauri 本身构建在 tokio 上，所以**在 app 层包一个 runtime 桥接是可行的**
-   ——这条我先前说错过：说成「接它 = 把 tokio 引进核心依赖树」，代价说重了。
-   真要换，桥接放 `src-tauri`，`reason` 核心不动。
+## 协议层没外包，是**许可证门挡的**，不是技术判断
 
-3. **Anthropic 侧官方 SDK 两年零更新**（2024-09-03），那半边手写是当前唯一选择。
+实测（把 genai 挂进依赖树跑 `cargo deny`）：
+
+    error[banned]: crate 'openssl-sys = 0.9.117' is explicitly banned
+
+两条 TLS 路线都撞门：
+
+| genai 路线 | 撞什么 |
+| --- | --- |
+| `native-tls` | 拖进 `openssl-sys` → **撞 `deny.toml` 的 ban**（"统一走 rustls"） |
+| `rustls-tls`（默认） | 拖进 `webpki-roots`（**MPL-2.0**）→ 现有 6 条 MPL 豁免全是 Tauri 的 CSS 解析 crate，不含它 |
+
+⚠ 别把这个结论说成「genai 不合格」——它 45 万下载、两个月前还在更新，
+是这个领域最成熟的通用实现。**卡住它的是我们自己的门，不是它。**
+要换就得**先单独论证 webpki-roots 那条豁免**，不要在接依赖时顺手放行。
+
+**另两条（都不是拦路虎）：**
+
+- **核心 crate 仍要保持同步。** `Reasoner` 是同步 trait 而 genai 是 async；
+  但 **Tauri 本身构建在 tokio 上**，所以在 `src-tauri` 包一层 runtime 桥接即可，
+  `reason` 核心不动。先前说成「接它 = 把 tokio 引进核心依赖树」是**代价说重了**。
+- **Anthropic 侧官方 SDK 两年零更新**（2024-09-03），那半边手写是当前唯一选择。
 
 **复审条件**：`deny.toml` 愿意为 webpki-roots 单独论证一条 MPL-2.0 豁免时，
-本节作废并改用 genai。**不要因为「忘了为什么」就再查一遍**——那是本节存在的理由。
+**协议层那 120 行改用 genai**（接缝层不动）。**不要因为「忘了为什么」就再查一遍**
+——那是本节存在的理由。
+
+⚠ 另一条纪律记在这：**结论要实测，别拿推理顶。**
+本节第一版写的是「接 genai = 把 tokio 引进核心依赖树」，那是**推断**，
+而 Tauri 本就构建在 tokio 上、根本不是问题。又有一版凭直觉猜
+「`native-tls` 在 Windows 上走 SChannel、不会拖 openssl-sys」——
+**实测证明那个直觉是错的**（`cargo deny` 报 `openssl-sys is explicitly banned`）。
+**一个未验证的直觉差点推翻一条已验证的结论。** 改依赖前先把它挂进
+`cargo deny` 跑一遍，比读文档快也比读文档准。
 
 ## 加一家兼容方是加一行，不是加五个 arm
 
