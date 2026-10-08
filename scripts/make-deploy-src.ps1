@@ -5,42 +5,46 @@ $out = Join-Path $root 'target\deploy-src'
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-# 只带**源码与文档**。不带 target/（35GB 编译产物）与 node_modules/
-# （依赖能由 Cargo.lock / package.json 复原），部署服务对源码包有 200MB 上限。
-$include = @(
-    'crates', 'ui/src', 'ui/src-tauri/src', 'ui/src-tauri/capabilities',
-    'ui/src-tauri/icons', 'ui/src-tauri/tauri.conf.json', 'ui/src-tauri/Cargo.toml',
-    'ui/src-tauri/build.rs', 'ui/static', 'ui/package.json', 'ui/svelte.config.js',
-    'ui/vite.config.ts', 'ui/tsconfig.json', 'ui/pnpm-workspace.yaml',
-    'docs', 'scripts', 'xtask/src', 'xtask/Cargo.toml',
-    'Cargo.toml', 'Cargo.lock', 'deny.toml', '.scratch', 'AGENTS.md', 'CONTEXT.md', 'README.md', '.gitignore'
+# ⚠ **按排除来，不用白名单。**
+#
+# 白名单漏一个目录，漏掉的东西就永远传不上去了——而「把所有源码传上去」
+# 本身就是要防这种漏。第一次做的是白名单，结果漏了 `.git`（76 个提交的历史）
+# 和 `examples/`（净室参考项目），用户直接问「所有源码都上传了吗」。
+# 排除法才是这个场景该用的形式。
+# 只给**目录名**，不给绝对路径。robocopy 的 /XD 拿绝对路径时**只匹配顶层**，
+# 于是 `ui\node_modules`、`ui\.svelte-kit`、`ui\build` 全都漏了过去——
+# 第一次跑出来 840MB / 57014 个文件，其中绝大部分是依赖。
+$excludeDirs = @(
+    'target',        # 编译产物，可再生；仓库里曾经有 33GB
+    'node_modules',  # 依赖由 package.json / Cargo.lock 复原
+    '.svelte-kit',   # SvelteKit 构建中间产物
+    'build',         # ui build 产物，由 pnpm build 重新生成
+    '.pnpm-store',
+    '__pycache__',
+    '.venv'
 )
-foreach ($rel in $include) {
-    $src = Join-Path $root $rel
-    if (-not (Test-Path $src)) { continue }
-    $dst = Join-Path $out $rel
-    New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
-    Copy-Item -Recurse -Force $src $dst
+
+$robocopyArgs = @($root, $out, '/E', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/XD')
+$robocopyArgs += $excludeDirs
+$null = & robocopy @robocopyArgs
+
+# 嵌套仓库的 .git 与二进制包：`examples/jev-chat-jarvis` 是**别人的**项目
+# （AGENTS.md 明确说只读它的实测结论、不要移植代码）。它自带 69.6MB 的
+# .git 历史和一个 24.6MB 的 APK——那是第三方的历史和二进制，
+# 跟交接本项目的工作没关系，带上去只是把上传撑大。
+$null = & robocopy $out $out '*.apk' /S /MOV
+foreach ($g in Get-ChildItem (Join-Path $out 'examples') -Recurse -Directory -Force -Filter '.git' -ErrorAction SilentlyContinue) {
+    Remove-Item -Recurse -Force $g.FullName
 }
 
-# 图标只留 Windows 桌面真正用得到的几个。
-#
-# `ui/src-tauri/icons/` 是 Tauri 默认生成的**全平台**套件：
-# Android mipmap（5 档密度）+ iOS AppIcon + Windows Store 方块 + macOS icns。
-# 本项目 `bundle.targets` 只有 `msi` / `nsis`，`tauri.conf.json` 里也只引用了
-# `icons/icon.ico` —— 那些平台变体一份都用不上，却占了源码副本里最大的头。
-#
-# ⚠ **只裁这份副本，不动仓库里的图标。** 仓库保留全套是对的：
-# 哪天要出安卓/iOS 包，`tauri icon` 的输入还在，不用重新生成。
-$iconDir = Join-Path $out 'ui\src-tauri\icons'
-if (Test-Path $iconDir) {
-    Get-ChildItem $iconDir -Directory | Remove-Item -Recurse -Force
-    Get-ChildItem $iconDir -File |
-        Where-Object { $_.Name -notmatch '^(icon\.ico|icon\.png|32x32\.png|128x128\.png|128x128@2x\.png)$' } |
-        Remove-Item -Force
-}
+# robocopy 的退出码：0~7 都算成功（1=有文件被复制，3=有额外文件…）。
+# >=8 才是真失败。
+if ($LASTEXITCODE -ge 8) { throw "robocopy 失败，退出码 $LASTEXITCODE" }
 
-$size = (Get-ChildItem $out -Recurse -File | Measure-Object -Property Length -Sum).Sum
+$size = (Get-ChildItem $out -Recurse -File -Force | Measure-Object Length -Sum).Sum
+$files = (Get-ChildItem $out -Recurse -File -Force).Count
 "源码副本：$out"
-"大小：$([math]::Round($size/1KB,1)) KB（上限 200MB）"
-"文件数：$((Get-ChildItem $out -Recurse -File).Count)"
+"大小：$([math]::Round($size/1KB,1)) KB（部署上限 200 MB）"
+"文件数：$files"
+"含 .git = $(Test-Path (Join-Path $out '.git'))"
+"含 examples = $(Test-Path (Join-Path $out 'examples'))"
