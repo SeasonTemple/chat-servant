@@ -7,6 +7,15 @@
   import TierSwitch from '$lib/TierSwitch.svelte';
   import type { Candidate, DispatchReply, Message, Tier } from '$lib/types';
 
+  /**
+   * **脱离 Tauri 运行。** 浏览器里没有 IPC，只能读静态演示数据。
+   *
+   * 判据不是「有没有 Tauri」而是 URL 上有没有 `demo`——用 `typeof
+   * window.__TAURI_INTERNALS__` 去探会在打包产物里被静态消除，
+   * 换个构建模式就失效，而 URL 参数是显式的、不会自己变。
+   */
+  const DEMO = typeof location !== 'undefined' && new URLSearchParams(location.search).has('demo');
+
   /** Rust 侧推过来的消息流。**前端不自己算**——`Message[]` 是 Rust 判完发过来的。 */
   let messages = $state<Message[]>([]);
   let candidates = $state<Candidate[]>([]);
@@ -135,6 +144,13 @@
       // 界面就停在初始状态，而后端日志一切正常。
       // 未捕获的异常在生产环境里是完全看不见的。
       try {
+        if (DEMO) {
+          // 演示模式**不碰 Tauri 也不注册监听器**——浏览器里没有 IPC，
+          // `probe_anchor` 第一步就会抛；就算它不抛，监听器也只是一串
+          // 永不触发的回调，让人以为「界面卡住了」。
+          await pullDemo();
+          return;
+        }
         const ping = await invoke<{ ok: boolean; anchor: string; detail: string }>('probe_anchor');
         if (cancelled) return;
         reason = ping.ok ? `锚点 ${ping.anchor}` : (ping.detail ?? '锚点推不出来');
@@ -203,8 +219,21 @@
    *
    * 两个调用方：手动刷新按钮，以及**注册完监听器之后立刻补一次**
    * （见上面的 catch-up）。
+   *
+   * ## `?demo=1`：脱离 Tauri 跑
+   *
+   * 浏览器里没有 `window.__TAURI_INTERNALS__`，`invoke` 必然抛错——
+   * 部署出去的页面只会显示一句「收不到 Rust 的推送」，那对改界面毫无用处。
+   *
+   * 所以给了它一条**数据源**而不是一条**补丁**：`?demo=1` 时读
+   * `/readout.demo.json`，面板的每一个组件、每一条样式、每一个状态
+   * 都照常渲染。这样界面设计可以在浏览器里全速迭代，不必每次都去点微信。
+   *
+   * 演示数据里**不含任何真实聊天内容**（见该文件顶部的说明）——
+   * 因为这个页面可能被部署到公开 URL 上。
    */
   async function pullSnapshot() {
+    if (DEMO) return pullDemo();
     try {
       const r = await invoke<{
         messages: Message[];
@@ -220,6 +249,23 @@
       return true;
     } catch (e) {
       reason = `读快照失败：${String(e)}`;
+      return false;
+    }
+  }
+
+  /**
+   * 演示数据源。**形状照真实 OCR 输出仿**，所以排版是可信的。
+   */
+  async function pullDemo() {
+    try {
+      const r = await fetch('/readout.demo.json').then((x) => x.json());
+      messages = r.messages ?? [];
+      candidates = r.candidates ?? [];
+      reason = r.reason ?? '';
+      peer = r.peer ?? '';
+      return true;
+    } catch (e) {
+      reason = `演示数据读不到：${String(e)}`;
       return false;
     }
   }
@@ -260,6 +306,13 @@
 
   async function act(c: Candidate, action: 'fill' | 'confirm') {
     busy = true;
+    if (DEMO) {
+      // 演示模式没有后端。**不假装成功**——回一句实话，
+      // 而不是让界面显示「已填入」然后什么都没有发生。
+      reason = `演示模式：不会真的${action === 'fill' ? '填入' : '发送'}。这条候选是：${c.text}`;
+      busy = false;
+      return;
+    }
     try {
       // 回执**不是布尔值**。PossiblySent 之后禁止自动重放。
       // ⚠ 不传 tier：档位由 Rust 自己持有并读取。
@@ -296,7 +349,7 @@
         title={relockPending ? '已请求重锁，下一轮起生效' : '把当前这个会话锁成要处理的那个'}
         aria-label="重新锁定当前会话"
         onclick={relock}
-        disabled={locking || relockPending}
+        disabled={DEMO || locking || relockPending}
       >
         <Lock size={13} strokeWidth={2} aria-hidden="true" class={locking ? 'spin' : ''} />
       </button>
@@ -305,6 +358,7 @@
         title="识别画布：每个框按归类结果上色"
         aria-label="打开识别画布"
         onclick={() => invoke('open_debug').catch(() => {})}
+        disabled={DEMO}
       >
         <ScanSearch size={13} strokeWidth={2} aria-hidden="true" />
       </button>
@@ -313,6 +367,7 @@
         title="设置"
         aria-label="打开设置"
         onclick={() => invoke('open_settings').catch(() => {})}
+        disabled={DEMO}
       >
         <Settings2 size={13} strokeWidth={2} aria-hidden="true" />
       </button>
@@ -321,7 +376,7 @@
         title="手动读一次快照"
         aria-label="手动读一次快照"
         onclick={refresh}
-        disabled={refreshing}
+        disabled={DEMO || refreshing}
       >
         <RefreshCcwDot
           size={13}
