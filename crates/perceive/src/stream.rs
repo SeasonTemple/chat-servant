@@ -133,6 +133,25 @@ impl PaneWatcher {
         self.watermark = self.watermark.max(y);
         self.pending = None;
     }
+
+    /// **把水位线退回顶部**，下一帧会重读整段消息区。
+    ///
+    /// ## 什么时候必须调
+    ///
+    /// 换会话。换完之后消息区里全是**从没读过的内容**，而水位线还停在
+    /// 上一段对话的底部——于是增量 ROI 永远只剩贴着输入框的那一条缝，
+    /// **一条消息都不会再进来**，候选也就永远出不来。
+    ///
+    /// 实测：点「锁」换到另一个会话后，会话名和闸都对，但候选一直是 0，
+    /// 而且不会自愈。清历史、清摘要、清候选都做了，唯独漏了水位线——
+    /// 它不在 `Scratch` 里，所以「把会话状态清干净」这件事天然漏掉它。
+    ///
+    /// `last` 也要丢掉：留着旧会话的画面会让「没变化」的判断继续成立。
+    pub fn rewind(&mut self) {
+        self.watermark = 0;
+        self.pending = None;
+        self.last = None;
+    }
 }
 
 /// 两帧在 `[y0, y1)` 这段上逐字节是否完全一样。
@@ -195,6 +214,45 @@ mod tests {
             paint(&mut px, a, b, INK);
         }
         Frame::from_rgb(W, H, px).expect("pane")
+    }
+
+    /// **重锁之后必须能重读整段消息区。**
+    ///
+    /// 2026-10-08 实机事故：换会话后水位线还停在上一段对话的底部，
+    /// 增量 ROI 永远只剩贴着输入框的那条缝，于是**一条消息都进不来**、
+    /// 候选永远是 0，而且不会自愈。清历史、清摘要、清候选都做了，
+    /// 唯独漏了水位线——它不在会话状态里。
+    ///
+    /// 这条测试按那条真实路径走：A 读到顶 → 切到 B（画面全变）→ 重锁。
+    #[test]
+    fn a_relock_rereads_the_whole_pane() {
+        let a = pane(&[(100, 112), (140, 152)], None);
+        let mut w = PaneWatcher::new(0);
+        assert!(matches!(w.observe(&a), Decision::Read { .. }));
+        w.commit(200);
+        assert_eq!(w.watermark(), 200);
+
+        // 换成会话 B：整块画面都不同，但水位线还在底部。
+        //
+        // 注意这里**可能返回 Quiet**：水位线以下那段（A、B 都空）在字节上
+        // 完全一样，`same_pixels` 会判「没变化」。真实系统里换会话是靠
+        // **头部指纹**发现的（见 watch.rs 的会话闸），不是靠这里的 diff——
+        // 闸关着的时候不会推进水位线，于是 B 的内容一条也进不来。
+        let b = pane(&[(40, 52), (80, 92), (120, 132)], None);
+        let _ = w.observe(&b);
+        assert_eq!(w.watermark(), 200, "闸关着的时候水位线不动");
+
+        // 重锁：水位线必须退回去，否则 B 的内容永远读不到。
+        w.rewind();
+        assert_eq!(w.watermark(), 0, "重锁没有把水位线退回顶部");
+        let roi = match w.observe(&b) {
+            Decision::Read { roi } => roi,
+            Decision::Quiet => panic!("重锁后必须重读整段消息区"),
+        };
+        assert!(
+            roi.y0 <= 1,
+            "重锁后的 ROI 应当从消息区顶部开始，实际 {roi:?}"
+        );
     }
 
     /// 静止回放：第一次读，之后每次都是零调用。

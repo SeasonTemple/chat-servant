@@ -11,11 +11,38 @@ use crate::attribute::{Attribution, NoiseClass, Speaker};
 /// 归并成一条消息。
 ///
 /// `Serialize` 是因为 UI 要渲染它——**但归并仍然只在 Rust 侧**。
+///
+/// ## ⚠ 字段名是**契约**，不是随手起的
+///
+/// 界面按 `{#each messages as m (m.id)}` 做 keyed 渲染，并显示 `m.evidence`。
+/// 这个结构**少一个字段，界面就整块空白**——而且后端日志一切正常：
+/// 实测 Rust 推了 7 条消息，前端一个都没渲染出来，
+/// 因为当时这个结构里**没有 `id`**，7 条消息的 key 全是 `undefined`，
+/// Svelte 的 keyed each 直接把它们判成同一个节点。
+///
+/// 所以 `id` / `evidence` 由 `group` 负责填，且有测试守着
+/// （见 `the_serialized_shape_carries_what_the_panel_binds_to`）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Message {
+    /// **稳定键。** 由「说话人 + 正文」导出，见 [`merge_into_stream`] 的唯一化。
+    /// 界面拿它做 keyed 渲染与入场动画的锚点，所以**同一句话在多轮之间
+    /// 必须得到同一个 id**，否则每轮都会重画一遍动画。
+    pub id: String,
     pub speaker: Speaker,
     pub text: String,
     pub rect: Rect,
+    /// 这条为什么被这样判。**界面上常驻显示**——认错了要能立刻看见，
+    /// 而不是靠猜。
+    pub evidence: String,
+}
+
+/// 从「说话人 + 正文」导出稳定键。
+///
+/// 用原文而不是哈希：哈希会碰撞，而 Svelte 的 keyed each 遇到重复 key
+/// 会**静默丢掉后面那条**，面板上就少一条消息且没有任何报错。
+/// `MESSAGE_WINDOW` 只有 24 条，直接带原文的代价可以忽略。
+fn message_id(speaker: Speaker, text: &str) -> String {
+    format!("{speaker:?}:{text}")
 }
 
 /// 同一说话人的两行之间，间距小于「较高那行的行高」就并成一条。
@@ -50,11 +77,15 @@ pub fn group(attrs: &[Attribution]) -> Vec<Message> {
                 m.rect.x0 = m.rect.x0.min(a.rect.x0);
                 m.rect.x1 = m.rect.x1.max(a.rect.x1);
                 m.rect.y1 = a.rect.y1;
+                // 证据取**第一行**那条：多行合并后每一行的判据可能不同，
+                // 而用户看到的是一条消息，显示第一条最贴近「它是怎么进来的」。
             }
             _ => out.push(Message {
+                id: message_id(a.speaker, &a.text),
                 speaker: a.speaker,
                 text: a.text.clone(),
                 rect: a.rect,
+                evidence: a.evidence.to_string(),
             }),
         }
     }
@@ -97,6 +128,27 @@ pub fn merge_into_stream(prev: &[Message], new: &[Message]) -> Vec<Message> {
     }
     if out.len() > MESSAGE_WINDOW {
         out.drain(..out.len() - MESSAGE_WINDOW);
+    }
+    // ⚠ **id 必须在这份列表内部唯一。**
+    //
+    // 去重只看最近 [`DEDUP_TAIL`] 条，所以「同样一句话隔很久又说一遍」
+    // 会合法地共存两条，而它们的 `message_id` 是一样的。
+    // 界面是 `{#each ... (m.id)}`——重复 key 会让后一条**静默消失**，
+    // 面板上凭空少一条消息，而前后端都没有任何报错。
+    // 撞上的按次序加后缀，保证唯一。
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in out.iter_mut() {
+        if seen.insert(m.id.clone()) {
+            continue;
+        }
+        let base = m.id.clone();
+        for n in 2u32.. {
+            let cand = format!("{base}#{n}");
+            if seen.insert(cand.clone()) {
+                m.id = cand;
+                break;
+            }
+        }
     }
     out
 }
@@ -181,9 +233,11 @@ mod session_gate {
 
     fn msg_at(sp: Speaker, text: &str, y: i32) -> Message {
         Message {
+            id: message_id(sp, text),
             speaker: sp,
             text: text.to_string(),
             rect: chatservant_core::frame::Rect::new(0, y, 100, y + 12),
+            evidence: format!("测试 高={}px", 12),
         }
     }
 
@@ -271,6 +325,87 @@ mod session_gate {
         assert_eq!(
             out.last().unwrap().text,
             format!("第 {} 条", MESSAGE_WINDOW + 9)
+        );
+    }
+
+    /// **同一份列表里 id 必须唯一。**
+    ///
+    /// 2026-10-08 实机事故的另一半：去重只看最近 [`DEDUP_TAIL`] 条，
+    /// 所以「隔久了又说一遍同样的话」会合法地留下两条、内容与
+    /// `message_id` 都一样。界面是 `{#each messages as m (m.id)}`——
+    /// 重复 key 让后一条**静默消失**，面板上凭空少一条，两端都不报错。
+    #[test]
+    fn ids_are_unique_inside_one_stream() {
+        let filler: Vec<Message> = (0..DEDUP_TAIL + 2)
+            .map(|i| msg(Speaker::Me, &format!("第 {i} 条")))
+            .collect();
+        let mut prev = vec![msg(Speaker::Them, "乐")];
+        prev.extend(filler);
+        let out = merge_into_stream(&prev, &[msg(Speaker::Them, "乐")]);
+
+        let mut ids: Vec<&str> = out.iter().map(|m| m.id.as_str()).collect();
+        let before = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            before,
+            "同一份列表里出现了重复 id：{}",
+            out.iter()
+                .map(|m| format!("{}#{}", m.text, m.id))
+                .collect::<Vec<_>>()
+                .join(" / ")
+        );
+    }
+
+    /// 同一句话在多轮之间必须拿到**同一个 id**。
+    ///
+    /// 界面拿 id 当入场动画的锚点；id 每轮变，动画就会一轮轮重放，
+    /// 看起来像界面在不停闪。
+    #[test]
+    fn the_same_message_keeps_its_id_across_rounds() {
+        let first = merge_into_stream(&[], &[msg(Speaker::Them, "乐")]);
+        let second = merge_into_stream(&first, &[msg_at(Speaker::Them, "乐", 40)]);
+        assert_eq!(
+            first[0].id, second[0].id,
+            "同一句话两轮之间 id 变了，入场动画会反复重放"
+        );
+    }
+
+    /// **序列化出来的形状必须带上面板真正绑定的字段。**
+    ///
+    /// 2026-10-08 实机事故的根因：Rust 的 `Message` 只有
+    /// `speaker/text/rect`，而界面按 `m.id` 做 keyed 渲染、按 `m.evidence`
+    /// 显示判据。结果后端日志 `messages=7`，面板上一条都不渲染——
+    /// 7 个 `undefined` key 被 Svelte 判成同一个节点，
+    /// 而前后端**都没有任何报错**。
+    ///
+    /// 这条测试就是那道防线：字段改名或删除时它会立刻红。
+    #[test]
+    fn the_serialized_shape_carries_what_the_panel_binds_to() {
+        let out = group(&[line(NoiseClass::Text, "来了吗", 100)]);
+        let json: serde_json::Value = serde_json::to_value(&out[0]).expect("Message 必须能序列化");
+        for key in ["id", "speaker", "text", "rect", "evidence"] {
+            assert!(
+                json.get(key).is_some(),
+                "序列化的 Message 少了 `{key}` —— 面板绑定的是它。实际形状：{json}"
+            );
+        }
+        assert_ne!(json["id"].as_str(), Some(""), "id 不能是空串");
+        assert!(
+            !json["id"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("undefined"),
+            "id 不该是 undefined/null 拼出来的"
+        );
+        // 枚举必须序列化成**裸字符串**，前端 `speaker: 'Me' | 'Them' | 'System'`
+        // 靠它分左右。序列化成 `{"Them":null}` 之类的话界面会全部当成「系统」。
+        assert_eq!(json["speaker"].as_str(), Some("System"));
+        assert_eq!(json["text"].as_str(), Some("来了吗"));
+        assert!(
+            !json["evidence"].as_str().unwrap_or_default().is_empty(),
+            "判据必须能显示出来——空的话界面上那条依据就是空的"
         );
     }
 

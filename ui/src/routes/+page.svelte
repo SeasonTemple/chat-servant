@@ -94,10 +94,17 @@
    * 所以这里只挑真正要人动手的情况：
    * - 认不出会话 → 程序不会动手，硬约束第 1 条生效中
    * - Rust 说推过来的那一轮出了错
+   * - 前端这头断了（监听没建起来 / 快照读不回来）
+   *
+   * ⚠ **报错优先于「没认出会话」。**
+   * 早先是 `if (!peer) return '没认出会话…'` 排在最前面，于是只要会话名
+   * 是空的，`reason` 里真正的错误（读快照失败、监听被拒）就被盖掉——
+   * 界面上永远是那一句「确认微信窗口开着」，把人引到完全错误的方向。
+   * 这正是本项目反复在修的那类「界面在说谎」。
    */
   const problem = $derived.by(() => {
+    if (/失败|错误|抓不到|收不到|异常/.test(reason)) return reason;
     if (!peer) return '没认出会话，本轮不动手 —— 确认微信窗口开着、没有被缩到托盘';
-    if (/失败|错误|抓不到|收不到/.test(reason)) return reason;
     return '';
   });
 
@@ -107,14 +114,19 @@
     let cancelled = false;
 
     void (async () => {
-      const ping = await invoke<{ ok: boolean; anchor: string; detail: string }>('probe_anchor');
-      if (cancelled) return;
-      reason = ping.ok ? `锚点 ${ping.anchor}` : (ping.detail ?? '锚点推不出来');
-
-      const { listen } = await import('@tauri-apps/api/event');
-      // ⚠ 注册失败也要**看得见**。监听器静默挂掉时，界面会一直停在
-      // `probe_anchor` 那一行，用户和开发者都看不出是「没收到」还是「收到但没变」。
+      // ⚠ **整个链路必须在同一个 try 里。**
+      //
+      // 早先只有 `listen` 那一步包了 catch，`probe_anchor` 和动态 import
+      // 在外面裸奔。任何一步抛错都会变成一个**没人接的 Promise 拒绝**——
+      // `onMount` 里没人 `await` 它，于是监听器永远不会被注册，
+      // 界面就停在初始状态，而后端日志一切正常。
+      // 未捕获的异常在生产环境里是完全看不见的。
       try {
+        const ping = await invoke<{ ok: boolean; anchor: string; detail: string }>('probe_anchor');
+        if (cancelled) return;
+        reason = ping.ok ? `锚点 ${ping.anchor}` : (ping.detail ?? '锚点推不出来');
+
+        const { listen } = await import('@tauri-apps/api/event');
         const un = await listen<{
           messages: Message[];
           candidates: Candidate[];
@@ -147,8 +159,11 @@
         //
         // 「先订阅、再补拉」是这类推送的标准接法：订阅保证不漏后面的，
         // 补拉保证不漏之前的。少任何一半都会出现「偶尔空白且不自愈」。
-        await pullSnapshot();
+        const ok = await pullSnapshot();
+        if (!ok && !cancelled) reason = '观察循环还没跑出第一帧，稍等一下或点「新」再试。';
       } catch (e) {
+        // 这一条必须**显眼**：它意味着界面和 Rust 之间根本没连上，
+        // 面板上看到的一切都不可信。
         reason = `**收不到 Rust 的推送**：${String(e)}`;
       }
     })();
@@ -339,11 +354,19 @@
   .cs-panel {
     /* 导轨是绝对定位的，需要面板自己当包含块。 */
     position: relative;
-    display: grid;
-    /* 四段：标题栏 / 消息 / 候选 / 档位。
-       `1fr` 给候选——它是这个面板的产出，理应拿走最多的地方；
-       消息与档位按内容伸缩，不参与抢占。 */
-    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    /* ⚠ **必须用 flex，不能用 grid 的位置行。**
+     *
+     * 原来这里是 `grid-template-rows: auto auto minmax(0,1fr) auto`，
+     * 按「标题 / 异常条 / 消息 / 候选 / 档位」四行 + 一行隐式行来排。
+     * 但**异常条是条件渲染的**：正常时它根本不在 DOM 里，于是所有孩子
+     * 往上错一格——消息流落到 `auto` 行，按内容撑到多高算多高，
+     * 候选被顶到屏幕外面去。
+     *
+     * 实测 2026-10-08：9 条消息时整个候选区被挤出可视范围，
+     * 而「候选」正是这个面板的产出。flex + 显式 flex 值不受
+     * 有无兄弟节点影响，这类错位就不存在了。 */
+    display: flex;
+    flex-direction: column;
     height: 100%;
     padding: 0 0.7rem;
     background: var(--cs-surface);
@@ -371,6 +394,7 @@
 
   /* ── 标题栏 = 「我现在看着谁」 ─────────────────────────────── */
   .cs-head {
+    flex: none;
     display: flex;
     align-items: center;
     gap: 0.45rem;
@@ -445,6 +469,7 @@
 
   /* ── 异常条：只在真出事时出现 ─────────────────────────────── */
   .cs-alarm {
+    flex: none;
     margin: 0.5rem 0 0;
     padding: 0.45rem 0.55rem;
     font-size: 0.7rem;
@@ -456,7 +481,13 @@
   }
 
   /* ── 候选 ─────────────────────────────────────────────────── */
+  /* ⚠ **候选区必须永远占住地方**，哪怕消息很多。
+   *
+   * 候选是这个面板的产出；它一旦被消息流顶出可视范围，用户就既看不到
+   * 也没法点，产品等于没有输出。消息流是「背景资料」，候选是「结果」，
+   * 所以消息流封顶 40%、自己滚动，剩下的都给候选。 */
   .cs-cands {
+    flex: 1 1 0;
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
@@ -497,6 +528,7 @@
 
   /* ── 档位 = 推子 ──────────────────────────────────────────── */
   .cs-foot {
+    flex: none;
     display: flex;
     align-items: center;
     justify-content: space-between;

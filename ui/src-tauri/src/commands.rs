@@ -617,7 +617,21 @@ pub fn start(app: &AppHandle) {
                     {
                         s.candidates = out.candidates.clone();
                     }
-                    let _ = app2.emit("readout", &out);
+                    // ⚠ **不要吞掉 emit 的错误。**
+                    //
+                    // 早先这里写的是 `let _ = app2.emit(...)`，于是序列化失败
+                    // （字段里有 serde 编不出来的东西）时：日志照打「emit
+                    // readout tick=N」、Rust 侧一切正常，而界面**一个字都收不到**，
+                    // `latest_readout` 也走同一条序列化路径所以同样失败——
+                    // 表现就是「后端认出会话了，界面永远停在空白」，
+                    // 而日志里看不出任何异常。这正是**恒哑的错误处理**。
+                    if let Err(e) = app2.emit("readout", &out) {
+                        tracing::error!(
+                            target: "chat_servant::pump",
+                            "readout 推不到界面：{e}（tick={}）",
+                            out.ticks
+                        );
+                    }
                     tracing::info!(
                         target: "chat_servant::pump",
                         "emit readout tick={} peer={:?} messages={} candidates={}",

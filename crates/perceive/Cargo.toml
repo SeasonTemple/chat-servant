@@ -24,3 +24,7 @@ image.workspace = true
 # 夹具自证：manifest 里记 sha256，测试启动时校验字节没被改过。
 # RustCrypto 的 `sha2` 是 MIT OR Apache-2.0，符合本仓库的许可门槛。
 sha2 = "0.10"
+# 只给测试用：核对 `Message` 序列化出来的 JSON 形状与面板绑定的字段一致。
+# 工作区里已有（chatservant-reason 在用），不引入新 crate，许可门槛不变。
+# MIT OR Apache-2.0。
+serde_json.workspace = true

@@ -51,6 +51,13 @@
 
 <style>
   .cs-stream {
+    /* ⚠ **必须封顶并自己滚动。**
+     *
+     * 它是「背景资料」，候选才是这个面板的产出。消息一多（实测 9 条就
+     * 把候选整块顶出可视范围），不封顶就等于把结果藏起来了。
+     * `max-height` 用百分比——父级是定高的 flex 列容器，能解析。 */
+    flex: 0 1 auto;
+    max-height: 40%;
     display: flex;
     flex-direction: column;
     gap: 0.3rem;

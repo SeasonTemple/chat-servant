@@ -18,14 +18,18 @@ use chatservant_perceive::{Message, Speaker};
 fn messages() -> Vec<Message> {
     vec![
         Message {
+            id: "Them:今晚有空吗".into(),
             speaker: Speaker::Them,
             text: "今晚有空吗".into(),
             rect: Rect::new(0, 0, 10, 10),
+            evidence: "测试".into(),
         },
         Message {
+            id: "Me:我看一下".into(),
             speaker: Speaker::Me,
             text: "我看一下".into(),
             rect: Rect::new(0, 20, 10, 30),
+            evidence: "测试".into(),
         },
     ]
 }
