@@ -10,11 +10,20 @@
     busy: boolean;
     /** 是不是模型最看好的一条。推荐条要置顶并标注。 */
     recommended: boolean;
+    /**
+     * **已装填**（Confirm 档第一次点击之后）。
+     *
+     * 装填是一个**状态变化**，界面上必须看得见：按钮文案从
+     * 「填入并确认发送」变成「确认发送」，样式也换掉。
+     * 看不见的话用户不知道「再点一次」这次会真的发出去——
+     * 而这正是整个产品里最需要慎重的一步。
+     */
+    armed: boolean;
     onfill: () => void;
     onconfirm: () => void;
   }
 
-  const { c, rank, busy, recommended, onfill, onconfirm }: Props = $props();
+  const { c, rank, busy, recommended, armed, onfill, onconfirm }: Props = $props();
 
   /** 胜出概率。宽度直接就是概率——一眼看出模型有多确定，不靠读数字。 */
   const pct = $derived(Math.round(Math.max(0, Math.min(1, c.probability)) * 100));
@@ -69,18 +78,21 @@
       <CornerDownLeft size={13} strokeWidth={2} aria-hidden="true" />
       <span>填入</span>
     </button>
-    <!-- 升到 Confirm 档必须人按。程序自己不许升档。 -->
+    <!-- 已装填时按钮换成「真的按下去就发」的写法。
+         没装填时它说的是「填入并确认发送」——一次点击里包含两步，
+         这个区别必须写在按钮上，不能只写在回执里。 -->
     <button
       class="cs-act"
+      class:armed
       disabled={busy}
       onclick={() => {
         onconfirm();
       }}
-      title="填入后二次确认才发送"
-      aria-label="填入并确认发送"
+      title={armed ? '输入框里已经是这条了，按下去就会发出去' : '填入输入框，再点一次才真的发送'}
+      aria-label={armed ? '确认发送' : '填入并确认发送'}
     >
       <SendHorizontal size={13} strokeWidth={2} aria-hidden="true" />
-      <span>确认发送</span>
+      <span>{armed ? '确认发送' : '填入并确认发送'}</span>
     </button>
   </div>
 </article>
@@ -210,5 +222,18 @@
 
   .cs-act.primary:hover:not(:disabled) {
     background: color-mix(in srgb, var(--cs-brass) 22%, transparent);
+  }
+
+  /* 已装填：这是整个面板里**唯一一个按下就会真的发出去**的按钮，
+     所以它必须看起来跟别的按钮不一样——不是更亮，是**更实**。 */
+  .cs-act.armed {
+    border-color: var(--cs-alarm);
+    background: color-mix(in srgb, var(--cs-alarm) 18%, transparent);
+    color: var(--cs-alarm);
+    font-weight: 600;
+  }
+
+  .cs-act.armed:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--cs-alarm) 28%, transparent);
   }
 </style>

@@ -31,6 +31,14 @@
   let relockPending = $state(false);
   /** 手动刷新中。按钮要有状态。 */
   let refreshing = $state(false);
+  /**
+   * **已装填的那条候选。** Confirm 档第一次点击之后 Rust 会推 `armed` 事件。
+   *
+   * 这是面板里唯一一个「再按一次就真的发出去」的按钮，所以必须显形：
+   * 用户得知道现在按下去会发生什么。事件早先发出去但**没有任何监听者**，
+   * 于是装填既不生效也不可见。
+   */
+  let armedId = $state('');
   /** 重锁请求进行中。**按钮要有状态**——点了没反馈等于没点。 */
   let locking = $state(false);
 
@@ -111,7 +119,11 @@
 
   onMount(() => {
     // 一次 invoke 打通 Rust → 前端。**不轮询**：`readout` 是 Rust 推过来的。
-    let dispose: (() => void) | null = null;
+    //
+    // 多个监听器要**分别**退订。早先只有一个 `dispose` 变量时，
+    // 后注册的监听器会把前面的覆盖掉——组件卸载后那些监听器还活着，
+    // 往一个已经没人读的 state 里写值。列表是从头就位是对的。
+    const disposables: (() => void)[] = [];
     let cancelled = false;
 
     void (async () => {
@@ -142,12 +154,14 @@
           reason = e.payload.reason;
           peer = e.payload.peer ?? '';
           relockPending = e.payload.relock_pending ?? false;
+          // 候选换了，旧装填自动作废——装填是**某一条具体候选**的状态。
+          armedId = '';
         });
         if (cancelled) {
           un();
           return;
         }
-        dispose = un;
+        disposables.push(un);
         // ⚠ **订阅之后必须立刻补拉一次快照。**
         //
         // Rust 的循环在应用启动那一刻就开始跑了，而前端要等
@@ -162,6 +176,12 @@
         // 补拉保证不漏之前的。少任何一半都会出现「偶尔空白且不自愈」。
         const ok = await pullSnapshot();
         if (!ok && !cancelled) reason = '观察循环还没跑出第一帧，稍等一下或点「新」再试。';
+        // 装填事件。它是 Confirm 档「再按一次就发」的那个状态，
+        // 必须让按钮显形——不可见的状态等于没有状态。
+        const unArmed = await listen<string>('armed', (e) => {
+          armedId = e.payload;
+        });
+        disposables.push(unArmed);
       } catch (e) {
         // 这一条必须**显眼**：它意味着界面和 Rust 之间根本没连上，
         // 面板上看到的一切都不可信。
@@ -171,7 +191,10 @@
 
     return () => {
       cancelled = true;
-      dispose?.();
+      // ⚠ **逐个退订**，不是只退最后一个——早先只有一个 `dispose` 变量，
+      // 后注册的监听器会把前面的覆盖掉，组件卸载后它们还活着，
+      // 往一个已经没人读的 state 里写值。
+      for (const d of disposables.splice(0)) d();
     };
   });
 
@@ -339,6 +362,7 @@
           rank={i + 1}
           {busy}
           recommended={c.id === bestId}
+          armed={c.id === armedId}
           onfill={() => act(c, 'fill')}
           onconfirm={() => act(c, 'confirm')}
         />

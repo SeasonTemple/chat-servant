@@ -1,4 +1,4 @@
-//! Tauri 命令层。**Rust 侧是唯一事实来源**——前端只渲染这里发过去的东西。
+﻿//! Tauri 命令层。**Rust 侧是唯一事实来源**——前端只渲染这里发过去的东西。
 //!
 //! 这里刻意只放**纯逻辑**与**几何探测**，不放输入注入：
 //! ticket 09 的验收标准是「回读剪贴板与候选原文字节级相等」，
@@ -37,6 +37,73 @@ struct AppState {
     tier: crate::watch::TierCell,
     /// 「重新锁定当前会话」的请求。与循环共用同一个格子。
     relock: crate::watch::Relock,
+    /// **Confirm 档的「已装填」状态。** 见 [`Arming`]。
+    armed: Arming,
+}
+
+/// Confirm 档的二次确认：**程序不许替人省这一步，但人也不能被卡在这一步。**
+///
+/// ## 这里曾经是一个死胡同
+///
+/// 早先的实现是：
+///
+/// ```rust
+/// if tier == Dispatch::Confirm && action == "confirm" {
+///     let _ = app.emit("armed", &candidate_id);
+///     return DispatchReply { outcome: "NotSent", detail: "已准备好。再点一次…" };
+/// }
+/// ```
+///
+/// 第二次点击进来时，`tier` **仍然是 Confirm**、`action` **仍然是 confirm**
+/// ——**同一个分支又命中**，于是永远走不到下面的 `deliver`。
+///
+/// 后果不是「多一步确认」，而是 **Confirm 档根本发不出去**：
+/// 用户点一次回一句「再点一次」，点两次还是「再点一次」，
+/// 点一百次也还是。而那句话是一个**明晃晃的假承诺**——
+/// 它承诺下一次会发，下一次不会。
+///
+/// 2026-10-09 实机复现：点「填入并确认发送」→ 文字进了输入框、
+/// 没有发出去、回执说「再点一次」。再点，无限循环。
+///
+/// `armed` 事件当时也没有任何前端监听者——装填状态发出去就没了。
+///
+/// ## 为什么状态必须在 Rust 侧
+///
+/// 「这一次点击是装填还是发送」是**决定一条消息会不会真的发出去**的判断。
+/// 放在前端就等于把这条判断交给一个可以随手改的变量，
+/// 硬约束第 5 条（升档必须人按、默认档最低）当场失效。
+///
+/// ## 装填什么时候失效
+///
+/// 三种情况都必须失效，否则「装填」会变成一张可以囤起来的许可证：
+/// · 候选换了（`ticks` 变了）——上一轮的候选已经不是这一轮的候选了；
+/// · 档位变了；
+/// · 真的发出去了。
+#[derive(Debug, Default)]
+struct Arming {
+    /// 已装填的那条候选的 id。
+    id: Option<String>,
+    /// 装填时观察循环跑到第几圈。用来判断候选是否已经换过。
+    ticks: u64,
+}
+
+impl Arming {
+    /// 装填。**只在同一条候选、且候选没换过时才成立。**
+    ///
+    /// 返回 `false` 表示「之前那次装填已经作废，这次必须重新装填」——
+    /// 宁可让用户多点一次，也不要把上一轮的确认挪到这一轮的候选上。
+    fn arm(&mut self, id: &str, ticks: u64) -> bool {
+        if self.id.as_deref() == Some(id) && self.ticks == ticks {
+            return true;
+        }
+        self.id = Some(id.to_string());
+        self.ticks = ticks;
+        false
+    }
+
+    fn disarm(&mut self) {
+        self.id = None;
+    }
 }
 
 /// 取全局状态。**锁中毒不算致命**——状态还在，继续用比崩掉好。
@@ -110,10 +177,32 @@ pub fn debug_pane() -> Option<crate::debug::DebugPane> {
 pub struct DispatchReply {
     pub outcome: &'static str,
     pub detail: String,
+    /// 档位守则给出的「下一步」。`None` = 到此为止，没什么要接着做的。
+    pub next_hint: Option<String>,
 }
 
 #[tauri::command]
 pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> DispatchReply {
+    // ⚠ **夹具模式下绝不投递。**
+    //
+    // 夹具模式是给「没有微信可用时改界面」用的，可它拿到的是**真微信的帧**。
+    // 这时候按「确认发送」会把内容打进**一个真的对话里**——
+    // 而这个人并没有要求发这条消息。
+    //
+    // 「我以为我在测试」不构成免责理由：不可逆动作的前提是**用户确实要它**。
+    let fixture_mode = std::env::var("CHATSERVANT_FIXTURE")
+        .map(|p| !p.trim().is_empty())
+        .unwrap_or(false);
+    if fixture_mode {
+        return DispatchReply {
+            outcome: "Failed",
+            detail: "当前跑在**冻结的夹具帧**上（CHATSERVANT_FIXTURE），不投递。\
+                     要真的发送，去掉该环境变量重启。"
+                .into(),
+            next_hint: None,
+        };
+    }
+
     // ⚠ **档位从 Rust 自己的格子读，不看前端传什么。**
     // 早先的签名收一个 `tier: String` 并直接采信——那等于把「这条消息
     // 会不会真的发出去」交给一个前端可以随便改的字符串。
@@ -125,17 +214,92 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
     d.set_tier(tier);
 
     // Confirm 档：**没确认就不发送**。这条是硬约束，程序不许替人省这一步。
-    // 第一次点「填入并确认发送」只是**准备**，第二次（tier 已是 Confirm）
-    // 才真的发。所以判据是 tier 而不是 action。
+    //
+    // ⚠⚠ 判据是「**这一条候选已经装填过、且候选没有换过**」，
+    // 不是 action。早先这里写 `tier == Confirm && action == "confirm"`——
+    // 两次点击进来的条件完全相同，于是第二次又命中这里，永远发不出去，
+    // 而回执每次都写着「再点一次就会发出去」。见 [`Arming`]。
+    let ticks = with_state(|s| s.watcher.latest())
+        .flatten()
+        .map(|o| o.ticks);
     if tier == Dispatch::Confirm && action == "confirm" {
-        let _ = app.emit("armed", &candidate_id);
+        let already = {
+            let Ok(mut g) = STATE.lock() else {
+                return DispatchReply {
+                    outcome: "Failed",
+                    detail: "内部状态锁中毒".into(),
+                    next_hint: None,
+                };
+            };
+            match g.as_mut() {
+                Some(s) => match ticks {
+                    Some(t) => s.armed.arm(&candidate_id, t),
+                    // 拿不到当前这轮（循环还没跑出快照）→ 不许装填。
+                    // 宁可让他等一轮，也不要在没有基准的情况下放行发送。
+                    None => false,
+                },
+                None => false,
+            }
+        };
+        if !already {
+            // 装填是**状态变化**，要告诉界面：按钮文案从「填入并确认发送」
+            // 变成「确认发送」，样式也换掉。早先这个 emit 发出去之后
+            // **没有任何前端监听者**，状态就丢了——于是装填既不生效也不可见。
+            let _ = app.emit("armed", &candidate_id);
+            // 第一次点击：**只填入，不发**。这一步同时是让人读、让人改的窗口。
+            let filled = deliver(&candidate_id, false);
+            let next = d.next(filled.clone(), 0);
+            return DispatchReply {
+                outcome: outcome_name(&filled),
+                detail: format!(
+                    "{}。已填入输入框——**看一眼、改一改**，再点一次「确认发送」才真的发出去。",
+                    filled.explain()
+                ),
+                next_hint: Some(next.explain()),
+            };
+        }
+        // 第二次点击：**只按回车，不再往输入框里写任何东西。**
+        //
+        // ⚠ 两次都填会发出去两份拼接——`fill_input_box` 的语义是
+        // 「在光标处追加」，它不动用户已经打了一半的字。
+        // 实测（2026-10-09）：发出去的是同一句话连着两遍。
+        let Some(hwnd) = find_wechat() else {
+            return DispatchReply {
+                outcome: "Failed",
+                detail: "找不到微信窗口（已退出？换了进程名？）".into(),
+                next_hint: None,
+            };
+        };
+        let receipt = chatservant_capture::inject::send_only(hwnd);
+        if let Ok(mut g) = STATE.lock()
+            && let Some(s) = g.as_mut()
+        {
+            // 一次装填只服务一次发送；发过就作废。
+            s.armed.disarm();
+        }
+        let next = d.next(receipt.clone(), 0);
         return DispatchReply {
-            outcome: "NotSent",
-            detail: "已准备好。再点一次「确认发送」才会真的发出去。".into(),
+            outcome: outcome_name(&receipt),
+            detail: format!(
+                "档位 {}｜{}｜下一步：{}",
+                tier_name(tier),
+                receipt.explain(),
+                next.explain()
+            ),
+            next_hint: Some(next.explain()),
         };
     }
 
-    let receipt = deliver(&candidate_id, &action, tier);
+    // 改档就解除装填：上一档的确认不能带到下一档。
+    // ⚠ 放在这里而不是 `set_tier` 里：`set_tier` 是命令层的入口，
+    // 而这里保证「**任何一次投递动作**之前，装填都是有效的」。
+    if let Ok(mut g) = STATE.lock()
+        && let Some(s) = g.as_mut()
+    {
+        s.armed.disarm();
+    }
+
+    let receipt = deliver(&candidate_id, matches!(tier, Dispatch::Auto));
 
     // 让档位守则跑一遍，把下一步该做什么告诉前端。
     let next = d.next(receipt.clone(), 0);
@@ -147,6 +311,7 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
             receipt.explain(),
             next.explain()
         ),
+        next_hint: Some(next.explain()),
     }
 }
 
@@ -205,8 +370,13 @@ fn find_wechat() -> Option<windows::Win32::Foundation::HWND> {
 /// 都只填不发。而设置页写着「自动发送，填入即发送，不打断」——
 /// 界面承诺的是整个产品里**最危险的那个能力**，代码却根本没实现。
 ///
-/// 现在 Auto 走 [`fill_and_send`]，其余两档走 [`fill_input_box`]。
-fn deliver(candidate_id: &str, action: &str, tier: Dispatch) -> DeliveryReceipt {
+/// 现在由调用方把「这一轮到底该不该发」算成 [`send`] 传进来：
+/// Auto 恒为 true；Confirm 要先在 [`Arming`] 里成立；Manual 恒为 false。
+///
+/// `send` 是**显式参数**而不是再读一次 tier——「发不发」这个判断只允许
+/// 有一个地方做（`dispatch`），这里再读一遍 tier 就是第二份判断，
+/// 两份迟早会分叉，而且分叉的方向会是「多发」。
+fn deliver(candidate_id: &str, send: bool) -> DeliveryReceipt {
     let Some(hwnd) = find_wechat() else {
         return DeliveryReceipt::Failed("找不到微信窗口（已退出？换了进程名？）".into());
     };
@@ -224,14 +394,10 @@ fn deliver(candidate_id: &str, action: &str, tier: Dispatch) -> DeliveryReceipt 
         ));
     };
 
-    let _ = action;
-    match tier {
-        Dispatch::Auto => chatservant_capture::inject::fill_and_send(&text, hwnd),
-        // Manual 与 Confirm 都在这里停下。Confirm 的第二次点击由
-        // `dispatch` 在更早的地方处理（第一次只准备，不发）。
-        Dispatch::Manual | Dispatch::Confirm => {
-            chatservant_capture::inject::fill_input_box(&text, hwnd)
-        }
+    if send {
+        chatservant_capture::inject::fill_and_send(&text, hwnd)
+    } else {
+        chatservant_capture::inject::fill_input_box(&text, hwnd)
     }
 }
 
@@ -598,6 +764,7 @@ pub fn start(app: &AppHandle) {
             images_out,
             tier,
             relock,
+            armed: Arming::default(),
         });
     }
 
@@ -680,6 +847,7 @@ fn build_loop_config() -> LoopConfig {
             let http = UreqHttp::default();
             let r = HttpReasoner::new(std::sync::Arc::new(http), provider, key);
             return LoopConfig {
+                source: crate::watch::FrameSource::from_env(),
                 ignore_top: IGNORE_TOP,
                 reasoner: Box::new(r),
                 transport_ready: true,
@@ -695,6 +863,7 @@ fn build_loop_config() -> LoopConfig {
     }
 
     LoopConfig {
+        source: crate::watch::FrameSource::from_env(),
         ignore_top: IGNORE_TOP,
         reasoner: Box::new(PresetReasoner),
         transport_ready: false,
@@ -794,5 +963,48 @@ mod budget_ceiling_tests {
         let v = budget_view(20_000, &Provider::OpenAi);
         assert_eq!(v.max, 8500);
         assert!(v.budget <= v.max && v.budget >= v.min, "超出滑块范围");
+    }
+
+    /// **Confirm 档的二次确认必须真的能走完。**
+    ///
+    /// 2026-10-09 实机事故：判据写成 `tier == Confirm && action == "confirm"`，
+    /// 两次点击条件完全相同，于是第二次又命中「装填」分支，
+    /// **Confirm 档永远发不出去**，而回执每次都写着「再点一次就会发」。
+    /// 界面上那是一个明晃晃的假承诺。
+    ///
+    /// 这条测试按用户的手来走：点一下（装填）→ 再点一下（发送）。
+    #[test]
+    fn confirm_arm_needs_two_clicks_and_then_releases() {
+        let mut a = Arming::default();
+        assert!(!a.arm("c0", 10), "第一次点击只能装填，不能放行发送");
+        assert!(a.arm("c0", 10), "第二次点击（候选没变）应当放行");
+        a.disarm();
+        assert!(
+            !a.arm("c0", 10),
+            "发过一次之后要重新装填——一次装填只服务一次发送"
+        );
+    }
+
+    /// **装填不能挪到另一条候选上。**
+    ///
+    /// 不然就是「我确认了 A，结果发出去的是 B」。
+    #[test]
+    fn an_arming_never_moves_to_another_candidate() {
+        let mut a = Arming::default();
+        assert!(!a.arm("c0", 10));
+        assert!(!a.arm("c1", 10), "换了一条候选就必须重新装填");
+        assert!(a.arm("c1", 10), "c1 自己装填后再点一次才放行");
+    }
+
+    /// **候选换过之后，上一次的装填立刻作废。**
+    ///
+    /// `ticks` 前进意味着观察循环出了新一轮 readout，候选集合已经不是
+    /// 装填时那一批了。拿旧确认去放行新的候选，是把一次确认扩大成两次。
+    #[test]
+    fn an_arming_dies_when_the_readout_advances() {
+        let mut a = Arming::default();
+        assert!(!a.arm("c0", 10));
+        assert!(!a.arm("c0", 11), "readout 前进后旧装填必须作废");
+        assert!(a.arm("c0", 11), "在新一轮里重新装填后，第二次点击放行");
     }
 }
