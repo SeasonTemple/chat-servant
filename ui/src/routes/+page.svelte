@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+  import { Lock, RefreshCcwDot, ScanSearch, Settings2 } from '@lucide/svelte/icons';
   import CandidateCard from '$lib/CandidateCard.svelte';
   import MessageStream from '$lib/MessageStream.svelte';
   import TierSwitch from '$lib/TierSwitch.svelte';
@@ -269,24 +270,42 @@
     <div class="cs-head-tools">
       <button
         class="cs-icon"
-        title="把当前这个会话锁成要处理的那个"
+        title={relockPending ? '已请求重锁，下一轮起生效' : '把当前这个会话锁成要处理的那个'}
+        aria-label="重新锁定当前会话"
         onclick={relock}
         disabled={locking || relockPending}
       >
-        {locking || relockPending ? '…' : '锁'}
+        <Lock size={13} strokeWidth={2} aria-hidden="true" class={locking ? 'spin' : ''} />
       </button>
       <button
         class="cs-icon"
         title="识别画布：每个框按归类结果上色"
+        aria-label="打开识别画布"
         onclick={() => invoke('open_debug').catch(() => {})}
       >
-        画
+        <ScanSearch size={13} strokeWidth={2} aria-hidden="true" />
       </button>
-      <button class="cs-icon" title="设置" onclick={() => invoke('open_settings').catch(() => {})}>
-        设
+      <button
+        class="cs-icon"
+        title="设置"
+        aria-label="打开设置"
+        onclick={() => invoke('open_settings').catch(() => {})}
+      >
+        <Settings2 size={13} strokeWidth={2} aria-hidden="true" />
       </button>
-      <button class="cs-icon" title="手动读一次快照" onclick={refresh} disabled={refreshing}>
-        {refreshing ? '…' : '新'}
+      <button
+        class="cs-icon"
+        title="手动读一次快照"
+        aria-label="手动读一次快照"
+        onclick={refresh}
+        disabled={refreshing}
+      >
+        <RefreshCcwDot
+          size={13}
+          strokeWidth={2}
+          aria-hidden="true"
+          class={refreshing ? 'spin' : ''}
+        />
       </button>
     </div>
   </header>
@@ -301,8 +320,18 @@
   <MessageStream {messages} />
 
   <!-- 候选是这个面板的**产出**。没有候选时不该有一大块空白顶在中间，
-       看起来像界面坏了——空状态只占它该占的那点地方。 -->
+       看起来像界面坏了——空状态只占它该占的那点地方。
+
+       上面加一条**带标签的分界线**是刻意的：消息流是「读到的证据」，
+       候选是「给出的建议」，两者是不同性质的信息，不该糊在一起。
+       上一版两者之间什么都没有，滚动时根本分不清哪块是哪块。 -->
   <section class="cs-cands" aria-label="候选回复">
+    <div class="cs-cands-head">
+      <span class="cs-cands-title">候选回复</span>
+      {#if sorted.length > 0}
+        <span class="cs-cands-n">{sorted.length} 条 · 按把握排序</span>
+      {/if}
+    </div>
     {#if sorted.length > 0}
       {#each sorted as c, i (c.id)}
         <CandidateCard
@@ -318,7 +347,7 @@
       <div class="cs-empty">
         {#if !peer}
           <span class="cs-empty-lead">没认出会话，不动手</span>
-          <span class="cs-empty-sub">点上面的「锁」，换成你正在看的那个会话</span>
+          <span class="cs-empty-sub">点上面的锁，换成你正在看的那个会话</span>
         {:else}
           <span class="cs-empty-lead">对方还没发新消息</span>
           <span class="cs-empty-sub">发来了才会起草候选</span>
@@ -440,18 +469,22 @@
     flex: none;
   }
 
-  /* 单字图标按钮。中文一个字比图标更容易在这么窄的面板里辨认，
-     也省掉一整套图标依赖。 */
+  /* 图标按钮。**不用汉字**。
+     上一版是「锁 / 画 / 设 / 新」四个字，理由写的是「一个字比图标更容易
+     在这么窄的面板里辨认，也省掉一整套图标依赖」——那是给自己找的借口：
+     单字图标在 22px 里既不像锁也不像画，四个并排时用户要逐字读，
+     而真正的锁形/放大镜形在小尺寸下是一眼可辨的。
+     @lucide/svelte 是 ISC 许可，符合本仓库的许可门槛；只取 4 个图标。 */
   .cs-icon {
-    width: 22px;
-    height: 22px;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
     padding: 0;
-    font-size: 0.7rem;
-    font-weight: 600;
     color: var(--cs-ink-3);
     background: transparent;
-    border: 1px solid var(--cs-border);
-    border-radius: 6px;
+    border: 1px solid transparent;
+    border-radius: 7px;
     transition:
       color var(--cs-dur-fast) var(--cs-ease),
       border-color var(--cs-dur-fast) var(--cs-ease),
@@ -459,12 +492,30 @@
   }
   .cs-icon:hover:not(:disabled) {
     color: var(--cs-ink);
-    border-color: var(--cs-border-strong);
+    border-color: var(--cs-border);
     background: rgb(255 255 255 / 4%);
   }
   .cs-icon:disabled {
     opacity: 0.35;
     cursor: default;
+  }
+
+  /* 「正在做」用**旋转**表示，而不是把图标换成省略号——
+     换形状会让按钮在 140ms 里跳一下，旋转则是在原地发生。 */
+  .cs-icon :global(svg.spin) {
+    animation: cs-spin 0.9s linear infinite;
+  }
+
+  @keyframes cs-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cs-icon :global(svg.spin) {
+      animation: none;
+    }
   }
 
   /* ── 异常条：只在真出事时出现 ─────────────────────────────── */
@@ -501,7 +552,32 @@
   }
 
   .cs-cands:has(.cs-empty) {
-    justify-content: center;
+    justify-content: flex-start;
+  }
+
+  /* 分界标签。用字距拉开的小号字，不是粗体——它在说「下面是另一块」，
+     不是在喊「注意这里」。 */
+  .cs-cands-head {
+    flex: none;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.45rem 0.1rem 0.4rem;
+    margin-bottom: 0.3rem;
+    border-top: 1px solid var(--cs-border-strong);
+  }
+
+  .cs-cands-title {
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    color: var(--cs-ink-2);
+  }
+
+  .cs-cands-n {
+    font-size: 0.6rem;
+    color: var(--cs-ink-3);
   }
 
   /* 空状态只占它该占的那点地方。之前它 `flex:1` 撑满中段，

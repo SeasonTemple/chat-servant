@@ -171,20 +171,25 @@ fn parse_line(line: &windows::Media::Ocr::OcrLine) -> Option<OcrLine> {
 
 /// 按**几何间距**把词拼成一行，而不是照 `OcrLine.Text` 一律加空格。
 ///
-/// ## 判据
+/// ## 阈值是怎么定的（实测，不是拍脑袋）
 ///
-/// 相邻两个词的横向间隙**达到字高的三分之一**就补一个空格。
+/// `cargo xtask ocr <帧> --scale 2` 会把每一对相邻词的间隙和字高都打出来。
+/// 2026-10-09 在真实微信帧上量到的分布：
 ///
-/// - `古` `文` `山`：汉字挨着排，间隙 0~1px → `古文山`
-/// - `Project` `Alpha`：真有一个空格，间隙 ≈ 半个字符宽 → `Project Alpha`
-/// - `用` `3D` `建模`：中英混排的空格也能保住 → `用 3D 建模`
-/// - `G8W`：引擎本来就当成一个词，不受影响
+/// ```text
+/// 文│件│传│输│助│手   间隙 0~2px   字高 24   比值 0.00~0.08   相邻汉字
+/// 来│了│吗            间隙 2~4px   字高 24   比值 0.08~0.17   相邻汉字
+/// 卜│a2025│全         间隙 2px     字高 20   比值 0.10        中英紧排
+/// 1│g│3               间隙 6px     字高 18   比值 0.33        误识别的连排
+/// ]│h                 间隙 38px    字高 22   比值 1.73        真有空格
+/// 口│.tgz             间隙 26px    字高 22   比值 1.18        真有空格
+/// ```
 ///
-/// 三分之一不是随手取的：抗锯齿会让相邻汉字的框有 1~2px 的缝隙或重叠，
-/// 阈值取 0 会把它们全变成空格（退化成原来那个 bug），取字高的一半又会把
-/// 中英混排里那点窄空格吃掉。三分之一落在两者之间。
-/// 比较写成 `gap * 3 >= h` 而不是 `gap >= h / 3`：字高是奇数时后者会取整
-/// 偏向 0，14px 的字高会得到阈值 4 而不是 4.67，肉眼没差别但边界用例会飘。
+/// 两堆之间是 **0.33 与 1.18** 之间的大空档，0.5 正落在中间。
+///
+/// 早先这里试过 1/2 又改成 1/3：1/3 会被那条 0.33 的误识别连排骗到，
+/// 把「B0」拼成「B 0」。**降阈值是为了迁就一个自己编的测试几何，
+/// 而真帧上的真实分布根本不需要那么松**——量出来的数才是判据。
 ///
 /// ## 为什么不写死「中文之间永远不加空格」
 ///
@@ -197,7 +202,9 @@ fn join_words(words: &[OcrWord]) -> String {
             let prev = &words[i - 1];
             let gap = w.rect.x0 - prev.rect.x1;
             let h = w.rect.height().max(prev.rect.height());
-            if gap * 3 >= h {
+            // 写成 `gap * 2 >= h` 而不是 `gap >= h / 2`：字高是奇数时后者会
+            // 向下取整，21px 的字高会得到阈值 10 而不是 10.5，边界用例会飘。
+            if gap * 2 >= h {
                 out.push(' ');
             }
         }
@@ -231,11 +238,17 @@ fn pipeline(e: windows::core::Error) -> OcrError {
 mod tests {
     use super::*;
 
-    /// 造一个字宽 `adv` 的词，从 `x` 开始。
-    fn word(text: &str, x: i32, h: i32) -> OcrWord {
+    /// 造一个**宽 `adv`、高 `h`** 的词，左边缘在 `x`。
+    ///
+    /// ⚠ 宽高必须分开。早先的测试辅助把宽度也写成 `h`，于是「有空格」
+    /// 的用例只能靠把 `x` 拉得很远来构造，间隙大到不像真帧——
+    /// 阈值就是被这种编出来的几何带偏的（降到 1/3，然后真帧上
+    /// 「B0」被拼成「B 0」）。下面的数字全部来自 `cargo xtask ocr`
+    /// 在真实微信帧上的实测。
+    fn word(text: &str, x: i32, adv: i32, h: i32) -> OcrWord {
         OcrWord {
             text: text.into(),
-            rect: Rect::new(x, 100, x + h, 100 + h),
+            rect: Rect::new(x, 100, x + adv, 100 + h),
         }
     }
 
@@ -245,41 +258,69 @@ mod tests {
     /// 更早一次是「文件传输助手」六个孤字。根因就是照抄
     /// `OcrLine.Text()`——它把每个 word 用空格拼起来，而中文被逐字切分。
     /// 标题栏是「我现在看着谁」，那上面出现空格就是在说谎。
+    ///
+    /// 实测「文│件│传│输│助│手」：字高 24，间隙 0~2px。
     #[test]
     fn cjk_split_into_characters_keeps_no_spaces() {
-        let ws = vec![word("古", 10, 14), word("文", 25, 14), word("山", 40, 14)];
-        assert_eq!(join_words(&ws), "古文山");
+        let ws = vec![
+            word("文", 100, 24, 24),
+            word("件", 124, 24, 24),
+            word("传", 148, 24, 24),
+            word("输", 172, 24, 24),
+            word("助", 196, 24, 24),
+            word("手", 221, 24, 24),
+        ];
+        assert_eq!(join_words(&ws), "文件传输助手");
     }
 
-    /// 真有空格的地方要保留——英文名字被切开时不能粘成一坨。
+    /// **真空格要保住。** 实测 `口│.tgz`：间隙 26px / 字高 22（比值 1.18）。
     #[test]
     fn a_real_word_gap_becomes_one_space() {
-        let ws = vec![word("Project", 10, 10), word("Alpha", 60, 10)];
-        assert_eq!(join_words(&ws), "Project Alpha");
+        let ws = vec![word("口", 100, 18, 22), word(".tgz", 144, 30, 22)];
+        assert_eq!(join_words(&ws), "口 .tgz");
     }
 
-    /// 中英混排：`用 3D 建模` 里的两个空格是像素上真实存在的间隙，
-    /// 不能因为「前后涉及汉字」就吃掉。
+    /// **误识别的连排不该被拆开。**
+    ///
+    /// 实测真帧上一行被读成 `1 g 3`：中间那一对的间隙 6px / 字高 18
+    /// （比值 0.33）。早先把阈值降到 1/3 就是被它骗到，把 `B0` 拼成
+    /// `B 0`。这条测试守的就是**别再降**。
     #[test]
-    fn mixed_cjk_and_latin_keeps_its_gaps() {
-        let ws = vec![word("用", 10, 14), word("3D", 30, 14), word("建模", 55, 14)];
-        assert_eq!(join_words(&ws), "用 3D 建模");
+    fn a_misread_but_tight_run_stays_joined() {
+        let ws = vec![word("B", 100, 12, 18), word("0", 118, 12, 18)];
+        assert_eq!(join_words(&ws), "B0", "间隙 6px/字高 18=0.33，不够半个字高");
+    }
+
+    /// 中英紧排：实测 `卜│a2025│全` 间隙 2px / 字高 20（比值 0.10）。
+    #[test]
+    fn cjk_and_latin_without_a_space_stay_joined() {
+        let ws = vec![
+            word("卜", 100, 20, 20),
+            word("a2025", 122, 40, 20),
+            word("全", 164, 20, 20),
+        ];
+        assert_eq!(join_words(&ws), "卜a2025全");
+    }
+
+    /// 抗锯齿造成的 1px 缝隙**不算**空格。阈值若取 0，汉字之间那点缝隙
+    /// 会全变成空格，退化成原来那个 bug。
+    #[test]
+    fn a_one_pixel_seam_is_not_a_space() {
+        let ws = vec![word("信", 100, 24, 24), word("息", 125, 24, 24)];
+        assert_eq!(join_words(&ws), "信息");
+    }
+
+    /// 重叠（间隙为负）也不能变成空格——滚动会让框轻微交叠。
+    #[test]
+    fn overlapping_boxes_stay_joined() {
+        let ws = vec![word("一", 100, 20, 26), word("j", 118, 12, 26)];
+        assert_eq!(join_words(&ws), "一j");
     }
 
     /// 只有一个词时不该凭空多个空格。
     #[test]
     fn a_single_word_is_returned_verbatim() {
-        assert_eq!(join_words(&[word("G8W", 10, 10)]), "G8W");
+        assert_eq!(join_words(&[word("G8W", 10, 30, 10)]), "G8W");
         assert_eq!(join_words(&[]), "");
-    }
-
-    /// 抗锯齿造成的 1px 缝隙**不算**空格。
-    ///
-    /// 阈值若取 0，汉字之间那点缝隙会全变成空格，退化成原来那个 bug。
-    #[test]
-    fn a_one_pixel_seam_is_not_a_space() {
-        // 上一个词到 24，下一个从 25 起：1px 缝隙
-        let ws = vec![word("信", 10, 14), word("息", 25, 14)];
-        assert_eq!(join_words(&ws), "信息");
     }
 }

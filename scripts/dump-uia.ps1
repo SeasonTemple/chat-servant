@@ -1,17 +1,14 @@
-# 把微信窗口的 UI Automation 树打出来，用来回答：
-#   「不抢前台，能不能把文字送进聊天输入框？」
+﻿# 列出微信窗口 UIA 树里的**全部**后代元素（控件类型 / 名字 / 类名 / 矩形 / 可用模式）。
 #
-# 已知事实（2026-10-09 实测）：
-#   · 微信顶层窗口只有 2 个子 HWND，全是 Qt 的，没有原生 Edit
-#     → WM_PASTE 投给子窗口这条路**没有投递目标**
-#   · 但 UIA 树是通的，根节点 class = `mmui::MainWindow`
-#     → 官方 ValuePattern / TextPattern 可能是出路
-# 这份脚本把整棵树连同控件类型、名字、矩形、可用模式列出来。
+# 用途：回答「不抢前台能不能把文字送进聊天输入框」。
+# 已知：微信顶层只有 2 个 Qt 子 HWND，没有原生 Edit → WM_PASTE 无投递目标；
+#       但 UIA 根是 `mmui::MainWindow`，FindAll 能找到 Edit 且 ValuePattern 可用。
+# 问题是**聊天输入框**到底是哪个元素、以及它支持什么模式——只能把树打出来看。
 #
-# 用法: dump-uia.ps1 <hwnd> [最大深度]
+# 用法: dump-uia.ps1 <hwnd> [只打印矩形在某区域内的元素]
 param(
     [Parameter(Mandatory)][string]$Hwnd,
-    [int]$MaxDepth = 14
+    [int]$X0 = 0, [int]$Y0 = 0, [int]$X1 = 0, [int]$Y1 = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,41 +18,40 @@ Add-Type -AssemblyName UIAutomationTypes
 $h = [IntPtr][Convert]::ToInt64($Hwnd, 16)
 $root = [System.Windows.Automation.AutomationElement]::FromHandle($h)
 if (-not $root) { throw "拿不到 UIA 根元素" }
+$rr = $root.Current.BoundingRectangle
+Write-Host ("根：'{0}' class='{1}' rect=({2},{3},{4},{5})" -f `
+    $root.Current.Name, $root.Current.ClassName, [int]$rr.X, [int]$rr.Y, [int]$rr.Width, [int]$rr.Height)
 
-$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+$all = $root.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition)
+Write-Host "后代元素共 $($all.Count) 个"
 
-function Show($el, $depth, $path) {
-    if ($depth -gt $MaxDepth) { return }
-    try {
-        $c = $el.Current
-        $r = $c.BoundingRectangle
-        $flags = @()
-        foreach ($p in @(
-            @{ n = 'Value'; t = [System.Windows.Automation.ValuePattern]::Pattern },
-            @{ n = 'Text'; t = [System.Windows.Automation.TextPattern]::Pattern },
-            @{ n = 'Legacy'; t = [System.Windows.Automation.LegacyIAccessiblePattern]::Pattern },
-            @{ n = 'Invoke'; t = [System.Windows.Automation.InvokePattern]::Pattern }
-        )) {
-            $o = $null
-            if ($el.TryGetCurrentPattern($p.t, [ref]$o)) { $flags += $p.n }
-        }
-        $name = $c.Name
-        if ($name.Length -gt 28) { $name = $name.Substring(0, 28) + '…' }
-        Write-Host ("{0}{1,-14} '{2}' class={3,-22} rect=({4},{5},{6},{7}) [{8}]" -f `
-            ('  ' * $depth), $c.ControlType.ProgrammaticName -replace 'ControlType\.', '',
-            $name, $c.ClassName,
-            [int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height,
-            ($flags -join ','))
-    } catch {
-        Write-Host ("{0}<读不到属性>" -f ('  ' * $depth))
-        return
+$patterns = @(
+    @{ n = 'Value'; t = [System.Windows.Automation.ValuePattern]::Pattern },
+    @{ n = 'Text'; t = [System.Windows.Automation.TextPattern]::Pattern },
+    @{ n = 'Invoke'; t = [System.Windows.Automation.InvokePattern]::Pattern },
+    @{ n = 'Selection'; t = [System.Windows.Automation.SelectionPattern]::Pattern }
+)
+
+for ($i = 0; $i -lt $all.Count; $i++) {
+    $e = $all.Item($i)
+    $c = $null; $r = $null
+    try { $c = $e.Current; $r = $c.BoundingRectangle } catch { continue }
+    if ($X1 -gt $X0) {
+        if ($r.X + $r.Width -lt $X0 -or $r.X -gt $X1) { continue }
+        if ($r.Y + $r.Height -lt $Y0 -or $r.Y -gt $Y1) { continue }
     }
-    $child = $walker.GetFirstChild($el)
-    while ($child) {
-        Show $child ($depth + 1) "$path/$($child.Current.AutomationId)"
-        $child = $walker.GetNextSibling($child)
+    $flags = @()
+    foreach ($p in $patterns) {
+        $o = $null
+        try { if ($e.TryGetCurrentPattern($p.t, [ref]$o)) { $flags += $p.n } } catch { }
     }
+    $name = $c.Name
+    if ($name.Length -gt 30) { $name = $name.Substring(0, 30) + '…' }
+    Write-Host ("[{0,4}] {1,-12} '{2}' class={3,-20} rect=({4},{5},{6}x{7}) [{8}]" -f `
+        $i, ($c.ControlType.ProgrammaticName -replace 'ControlType\.', ''),
+        $name, $c.ClassName,
+        [int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height,
+        ($flags -join ','))
 }
-
-Write-Host "根：'$($root.Current.Name)' class='$($root.Current.ClassName)'" -ForegroundColor Cyan
-Show $root 0 ''

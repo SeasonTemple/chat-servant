@@ -20,6 +20,11 @@
    * 要去，也得他自己决定。
    */
   const follow = (n: number) => scrollToBottom(n, DUR.base);
+
+  /** 展开了判据的那一条。同一时刻只开一条——这是诊断视图，不是产品。 */
+  let opened = $state<string | null>(null);
+
+  const speaker = (s: Message['speaker']) => (s === 'Me' ? '我' : s === 'Them' ? '对方' : '系统');
 </script>
 
 <section {@attach follow(messages.length)} class="cs-stream" aria-label="对话">
@@ -28,6 +33,9 @@
       入场动画只给**新增的那一条**：{#each} 的 keyed 渲染只重建变化项，
       所以这里给每条挂 enter 是安全的——旧消息的 DOM 没被重建，
       attachment 不会重跑，只有真正新插入的节点会闪一下。
+
+      `m.id` 必须是真键。Rust 侧早期没这个字段，7 条消息的 key 全是
+      undefined，Svelte 判成同一个节点——面板整块空白而后端毫无报错。
     -->
     <article
       {@attach enter(enterFrom(6))}
@@ -35,14 +43,22 @@
       class:me={m.speaker === 'Me'}
       class:sys={m.speaker === 'System'}
     >
-      <header class="cs-msg-head">
-        <span class="cs-who">
-          {m.speaker === 'Me' ? '我' : m.speaker === 'Them' ? '对方' : '系统'}
-        </span>
-        <!-- 判定依据常驻可见：认错了要能立刻发现，而不是去猜 -->
-        <span class="cs-ev" title={m.evidence}>{m.evidence}</span>
-      </header>
+      <button
+        class="cs-who"
+        title="点开看这条为什么被这样判"
+        aria-expanded={opened === m.id}
+        onclick={() => (opened = opened === m.id ? null : m.id)}
+      >
+        {speaker(m.speaker)}
+      </button>
       <p class="cs-text selectable">{m.text}</p>
+      {#if opened === m.id}
+        <!-- 判据**按需展开**，不再常驻。
+             它是 rgb()/对比度/彩度这一串诊断数字，常驻显示会把正文压到
+             读不下去——上一版每条消息上面都挂着一整行这种数字，
+             面板看上去像日志而不是聊天记录。诊断信息要能拿到，但不该占版面。 -->
+        <p class="cs-ev selectable">{m.evidence || '（这条没有记录判据）'}</p>
+      {/if}
     </article>
   {:else}
     <p class="cs-empty">还没有消息</p>
@@ -57,77 +73,104 @@
      * 把候选整块顶出可视范围），不封顶就等于把结果藏起来了。
      * `max-height` 用百分比——父级是定高的 flex 列容器，能解析。 */
     flex: 0 1 auto;
-    max-height: 40%;
+    max-height: 38%;
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
-    padding: 0.5rem 0 0;
+    padding: 0.4rem 0 0;
     overflow-y: auto;
     scrollbar-width: thin;
-    min-height: 2.4rem;
+    min-height: 2.2rem;
     /* GSAP 改 scrollTop，这里不能再给 transition，否则会互相拖慢 */
   }
 
-  /* 每条消息只用**左边一条 2px 的色条**区分说话人，不做气泡、不做头像。
-     面板很窄，气泡会把正文的行宽压到读不下去；色条够了——
-     「谁说的」是二元信息，不需要更多像素。 */
+  /* 一条消息 = **一行说话人 + 正文**。没有卡片、没有气泡、没有头像。
+     这是仪表的读数区，不是第二个聊天软件：越平越好读，越不像微信
+     就越不会被误认成微信的一部分。 */
   .cs-msg {
-    display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
-    padding: 0.35rem 0.5rem;
-    border-radius: var(--cs-radius-sm);
-    background: var(--cs-surface-raised);
-    border-left: 2px solid var(--cs-them);
+    display: grid;
+    /* 说话人占一个固定窄列，正文吃掉剩下的。正文左边缘因此全线对齐，
+       扫读时眼睛只需走一条直线。 */
+    grid-template-columns: 2.1rem minmax(0, 1fr);
+    column-gap: 0.45rem;
+    align-items: baseline;
+    padding: 0.16rem 0.1rem;
+    border-radius: 4px;
+    /* 上一版每条都有一块底色 + 左边框，一屏七八条时整片区域被切碎，
+       反而看不出对话的节奏。改成**只有左边一条 2px 的说话人色**，
+       并且**隔条才给一点底色**，密排时是安静的。 */
+    border-left: 2px solid transparent;
+  }
+
+  .cs-msg:nth-child(even) {
+    background: rgb(255 255 255 / 2.5%);
+  }
+
+  .cs-msg:hover {
+    border-left-color: color-mix(in srgb, var(--cs-them) 70%, transparent);
+  }
+  .cs-msg.me:hover {
+    border-left-color: color-mix(in srgb, var(--cs-me) 70%, transparent);
   }
 
   .cs-msg.me {
-    border-left-color: var(--cs-me);
+    color: var(--cs-ink-2);
   }
 
   .cs-msg.sys {
-    opacity: 0.7;
-    border-left-color: var(--cs-ink-3);
+    color: var(--cs-ink-3);
   }
 
-  .cs-msg-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 0.4rem;
-  }
-
+  /* 说话人用小号等宽，三种身份靠颜色区分：
+     对方=蓝、自己=绿（沿用微信绿，但只用于这一条语义）、系统=灰。 */
   .cs-who {
-    font-size: 0.62rem;
-    color: var(--cs-ink-3);
-    flex: 0 0 auto;
+    appearance: none;
+    border: 0;
+    background: none;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    font-size: 0.6rem;
+    font-variant-numeric: tabular-nums;
+    text-align: left;
+    color: var(--cs-them);
+    cursor: help;
+    border-bottom: 1px dotted transparent;
   }
-
-  .cs-ev {
-    font-size: 0.58rem;
+  .cs-who:hover {
+    border-bottom-color: currentColor;
+  }
+  .cs-msg.me .cs-who {
+    color: var(--cs-me);
+  }
+  .cs-msg.sys .cs-who {
     color: var(--cs-ink-3);
-    opacity: 0.8;
-    text-align: right;
-    /* 依据可能很长：限制一行 + 保留 title。
-       窄面板下宁可截断，也不要它把整条消息撑高。 */
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
   }
 
   .cs-text {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: 0.76rem;
     line-height: 1.5;
+    color: var(--cs-ink);
+    overflow-wrap: anywhere;
+  }
+
+  .cs-ev {
+    grid-column: 2;
+    margin: 0.2rem 0 0.15rem;
+    padding: 0.25rem 0.4rem;
+    font-size: 0.62rem;
+    line-height: 1.5;
+    color: var(--cs-ink-3);
+    background: var(--cs-surface-raised);
+    border-radius: 4px;
     overflow-wrap: anywhere;
   }
 
   .cs-empty {
     margin: 0;
-    padding: 0.75rem 0.25rem;
-    font-size: 0.72rem;
-    color: var(--cs-ink-3);
+    padding: 0.6rem 0;
     text-align: center;
+    font-size: 0.7rem;
+    color: var(--cs-ink-3);
   }
 </style>

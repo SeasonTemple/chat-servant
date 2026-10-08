@@ -547,6 +547,29 @@ fn probe_ocr(file: &Path, scale: u32) -> Result<()> {
             l.height(),
             l.text
         );
+        // ⚠ **逐词间隙**。行文本里那个空格到底该不该有，只有间隙能回答：
+        // 中文被逐字切开时「古 文 山」是假空格，而真正的空格间隙是字高的
+        // 几倍。凭印象调阈值会来回摇摆——实测就是「B0」被插成「B 0」。
+        // 打印出来直接看数。
+        if l.words.len() > 1 {
+            for pair in l.words.windows(2) {
+                let gap = pair[1].rect.x0 - pair[0].rect.x1;
+                let h = pair[0].rect.height().max(pair[1].rect.height());
+                println!(
+                    "      ·{:>12}│{:>12}│ 间隙 {:>3}px  字高 {:>3}  比值 {:.2}{}",
+                    pair[0].text,
+                    pair[1].text,
+                    gap,
+                    h,
+                    gap as f32 / h.max(1) as f32,
+                    if gap * 3 >= h {
+                        "  ← 现在会插空格"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
     }
     println!("\n---- 整图 ----\n{}", ocr.text);
     Ok(())
