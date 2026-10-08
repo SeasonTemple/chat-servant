@@ -135,6 +135,19 @@
           return;
         }
         dispose = un;
+        // ⚠ **订阅之后必须立刻补拉一次快照。**
+        //
+        // Rust 的循环在应用启动那一刻就开始跑了，而前端要等
+        // `probe_anchor` 返回、动态 import 完成，才走到这里注册监听器。
+        // 这中间如果有内容变化，那一条推送就**发在我们订阅之前**——
+        // 事件不会补发，界面从此停在空白，而 Rust 那边一切正常。
+        //
+        // 实测就是这样：后端日志 `peer="G8W" messages=2 candidates=3`，
+        // 面板却显示「没认出会话 / 还没有消息」。
+        //
+        // 「先订阅、再补拉」是这类推送的标准接法：订阅保证不漏后面的，
+        // 补拉保证不漏之前的。少任何一半都会出现「偶尔空白且不自愈」。
+        await pullSnapshot();
       } catch (e) {
         reason = `**收不到 Rust 的推送**：${String(e)}`;
       }
@@ -147,14 +160,12 @@
   });
 
   /**
-   * 手动读一次当前快照。
+   * 拉一次当前快照，灌进界面状态。
    *
-   * 面板是**纯推送**的：循环只在有变化时 emit，静态窗口里它一直沉默。
-   * 用户怀疑漏了消息时没有补救手段——这个按钮是那条出路，
-   * 也让 `latest_readout` 不再是一个没人调用的命令。
+   * 两个调用方：手动刷新按钮，以及**注册完监听器之后立刻补一次**
+   * （见上面的 catch-up）。
    */
-  async function refresh() {
-    refreshing = true;
+  async function pullSnapshot() {
     try {
       const r = await invoke<{
         messages: Message[];
@@ -162,16 +173,28 @@
         reason: string;
         peer: string;
       } | null>('latest_readout');
-      if (!r) {
-        reason = '观察循环还没跑出第一帧。';
-        return;
-      }
+      if (!r) return false;
       messages = r.messages ?? [];
       candidates = r.candidates ?? [];
       reason = r.reason;
       peer = r.peer ?? '';
+      return true;
     } catch (e) {
       reason = `读快照失败：${String(e)}`;
+      return false;
+    }
+  }
+
+  /**
+   * 手动读一次当前快照。
+   *
+   * 面板是**推送为主**的：循环只在有变化时 emit，静态窗口里它一直沉默。
+   * 用户怀疑漏了消息时没有补救手段——这个按钮是那条出路。
+   */
+  async function refresh() {
+    refreshing = true;
+    try {
+      if (!(await pullSnapshot())) reason = '观察循环还没跑出第一帧。';
     } finally {
       refreshing = false;
     }

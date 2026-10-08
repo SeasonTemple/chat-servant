@@ -619,40 +619,42 @@ fn step(
     let Decision::Read { roi } = watcher.observe(&full) else {
         return Ok(None);
     };
-    // 消息区坐标 -> 整帧坐标，用整帧去裁 OCR 的输入。
-    let roi_frame = chatservant_core::frame::Rect::new(
-        roi.x0 + anchor.chat.x0,
-        roi.y0 + anchor.chat.y0,
-        roi.x1 + anchor.chat.x0,
-        roi.y1 + anchor.chat.y0,
-    );
 
-    // ③ 只对新增带跑 OCR。**必须放大**——
-    // 原分辨率下 `Windows.Media.Ocr` 会漏读，实测同一块画面：
-    // 带子按 1x 送进去只读到 4 行，放大 2x 后读全（`read_lines` 那条
-    // 路径一直这么做，见 ADR-0002 补记）。这里曾经漏了这一步，
-    // 于是对方的消息被 OCR 整段丢掉，界面上永远「没有消息」。
-    let band = frame
-        .crop(roi_frame)
-        .ok_or_else(|| format!("ROI {roi_frame:?} 裁不出图"))?;
-    let view = band
-        .upscaled_nearest(chatservant_perceive::OCR_UPSCALE)
-        .ok_or_else(|| "ROI 带放大失败".to_string())?;
+    // ③ **OCR 整帧（放大后），再按 ROI 过滤行——不要裁一块去 OCR。**
+    //
+    // 实测（2026-10-07，同一块画面）：
+    //
+    // ```text
+    // 整帧 2x        5 行，读到「乐」（对方消息）
+    // ROI 带子 2x   4 行，读不到「乐」
+    // ```
+    //
+    // 「乐」就在带子里（pane 坐标 79,128），它没消失，是识别器在裁剪后
+    // 把它漏了。这与「乐」气泡那次、标题栏 40px 那次是**同一类毛病**：
+    // `Windows.Media.Ocr` 需要行周围有内容才收，裁得越紧漏得越多。
+    // 与其为裁剪框反复试参数，不如**永远 OCR 整帧**——这也顺带消掉了
+    // 「裁剪坐标 ↔ 帧坐标 ↔ 消息区坐标」三套换算，正是坐标 bug 的来源。
+    //
+    // 配方与 `perceive::read_lines` 完全一致（放大 → OCR → 换算到消息区坐标），
+    // 别在这里自己改一套。
+    let sc = chatservant_perceive::OCR_UPSCALE;
+    let view = frame
+        .upscaled_nearest(sc)
+        .ok_or_else(|| "整帧放大失败".to_string())?;
     let ocr = chatservant_capture::ocr::recognize(&view).map_err(|e| format!("OCR 失败：{e}"))?;
     s.ocr_calls += 1;
 
     let palette = chatservant_perceive::Palette::learn(&frame, anchor.chat)
         .ok_or_else(|| "学不到配色（消息区太平）".to_string())?;
 
-    // 行框要换算三次：放大后的视图坐标 → 带子坐标（除以倍数）
-    // → 整帧坐标（加 roi_frame 原点）→ **消息区坐标**（减 chat 原点）。
-    let sc = chatservant_perceive::OCR_UPSCALE;
+    // 行框：放大后的视图坐标 → 整帧（除以倍数）→ **消息区坐标**（减 chat 原点）。
+    // 然后按 ROI 裁掉本轮不该管的那些行——ROI 本身就是消息区坐标。
     let lines: Vec<chatservant_capture::ocr::OcrLine> = ocr
         .lines
         .iter()
         .map(|l| {
-            let f = |v: i32| v / sc as i32 + roi_frame.x0 - anchor.chat.x0;
-            let g = |v: i32| v / sc as i32 + roi_frame.y0 - anchor.chat.y0;
+            let f = |v: i32| v / sc as i32 - anchor.chat.x0;
+            let g = |v: i32| v / sc as i32 - anchor.chat.y0;
             chatservant_capture::ocr::OcrLine {
                 text: l.text.clone(),
                 rect: chatservant_core::frame::Rect::new(
@@ -664,13 +666,19 @@ fn step(
                 words: vec![],
             }
         })
+        // 按 ROI 过滤：只留本轮该管的那些行。ROI 是消息区坐标，
+        // 行框也已经换算到消息区坐标，两边可以直接比。
+        .filter(|l| {
+            l.rect.y1 > roi.y0 && l.rect.y0 < roi.y1 && l.rect.x1 > roi.x0 && l.rect.x0 < roi.x1
+        })
         .collect();
     let attrs = chatservant_perceive::classify_all(&lines, &full, &palette);
     let messages = chatservant_perceive::group(&attrs);
     tracing::debug!(
         target: "chat_servant::watch",
-        "roi(整帧)={roi_frame:?} ocr行={} 归类={} 消息={}",
+        "roi={roi:?} ocr总行={} 本轮行={} 归类={} 消息={}",
         ocr.lines.len(),
+        lines.len(),
         attrs.len(),
         messages.len()
     );
