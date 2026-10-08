@@ -1,4 +1,4 @@
-//! 常驻观察循环——**把六个阶段串成一条会自己跑的链**。
+﻿//! 常驻观察循环——**把六个阶段串成一条会自己跑的链**。
 //!
 //! ## 循环里有什么
 //!
@@ -158,8 +158,106 @@ impl RecentN {
     }
 }
 
+/// 一帧从哪来。
+///
+/// ## 为什么要有这个枚举
+///
+/// 原来循环里写死了 `find_chat_window` + WGC，于是**整个应用都只能在
+/// 微信真的开着、并且窗口位置摆对的时候跑**。后果不是「多写点测试」的问题，
+/// 而是：改一次界面就得去点一次微信、截一次图、确认一次像素——
+/// 而这些步骤每次结果都不一样。于是「界面能不能跑通」这件事
+/// **没法被可靠地验证**，只能靠一次次人肉点击碰运气。
+///
+/// 有了它，`CHATSERVANT_FIXTURE=<png>` 就能让**整个应用**（含 Tauri 窗口与
+/// 面板）跑在一张冻结的真实帧上：OCR、归类、锁定、起草、事件推送、界面渲染
+/// 一条都不少，只有「这一帧从哪来」变了。
+///
+/// 钉在夹具上时画面每轮都一样，所以第一轮起草之后循环会自然进入静默期——
+/// 这正好也是要验的行为（硬约束第 6 条）。
+///
+/// ## 为什么用环境变量而不是编译期开关
+///
+/// 切模式不该要求重新编译。要是一般参数就得 `cargo build` 一次，
+/// 这个开关没两天就会被当成摆设绕过去。
+#[derive(Clone, Debug)]
+pub enum FrameSource {
+    /// 现场：找微信窗口 + WGC 抓帧。
+    Live,
+    /// 从一张 PNG 反复读同一帧。
+    Fixture(std::path::PathBuf),
+}
+
+impl FrameSource {
+    /// 从环境变量读。没设就是现场模式。
+    pub fn from_env() -> Self {
+        match std::env::var("CHATSERVANT_FIXTURE") {
+            Ok(p) if !p.trim().is_empty() => Self::Fixture(std::path::PathBuf::from(p)),
+            _ => Self::Live,
+        }
+    }
+
+    pub fn is_fixture(&self) -> bool {
+        matches!(self, Self::Fixture(_))
+    }
+
+    /// 夹具模式下给 reason 加的前缀。
+    ///
+    /// ⚠ **必须加**。夹具跑出来的界面上写着「文件传输助手」、消息和候选
+    /// 都和真的一模一样，不标出来就没人分得清这是不是实时的。
+    /// 而一个会让人以为「程序在实时看着我的微信」的界面——
+    /// 那是在说谎。
+    pub fn stamp(&self, reason: &str) -> String {
+        if self.is_fixture() {
+            format!("【夹具帧，不是实时画面】{reason}")
+        } else {
+            reason.to_string()
+        }
+    }
+}
+
+/// 读一帧。现场模式做完整的可读性检查；夹具模式只读文件。
+fn load_frame(
+    src: &FrameSource,
+    last_hwnd: &mut Option<isize>,
+) -> Result<chatservant_capture::Frame, String> {
+    if let FrameSource::Fixture(path) = src {
+        return chatservant_capture::frame_from_png(path)
+            .map_err(|e| format!("读夹具 {} 失败：{e}", path.display()));
+    }
+
+    let hit = find_chat_window(&WECHAT).map_err(|e| format!("找窗口失败：{e}"))?;
+    *last_hwnd = Some(hit.hwnd_raw);
+
+    // ⚠ **先问能不能抓到，再决定要不要试。**
+    //
+    // 这里必须用 `why_wgc_unreadable`，**不能**用区域抓屏那套判据。
+    // 区域抓屏读的是屏幕像素，被盖住就完蛋；但 **WGC 就是为抓被遮挡窗口
+    // 设计的**（实测 2026-10-07：6/9 采样点被盖住，八段 e2e 照样全通）。
+    //
+    // 原先这里用的是带遮挡检查的 `why_unreadable`，于是**只要有任何东西
+    // 盖住微信就直接返回错误**——而那永远是常态。后果是观察循环一次帧都
+    // 没抓到过，界面上只有一句「抓不到：窗口被别的窗口盖住了」，
+    // 帧计数恒为 0，进程 CPU 恒为 0。
+    if let Some(why) = chatservant_capture::region::why_wgc_unreadable(hit.hwnd_raw) {
+        return Err(format!("抓不到：{why}"));
+    }
+
+    let frame = capture_one_frame(hit.hwnd_raw).map_err(|e| {
+        match chatservant_capture::region::why_unreadable(hit.hwnd_raw) {
+            Some(why) => format!("抓帧失败：{e}。{why}"),
+            None => format!("抓帧失败：{e}"),
+        }
+    })?;
+    if frame.is_black() {
+        return Err("抓到全黑帧——GPU 合成窗口的已知失败模式".into());
+    }
+    Ok(frame)
+}
+
 /// 循环的配置。组装真实传输需要 key，所以从这里进。
 pub struct LoopConfig {
+    /// **一帧从哪来。** 默认现场抓；也可以钉在一张冻结的 PNG 上。
+    pub source: FrameSource,
     /// 顶部跳过多高（置顶公告条）。由 `ChatSurface` 给，不写死。
     pub ignore_top: i32,
     /// 拿候选的传输。**`Box<dyn Reasoner>` 可以是预置的**——
@@ -258,6 +356,10 @@ struct Scratch {
     /// 硬约束第 1 条要求「只对锁定会话动手」是**看得见**的；
     /// 不动手指甲的闸等于没有闸。
     prev_gate_open: Option<bool>,
+    /// 一帧从哪来。见 [`FrameSource`]。
+    source: FrameSource,
+    /// 现场模式下最近一次用到的窗口句柄。给日志与投递用。
+    last_hwnd: Option<isize>,
 }
 
 impl Scratch {
@@ -280,6 +382,9 @@ impl Scratch {
             token_budget: TokenBudget::new(crate::commands::BUDGET_DEFAULT),
             provider: chatservant_reason::Provider::OpenAi,
             prev_gate_open: None,
+            // 默认现场；`spawn` 会用 `LoopConfig` 里的那份覆盖。
+            source: FrameSource::Live,
+            last_hwnd: None,
         }
     }
 }
@@ -484,6 +589,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
             s.token_budget = cfg.token_budget.clone();
             s.provider = cfg.provider;
             s.relock = cfg.relock.clone();
+            s.source = cfg.source.clone();
             let mut last_calls = 0u32;
             let mut ticks = 0u64;
             let mut anchor: Option<PaneAnchor> = None;
@@ -517,7 +623,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                             peer: s.peer.clone(),
                             messages: s.messages.clone(),
                             candidates: s.candidates.clone(),
-                            reason: s.reason.clone(),
+                            reason: s.source.stamp(&s.reason),
                             model_calls: last_calls,
                             relock_pending: s.relock.pending(),
                             counts: CallCounts {
@@ -548,7 +654,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                             peer: s.peer.clone(),
                             messages: s.messages.clone(),
                             candidates: s.candidates.clone(),
-                            reason: "这一轮没跑通".into(),
+                            reason: s.source.stamp("这一轮没跑通"),
                             model_calls: last_calls,
                             relock_pending: s.relock.pending(),
                             counts: CallCounts {
@@ -588,32 +694,8 @@ fn step(
     s: &mut Scratch,
     last_boxes: &std::sync::Mutex<Option<crate::debug::DebugPane>>,
 ) -> Result<Option<PaneAnchor>, String> {
-    // ① 找窗口 + 抓帧
-    let hit = find_chat_window(&WECHAT).map_err(|e| format!("找窗口失败：{e}"))?;
-
-    // ①b **先问能不能抓到，再决定要不要试。**
-    //
-    // ⚠ 这里必须用 `why_wgc_unreadable`，**不能**用区域抓屏那套判据。
-    // 区域抓屏读的是屏幕像素，被盖住就完蛋；但 **WGC 就是为抓被遮挡窗口
-    // 设计的**（实测 2026-10-07：6/9 采样点被盖住，八段 e2e 照样全通）。
-    //
-    // 原先这里用的是带遮挡检查的 `why_unreadable`，于是**只要有任何东西
-    // 盖住微信就直接返回错误**——而那永远是常态。后果是观察循环一次帧都
-    // 没抓到过，界面上只有一句「抓不到：窗口被别的窗口盖住了」，
-    // 帧计数恒为 0，进程 CPU 恒为 0。
-    if let Some(why) = chatservant_capture::region::why_wgc_unreadable(hit.hwnd_raw) {
-        return Err(format!("抓不到：{why}"));
-    }
-
-    let frame = capture_one_frame(hit.hwnd_raw).map_err(|e| {
-        match chatservant_capture::region::why_unreadable(hit.hwnd_raw) {
-            Some(why) => format!("抓帧失败：{e}。{why}"),
-            None => format!("抓帧失败：{e}"),
-        }
-    })?;
-    if frame.is_black() {
-        return Err("抓到全黑帧——GPU 合成窗口的已知失败模式".into());
-    }
+    // ① 找窗口 + 抓帧（或读夹具）
+    let frame = load_frame(&s.source, &mut s.last_hwnd)?;
 
     // ④ 锚点与消息区。
     //
