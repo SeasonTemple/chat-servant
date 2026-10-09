@@ -63,3 +63,23 @@ export interface BudgetView {
   provider_base: number;
   provider: string;
 }
+
+/**
+ * 面板当前处于哪一阶段。与 `contract::Phase`（Rust 侧）严格对应。
+ *
+ * **判断归 Rust，界面只渲染。**
+ *
+ * 早先界面靠 `candidates.length === 0` 隐式区分「静默 / 出错 / 刚启动」
+ * 三种完全不同的状态——那是界面在猜后端在干嘛，而且同一个判断在三处
+ * 各写一遍、其中两处还写得不一样。序列化形状是**带判别字段**的
+ * （`{ phase: 'drafting', messages: [...] }`），Rust 侧有一条测试
+ * `phase_serializes_with_a_discriminant_field` 把它测死了。
+ */
+export type Phase =
+  | { phase: 'read'; messages: Message[] }
+  | { phase: 'drafting'; messages: Message[] }
+  | { phase: 'drafted'; messages: Message[]; candidates: Candidate[] }
+  | { phase: 'failed'; messages: Message[]; error: string };
+
+/** 推送载荷。阶段走 {@link Phase}。 */
+export type ReadoutPayload = Phase;

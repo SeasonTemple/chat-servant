@@ -48,8 +48,15 @@ pub fn enumerate_for(surface: &ChatSurface) -> Result<Vec<WindowHit>, WindowErro
         out: Vec<WindowHit>,
     }
 
+    /// `EnumWindows` 的回调。**由 Windows 在本线程上同步调用**，
+    /// 不跨线程、不延迟——所以它拿到的 `lparam` 指向的 `ctx` 一定还活着。
     unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: `lparam` 是 `enumerate_for` 用 `std::ptr::from_mut(&mut ctx)`
+        // 传进来的**栈上** `ctx`；`EnumWindows` 是同步枚举，返回前不会撤销，
+        // 期间 `ctx` 一直不可移动、不可再借用。这正是把裸指针包成 LPARAM
+        // 再取回来的标准做法。
         let ctx = unsafe { &mut *(lparam.0 as *mut Ctx<'_>) };
+        // SAFETY: `describe` 只读窗口信息、不改全局状态；下面已给出它的前提。
         if let Some(hit) = unsafe { describe(hwnd) }
             && ctx.exes.iter().any(|e| *e == hit.exe)
         {
@@ -62,18 +69,28 @@ pub fn enumerate_for(surface: &ChatSurface) -> Result<Vec<WindowHit>, WindowErro
         exes: surface.exes,
         out: Vec::new(),
     };
+    // SAFETY: `cb` 是同步回调，返回前 `ctx` 不动（见上面的说明）。
     unsafe { EnumWindows(Some(cb), LPARAM(std::ptr::from_mut(&mut ctx) as isize)) }
         .map_err(|e| WindowError::Enumeration(e.to_string()))?;
     Ok(ctx.out)
 }
 
 /// 收集一个窗口的完整信息。窗口已经关了、进程名取不到就跳过它。
+///
+/// # Safety
+///
+/// `hwnd` 必须是 `EnumWindows` 正在枚举的**活窗口句柄**。
+/// 函数只查询（可见性 / 进程 / 标题 / 矩形），不改动窗口状态，
+/// 所以不要求调用方持有任何额外锁；但传一个已销毁的 HWND
+/// 仍会读到未定义内容。
 unsafe fn describe(hwnd: HWND) -> Option<WindowHit> {
+    // SAFETY: 只读窗口可见性，不解引用指针、不写内存。
     if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
         return None;
     }
 
     let mut pid: u32 = 0;
+    // SAFETY: `pid` 是栈上 u32，`&raw mut` 有效且生命周期覆盖调用。
     unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut pid)) };
 
     let exe = process_exe_name(pid)?;
@@ -81,12 +98,18 @@ unsafe fn describe(hwnd: HWND) -> Option<WindowHit> {
         return None;
     }
 
+    // ⚠ 缓冲区长度必须如实传给 Win32。`GetWindowTextW` 返回的是**实际写入的
+    // 字符数（不含终止 NUL）**，最大不超过 `buf.len()-1`——`n` 越界的话
+    // 下面 `&buf[..n]` 就会 panic。
     let mut buf = [0u16; 512];
+    // SAFETY: `buf` 是 512 个 u16 的栈数组，`&mut buf` 自动带上长度，
+    // Win32 只往这块内存里写。
     let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
     let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
 
     // 取不到矩形不影响识别进程，只是面积排序会不准，所以不失败。
     let mut rect = RECT::default();
+    // SAFETY: `rect` 是栈变量，`GetWindowRect` 只写 4 个 i32。
     let area = if unsafe { GetWindowRect(hwnd, &raw mut rect) }.is_ok() {
         i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top)
     } else {
@@ -105,9 +128,20 @@ unsafe fn describe(hwnd: HWND) -> Option<WindowHit> {
 /// 进程名（小写，含扩展名）。打不开进程就返回 `None`——
 /// 权限不足的进程不是我们要找的，跳过比报错合理。
 fn process_exe_name(pid: u32) -> Option<String> {
+    // SAFETY: 只申请进程查询权限（`PROCESS_QUERY_LIMITED_INFORMATION`），
+    // 不申请读写内存——这里只读可执行文件的路径。
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
     let mut buf = [0u16; 1024];
+    // ⚠ `size` 是**入参也是出参**：入参写容量，出参写实际字符数。
+    // 必须先填上真实容量，否则 Win32 认为缓冲区是 0 字节、直接失败。
     let mut size = buf.len() as u32;
+    // SAFETY: `buf` 是 1024 个 u16 的栈数组、容量已如实写进 `size`；
+    // `size` 是栈上 u32。Win32 只往这块内存里写，不多写。
+    //
+    // ⚠ 另注：`handle` 在这里**没有 CloseHandle**——函数是 `Option<String>`，
+    //   中途有若干个 `?` 提前返回，统一清理需要改成 guard。
+    //   进程句柄由系统在进程退出时回收，短期泄漏可接受，
+    //   但**每次调用泄漏一个**这件事要知道（`enumerate_for` 每个窗口调一次）。
     unsafe {
         QueryFullProcessImageNameW(
             handle,
@@ -208,9 +242,12 @@ pub fn find_chat_window(surface: &ChatSurface) -> Result<WindowHit, WindowError>
 /// 返回是否动了手。
 pub fn restore_without_activating(hwnd_raw: isize) -> bool {
     let hwnd = HWND(hwnd_raw as *mut c_void);
+    // SAFETY: 只读窗口状态，不解引用指针、不写内存。
     if !unsafe { IsIconic(hwnd) }.as_bool() {
         return false;
     }
+    // SAFETY: 两个调用都只**改窗口的显示状态**，不解引用任何我们持有的指针；
+    // 参数全是立即值。`SW_SHOWNOACTIVATE` + `SWP_NOACTIVATE` 保证不抢焦点。
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         let _ = SetWindowPos(

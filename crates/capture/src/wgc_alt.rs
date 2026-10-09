@@ -180,6 +180,11 @@ impl Worker {
         use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
         let tid = *self.tid.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tid) = tid {
+            // SAFETY: 四个参数全是立即值，不传任何指针。
+            // `PostThreadMessageW(tid, WM_QUIT, …)` 把等待中的消息循环叫醒；
+            // 它不会投递别的消息，也不会解引用任何东西。
+            // ⚠ 只发给**自己那条**工作线程（`tid` 来自 `GetCurrentThreadId`
+            //   记下的同一个线程），不会影响系统里其它线程。
             unsafe {
                 let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
             }
@@ -218,6 +223,7 @@ impl RawCapture {
 /// 正确语义是：**没有新帧 = 画面没变 = 上一帧就是当前画面**。
 fn run_worker(jobs: mpsc::Receiver<Job>, tid_cell: std::sync::Arc<std::sync::Mutex<Option<u32>>>) {
     use windows::Win32::System::Threading::GetCurrentThreadId;
+    // SAFETY: 无参数、无指针，只读当前线程 ID。
     *tid_cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(unsafe { GetCurrentThreadId() });
 
     // 当前会话绑在哪个窗口上。窗口变了（微信重开、句柄被复用）就重建。

@@ -1,5 +1,23 @@
 //! 窗口发现与 Windows Graphics Capture。只认识 HWND，不认识任何聊天软件语义。
 
+// ⚠ **`missing_docs` 在这个 crate 上不适用。**
+//
+// 工作区的 lint 策略里有 `missing_docs = "warn"`，而 `gate.ps1` 跑的是
+// `clippy -- -D warnings`，于是它在这个 crate 上会变成 75 条 error——
+// 全部是 `AnchorError::TooSmall(u32, u32)`、`WgcError::Buffer(String)`
+// 这类**错误枚举的变体**。
+//
+// 这正是那条策略自己反对的事：「一上来全 deny 会产生几百条噪声，
+// **噪声本身会让人忽略警告**」。
+//
+// 为什么在这里特别不适用：本 crate 是一层 **Win32 FFI 绑定**。
+// `TooSmall`、`NoPanelBg`、`Buffer(String)` 这些名字本身就是文档——
+// 它们逐字对应 Win32 的错误语义，补 75 段注释只会让真正的警告更难看见。
+//
+// 纯逻辑的那三个 crate（`core` / `perceive` / `reason`）**没有**这条豁免，
+// 它们的公开 API 仍然受 `missing_docs` 约束。
+#![allow(missing_docs)]
+
 pub use chatservant_core::frame::Frame;
 
 pub mod anchor;

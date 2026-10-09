@@ -303,5 +303,6 @@ pub fn capture_primary_monitor() -> Result<Frame, CaptureError> {
 /// 拿着过期句柄去开捕获会话会得到一个含义不明的错误。
 pub fn is_alive(hwnd_raw: isize) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+    // SAFETY: 只判断句柄是否还指向一个窗口，不解引用、不写内存。
     unsafe { IsWindow(Some(HWND(hwnd_raw as *mut c_void))).as_bool() }
 }

@@ -44,6 +44,8 @@ pub enum PrintWindowError {
 pub fn capture(hwnd_raw: isize) -> Result<chatservant_core::frame::Frame, PrintWindowError> {
     let hwnd = HWND(hwnd_raw as *mut c_void);
     let mut rect = RECT::default();
+    // SAFETY: `rect` 是栈变量，`GetWindowRect` 只写 4 个 i32，
+    // 指针有效且生命周期覆盖调用。
     unsafe { GetWindowRect(hwnd, &raw mut rect) }.map_err(|_| PrintWindowError::BadSize)?;
     let w = rect.right - rect.left;
     let h = rect.bottom - rect.top;
@@ -55,20 +57,26 @@ pub fn capture(hwnd_raw: isize) -> Result<chatservant_core::frame::Frame, PrintW
     // GDI 对象必须在所有提前返回之前清理，否则句柄泄漏。
     // 整个过程跑在一个闭包里，拿到结果再往外传。
     let frame = {
+        // SAFETY: 取窗口 DC；返回的 HDC 由系统管理，下面每条错误分支
+        // 都成对 `ReleaseDC`——漏一条就漏一个 GDI 句柄。
         let window_dc = unsafe { GetWindowDC(Some(hwnd)) };
         if window_dc.is_invalid() {
             return Err(PrintWindowError::Gdi("GetWindowDC"));
         }
+        // SAFETY: `window_dc` 已判有效；同 DC 的兼容 DC 由 GDI 保证可用。
         let mem_dc = unsafe { CreateCompatibleDC(Some(window_dc)) };
         if mem_dc.is_invalid() {
+            // SAFETY: 与上面 `GetWindowDC(Some(hwnd))` 成对，窗口句柄要一致。
             unsafe {
                 let _ = ReleaseDC(Some(hwnd), window_dc);
             }
             return Err(PrintWindowError::Gdi("CreateCompatibleDC"));
         }
         // 0,0 = 与 window_dc 同尺寸
+        // SAFETY: 两个 0 的含义由 Win32 定义（取源 DC 尺寸），无指针参数。
         let bitmap = unsafe { CreateCompatibleBitmap(window_dc, 0, 0) };
         if bitmap.is_invalid() {
+            // SAFETY: 两条清理都与上面取得它们的调用成对。
             unsafe {
                 let _ = DeleteDC(mem_dc);
                 let _ = ReleaseDC(Some(hwnd), window_dc);
@@ -76,6 +84,9 @@ pub fn capture(hwnd_raw: isize) -> Result<chatservant_core::frame::Frame, PrintW
             return Err(PrintWindowError::Gdi("CreateCompatibleBitmap"));
         }
 
+        // SAFETY: `mem_dc`/`bitmap` 都是刚拿到且已判有效的句柄。
+        // ⚠ 与 `region::capture` 同样**故意不恢复旧位图**：
+        //   DC 是「用完就删」的一次性资源。
         unsafe {
             let _old = SelectObject(mem_dc, bitmap.into());
 
@@ -95,6 +106,14 @@ pub fn capture(hwnd_raw: isize) -> Result<chatservant_core::frame::Frame, PrintW
 }
 
 /// 从内存 DC 读回 BGRA，转成 RGB8。
+///
+/// # Safety
+///
+/// `mem_dc` 与 `bitmap` 必须来自同一次 `CreateCompatibleDC` /
+/// `CreateCompatibleBitmap`，且 `bitmap` 已 `SelectObject` 进 `mem_dc`——
+/// `GetDIBits` 按 DC 当前的变换算扫描线宽度，用错配的 DC 会写出越界长度。
+///
+/// `w`/`h` 必须与 `CreateCompatibleBitmap(window_dc, 0, 0)` 取到的实际尺寸一致。
 unsafe fn read_rgb(
     mem_dc: HDC,
     bitmap: HBITMAP,
@@ -115,6 +134,16 @@ unsafe fn read_rgb(
         bmiColors: [RGBQUAD::default(); 1],
     };
     let mut bgra = vec![0u8; (w as usize) * (h as usize) * 4];
+    // SAFETY: **写入长度必须真的对得上**（本文件唯一按指针写内存的调用）。
+    //
+    // `GetDIBits` 按 `info` 头部算：`biBitCount: 32` → 每像素 4 字节；
+    // `biWidth: w` → 每行 `w*4`；请求 `h` 行 → 共 `w*h*4`。
+    // `bgra` 恰好分配 `w*h*4`，不多不少。
+    //
+    // ⚠ 这里 `biHeight` 取**正数**（`region::capture` 取负数）：两次的
+    //   `BITMAPINFO` 写法不一致是有意的——本函数靠 `bgra` 分配与
+    //   `CreateCompatibleBitmap(window_dc, 0, 0)` 的实际尺寸对齐，
+    //   方向对不上只会画面翻转，不是安全问题。
     let lines = unsafe {
         GetDIBits(
             mem_dc,

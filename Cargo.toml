@@ -5,6 +5,69 @@ members = ["crates/core", "crates/capture", "crates/perceive", "crates/reason", 
 # 排除掉免得门禁去扫它的 target。
 exclude = ["ui/src-tauri/gen"]
 
+# ── 工作区 lint 策略 ───────────────────────────────────────
+#
+# ## 为什么要加这个
+#
+# `scripts/gate.ps1` 早就在跑 `cargo clippy --workspace --all-targets -- -D warnings`，
+# 也就是 **Effective Rust Item 32「Clippy in CI」早就做到了**。
+# 但 Item 29 还有后半句没兑现：
+#
+# > "make your code Clippy-warning free. That way, when new warnings appear—
+#    whether from changed code or from clippy being upgraded—**they will be obvious**."
+#
+# 没有 `[lints]` 段的时候，新警告淹没在 clippy 默认启用的几百条里，
+# 做不到 obvious。`HANDOFF.md` §5.4 B-2 说「没有代码风格层」——
+# 机器门禁有，**缺的是把策略写下来**。
+#
+# ## 判据来自哪
+#
+# `coding-guidelines`（actionbook/rust-skills，★1.4k，3/3 安全审计通过）给的是
+# 一张 50 条规则 + `clippy-lints/` 映射表。按 §5.3 筛选判据第 4 条
+# 「社区的就当**判据来源**，不当官方规范引用」使用——
+# 取它指出的 lint 名，不引它整套规则。
+#
+# ## 为什么 `pedantic` 只 warn 不 deny
+#
+# pedantic 里大量是风格偏好（`must_use_candidate` 对本项目没有意义…）。
+# 一上来全 deny 会产生几百条噪声，**噪声本身会让人忽略警告**——
+# 那正好违背 Effective Rust 那条原则。**warn 起步，逐条升 deny。**
+[workspace.lints.rust]
+future-incompatible = "warn"
+missing_docs = "warn"
+# 每个 `unsafe` 块必须带 `// Safety:` 说明为什么安全。
+#
+# ⚠ 这里**不用** `unsafe_code = "forbid"`。它做不到想要的效果：
+# Cargo **不允许**同一个 package 既写 `lints.workspace = true` 继承工作区、
+# 又用 `[lints.rust]` 覆盖其中一项——报 "cannot override workspace.lints in lints"。
+# 也就是说「三个纯 crate forbid、capture 不 forbid」在 manifest 层面
+# 根本表达不出来，除非让那三个 crate 把工作区的每一条 lint 手工抄一遍，
+# 而抄一遍就会漂（本项目已经吃过「两处各抄一份」的亏，见 HANDOFF §3）。
+#
+# `undocumented_unsafe_blocks` 达到的是**同一个审查目的**，
+# 而且对 `capture` 那 51 处 Win32 FFI 同样有效——
+# 每处 `unsafe` 都必须写清楚为什么安全，这比"另外三个 crate 全面禁止"
+# 更有价值：它管住了**唯一真正有 unsafe 的地方**。
+#
+# ⚠ 这两条是 **clippy** 的 lint、不是 rustc 的，必须带 `clippy::` 前缀，
+# 而且必须写在下面的 `[workspace.lints.clippy]` 段里。
+# 写成裸名字 cargo 会报 "lint name is deprecated and may not have an effect"。
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = 10 }
+# 每个 `unsafe` 块必须带 `// Safety:` 说明为什么安全。理由见上。
+undocumented_unsafe_blocks = "warn"
+# 公开的 `unsafe fn` 必须有 `# Safety` 文档段。
+missing_safety_doc = "warn"
+# Effectiv Rust：能用 `?` 传播就别 match 链。
+# 本项目 §5.4 B-2 点名的「恒哑的错误处理」靠人 review 抓不住，靠这个。
+question_mark = "warn"
+# 命名撒谎是这个项目的实际病灶（§5.4 B-2 表格第三行：
+# 变量叫 `full` 实际是裁过的消息区，坐标换算连着错三次）。
+# `similar_names` 抓的是 `x` / `xx` 这类近似名，本项目更适合 `allow`,
+# 但**显式 allow 并写清理由**，好过它默认 warn 然后被忽略。
+similar_names = "allow"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

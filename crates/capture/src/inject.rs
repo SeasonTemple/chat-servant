@@ -89,6 +89,10 @@ fn write_clipboard(text: &str) -> Result<(), String> {
     utf16.push(0); // Win32 要求以 NUL 结尾
     let bytes = utf16.len() * 2;
 
+    // SAFETY: 整块只操作**剪贴板**——OpenClipboard/EmptyClipboard/SetClipboardData`r
+    // 配的都是本函数刚构造的 HGLOBAL。Win32 会**接管**这块内存的所有权，
+    // 所以 ytes 的尺寸必须和 utf16 的实际字节数一致（上面已算），
+    // 之后 Rust 侧不再访问 utf16。每条错误分支都成对 CloseClipboard。
     unsafe {
         // 打开剪贴板失败最常见的原因是**别的程序正开着它**。
         // 这里重试几次而不是立刻报错——Windows 上这一瞬间是常态。
@@ -127,6 +131,8 @@ fn write_clipboard(text: &str) -> Result<(), String> {
 fn read_clipboard() -> Result<String, String> {
     // 调用方已经持锁（`roundtrip` / `fill_input_box`）。
     // 这里不重复上锁——`Mutex` 不可重入，重复 lock 会死锁。
+    // SAFETY: 只读剪贴板。GlobalLock 返回的指针指向**系统管理的**共享内存，
+    // 直到 GlobalUnlock 之前都有效，所以锁的生命周期覆盖下面的读取。
     unsafe {
         if !open_clipboard_with_retry() {
             return Err("回读时打不开剪贴板".into());
@@ -166,6 +172,7 @@ pub fn read_clipboard_public() -> Result<String, String> {
 /// 重试是唯一正确的处理方式。
 fn open_clipboard_with_retry() -> bool {
     for _ in 0..5 {
+        // SAFETY: 无参数、无指针，只尝试打开剪贴板。None = 当前任务。
         if unsafe { OpenClipboard(None) }.is_ok() {
             return true;
         }
@@ -249,6 +256,10 @@ fn send_inputs(inputs: &mut [INPUT]) -> Result<(), String> {
     if inputs.is_empty() {
         return Ok(());
     }
+    // SAFETY: inputs 是调用方（chord_events / 	ype_unicode）构造好的、
+    // 长度与 cbSize 描述一致的结构数组，指针有效覆盖整个调用。
+    // ⚠ SendInput 会**读**这块内存并把事件投到当前前台窗口——
+    //   调用方已通过 ocus(target) 确认目标在前台（见 ill_input_box）。
     let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
     if sent as usize == inputs.len() {
         Ok(())
@@ -415,6 +426,10 @@ pub fn focus(target: HWND) -> Result<(), String> {
         GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
     };
 
+    // SAFETY: 整块只调 GetForegroundWindow / SetForegroundWindow /
+    // AttachThreadInput / GetWindowThreadProcessId——都是**按值收发**窗口或线程 ID，
+    // 不解引用任何我们持有的指针。AttachThreadInput 会改本线程的输入队列关联，
+    // 所以**每条分支都必须 Detach**——本函数保证成对（见下面的展开写法）。
     unsafe {
         let fg = GetForegroundWindow();
         if fg == target && SetForegroundWindow(target).as_bool() {
@@ -548,6 +563,7 @@ pub fn send_only(target: HWND) -> DeliveryReceipt {
 pub fn cursor_pos() -> Option<POINT> {
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut p = POINT::default();
+    // SAFETY: `p` 是栈上的 POINT，`GetCursorPos` 只往里写 2 个 i32。
     unsafe { GetCursorPos(&mut p).ok().map(|()| p) }
 }
 
@@ -555,6 +571,7 @@ pub fn cursor_pos() -> Option<POINT> {
 pub fn to_screen(target: HWND, x: i32, y: i32) -> Option<POINT> {
     use windows::Win32::Graphics::Gdi::ClientToScreen;
     let mut p = POINT { x, y };
+    // SAFETY: p 是栈上的 POINT，ClientToScreen 只改写它自己的两个字段。
     unsafe { ClientToScreen(target, &mut p).as_bool().then_some(p) }
 }
 
@@ -568,6 +585,9 @@ mod tests {
             .iter()
             .map(|i| {
                 // `INPUT::Anonymous` 是 union，读字段要 unsafe。
+                // SAFETY: 读 union 的字段。chord_events 只会造 `r
+                // `INPUT{ Keyboard }`，所以 ki 这个变体**是有效的**。
+                // 读的是拷贝（ki 不是引用），不产生别名。
                 let ki = unsafe { i.Anonymous.ki };
                 (ki.wVk.0, ki.dwFlags == KEYEVENTF_KEYUP)
             })

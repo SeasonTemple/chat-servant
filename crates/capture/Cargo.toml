@@ -21,3 +21,18 @@ wgc.workspace = true
 image.workspace = true
 # API 的图块要 base64。只取编码那一半，不引解码与全部算法。
 base64 = { version = "0.22", default-features = false, features = ["std"] }
+
+# ── 继承工作区 lint 策略（见根 Cargo.toml 的 `[workspace.lints]`）──
+#
+# Effective Rust Item 29：让代码 clippy-warning-free，
+# 新警告出现时才「obvious」。`gate.ps1` 早就在跑 clippy，
+# 缺的是把策略**写下来**——这段就是那个策略。
+[lints]
+workspace = true
+#
+# ⚠ **这里不 forbid unsafe。** 2026-10-10 实测：本 crate 有 51 处
+# `unsafe`——`SendInput`、`OpenClipboard`、COM 激活，全是 Win32 FFI，
+# 绕不开。所以工作区级别的 `unsafe_code = "forbid"` 只能加在
+# core / perceive / reason 那三个纯逻辑 crate 上。
+# 本 crate 的 unsafe 应该配 `# Safety` 文档与
+# `undocumented_unsafe_blocks` 警告，而不是 forbid。
