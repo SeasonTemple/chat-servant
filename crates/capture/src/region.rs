@@ -61,10 +61,14 @@ pub enum RegionError {
 /// 返回的画面是**屏幕坐标**下的内容——`Frame` 的原点是屏幕左上角。
 pub fn capture(hwnd_raw: isize) -> Result<chatservant_core::frame::Frame, RegionError> {
     let hwnd = HWND(hwnd_raw as *mut c_void);
+    // SAFETY: 两个调用都只**读**窗口状态，不解引用任何指针；
+    // `hwnd` 由 `find_chat_window` 从 `EnumWindows` 拿到的真实窗口句柄。
     if !unsafe { IsWindowVisible(hwnd) }.as_bool() || unsafe { IsIconic(hwnd) }.as_bool() {
         return Err(RegionError::NotVisible);
     }
     let mut rect = RECT::default();
+    // SAFETY: `rect` 是本函数栈上的变量，`GetWindowRect` 只往里写 4 个 i32，
+    // 指针有效且生命周期覆盖整个调用。`hwnd` 同上。
     unsafe { GetWindowRect(hwnd, &raw mut rect) }.map_err(|_| RegionError::NoRect)?;
     let w = rect.right - rect.left;
     let h = rect.bottom - rect.top;
@@ -76,6 +80,7 @@ pub fn capture(hwnd_raw: isize) -> Result<chatservant_core::frame::Frame, Region
     // 整块都在屏幕外（多显示器拔了、窗口挪走了）也抓不到。
     let (screen_w, screen_h) = {
         use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+        // SAFETY: `GetSystemMetrics` 无参数、无指针，纯查询。
         (unsafe { GetSystemMetrics(SM_CXSCREEN) }, unsafe {
             GetSystemMetrics(SM_CYSCREEN)
         })
@@ -85,19 +90,25 @@ pub fn capture(hwnd_raw: isize) -> Result<chatservant_core::frame::Frame, Region
     }
 
     let frame = {
+        // SAFETY: 取屏幕 DC。返回的 HDC 由系统管理，
+        // 下面每条错误分支都成对 `ReleaseDC`——漏一条就漏一个 GDI 句柄。
         let screen_dc = unsafe { GetDC(None) };
         if screen_dc.is_invalid() {
             return Err(RegionError::Gdi("GetDC"));
         }
+        // SAFETY: `screen_dc` 已确认有效；同 DC 的兼容 DC 由 GDI 保证可用。
         let mem_dc = unsafe { CreateCompatibleDC(Some(screen_dc)) };
         if mem_dc.is_invalid() {
+            // SAFETY: 释放上面那个屏幕 DC，与 `GetDC` 成对。
             unsafe {
                 let _ = ReleaseDC(None, screen_dc);
             }
             return Err(RegionError::Gdi("CreateCompatibleDC"));
         }
+        // SAFETY: `w`/`h` 上面已判过 `> 0`，且都 ≤ `i32::MAX`（窗口尺寸上限）。
         let bitmap = unsafe { CreateCompatibleBitmap(screen_dc, w as i32, h as i32) };
         if bitmap.is_invalid() {
+            // SAFETY: 两条清理都与上面取得它们的调用成对。
             unsafe {
                 let _ = DeleteDC(mem_dc);
                 let _ = ReleaseDC(None, screen_dc);
@@ -105,6 +116,10 @@ pub fn capture(hwnd_raw: isize) -> Result<chatservant_core::frame::Frame, Region
             return Err(RegionError::Gdi("CreateCompatibleBitmap"));
         }
 
+        // SAFETY: `mem_dc` 与 `bitmap` 都是刚拿到且已判有效的句柄。
+        // ⚠ 这里**故意不恢复旧位图**（`DeleteDC` 会连带释放它选的位图）——
+        //   那会把 DC 原来选的默认位图一起删掉，属于已知的 GDI 坑，
+        //   所以本函数的 DC 是「用完就删」的一次性资源。
         unsafe {
             let _old = SelectObject(mem_dc, bitmap.into());
 
@@ -127,6 +142,9 @@ pub fn capture(hwnd_raw: isize) -> Result<chatservant_core::frame::Frame, Region
                 Err(RegionError::BitBltFailed)
             };
 
+            // 三句清理都与上面取得它们的调用成对。
+            // ⚠ **顺序不能换**：`DeleteDC` 会连带删掉 DC 选中的位图，
+            //   所以位图必须先单独 `DeleteObject` 一次，否则漏一个 GDI 对象。
             let _ = DeleteObject(bitmap.into());
             let _ = DeleteDC(mem_dc);
             let _ = ReleaseDC(None, screen_dc);
@@ -151,6 +169,8 @@ pub fn is_occluded(hwnd_raw: isize, sample_points: &[(i32, i32)]) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
     let hwnd = HWND(hwnd_raw as *mut c_void);
     sample_points.iter().any(|&(x, y)| {
+        // SAFETY: `WindowFromPoint` 按值收一个 POINT、返回一个窗口句柄，
+        // 不写任何内存。返回的句柄只用来**比较**，不解引用。
         let hit = unsafe { WindowFromPoint(POINT { x, y }) };
         !hit.is_invalid() && hit != hwnd
     })
@@ -167,6 +187,8 @@ pub fn is_occluded(hwnd_raw: isize, sample_points: &[(i32, i32)]) -> bool {
 pub fn occlusion_samples(hwnd_raw: isize) -> Vec<(i32, i32)> {
     let hwnd = HWND(hwnd_raw as *mut c_void);
     let mut rect = RECT::default();
+    // SAFETY: `rect` 是栈上变量，`GetWindowRect` 只往里写 4 个 i32，
+    // 指针有效且生命周期覆盖整个调用。
     if unsafe { GetWindowRect(hwnd, &raw mut rect) }.is_err() {
         return Vec::new();
     }
@@ -205,6 +227,8 @@ pub fn is_cloaked(hwnd_raw: isize) -> bool {
     use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
     let hwnd = HWND(hwnd_raw as *mut c_void);
     let mut cloaked: i32 = 0;
+    // SAFETY: `cloaked` 是栈上的 `i32`，长度按 `size_of::<i32>()` 如实传，
+    // 指针有效且生命周期覆盖整个调用——DWM 只会往这块 4 字节里写。
     let ok = unsafe {
         DwmGetWindowAttribute(
             hwnd,
@@ -233,9 +257,11 @@ pub fn is_cloaked(hwnd_raw: isize) -> bool {
 pub fn why_wgc_unreadable(hwnd_raw: isize) -> Option<String> {
     use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
     let hwnd = HWND(hwnd_raw as *mut c_void);
+    // SAFETY: 两个调用都只**读**窗口状态，不解引用指针、不写内存。
     if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
         return Some("窗口不可见（可能在别的虚拟桌面或已最小化到托盘）".into());
     }
+    // SAFETY: 只读窗口状态，不解引用指针、不写内存。
     if unsafe { IsIconic(hwnd) }.as_bool() {
         return Some("窗口已最小化——还原它才能抓到".into());
     }
@@ -268,6 +294,7 @@ pub fn why_unreadable(hwnd_raw: isize) -> Option<String> {
     let covered = pts
         .iter()
         .filter(|&&(x, y)| {
+            // SAFETY: 按值收 POINT、返回句柄，不写内存；句柄只比较不解引用。
             let hit = unsafe { WindowFromPoint(POINT { x, y }) };
             !hit.is_invalid() && hit != hwnd
         })
@@ -282,6 +309,16 @@ pub fn why_unreadable(hwnd_raw: isize) -> Option<String> {
     ))
 }
 
+/// 从内存 DC 里把位图读成 `Frame`。
+///
+/// # Safety
+///
+/// `mem_dc` 与 `bitmap` 必须来自同一次 `CreateCompatibleDC` /
+/// `CreateCompatibleBitmap`，且 `bitmap` 必须已经 `SelectObject` 进 `mem_dc`——
+/// `GetDIBits` 会按 DC 当前的变换（缩放/镜像）算出扫描线宽度，
+/// 用错配的 DC 会写出越界长度。本文件的调用点保证了这个前提。
+///
+/// `w`/`h` 必须与 `CreateCompatibleBitmap` 时传入的一致。
 unsafe fn read_rgb(
     mem_dc: HDC,
     bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
@@ -301,6 +338,19 @@ unsafe fn read_rgb(
         bmiColors: [RGBQUAD::default(); 1],
     };
     let mut bgra = vec![0u8; (w as usize) * (h as usize) * 4];
+    // SAFETY: **写入长度必须真的对得上**，这是本文件唯一一处会按指针写内存的调用。
+    //
+    // `GetDIBits` 按 `info` 里的头部算出每行字节数 × 行数：
+    //   `biBitCount: 32` → 每像素 4 字节；`biWidth: w` → 每行 `w*4` 字节；
+    //   请求 `h` 行 → 共 `w*h*4` 字节。
+    // `bgra` 恰好分配了 `w*h*4`，不多不少。
+    //
+    // `biHeight` 取负数（`-h`）表示自下而上，与 `CreateCompatibleBitmap`
+    // 一致；方向错了不会越界，只会让画面上下翻转——所以它不是安全问题，
+    // 但错了很难看出来，这里一并说明。
+    //
+    // `info` 由 `&raw mut` 传指针，`GetDIBits` 可能改写它；
+    // 它是本函数的栈变量，长度覆盖整个调用。
     let lines = unsafe {
         GetDIBits(
             mem_dc,

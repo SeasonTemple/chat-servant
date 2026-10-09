@@ -42,11 +42,24 @@
         }
       };
       await pull();
-      const un = await listen('debug_pane', () => {
-        void pull();
-      });
+      // ⚠ **整个链路包在 try 里。**
+      //
+      // `listen` 在没有 Tauri IPC 的环境里（浏览器预览、静态部署）
+      // 读 `window.__TAURI_INTERNALS__.transformCallback` 会拿到 undefined，
+      // 于是抛出一个**没人接的 Promise 拒绝**——组件卸载了、日志里也
+      // 没有，看起来就像「这个窗口没反应」。
+      //
+      // `pull` 自己的 catch 救不了它：崩在后面这一步。
+      let un: (() => void) | null = null;
+      try {
+        un = await listen('debug_pane', () => {
+          void pull();
+        });
+      } catch (e) {
+        err = String(e);
+      }
       if (dead) {
-        un();
+        un?.();
         return;
       }
       stop = un;

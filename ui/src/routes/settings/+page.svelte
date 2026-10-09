@@ -109,6 +109,31 @@
    * 改档。与主面板**共用 Rust 那一个格子**。
    * 界面上显示的是 Rust 回传的真实生效值，不是用户点过的那个。
    */
+  /**
+   * 「关闭时」的行为。与主面板**共用 Rust 那一个 setting**。
+   *
+   * ⚠ Rust 侧会验证：托盘不存在时**拒收**「收进托盘」—— 那样关掉面板
+   * 它就藏起来了。所以这里把错误原样显示，不假装成功。
+   */
+  let closeBehavior = $state<'exit' | 'tray'>('exit');
+  let closeNote = $state('');
+
+  async function setClose(next: 'exit' | 'tray') {
+    closeNote = '';
+    try {
+      await invoke('set_close_behavior', { behavior: next });
+      closeBehavior = next;
+      closeNote =
+        next === 'tray'
+          ? '按 − 收进托盘。托盘图标在自动发送档位下会带红点。'
+          : '按 × 直接退出。程序不会在后台继续跑。';
+    } catch (e) {
+      // 写失败就**读回真实值** —— 别让开关停在一个程序并不认同的状态上。
+      closeBehavior = await invoke<'exit' | 'tray'>('get_close_behavior').catch(() => 'exit');
+      closeNote = String(e);
+    }
+  }
+
   async function changeTier(t: Tier) {
     try {
       tier = await invoke<Tier>('set_tier', { tier: t });
@@ -170,6 +195,14 @@
         tier = await invoke<Tier>('get_tier');
       } catch {
         tier = 'Manual';
+      }
+      try {
+        // 「关闭时」也要读回来。读不到就按 `exit` —— 那是**失败方向偏保守**
+        // 的那个：宁可用户以为它会退出（然后发现托盘还在），也不要
+        // 以为它会退出而它其实藏在后台。
+        closeBehavior = await invoke<'exit' | 'tray'>('get_close_behavior').catch(() => 'exit');
+      } catch {
+        closeBehavior = 'exit';
       }
     })();
   });
@@ -244,18 +277,52 @@
     <span class="cs-label">发送档位</span>
     <div><TierSwitch bind:tier onchange={changeTier} /></div>
   </section>
-  <p class="cs-note">
-    档位只在**你按了之后**才生效。会话结束时一律回落到「只填入」，程序自己不会升档。
-    这里改的和主面板改的是**同一个档位**——早先两边各存一份，设置页那个开关 完全不起作用。
-  </p>
+  <!--
+    ⚠ **说明文字只写「怎么用」。** 「早先两边各存一份、开关不起作用」
+    这类是给接手程序员看的提交历史，不该出现在界面上——它对用户没有
+    可操作性，只是让人以为自己用错过什么。历史留在注释里。
+  -->
+  <p class="cs-note">改完立刻生效。会话结束时回落到「只填入」—— 程序自己不会升档。</p>
   {#if tierNote}
     <p class="cs-fail" role="alert">{tierNote}</p>
   {/if}
 
+  <h2 class="cs-h2">窗口</h2>
+  <section class="cs-row">
+    <span class="cs-label">按窗口控制键时</span>
+    <div class="cs-seg" role="radiogroup" aria-label="关闭窗口的行为">
+      <button
+        class="cs-seg-item"
+        class:on={closeBehavior === 'exit'}
+        role="radio"
+        aria-checked={closeBehavior === 'exit'}
+        onclick={() => setClose('exit')}
+      >
+        退出（默认）
+      </button>
+      <button
+        class="cs-seg-item"
+        class:on={closeBehavior === 'tray'}
+        role="radio"
+        aria-checked={closeBehavior === 'tray'}
+        onclick={() => setClose('tray')}
+      >
+        收进托盘
+      </button>
+    </div>
+  </section>
+  <p class="cs-note">
+    主面板没有标题栏也不在任务栏里，这三个键是它<strong>唯一的出口</strong>。
+    「退出」关掉窗口它就真停了；「收进托盘」则面板收起、<strong>程序继续跑</strong>。
+  </p>
+  {#if closeNote}
+    <p class="cs-fail" role="alert">{closeNote}</p>
+  {/if}
+
   <h2 class="cs-h2">上下文</h2>
   <p class="cs-note">
-    送进模型的**最近**多少条原文。超出后更早的部分压成一段摘要——
-    摘要是按块算的（攒够一整块才调一次模型），所以这个数调大**不会**等比变贵。
+    送进模型的<strong>最近</strong>多少条原文。更早的压成摘要，所以调大<strong>不会</strong
+    >等比变贵。
   </p>
   <div class="cs-slider">
     <input
@@ -277,29 +344,43 @@
   <section class="cs-row">
     <span class="cs-label">把对方发的图片发给模型</span>
     <div>
+      <!--
+        ⚠ **按钮写动作，不写状态。**
+        原来关着的时候显示「关闭」—— 可按下去是**打开**。
+        「关闭」读起来像「当前状态是关闭」，而不是「按这个会关闭」。
+        控件说的话和它要做的事对不上，用户得先猜一次。
+      -->
       <button class="cs-btn" class:primary={imagesOut} onclick={() => toggleImagesOut(!imagesOut)}>
-        {imagesOut ? '已打开' : '关闭'}
+        {imagesOut ? '关掉' : '打开'}
       </button>
     </div>
   </section>
-  <p class="cs-note cs-warn">
-    <strong>默认关闭。</strong>打开后，对方发来的图片区域会被裁出、缩放、编码，
-    然后发给第三方模型。图片区域的识别目前**只在 1 张真实样本上验证过**，
-    其余情况可能误判——误判的代价是把你看到的画面交给外部模型。
-  </p>
+  <!--
+    ⚠ 这段**必须短**，而且**只能红一句**。
+
+    早先它是四行红字（`cs-warn` 整段都红），一个「关闭」开关底下
+    挂着四行警告 —— 红占了整屏三分之一，**红色又退化成装饰了**。
+    跟主面板 armed 态那两句红是同一个毛病，我在那边刚砍完就又犯在这边。
+
+    危险开关要说清三件事，但**不用红字说**：会做什么、可能错在哪、
+    错了什么后果 —— 三件都在，只是压在正常的铅笔色正文里。
+    红色只留给那句「在你没预期的时候它会这么做」。
+  -->
+  <p class="cs-note">对方发来的<strong>整块画面</strong>会发给第三方模型。</p>
+  <p class="cs-warn-on">画面切分只在 1 张真实样本上验证过 —— 认错框，屏幕就出去了</p>
   {#if imagesNote}
     <p class="cs-note" role="status">{imagesNote}</p>
   {/if}
 
   <!--
-    图片 token 预算。**`budget.visible` 由 Rust 读总闸算出来**，前端不自己判断。
+    图片 token 预算。<strong>`budget.visible` 由 Rust 读总闸算出来</strong>，前端不自己判断。
     总闸关着时没有一张图会外发，摆滑块就是「调了没反应的控制项」——
     ticket 11 刚拆掉过一个同类的。
   -->
   {#if budget?.visible}
     <h2 class="cs-h2">图片成本</h2>
     <p class="cs-note">
-      送进模型的**单张**图片上限。超出就把图缩到预算内——小图不放大， 放大只会更贵更糊。
+      送进模型的<strong>单张</strong>图片上限。超出就把图缩到预算内，小图不放大。
     </p>
     <div class="cs-slider">
       <input
@@ -314,7 +395,7 @@
       <output>{budget.budget} token</output>
     </div>
     {#if budget.provider_base > budget.budget}
-      <!-- 无解要**明说**。悄悄发一张然后超支，比报错糟得多。 -->
+      <!-- 无解要<strong>明说</strong>。悄悄发一张然后超支，比报错糟得多。 -->
       <p class="cs-note cs-warn" role="alert">
         {budget.provider} 发任何一张图都要 {budget.provider_base} token 的底账， 预算 {budget.budget}
         无解——再调小也不会更省。
@@ -331,7 +412,7 @@
 
   <h2 class="cs-h2">模型 key</h2>
   <p class="cs-note">
-    key 存进 **Windows 凭据管理器**，不落任何普通文件、不进日志。 前端读不到 key
+    key 存进 <strong>Windows 凭据管理器</strong>，不落任何普通文件、不进日志。 前端读不到 key
     本身——所有网络调用都在 Rust 侧。
   </p>
 
@@ -353,7 +434,7 @@
       </div>
 
       {#if p.configured}
-        <!-- 已配置时**不显示输入框**。要改才点「换一把」——
+        <!-- 已配置时<strong>不显示输入框</strong>。要改才点「换一把」——
              这样明文 key 不会因为打开设置页就躺在界面上。 -->
         <div class="cs-actions">
           <button class="cs-btn" onclick={() => (drafts[p.id] = REVEAL)} disabled={busy[p.id]}>
@@ -368,7 +449,7 @@
           </button>
         </div>
       {:else}
-        <!-- p.hint 是 Rust 给的**可执行**指引：存哪、变量名叫什么。
+        <!-- p.hint 是 Rust 给的<strong>可执行</strong>指引：存哪、变量名叫什么。
              不能是空字符串或「暂无」。 -->
         <p class="cs-hint">{p.hint}</p>
       {/if}
@@ -444,24 +525,50 @@
     color: var(--cs-ink);
   }
 
+  /* ── 一行设置项 ────────────────────────────────────────
+   *
+   * ⚠ **标题在上、控件在下，不是左右分列两端。**
+   *
+   * 原来是 `justify-content: space-between` —— 标签贴左边、控件甩到最右。
+   * 700px 宽的窗口里中间空出 400px，两个东西看着像毫不相干的两块。
+   * 而它们**本来就是一件事的两半**：这一项是什么，怎么改它。
+   *
+   * 上下排还有个实际好处：控件不再被窗口宽度摆布，
+   * 窄一点也不会被挤到第二行。
+   */
   .cs-row {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.4rem;
   }
 
   .cs-label {
     font-size: 0.78rem;
-    color: var(--cs-ink-2);
+    font-weight: 600;
+    color: var(--cs-ink);
   }
 
   .cs-note {
     margin: 0;
     font-size: 0.7rem;
     line-height: 1.6;
-    color: var(--cs-ink-3);
+    /* ⚠ 正文用**铅笔档**（6.22 : 1），不是标注档。
+     *
+     * 早先这里是 `--cs-ink-3` —— 而那档只有 3.81 : 1，它被当正文用了。
+     * 3.81 只够标注（WCAG AA 的 4.5 是给正文的）。
+     * 「默认关闭。打开后…」这种句子是**要人读的**，读不清等于没说。 */
+    color: var(--cs-pencil);
     white-space: pre-line;
+    /* 一整段说明文字不该横跨 640px——行太长眼睛回行会累。 */
+    max-width: 60ch;
+  }
+
+  /* 说明文字里的强调。**不是**加粗到极黑，用墨档里的一档，
+   * 免得一段话里出现三个不同重量的字。 */
+  .cs-note strong {
+    color: var(--cs-ink);
+    font-weight: 600;
   }
 
   .cs-hint {
@@ -512,8 +619,8 @@
   }
 
   .cs-badge.ok {
-    color: var(--cs-brass);
-    background: color-mix(in srgb, var(--cs-brass) 16%, transparent);
+    color: var(--cs-live);
+    background: color-mix(in srgb, var(--cs-live) 16%, transparent);
   }
 
   .cs-badge.ok.env {
@@ -546,13 +653,19 @@
 
   .cs-input:focus {
     outline: none;
-    border-color: color-mix(in srgb, var(--cs-brass) 60%, transparent);
+    border-color: color-mix(in srgb, var(--cs-live) 60%, transparent);
   }
 
+  /* 独立按钮。**和两处分段控件同高 33px** —— 这一页上它们是
+   * 同一级控件，三种规格（28 / 33 / 30）意味着用户点之前得先判断
+   * 「这颗算不算主要控件」。
+   *
+   * 同样是量出来的，不是估的：原来 28px、圆角 7px、字号 0.7rem。 */
   .cs-btn {
-    padding: 0.3rem 0.7rem;
-    font-size: 0.7rem;
-    border-radius: 7px;
+    /* 33 − 2(border) = 31 给内容：行高 19 + 上下各 6 */
+    padding: 0.406rem 0.7rem;
+    font-size: 0.78rem;
+    border-radius: var(--cs-radius-sm);
     border: 1px solid var(--cs-border-strong);
     background: transparent;
     white-space: nowrap;
@@ -568,12 +681,92 @@
   }
 
   .cs-btn.primary {
-    border-color: color-mix(in srgb, var(--cs-brass) 55%, transparent);
-    color: var(--cs-brass);
+    border-color: color-mix(in srgb, var(--cs-live) 55%, transparent);
+    color: var(--cs-live);
   }
 
   .cs-btn.danger {
     border-color: color-mix(in srgb, var(--cs-alarm) 45%, transparent);
     color: var(--cs-alarm);
+  }
+
+  /* ── 分段控件（「关闭时」用）──────────────────────────────
+   *  两个选项都是一整个动作，<strong>不是轻/重</strong>。所以并列，不做主次。 */
+  .cs-seg {
+    display: inline-flex;
+    gap: 2px;
+  }
+
+  .cs-seg-item {
+    padding: 6px 12px;
+    border: 1px solid var(--cs-rule-strong);
+    border-radius: var(--cs-radius-sm);
+    font-size: 12.5px;
+    color: var(--cs-pencil);
+    transition:
+      background var(--cs-dur-fast) var(--cs-ease),
+      color var(--cs-dur-fast) var(--cs-ease),
+      border-color var(--cs-dur-fast) var(--cs-ease);
+  }
+
+  .cs-seg-item:hover {
+    background: rgb(20 26 31 / 6%);
+    color: var(--cs-ink);
+  }
+
+  /* 选中：墨底纸字。和 TierSwitch 同一套 —— 两个都是「改一个设置」，
+   * 一个重一个轻才是真问题。红在这里永远不出现：红只给不可逆。 */
+  .cs-seg-item.on {
+    background: var(--cs-ink);
+    border-color: var(--cs-ink);
+    color: var(--cs-surface-raised);
+    font-weight: 600;
+  }
+
+  .cs-seg-item.on:hover {
+    background: var(--cs-ink-2);
+  }
+
+  /* 危险开关下面那一句红。**只有这一句是红的。** */
+  .cs-warn-on {
+    margin: 0.3rem 0 0;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--cs-live);
+  }
+
+  /* ── 滑块 ───────────────────────────────────────────────
+   *
+   * ⚠ **`<output>` 从来没被样式过。**
+   *
+   * 浏览器给它的默认样式是 `13.33px Arial` —— 比这一页正文（0.7rem
+   * ≈ 11.2px）还大，而且带 UA 的蓝色。于是滑块旁边那个实时读数
+   * 是全页最大最跳的一处字，比它要读的说明文字还显眼。
+   *
+   * 一个「12 条」不该比整段解释它为什么这么调的话还重。
+   */
+  .cs-slider {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    max-width: 30rem;
+  }
+
+  .cs-slider input[type='range'] {
+    flex: 1 1 auto;
+    min-width: 0;
+    accent-color: var(--cs-ink);
+  }
+
+  .cs-slider output {
+    flex: none;
+    min-width: 5.5rem;
+    font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    /* 机器读出来的数 → 等宽，和主面板的分工一致。 */
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--cs-ink);
+    /* UA 默认把 output 渲染得像超链接，蓝色 + 下划线。去掉。 */
+    text-decoration: none;
   }
 </style>

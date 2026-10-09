@@ -18,7 +18,7 @@
         "url": "/",
         "width": 380,
         "height": 560,
-        "minWidth": 320,
+        "minWidth": 340,
         "minHeight": 380,
         "resizable": true,
         "transparent": false,

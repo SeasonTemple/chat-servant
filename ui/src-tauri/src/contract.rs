@@ -1,0 +1,331 @@
+//! # 前后端契约
+//!
+//! 事件名、动作、档位 —— **凡是跨进程边界传的东西，都在这个文件里定义。**
+//!
+//! ## 为什么要有这个文件
+//!
+//! 2026-10-10 实测：事件名当时散在**三处**——
+//! `main.rs` 的 `pub mod events` 只有 `READOUT` / `TELEMETRY`，
+//! `commands.rs:248` 写的是字面量 `app.emit("armed", ...)`，
+//! 前端 `+page.svelte` 写的是第三个字面量 `listen('armed', ...)`。
+//!
+//! 改一个事件名要同时动三个地方，漏一个就是「界面收不到、后端日志一切正常」。
+//! `docs/HANDOFF.md` §5.4 B-1 点名的就是这个。
+//!
+//! ## 跨语言这件事没完全解决
+//!
+//! Rust 和 TypeScript 是两门语言，**这里仍然有两份**（`types.ts` 镜像本文件）。
+//! 彻底解掉要上类型生成链，那是独立工程（见 HANDOFF §5.4 B-1「重构方向」）。
+//! 现在的目标是：**每种语言内部只有一处**，且改动能被类型检查抓到一部分。
+
+use serde::{Deserialize, Serialize};
+
+/// Tauri 事件名。**前端只认这几个，不轮询。**
+///
+/// ⚠️ 改这里等于改契约。前端镜像在 `ui/src/lib/types.ts` 的 `EVENTS`。
+pub mod events {
+    /// 每轮观察的结果。面板的全部内容都从这里来。
+    pub const READOUT: &str = "readout";
+    /// 「已装填」——Confirm 档第一次点击后，前端据此让按钮显形。
+    ///
+    /// **不可见的状态等于没有状态**：用户得知道现在按下去会不会真发出去。
+    pub const ARMED: &str = "armed";
+    /// 调试画布数据。**只在 debug 窗口订阅**，主面板不收。
+    pub const DEBUG_PANE: &str = "debug_pane";
+    /// 帧计数等遥测。用来证明「不是轮询」。
+    pub const TELEMETRY: &str = "telemetry";
+
+    /// 全部事件名。**测试用它断言「没有漏在外面的字面量」。**
+    pub const ALL: [&str; 4] = [READOUT, ARMED, DEBUG_PANE, TELEMETRY];
+}
+
+/// 投递动作。
+///
+/// **原先是 `String`**——`action: "删库"` 也能一路传进 `dispatch`。
+/// 现在它在 `serde` 反序列化阶段就失败，进不了业务逻辑。
+///
+/// 命名与前端 `types.ts` 的 `Action` 严格对应，**改一边就要改另一边**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Action {
+    /// 填入输入框，停在光标处。**不发送。** Manual 档唯一允许的动作。
+    Fill,
+    /// 发送。**装填之后**按才走这条。
+    Confirm,
+}
+
+impl std::fmt::Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Fill => "填入",
+            Self::Confirm => "确认发送",
+        })
+    }
+}
+
+impl Action {
+    /// 从字符串解析。**大小写不敏感，且拒绝尾随空白。**
+    ///
+    /// 为什么不用 `serde` 自动做：Tauri 的 `#[tauri::command]` 参数是逐个反序列化的，
+    /// 单独一个 `String` 参数拿到手时已经晚了。这里显式解析，
+    /// 好处是**错误信息能直接显示给人看**（界面会把它写进 `reason`）。
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim() {
+            "fill" => Ok(Self::Fill),
+            "confirm" => Ok(Self::Confirm),
+            other => Err(format!(
+                "不认识的动作 {other:?}。只能是 \"fill\"（填入）或 \"confirm\"（确认发送）。"
+            )),
+        }
+    }
+}
+
+/// 面板当前处于哪一阶段。
+///
+/// **原先这个判断在前端**：`+page.svelte` 靠 `candidates.length === 0`
+/// 区分「静默」「出错」「刚启动」三种完全不同的状态——这是**界面在猜 Rust 的状态**。
+/// `docs/HANDOFF.md` §5.4 B-1 说的「状态语义没有集中的定义」在此收口：
+/// **判断归 Rust，界面只渲染。**
+///
+/// 这个枚举同时是 §4.3 首屏提速的地基——有了 `Read`，
+/// 观察循环就能**不等模型**先推一帧，实测体感 6~9s → 1.1s。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "phase", rename_all = "camelCase")]
+pub enum Phase {
+    /// 已认出会话、已读到消息，**模型还没回来**。
+    ///
+    /// 这是「首屏」：纯本地，~1.1s。界面据此立刻显示「读到 N 条，正在起草」。
+    Read {
+        /// 已归并的消息。**即使起草中也要给**——用户要看的是对方说了什么。
+        messages: Vec<chatservant_perceive::Message>,
+    },
+    /// 正在起草。消息可用，候选还没有。
+    ///
+    /// 单独一个变体而不是复用 `Read` + 一个 bool：让「模型还没回来」这件事
+    /// 在类型上就是一件事，前端不需要猜 `candidates` 为空意味着什么。
+    Drafting {
+        messages: Vec<chatservant_perceive::Message>,
+    },
+    /// 有候选。**这是产出。**
+    Drafted {
+        messages: Vec<chatservant_perceive::Message>,
+        candidates: Vec<crate::watch::DraftCandidate>,
+    },
+    /// 出错。`error` 是**能直接显示给人看**的中文，不是 `Debug` 格式。
+    Failed {
+        messages: Vec<chatservant_perceive::Message>,
+        error: String,
+    },
+}
+
+impl Phase {
+    /// 消息。四个变体都要——**出错时也保留已读到的消息**，
+    /// 否则一个 OCR 抖动会让面板把整段对话清空。
+    pub fn messages(&self) -> &[chatservant_perceive::Message] {
+        match self {
+            Self::Read { messages }
+            | Self::Drafting { messages }
+            | Self::Drafted { messages, .. }
+            | Self::Failed { messages, .. } => messages,
+        }
+    }
+
+    /// 候选。只有 `Drafted` 非空。
+    pub fn candidates(&self) -> &[crate::watch::DraftCandidate] {
+        match self {
+            Self::Drafted { candidates, .. } => candidates,
+            _ => &[],
+        }
+    }
+
+    /// 面板顶部要显示的告警。**只有 `Failed` 有话说。**
+    ///
+    /// 其他三种状态返回空串，让界面不占地方——一个一直显示「一切正常」的横幅
+    /// 会把真的异常稀释掉，这正是 §5.5 判据 12 背后的道理。
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            Self::Failed { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+
+    /// 判别字段的短名。**给推送去重用。**
+    ///
+    /// ## 为什么需要它
+    ///
+    /// `cs-pump` 线程靠「跟上一帧不一样才推」去重，而它原来**只看 `ticks`**。
+    /// 首屏优化（§4.3 方案 1）会在**一轮中间**多推一帧，那一帧的 `ticks`
+    /// 与上一轮相同——**pump 会以为没变化而把它吃掉**，首屏优化就白做了。
+    ///
+    /// 所以指纹必须是 `(ticks, phase)`。而 `Phase` 本身**不能**直接 `PartialEq`：
+    /// 同一个 `Drafted` 阶段里候选会变（新一轮推理完成），
+    /// 只比阶段名会漏推。**`ticks` 覆盖「同阶段内容变了」，
+    /// `phase` 覆盖「同一 ticks 里阶段变了」。两者缺一不可。**
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Read { .. } => "read",
+            Self::Drafting { .. } => "drafting",
+            Self::Drafted { .. } => "drafted",
+            Self::Failed { .. } => "failed",
+        }
+    }
+
+    /// 界面该显示哪句「正在干什么」。
+    ///
+    /// ⚠️ **判据 12：空状态必须给一个明确的下一步动作。**
+    /// `Drafting` 这一档如果只显示「加载中」，用户就不知道该等还是该干别的。
+    pub fn status_hint(&self) -> Option<&'static str> {
+        match self {
+            Self::Drafting { .. } => Some("正在起草，通常几秒"),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 动作解析：**认这两个，别的一律拒**。
+    ///
+    /// 这条测试存在的理由是：从前 `action` 是 `String`，
+    /// 任何字符串都能进 `dispatch`。拼错、传空、传中文，
+    /// 都要在**这里**失败，而不是走到 UI 层变成一句看不懂的 `reason`。
+    #[test]
+    fn only_fill_and_confirm_parse() {
+        assert_eq!(Action::parse("fill"), Ok(Action::Fill));
+        assert_eq!(Action::parse("confirm"), Ok(Action::Confirm));
+        // 尾随空白曾经会漏到下游——Tauri 参数不保证干净
+        assert_eq!(Action::parse("  fill  "), Ok(Action::Fill));
+        // 全部拒绝
+        for bad in ["", " ", "delete", "fill_all", "确认", "FILL", "0"] {
+            assert!(Action::parse(bad).is_err(), "{bad:?} 不该被接受");
+        }
+    }
+
+    /// 拒绝时必须**给得出人话**，因为它会直接显示在界面上。
+    #[test]
+    fn a_rejected_action_explains_itself() {
+        let e = Action::parse("delete").unwrap_err();
+        // 界面会原样显示这句，所以它得说清「能传什么」
+        assert!(e.contains("fill"), "{e}");
+        assert!(e.contains("confirm"), "{e}");
+    }
+
+    /// `Phase` 序列化出来是**带 `phase` 判别字段的**，前端据此分支。
+    ///
+    /// 锁死这个形状：前端 `+page.svelte` 靠 `payload.phase` 决定渲染什么，
+    /// 形状一变界面白屏——而这正是「Rust 的 `Message` 少一个 `id`，
+    /// 前端 `{#each (m.id)}` 全变 undefined，面板整块空白而后端日志一切正常」
+    /// 那一类事故的翻版。所以这里把它测死。
+    #[test]
+    fn phase_serializes_with_a_discriminant_field() {
+        let p = Phase::Drafting {
+            messages: Vec::new(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v.get("phase").and_then(|x| x.as_str()), Some("drafting"));
+
+        let d = Phase::Drafted {
+            messages: Vec::new(),
+            candidates: Vec::new(),
+        };
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v.get("phase").and_then(|x| x.as_str()), Some("drafted"));
+    }
+
+    /// 出错时**消息不能丢**。一个 OCR 抖动不该把整段对话清空。
+    #[test]
+    fn failing_keeps_the_messages_it_already_read() {
+        let p = Phase::Failed {
+            messages: Vec::new(),
+            error: "OCR 失败".into(),
+        };
+        assert!(p.messages().is_empty()); // 这里没塞消息，验证不 panic
+        assert_eq!(p.error(), Some("OCR 失败"));
+        assert!(p.candidates().is_empty());
+    }
+
+    /// `key()` 必须能把四个阶段**区分开**。
+    ///
+    /// 它是 `cs-pump` 去重的一半（另一半是 `ticks`）——
+    /// 判据是「同一 ticks 里阶段变了」也要能推出去。
+    /// 锁死它，免得将来加变体时忘了更新。
+    #[test]
+    fn phase_keys_are_distinct() {
+        let keys = [
+            Phase::Read { messages: vec![] }.key(),
+            Phase::Drafting { messages: vec![] }.key(),
+            Phase::Drafted { messages: vec![], candidates: vec![] }.key(),
+            Phase::Failed { messages: vec![], error: "x".into() }.key(),
+        ];
+        for (i, a) in keys.iter().enumerate() {
+            for (j, b) in keys.iter().enumerate() {
+                assert!(i == j || a != b, "{a} 与 {b} 同名，去重会漏推");
+            }
+        }
+    }
+
+    /// 事件名清单是**测试用的**——见下面的 `no_event_literal_in_sources`。
+    #[test]
+    fn event_names_are_stable() {
+        assert_eq!(events::READOUT, "readout");
+        assert_eq!(events::ARMED, "armed");
+        assert_eq!(events::DEBUG_PANE, "debug_pane");
+        assert_eq!(events::TELEMETRY, "telemetry");
+        assert_eq!(events::ALL.len(), 4);
+    }
+
+    /// **守住「只有这个文件能出现事件名字面量」这条纪律。**
+    ///
+    /// 为什么需要自动检查：事件名散三处这个问题，
+    /// 靠 code review 是抓不住的——`emit("armed")` 看起来完全正常。
+    /// 唯一可靠的办法是让机器去 grep 源码本身。
+    #[test]
+    fn no_event_literal_outside_this_file() {
+        // `CARGO_MANIFEST_DIR` = `ui/src-tauri`。仓库根是它的上两级。
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = here.parent().and_then(|p| p.parent()).unwrap_or(here);
+        // 本文件自己必然含字面量（它们就定义在这儿）
+        let me = here.join("src").join("contract.rs");
+
+        let mut bad: Vec<String> = Vec::new();
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        for dir in [here.join("src"), root.join("crates")] {
+            walk_rs(&dir, &mut files);
+        }
+        for path in &files {
+            if *path == me {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            for ev in events::ALL {
+                // 形如 emit("armed" / listen("armed" 的字面量出现
+                if text.contains(&format!("\"{ev}\"")) {
+                    bad.push(format!(
+                        "{}: 出现了事件名字面量 \"{ev}\"，改用 events::{}",
+                        path.display(),
+                        ev.to_uppercase()
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "事件名又散出去了：\n{}", bad.join("\n"));
+    }
+
+    fn walk_rs(dir: &std::path::Path, acc: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk_rs(&p, acc);
+            } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                acc.push(p);
+            }
+        }
+    }
+}

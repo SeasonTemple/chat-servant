@@ -6,7 +6,7 @@
 
 use chatservant_core::dispatch::{DeliveryReceipt, Dispatch, Dispatcher};
 use serde::Serialize;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
 use crate::secret::{self, KeyStatus};
@@ -18,6 +18,19 @@ use chatservant_reason::TurnContext;
 /// **Mutex 里的类型必须能在循环线程里用**——所以循环自己起了线程，
 /// 这里只存 `Watcher` 句柄与**纯数据**快照。
 static STATE: Mutex<Option<AppState>> = Mutex::new(None);
+
+/// 全局的 `AppHandle`。
+///
+/// **为什么需要它**：`set_tier` / 观察循环这些地方只有 `&mut AppState` 或
+/// 连它都没有，而「档位变了要刷托盘」这条要求跟档位是同一个触发点。
+/// 往 `AppState` 里塞 `AppHandle` 会把它变成自引用；用一个 OnceLock
+/// 是干净的。`AppHandle` 是 `Clone + Send + Sync`，存全局安全。
+static APP: OnceLock<AppHandle> = OnceLock::new();
+
+/// 记下 handle。由 `main.rs` 的 `setup` 在观察循环启动**之前**调。
+pub fn set_app_handle(h: AppHandle) {
+    let _ = APP.set(h);
+}
 
 struct AppState {
     watcher: Watcher,
@@ -39,6 +52,12 @@ struct AppState {
     relock: crate::watch::Relock,
     /// **Confirm 档的「已装填」状态。** 见 [`Arming`]。
     armed: Arming,
+    /// 程序**锁定并正在处理**的会话名。托盘的状态行读它。
+    ///
+    /// ⚠ **不是「窗口里当前显示的那个」。** 那是 `locked_peer` 之外的事：
+    /// 会话身份闸要求程序只对锁定会话动手，所以托盘首行要报的是
+    /// 「我到底在替谁说话」。空串 = 还没认出来，那同样是不动手。
+    peer: String,
 }
 
 /// Confirm 档的二次确认：**程序不许替人省这一步，但人也不能被卡在这一步。**
@@ -333,9 +352,14 @@ pub fn set_tier(tier: String) -> String {
         "Confirm" => Dispatch::Confirm,
         _ => Dispatch::Manual,
     };
-    with_state(|s| s.tier.set(d))
+    let real = with_state(|s| s.tier.set(d))
         .map(tier_name)
-        .unwrap_or_else(|| tier_name(Dispatch::Manual))
+        .unwrap_or_else(|| tier_name(Dispatch::Manual));
+    // ⭐ 在 `with_state` **之后**刷——锁已经放掉了，这里再拿就是死锁。
+    // 档位变了，托盘首行和图标状态必须跟着变：面板看不见的时候，
+    // 它是唯一告诉用户「开着自动」的地方。
+    refresh_tray();
+    real
 }
 
 fn tier_name(d: Dispatch) -> String {
@@ -463,6 +487,255 @@ pub fn park_settings(app: &AppHandle) {
     };
     let _ = w.set_position(PhysicalPosition::new(-32000.0, -32000.0));
     let _ = w.hide();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 窗口生命周期
+//
+// **这个程序启动之后必须有办法停掉。**
+//
+// 早先这个 crate 里一条退出路径都没有：主窗口 `decorations: false`
+// （没有标题栏）、`skipTaskbar: true`（不在任务栏）、`alwaysOnTop: true`，
+// 而 `tray-icon` 这个 feature 开了却一次都没用上。于是 Alt+F4 不生效、
+// 任务栏看不见、托盘没有图标——**一个只能靠任务管理器杀掉的程序，
+// 而它还在盯着别人的聊天窗口**。
+// ═══════════════════════════════════════════════════════════════
+
+/// 「关闭时」的行为。与前端 `types.ts` 的 `closeBehavior` 镜像。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloseBehavior {
+    /// 按 × 就是退出。**默认值** —— 没有托盘时这是唯一安全的落点。
+    Exit,
+    /// 按 − 收进托盘，程序继续跑。托盘菜单里才有的那个「退出」。
+    Tray,
+}
+
+impl Default for CloseBehavior {
+    /// **默认 `Exit`，不是 `Tray`。**
+    ///
+    /// 新装一个替你说话的程序，用户不该一关窗口它就悄悄跑着。
+    /// `Tray` 得是用户明确选过的 —— 那意味着他知道自己把它放进了后台。
+    fn default() -> Self {
+        CloseBehavior::Exit
+    }
+}
+
+/// 关闭行为那个设置文件的**词干**（不含 `.txt`）。
+///
+/// ⚠ 早先它是个没人用的常量，而 `prefs_path` 里另写了一份
+/// `"close_behavior.txt"`——**同一个事实两份拷贝**，改名时必然只改一处。
+/// 现在 `prefs_path` 直接用它拼文件名，这里是唯一的事实来源。
+const CLOSE_BEHAVIOR_FILE: &str = "close_behavior";
+
+/// 读「关闭时」。**读不到就按默认的 `Exit`** —— 那是最不容易出事的那个。
+#[tauri::command]
+pub fn get_close_behavior(app: AppHandle) -> CloseBehavior {
+    read_close_behavior(&app)
+}
+
+/// 写「关闭时」。前端设置页调它。
+///
+/// ⚠ **参数收 `String`，不收 `CloseBehavior`。**
+/// Tauri 的命令参数必须实现 `CommandArg`，也就是要能 `Deserialize`。
+/// `CloseBehavior` 只派生了 `Serialize`（那是**往外发**用的），
+/// 直接当参数会报 `the trait bound CloseBehavior: CommandArg is not satisfied`。
+///
+/// 收字符串再自己解析，和 [`set_tier`] 保持同一套写法——
+/// **一个记法认不出来的值一律走默认档并说明原因**，而不是静默升档。
+#[tauri::command]
+pub fn set_close_behavior(app: AppHandle, behavior: String) -> Result<(), String> {
+    let behavior = match behavior.as_str() {
+        "exit" => CloseBehavior::Exit,
+        "tray" => CloseBehavior::Tray,
+        other => return Err(format!("「{other}」不是合法的关闭行为（只认 exit / tray）")),
+    };
+    // ⭐ **先验证落点存不存在，再写。**
+    // 选了「收进托盘」却没有托盘 = 一个没有落点的动作 = 用户把面板
+    // 收走之后它就变成了看不见的僵尸。所以这一档必须在托盘可用时才成立。
+    if behavior == CloseBehavior::Tray && !tray_available(&app) {
+        return Err("托盘不可用，不能设成「收进托盘」—— 那样关掉面板它就藏起来了。".into());
+    }
+    let path = prefs_path(&app);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败：{e}"))?;
+    }
+    std::fs::write(&path, behavior_str(behavior)).map_err(|e| format!("写设置失败：{e}"))?;
+    // 托盘菜单的标题行也要跟着变（Auto 档开着会带红点）。
+    refresh_tray();
+    Ok(())
+}
+
+fn behavior_str(b: CloseBehavior) -> &'static str {
+    match b {
+        CloseBehavior::Exit => "exit",
+        CloseBehavior::Tray => "tray",
+    }
+}
+
+/// 设置文件放哪。与 `appDirectoriesOverride` 一起，落在应用自己的目录下。
+fn prefs_path(app: &AppHandle) -> std::path::PathBuf {
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join(format!("{CLOSE_BEHAVIOR_FILE}.txt"))
+}
+
+fn read_close_behavior(app: &AppHandle) -> CloseBehavior {
+    let Ok(s) = std::fs::read_to_string(prefs_path(app)) else {
+        return CloseBehavior::default();
+    };
+    match s.trim() {
+        "tray" if tray_available(app) => CloseBehavior::Tray,
+        // 「tray」但托盘没了 → 退回 Exit。**一个失效的设置比没有设置更危险**：
+        // 用户以为它还在后台跑，其实它可能已经退出了。
+        _ => CloseBehavior::Exit,
+    }
+}
+
+/// 托盘是不是真的建起来了。
+///
+/// **不查「我建过托盘吗」，查「现在还能拿到托盘吗」**——托盘初始化失败
+/// 时 `TrayIcon` 会是 None，而设置里可能还留着 `tray`。
+fn tray_available(app: &AppHandle) -> bool {
+    app.tray_by_id(TRAY_ID).is_some()
+}
+
+/// 托盘图标 id。与 `main.rs` 里建的那一个必须是同一个。
+pub const TRAY_ID: &str = "cs-tray";
+
+/// 收进托盘。**不是退出** —— 观察循环继续跑。
+///
+/// 只有「关闭时 = 收进托盘」时前端才会调它，所以这个命令存在
+/// 就意味着用户已经选过托盘那一档。
+#[tauri::command]
+pub fn hide_panel(app: AppHandle) -> Result<(), String> {
+    let Some(w) = app.get_webview_window("main") else {
+        return Err("主窗口不存在".into());
+    };
+    w.hide().map_err(|e| format!("隐藏失败：{e}"))
+}
+
+/// 显示主面板（托盘菜单 →「显示面板」）。
+#[tauri::command]
+pub fn show_panel(app: AppHandle) -> Result<(), String> {
+    let Some(w) = app.get_webview_window("main") else {
+        return Err("主窗口不存在".into());
+    };
+    w.show().map_err(|e| format!("显示失败：{e}"))?;
+    w.unminimize().map_err(|e| format!("取消最小化失败：{e}"))?;
+    w.set_focus().map_err(|e| format!("聚焦失败：{e}"))
+}
+
+/// **退出。**
+///
+/// 菜单里点「退出」和面板上点 × 都走这里，**共用同一条路径**——
+/// 两处能写错的地方越少越好。
+///
+/// ⚠ 不做二次确认：Auto 档开着时退出可能留下半句没发出去。拦它的
+/// 地方在**别处** —— 顶边写着当前档位，托盘图标在 Auto 时带红点，
+/// 菜单首行写着「小周 · 自动发送」。用户是看得见的，不该在点下去
+/// 的那一瞬间才拦住他。
+#[tauri::command]
+pub fn quit_app(app: AppHandle) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
+}
+
+/// 托盘图标跟着档位变。Auto 档开着时带红点 —— 面板看不见的时候，
+/// 这是唯一告诉用户「它还在，而且开着自动」的地方。
+pub fn refresh_tray() {
+    let Some(app) = APP.get() else {
+        // 观察循环有可能在 `set_app_handle` 之前起？不该，但真发生了
+        // 也只是托盘少刷一次，**不能 panic**。
+        tracing::debug!("还没有 AppHandle，托盘这次刷不了");
+        return;
+    };
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let title = tray_status_line();
+    let _ = tray.set_tooltip(Some(&title));
+    // 菜单首行就是状态行。**只有这一处** —— 面板和菜单不各写一遍。
+    if let Ok(menu) = build_tray_menu(app) {
+        let _ = tray.set_menu(Some(menu));
+    }
+}
+
+/// 托盘状态行：「谁 · 什么档位」。
+///
+/// ⚠ 报的是**程序锁定并正在处理的**那个会话，不是窗口里当前显示的
+/// 那个 —— 会话身份闸要求只对锁定会话动手，所以这里要回答的是
+/// 「我到底在替谁说话」。
+pub fn tray_status_line() -> String {
+    let peer = current_peer();
+    let who = if peer.is_empty() {
+        "没认出会话".to_string()
+    } else {
+        peer
+    };
+    format!("{who} · {}", current_tier_cn())
+}
+
+/// 托盘菜单。**构造在这里，不在 `main.rs`** —— 它要读档位和会话名，
+/// 那是这个模块的事；`main.rs` 只负责把图标建出来。
+///
+/// ## 为什么不用「build 失败就退化成一条分隔线」
+///
+/// 早先这里给每个 item 写了 `.unwrap_or_else(|_| sep())`，意思是
+/// 「这一项建不出来就拿分隔线顶上」。那是**把失败藏起来**：
+/// 菜单里会安静地少一项，而界面上没有任何地方说明少了什么。
+///
+/// 分隔线本来就该用 `.separator()`——它已经在链上了，不需要兜底。
+/// 真要失败，让它**响**地失败（`?`），菜单建不出来时上层会看到原因。
+pub fn build_tray_menu(app: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder};
+    let mb = MenuBuilder::new(app);
+    // `MenuItemBuilder::build(&M)` 与 `MenuBuilder::build(&M)` **都要传 manager**。
+    // 这是 Tauri 2 的签名，云端那版两处都写成了零参。
+    let item = |id: &str, text: &str, enabled: bool| {
+        MenuItemBuilder::with_id(id, text)
+            .enabled(enabled)
+            .build(app)
+    };
+    // ⚠ 末尾**不用** `Ok(...?)`：`MenuBuilder::build()` 返回的就是
+    // `Result<Menu<R>, tauri::Error>`，与本函数的返回类型一致，
+    // 多包一层 clippy 会报 "enclosing Ok and ? operator are unneeded"。
+    //
+    // 另注：这里零参、而上面的 `MenuItemBuilder::build(app)` 要传 manager——
+    // 两个同名方法在同一段代码里，签名还不一样。
+    mb
+        // 首行是**状态，不可点**。面板收起来之后，这是唯一告诉用户
+        // 「它还在、而且开着自动」的地方。
+        .item(&item("status", &tray_status_line(), false)?)
+        .separator()
+        .item(&item("show", "显示面板", true)?)
+        .item(&item("relock", "锁定当前会话", true)?)
+        .item(&item("settings", "打开设置", true)?)
+        .item(&item("debug", "识别画布", true)?)
+        .separator()
+        .item(
+            &MenuItemBuilder::with_id("quit", "退出")
+                .accelerator("CmdOrCtrl+Q")
+                .build(app)?,
+        )
+        // 零参的是 `MenuBuilder`，**要传参的是 `MenuItemBuilder`**。
+        .build()
+}
+
+/// 当前档位的中文名。
+///
+/// ⚠ **复用 `get_tier` 那条路径**（`with_state` + `tier_name`），不自己
+/// 再解析一遍。读锁拿不到就按最低档 `Manual` —— **绝不能猜一个更宽松的值**。
+fn current_tier_cn() -> String {
+    with_state(|s| s.tier.get())
+        .map(tier_name)
+        .unwrap_or_else(|| tier_name(Dispatch::Manual))
+}
+
+/// 程序锁定并正在处理的会话名。空 = 没认出来。
+fn current_peer() -> String {
+    with_state(|s| s.peer.clone()).unwrap_or_default()
 }
 
 /// 当前支持的模型供应商。
@@ -765,6 +1038,7 @@ pub fn start(app: &AppHandle) {
             tier,
             relock,
             armed: Arming::default(),
+            peer: String::new(),
         });
     }
 
@@ -779,10 +1053,27 @@ pub fn start(app: &AppHandle) {
                     && out.ticks != last
                 {
                     last = out.ticks;
+                    // ⭐ **先把锁释放，再刷托盘。**
+                    // `refresh_tray` 要读 `STATE` 拿档位和会话名，
+                    // 在锁里调它就是自己等自己 —— 直接死锁。
+                    let mut peer_changed = false;
                     if let Ok(mut g) = STATE.lock()
                         && let Some(s) = g.as_mut()
                     {
                         s.candidates = out.candidates.clone();
+                        if s.peer != out.peer {
+                            s.peer = out.peer.clone();
+                            peer_changed = true;
+                        }
+                    }
+                    if peer_changed {
+                        // 托盘首行写的是「我到底在替谁说话」，
+                        // 会话换了就得跟着换。
+                        //
+                        // ⚠ 直接调 `refresh_tray()`，**不要写 `commands::`**——
+                        // 这段代码就在 `commands` 模块里，`commands::`
+                        // 在自己模块内不是一个可解析的路径。
+                        refresh_tray();
                     }
                     // ⚠ **不要吞掉 emit 的错误。**
                     //

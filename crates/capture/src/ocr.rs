@@ -79,6 +79,11 @@ pub fn recognize(frame: &Frame) -> Result<OcrText, OcrError> {
     use windows::Media::Ocr::OcrEngine;
     use windows::Storage::Streams::DataWriter;
 
+    // SAFETY: 初始化本线程的 WinRT（COM）运行时。
+    // `RO_INIT_MULTITHREADED` 对应 `MTA`——`recognize` 会在 OCR 引擎的
+    // 回调里跨 apartment 使用 `OcrResult`，用 STA 会出现"COM 对象
+    // apartment 不匹配"。重复初始化返回 `RPC_E_CHANGED_MODE`，
+    // 这里用 `let _` 忽略：说明本线程已经初始化过，不是错误。
     let _ = unsafe {
         windows::Win32::System::WinRT::RoInitialize(
             windows::Win32::System::WinRT::RO_INIT_MULTITHREADED,
