@@ -778,11 +778,6 @@ fn step(
         attrs.len(),
         messages.len()
     );
-    // **累积**给界面。直接发本轮 ROI 的那几条，面板上的聊天记录会在
-    // 「本轮那几条」和「空」之间来回跳——因为 ROI 被水位线从下往上裁，
-    // 静默时它压根不含任何消息。累积后面板显示的是这个会话最近的一段对话。
-    s.messages = chatservant_perceive::merge_into_stream(&s.messages, &messages);
-
     // **会话身份闸。** 认的是**头部区域的像素指纹**，不是 OCR 读出来的名字。
     //
     // 为什么不比名字：实测真实帧上头部的**归类**是对的（`NoiseClass::Header`），
@@ -833,35 +828,27 @@ fn step(
         (Some(a), Some(b)) => a.is_same(b),
     };
     if !peer_ok {
-        s.candidates.clear();
-        s.reason = match (&s.locked_print, &print) {
-            (Some(_), None) => format!(
-                "没读出当前会话的头部，无法确认还是不是「{}」——本轮不动手",
-                s.locked_peer
-            ),
-            // `(None, Some(_))` 到不了这里：那一支已经在上面建锁并放行了。
-            (None, None) => "还没读到任何会话头部，先不动手".into(),
-            _ => format!(
-                "当前会话已经不是锁定的那一个（锁定的是「{}」）——本轮不动手",
-                if s.locked_name.is_empty() {
-                    "认不出的会话"
-                } else {
-                    &s.locked_name
-                }
-            ),
-        };
-        // **不推进水位线**：这样下一帧会重试，用户切回锁定会话后能立刻接上。
-        //
-        // ⚠ 但**闸的状态一变就要推一次 readout**。否则用户在微信里切了会话，
-        // 面板上一个字都不更新，继续挂着上一个会话的名字、消息和候选——
-        // 「看起来在处理 A，其实已经在看 B」。静默是对的，但静默到界面
-        // 开始说谎就不对了（硬约束第 1 条要求这道闸是看得见的）。
-        let just_closed = s.prev_gate_open != Some(false);
-        s.prev_gate_open = Some(false);
+        // **在这里就 return，也就不推进水位线**——这样下一帧会重试，
+        // 用户切回锁定会话后能立刻接上。
+        let just_closed = apply_gate_closed(s, print.as_ref());
         return Ok(if just_closed { Some(anchor) } else { None });
     }
     // 闸是开的。记一笔，供下次关闸时判断「是不是刚刚才关的」。
     s.prev_gate_open = Some(true);
+
+    // **累积**给界面。直接发本轮 ROI 的那几条，面板上的聊天记录会在
+    // 「本轮那几条」和「空」之间来回跳——因为 ROI 被水位线从下往上裁，
+    // 静默时它压根不含任何消息。累积后面板显示的是这个会话最近的一段对话。
+    //
+    // ⚠⚠ **这一行必须在身份闸之后**，这是 2026-10-11 修的真实缺陷。
+    //
+    // 它原来排在闸**前面**。于是用户在微信里切到会话 B 时，B 的消息先被
+    // `merge_into_stream` 并进了 A 的消息流，然后闸才关——闸只挡住了推理与
+    // 投递，**没挡住消息累积**。面板于是挂着「B 的会话名」显示「A 的历史
+    // 夹着 B 的新消息」，正是这段注释原本要防的
+    // 「看起来在处理 A，其实已经在看 B」。切回 A 时水位线没推进过，
+    // 消息会重读一遍，所以这里不需要额外的补偿逻辑。
+    s.messages = chatservant_perceive::merge_into_stream(&s.messages, &messages);
 
     // 存一份给调试画布。**在整帧坐标系**——画布按帧的百分比定位，
     // 用 ROI 坐标会让框整体偏移。
@@ -1011,6 +998,60 @@ fn apply_relock(s: &mut Scratch) {
     // 下面却还挂着上一个会话的对话——那正是「界面上出现不是这个会话的内容」，
     // 和上面那条历史串味是同一类事故，只是它出在给人看的那一层。
     s.messages.clear();
+}
+
+/// **闸关着的时候，把面板收拾干净。** 返回「是不是刚刚才关的」。
+///
+/// 抽成独立函数是为了能直接测它——它原来内联在 `step` 里，而 `step` 要
+/// 真帧、真 OCR、真 Reasoner 才跑得起来，于是这段「关闸时到底清了什么」
+/// 一次都没被断言过。
+///
+/// ## 为什么确认换了会话要连消息一起清
+///
+/// `s.peer` 每轮都在跟着真实窗口更新，所以闸一关，标题已经是新会话的名字了。
+/// 这时候下面还挂着**锁定会话**的历史，读起来就是「这是新会话的对话」——
+/// 而它不是。硬约束第 1 条要求这道闸是**看得见的**，一个会说谎的面板比
+/// 一条没反应的按钮更糟：用户无从判断哪段内容是自己正在看的那个会话的。
+///
+/// ## 为什么「认不出头部」不清
+///
+/// 认不出不等于换了会话（见 [`chatservant_perceive::identity::HeaderPrint::of`]）。
+/// 标题栏被裁掉、动画没画完都会短暂认不到，此时清空面板会让消息列表**闪一下**。
+/// 所以只有**指纹确实不同**这一支才清。
+///
+/// ⚠ 清了之后不用补偿：关闸那一支**不推进水位线**（`step` 直接 return），
+/// 用户切回锁定会话时整个消息区会重读一遍，`s.messages` 自然长回来。
+fn apply_gate_closed(
+    s: &mut Scratch,
+    print: Option<&chatservant_perceive::identity::HeaderPrint>,
+) -> bool {
+    s.candidates.clear();
+    s.reason = match (&s.locked_print, print) {
+        (Some(_), None) => format!(
+            "没读出当前会话的头部，无法确认还是不是「{}」——本轮不动手",
+            s.locked_peer
+        ),
+        // `(None, Some(_))` 到不了这里：那一支已经在建锁时放行了。
+        (None, None) => "还没读到任何会话头部，先不动手".into(),
+        _ => {
+            // 确认换人了：上一个会话的消息**不该继续挂在面板上**。
+            s.messages.clear();
+            format!(
+                "当前会话已经不是锁定的那一个（锁定的是「{}」）——本轮不动手",
+                if s.locked_name.is_empty() {
+                    "认不出的会话"
+                } else {
+                    &s.locked_name
+                }
+            )
+        }
+    };
+    // ⚠ 但**闸的状态一变就要推一次 readout**。否则用户在微信里切了会话，
+    // 面板上一个字都不更新，继续挂着上一个会话的候选——
+    // 静默是对的，但静默到界面开始说谎就不对了。
+    let just_closed = s.prev_gate_open != Some(false);
+    s.prev_gate_open = Some(false);
+    just_closed
 }
 
 /// 把媒体区域变成要送模型的图。**总闸关着时一律返回空。**
@@ -1191,8 +1232,9 @@ impl chatservant_reason::Summarizer for NoSummary {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUDGET_MAX, BUDGET_MIN, ImagesOut, RecentN, Relock, SESSION, Scratch, TierCell,
-        TokenBudget, apply_relock, collect_images, header_print,
+        BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message, RecentN, Relock, SESSION,
+        Scratch, Speaker, TierCell, TokenBudget, apply_gate_closed, apply_relock, collect_images,
+        header_print,
     };
     use chatservant_reason::context;
 
@@ -1247,6 +1289,118 @@ mod tests {
     #[test]
     fn image_egress_is_off_by_default() {
         assert!(!ImagesOut::off().get(), "默认必须是关的");
+    }
+
+    // ── 会话身份闸：关闸时到底清了什么 ────────────────────────
+
+    /// 造一张整块灰度不同的图，用它取头部指纹。
+    ///
+    /// 与 `perceive::identity` 的测试同一套配方：**灰阶差得够开**，
+    /// 相似度才落到阈值以下。真实会话名（深色字 + 浅底）就是这个分布。
+    fn print_of(gray: u8) -> chatservant_perceive::identity::HeaderPrint {
+        use chatservant_core::frame::{Frame, Rect};
+        const W: u32 = 64;
+        const H: u32 = 40;
+        let f = Frame::from_rgb(W, H, vec![gray; (W * H * 3) as usize]).expect("造图");
+        chatservant_perceive::identity::HeaderPrint::of(&f, Rect::new(0, 0, W as i32, H as i32))
+            .expect("取得到指纹")
+    }
+
+    fn a_msg(text: &str) -> Message {
+        Message {
+            id: format!("Them:{text}"),
+            speaker: Speaker::Them,
+            text: text.into(),
+            rect: chatservant_core::frame::Rect::new(0, 0, 10, 10),
+            evidence: "测试".into(),
+        }
+    }
+
+    /// **换会话时，面板上的消息必须跟着清掉。**
+    ///
+    /// 这条测的是 2026-10-11 定位到的真实缺陷：原来 `merge_into_stream`
+    /// 排在身份闸**前面**，于是切到会话 B 时 B 的消息先被并进 A 的消息流，
+    /// 闸才关——**闸只挡住了推理与投递，没挡住消息累积**。面板于是挂着
+    /// 「B 的会话名」显示「A 的历史夹着 B 的新消息」。
+    #[test]
+    fn closing_the_gate_on_a_different_conversation_drops_the_messages() {
+        let a = print_of(225);
+        let b = print_of(120);
+        assert!(!a.is_same(&b), "前提：这两块像素要判成不同会话");
+
+        let mut s = Scratch::new(RecentN::new(12));
+        s.locked_print = Some(a);
+        s.locked_name = "A".into();
+        s.messages.push(a_msg("A 里的私密内容"));
+        s.candidates.push(DraftCandidate {
+            id: "c1".into(),
+            text: "给 A 的草稿".into(),
+            probability: 0.5,
+        });
+
+        let just_closed = apply_gate_closed(&mut s, Some(&b));
+
+        assert!(just_closed, "刚关闸要推一次 readout，否则界面还停在旧状态");
+        assert!(
+            s.messages.is_empty(),
+            "换了会话还挂着锁定会话的消息：{:?}",
+            s.messages
+        );
+        assert!(s.candidates.is_empty(), "候选也必须一起清");
+        assert!(
+            s.reason.contains("锁定的是「A」"),
+            "面板要说明为什么不动手，实际：{}",
+            s.reason
+        );
+        // ⚠ **历史不能跟着清**：它是锁定会话的推理上下文，不是面板显示。
+        //   清它等于把当前会话攒下的上下文也扔了。
+        s.history.push("A 里的历史".into());
+        apply_gate_closed(&mut s, Some(&b));
+        assert_eq!(s.history.len(), 1, "关闸不是重锁，历史不该被清掉");
+    }
+
+    /// **连续关闸只推一次 readout。**
+    ///
+    /// `just_closed` 存在的意义就是这个：闸关着的时候每一圈都会走到这里，
+    /// 每圈都推一次等于面板每秒被重写一次，白费渲染。
+    #[test]
+    fn a_gate_that_stays_closed_only_pushes_one_readout() {
+        let a = print_of(225);
+        let b = print_of(120);
+        let mut s = Scratch::new(RecentN::new(12));
+        s.locked_print = Some(a);
+
+        assert!(apply_gate_closed(&mut s, Some(&b)), "第一次关闸要推");
+        assert!(
+            !apply_gate_closed(&mut s, Some(&b)),
+            "闸一直关着时不该每圈都推一次"
+        );
+    }
+
+    /// **「认不出头部」不等于换了会话——这时不许清面板。**
+    ///
+    /// 标题栏被裁掉、动画没画完都会短暂认不到。此时清空消息列表会让
+    /// 面板**闪一下**，而用户什么也没做错。清不清只该由「指纹确实不同」决定。
+    #[test]
+    fn losing_the_header_is_not_a_conversation_change() {
+        let a = print_of(225);
+        let mut s = Scratch::new(RecentN::new(12));
+        s.locked_print = Some(a);
+        s.messages.push(a_msg("同一会话里对方刚说的"));
+
+        apply_gate_closed(&mut s, None);
+
+        assert_eq!(
+            s.messages.len(),
+            1,
+            "只是认不到头部就把面板清空了：{:?}",
+            s.reason
+        );
+        assert!(
+            s.reason.contains("无法确认"),
+            "要说清是「认不出」而不是「换了会话」，实际：{}",
+            s.reason
+        );
     }
 
     /// 总闸的 clone 与本体共用一个格子——设置页改了循环得知道。
