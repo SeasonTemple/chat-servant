@@ -1212,3 +1212,79 @@ if !peer_ok { s.candidates.clear(); /* 但 s.messages 没清 */ return …; }
 `SetCursorPos` 用的屏幕坐标不是一个空间**（DPI 虚拟化）。
 按它们算出来的坐标点击会偏 260 多像素——2026-10-11 实测。
 要按坐标点谁，**用 UIA 的 `BoundingRectangle`**。
+
+---
+
+## 16. 2026-10-11 实机：窗口出口逐条过了，并抓到一个假控件
+
+`docs/本机验收清单.md` 里那四条「需要点击、本会话点不了、**结论未定**」的
+（点 `×`、托盘右键菜单、设置切「收进托盘」、点 `−`），这一轮有了可用的点击注入，
+**全部实跑**，另外把清单里写着「预期窗口跟着动」的那一条也点了——**它是 bug**。
+
+### 16.1 托盘档与 exit 档行为完全相反，两边都测了
+
+```
+tray 档：× / Alt+F4 / −  → 窗口隐藏，IsWindowVisible=False，进程存活（38 线程）
+exit 档：×               → 进程整个退出，顶层窗口连带托盘图标一起没
+```
+
+托盘往返完整：点 `−` → 面板消失、可见窗口表里没有「副驾」→ 展开托盘溢出区
+单击图标 → 面板回来，**消息水位未丢**（对方 1 · 我 7）。托盘图标 tooltip =
+`副驾 · chat-servant · 只填入`（档位正是 Manual，符合硬约束第 5 条）。
+右键菜单五项：显示面板 / 锁定当前会话 / 打开设置 / 识别画布 / —— / 退出。
+
+设置项双向也验了：切回「退出」后 `close_behavior.txt` 写成 `exit`，面板上 `−`
+如设计消失；删掉该文件重启 → 默认档仍是 exit、表头无 `−`。
+
+### 16.2 假控件：面板**根本拖不动**
+
+`+page.svelte` 的 `<header class="cs-head" data-tauri-drag-region>` 一直挂着，
+注释写着「抓手就是这两个字」，`WinCtl.svelte` 也认真用 `data-no-drag` 把按键
+排除在拖拽区外——**做得完整，但拖动毫无反应**：拖 220×120，实测 `dx=0 dy=0`。
+
+根因在 ACL，不在前端。`ui/src-tauri/capabilities/default.json` 的 `permissions`
+只有 `listen` / `unlisten` / `close`，**没有 `core:window:allow-start-dragging`**。
+Tauri 2 处理 `data-tauri-drag-region` 走的是前端调 `plugin:window|start_dragging`，
+权限不在表里就**静默拒绝**。
+
+> **新增规矩：ACL 少一条权限，界面上只会表现为「控件点不动 / 拖不动」，
+> 控制台不冒泡、clippy / svelte-check / 测试一样都不会报。**
+> 与 §3 里「`probe_key` 恒 `Ok(false)`」是同一族的欠账。
+
+已加权限，并把同一文件里失效的 `"settings"` 窗口标签删掉（该窗口 2026-10-10
+已删，设置搬进面板；`settings` 现在只是托盘菜单 id）。修完实测
+`dx=220 dy=120`，与拖动量逐像素一致。
+
+### 16.3 环境事实：Win11 托盘溢出区的 UIA 坐标不可信
+
+托盘图标默认进溢出区，顶层窗口 class 是
+`TopLevelWindowForOverflowXamlIsland`（**不是**常见的 `Xaml_WindowedPopupClass`）。
+
+更要命的是它给图标报的 `BoundingRectangle` 不可信：同一时刻按钮 rect 是
+`(2010,1251,166x32)`，而 popup 自己 rect 是 `(2057,1278,234x114)`——
+**按钮整个跑到 popup 外面去了**。按那个坐标右键，落点打在下面别人的窗口上。
+
+可靠做法是从 popup 矩形反推网格：图标 40px 步长、起点比 popup 左上角各多 17px，
+首格中心 = `popup 左上 + (37,37)`，与逐项枚举的结果逐像素吻合。
+
+还有一条更早踩的：**展开按钮是 toggle**——脚本里连点两次，第二次把已经展开的
+溢出区又关掉，于是「第二次跑什么都查不到」。先问一次再决定要不要点。
+
+### 16.4 新探针（`target/probe/`，未跟踪）
+
+| 脚本 | 干什么 |
+|---|---|
+| `tap-rel.ps1 <hwnd> <x> <y> [png]` | DPI-aware 按**窗口相对坐标**点一下（先 `SetProcessDPIAware()`） |
+| `dragwin.ps1 <hwnd>` | 拖动表头空白处，量 `GetWindowRect` 位移 |
+| `tray-overflow.ps1` | 展开溢出区并列出全部图标（先判断是否已开，避免 toggle 反关） |
+| `tray-restore.ps1` | 左键托盘图标恢复面板 |
+| `tray-menu.ps1` | 右键托盘图标、列菜单项并截菜单 |
+| `altf4.ps1` / `quit-by-x.ps1` | 两档关闭行为对照 |
+| `hover-crop.ps1` | 悬停后裁剪放大，用来分辨「没命中」与「命中了没生效」 |
+
+> `hover-crop.ps1` 的来历：点设置里的「退出」没反应，需要分辨是坐标没打中
+> 还是事件链断了。悬停放大一看，按钮组实际在 y≈275–290，
+> 而当时点的 y=307 落在它下方的空隙里。**这类问题不要靠猜，悬停截图一眼就分开了。**
+>
+> 顺带记一条：`gate.ps1` 里的 `pnpm build` 会触发 Vite HMR，**把前端状态重置回主区**
+> ——「设置屏莫名退回主区」不是产品缺陷，是 dev HMR。验设置项时别在跑门禁的同一时间点。
