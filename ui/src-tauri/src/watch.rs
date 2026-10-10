@@ -86,6 +86,15 @@ pub struct Readout {
     /// 界面必须显示它——会话名闸是「只对锁定会话动手」那道闸，
     /// 而闸的判据必须看得见，否则用户不知道为什么程序不动。
     pub peer: String,
+    /// **会话身份闸现在是开着还是关着。**
+    ///
+    /// ⚠ 这是一个**显式字段**，不是让界面去 `reason` 里找关键词。
+    /// 2026-10-11 实机：闸关上时 `reason` 写着「本轮不动手」，
+    /// 而前端的理由栏只放行含「失败/错误/抓不到/收不到/异常」的那几条，
+    /// 于是**闸关了但界面一个字都不说**——用户看到的还是
+    /// 「在等〈新会话〉的新消息」，读起来就是程序在盯着那个新会话。
+    /// 那正是硬约束第 1 条要求「看得见」的东西。
+    pub gate_open: bool,
     pub messages: Vec<Message>,
     pub candidates: Vec<DraftCandidate>,
     /// 判断摘要 + 降级说明。
@@ -356,6 +365,9 @@ struct Scratch {
     /// 硬约束第 1 条要求「只对锁定会话动手」是**看得见**的；
     /// 不动手指甲的闸等于没有闸。
     prev_gate_open: Option<bool>,
+    /// 闸现在是开着还是关着。**推给界面用**——见 [`Readout::gate_open`]
+    /// 上那条为什么不能靠 `reason` 的关键词来判断。
+    gate_open: bool,
     /// 一帧从哪来。见 [`FrameSource`]。
     source: FrameSource,
     /// 现场模式下最近一次用到的窗口句柄。给日志与投递用。
@@ -382,6 +394,7 @@ impl Scratch {
             token_budget: TokenBudget::new(crate::commands::BUDGET_DEFAULT),
             provider: chatservant_reason::Provider::OpenAi,
             prev_gate_open: None,
+            gate_open: true,
             // 默认现场；`spawn` 会用 `LoopConfig` 里的那份覆盖。
             source: FrameSource::Live,
             last_hwnd: None,
@@ -621,6 +634,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         let out = Readout {
                             anchor,
                             peer: s.peer.clone(),
+                            gate_open: s.gate_open,
                             messages: s.messages.clone(),
                             candidates: s.candidates.clone(),
                             reason: s.source.stamp(&s.reason),
@@ -652,6 +666,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         let out = Readout {
                             anchor,
                             peer: s.peer.clone(),
+                            gate_open: s.gate_open,
                             messages: s.messages.clone(),
                             candidates: s.candidates.clone(),
                             reason: s.source.stamp("这一轮没跑通"),
@@ -835,6 +850,9 @@ fn step(
     }
     // 闸是开的。记一笔，供下次关闸时判断「是不是刚刚才关的」。
     s.prev_gate_open = Some(true);
+    // 推给界面的那份也一样要跟着变——否则用户切回锁定会话之后，
+    // 面板还挂着上一轮「闸关着」的横幅。
+    s.gate_open = true;
 
     // **累积**给界面。直接发本轮 ROI 的那几条，面板上的聊天记录会在
     // 「本轮那几条」和「空」之间来回跳——因为 ROI 被水位线从下往上裁，
@@ -1051,6 +1069,7 @@ fn apply_gate_closed(
     // 静默是对的，但静默到界面开始说谎就不对了。
     let just_closed = s.prev_gate_open != Some(false);
     s.prev_gate_open = Some(false);
+    s.gate_open = false;
     just_closed
 }
 
@@ -1293,15 +1312,51 @@ mod tests {
 
     // ── 会话身份闸：关闸时到底清了什么 ────────────────────────
 
-    /// 造一张整块灰度不同的图，用它取头部指纹。
+    /// 造一块「标题栏」：深底 + 三个白字块。
     ///
-    /// 与 `perceive::identity` 的测试同一套配方：**灰阶差得够开**，
-    /// 相似度才落到阈值以下。真实会话名（深色字 + 浅底）就是这个分布。
-    fn print_of(gray: u8) -> chatservant_perceive::identity::HeaderPrint {
-        use chatservant_core::frame::{Frame, Rect};
-        const W: u32 = 64;
+    /// ⚠ `name` 决定**笔画落在哪**，而三个 name 的**亮度完全一样**。
+    ///
+    /// 这是 2026-10-11 那个破口的教训，代价是整个会话闸失效：
+    /// 早先这几处夹具用 `tint` 改**亮度**（225 对 120）来造「另一个会话」，
+    /// 于是它们一直是绿的；而真实会话名之间亮度一模一样，差的是**字形**。
+    /// 闸因此从来没在真实帧上关过——直到实机切了一次会话才暴露。
+    ///
+    /// 字块起点固定在 x=24/42/60，宽度 13 px，落在 y=12..24，
+    /// 与实测那块区域（16000 px 里 189 个墨迹像素）同一量级。
+    fn header_frame(w: u32, h: u32, name: u32) -> chatservant_capture::Frame {
+        let mut px = vec![30u8; (w * h * 3) as usize];
+        for y in 0..40u32.min(h) {
+            for x in 0..w {
+                let mut on = false;
+                for sx in [24u32, 42, 60] {
+                    let (Some(cx), Some(cy)) = (x.checked_sub(sx), y.checked_sub(12)) else {
+                        continue;
+                    };
+                    if cx < 13 && cy < 13 {
+                        on = match name {
+                            0 => cx < 7,
+                            1 => cx >= 7,
+                            _ => cy < 7,
+                        };
+                    }
+                }
+                if on {
+                    let i = ((y * w + x) * 3) as usize;
+                    px[i] = 225;
+                    px[i + 1] = 225;
+                    px[i + 2] = 225;
+                }
+            }
+        }
+        chatservant_capture::Frame::from_rgb(w, h, px).expect("尺寸一致")
+    }
+
+    /// 取一块「标题栏」的头部指纹。
+    fn print_of(name: u32) -> chatservant_perceive::identity::HeaderPrint {
+        use chatservant_core::frame::Rect;
+        const W: u32 = 200;
         const H: u32 = 40;
-        let f = Frame::from_rgb(W, H, vec![gray; (W * H * 3) as usize]).expect("造图");
+        let f = header_frame(W, H, name);
         chatservant_perceive::identity::HeaderPrint::of(&f, Rect::new(0, 0, W as i32, H as i32))
             .expect("取得到指纹")
     }
@@ -1324,8 +1379,8 @@ mod tests {
     /// 「B 的会话名」显示「A 的历史夹着 B 的新消息」。
     #[test]
     fn closing_the_gate_on_a_different_conversation_drops_the_messages() {
-        let a = print_of(225);
-        let b = print_of(120);
+        let a = print_of(0);
+        let b = print_of(1);
         assert!(!a.is_same(&b), "前提：这两块像素要判成不同会话");
 
         let mut s = Scratch::new(RecentN::new(12));
@@ -1365,8 +1420,8 @@ mod tests {
     /// 每圈都推一次等于面板每秒被重写一次，白费渲染。
     #[test]
     fn a_gate_that_stays_closed_only_pushes_one_readout() {
-        let a = print_of(225);
-        let b = print_of(120);
+        let a = print_of(0);
+        let b = print_of(1);
         let mut s = Scratch::new(RecentN::new(12));
         s.locked_print = Some(a);
 
@@ -1383,7 +1438,7 @@ mod tests {
     /// 面板**闪一下**，而用户什么也没做错。清不清只该由「指纹确实不同」决定。
     #[test]
     fn losing_the_header_is_not_a_conversation_change() {
-        let a = print_of(225);
+        let a = print_of(0);
         let mut s = Scratch::new(RecentN::new(12));
         s.locked_print = Some(a);
         s.messages.push(a_msg("同一会话里对方刚说的"));
@@ -1559,29 +1614,18 @@ mod tests {
     /// 而且全程**不需要任何 OCR 结果**。
     #[test]
     fn the_gate_reads_the_header_pixels_not_the_ocr_text() {
-        use chatservant_capture::Frame;
         use chatservant_capture::anchor::PaneAnchor;
         use chatservant_core::frame::Rect;
 
         const W: u32 = 500;
         const H: u32 = 300;
 
-        /// 顶部 40 px 是头带；`tint` 代表会话名画成什么样。
-        fn frame_with(tint: u8) -> Frame {
-            let mut px = vec![30u8; (W * H * 3) as usize];
-            for y in 0..40u32 {
-                for x in 0..W {
-                    let i = ((y * W + x) * 3) as usize;
-                    // 头带里放几段不同粗细的「字」，其余是面板底色
-                    if x > 20 && x < 200 && (x / 7) % 3 == 0 {
-                        px[i] = tint;
-                        px[i + 1] = tint;
-                        px[i + 2] = tint;
-                    }
-                }
-            }
-            Frame::from_rgb(W, H, px).expect("尺寸一致")
-        }
+        // 同一个亮度的白字，**笔画落点不同** —— 这才是两个名字的真实差别。
+        //
+        // ⚠ 早先这里是 `tint: u8`，用 225 对 120 的**亮度差**造「另一个会话」。
+        // 真实会话名亮度一样、差的是字形，所以那条夹具一直证明着
+        // 与现实无关的事，闸也一直在真实帧上关不掉。
+        let frame_with = |name: u32| header_frame(W, H, name);
 
         // 锚点给的是**帧坐标**，而 `header_print` 收的是**消息区**，
         // 这里让 chat 从 (0,0) 开始，两套坐标才一致。
@@ -1593,8 +1637,8 @@ mod tests {
             input_top: H as i32,
         };
 
-        let a = frame_with(225);
-        let b = frame_with(120);
+        let a = frame_with(0);
+        let b = frame_with(1);
         let pa = header_print(&a, &anchor).expect("取得到");
         let pb = header_print(&b, &anchor).expect("取得到");
         assert!(!pa.is_same(&pb), "两个不同会话被判成同一个");
@@ -1637,26 +1681,13 @@ mod tests {
     /// 锁错会话之后能修正：清掉旧锁 → 下一轮以当前像素为新基准。
     #[test]
     fn relocking_replaces_the_locked_conversation() {
-        use chatservant_capture::Frame;
         use chatservant_capture::anchor::PaneAnchor;
         use chatservant_core::frame::Rect;
 
         const W: u32 = 500;
         const H: u32 = 300;
-        fn frame_with(tint: u8) -> Frame {
-            let mut px = vec![30u8; (W * H * 3) as usize];
-            for y in 0..40u32 {
-                for x in 0..W {
-                    let i = ((y * W + x) * 3) as usize;
-                    if x > 20 && x < 200 && (x / 7) % 3 == 0 {
-                        px[i] = tint;
-                        px[i + 1] = tint;
-                        px[i + 2] = tint;
-                    }
-                }
-            }
-            Frame::from_rgb(W, H, px).expect("尺寸一致")
-        }
+        // 同一个亮度的白字，**笔画落点不同** —— 这才是两个名字的真实差别。
+        let frame_with = |name: u32| header_frame(W, H, name);
         let anchor = PaneAnchor {
             chat: Rect::new(0, 0, W as i32, H as i32),
             panel_bg: [30, 30, 31],
@@ -1667,7 +1698,7 @@ mod tests {
 
         let mut s = Scratch::new(RecentN::new(12));
         // 先锁在「错」的会话上
-        s.locked_print = header_print(&frame_with(225), &anchor);
+        s.locked_print = header_print(&frame_with(0), &anchor);
         assert!(s.locked_print.is_some());
 
         // 用户点重锁：请求被取走，旧锁被清掉
@@ -1676,11 +1707,11 @@ mod tests {
         s.locked_print = None;
 
         // 下一轮以当前像素为新基准
-        let now = header_print(&frame_with(120), &anchor).expect("取得到");
+        let now = header_print(&frame_with(1), &anchor).expect("取得到");
         assert!(now.is_same(&s.locked_print.clone().unwrap_or_else(|| now.clone())));
         assert_ne!(
             now,
-            header_print(&frame_with(225), &anchor).expect("取得到"),
+            header_print(&frame_with(0), &anchor).expect("取得到"),
             "重锁之后基准必须换成当前的会话"
         );
     }
