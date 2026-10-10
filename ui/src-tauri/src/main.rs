@@ -95,6 +95,24 @@ fn main() {
 fn build_tray(app: &tauri::AppHandle) {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
+    // ⚠ **图标必须显式给，不能指望 `default_window_icon` 兜底。**
+    // 2026-10-11 实机：这个图标**注册成功、tooltip 也对**（悬停读出来是
+    // 「没认出会话 · 只填入」，正是 `tray_status_line()` 的输出），但
+    // **画出来是一格空白**——shell 给一个没有图的图标照样留了通知区的位。
+    // 于是「托盘菜单 → 显示面板」这个唯一的后台出口，界面上根本点不着：
+    // 菜单收起来以后，用户不知道还有一个图标在那儿。
+    //
+    // 所以这里**编译期把 PNG 嵌进二进制**：不依赖运行时的
+    // `default_window_icon()`（它在 dev 模式下可能是空的），也不依赖
+    // 应用目录里有没有那个文件——那会让「图标在不在」取决于用户装在哪。
+    let icon = match tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png")) {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::error!("托盘图标解不开（程序仍可运行，但没有后台出口）：{e}");
+            return;
+        }
+    };
+
     // 菜单在 `commands` 里构造 —— 它要读档位和会话名。
     let menu = match commands::build_tray_menu(app) {
         Ok(m) => m,
@@ -105,6 +123,7 @@ fn build_tray(app: &tauri::AppHandle) {
     };
 
     let built = TrayIconBuilder::with_id(commands::TRAY_ID)
+        .icon(icon)
         .menu(&menu)
         .tooltip("chat-servant")
         // 菜单默认**只在右键**出现。左键不接管的话，用户点了图标

@@ -44,4 +44,12 @@ windows = { workspace = true }
 # ⚠ 版本必须与 `@tauri-apps/api` 的 **次版本**对齐，tauri build 会硬性检查：
 #   Found version mismatched Tauri packages: tauri (v2.11.6) : @tauri-apps/api (v2.12.1)
 # 改 node 依赖时这里要跟着动，不是「宽松点没关系」。
-tauri = { version = "=2.12.1", features = ["tray-icon"] }
+#
+# `image-png` 是为托盘图标加的：Windows 上 `default_window_icon()` 是从**可执行文件
+# 的图标资源**里取的，而那份资源只有 `tauri build` 打安装包时才嵌进去——
+# `cargo` / `tauri dev` 出来的二进制里没有，于是 dev 模式下它恒为 `None`，
+# 托盘 `NIM_ADD` 带了个空 `hIcon`，**通知区里留了一格空白**（tooltip 照常，
+# 因为那是我们自己写的文本）。所以图标得自己解一份 PNG 带进去。
+# `image` / `png` 本来就在依赖树里（许可证均为 MIT OR Apache-2.0，由
+# `cargo deny check` 守着），开这个 feature 不引入新的许可证面。
+tauri = { version = "=2.12.1", features = ["tray-icon", "image-png"] }
