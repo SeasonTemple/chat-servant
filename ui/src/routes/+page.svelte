@@ -44,6 +44,13 @@
    */
   let peer = $state('');
   /**
+   * 会话身份闸现在是开着还是关着。**Rust 侧推过来，前端不自己判断。**
+   *
+   * 关着的时候面板要明说「为什么不动手」——硬约束第 1 条要求这道闸
+   * 是**看得见**的；看不见的闸等于没有闸。
+   */
+  let gateOpen = $state(true);
+  /**
    * 重锁请求**还在等着被下一轮取走**。
    *
    * 按钮点了之后真正生效要等下一轮（最多一个 `TICK`）。不把这个状态
@@ -90,6 +97,14 @@
     peer?: string;
     tier?: Tier;
     relock_pending?: boolean;
+    /**
+     * 会话身份闸开着还是关着。**Rust 侧算好推过来，不靠 reason 的关键词猜。**
+     *
+     * ⚠ 2026-10-11 实机踩过：闸关上时 reason 写着「本轮不动手」，
+     * 而理由栏只放行含「失败/错误/抓不到/收收到/异常」的那几条，
+     * 于是闸关了界面却一个字都不说——用户看到的还是「在等〈新会话〉的新消息」。
+     */
+    gate_open?: boolean;
   }
 
   function apply(r: FullReadout) {
@@ -100,6 +115,7 @@
     peer = r.peer ?? '';
     if (r.tier) tier = r.tier;
     relockPending = r.relock_pending ?? false;
+    gateOpen = r.gate_open ?? gateOpen;
     // 候选换了，旧装填自动作废——装填是**某一条具体候选**的状态。
     armedId = '';
   }
@@ -937,6 +953,25 @@
         <div class="cs-idle">
           <p class="cs-idle-lead">面板不认人，就不动手</p>
           <p class="cs-idle-sub">这是硬约束，不是故障。认错人 → 在错的聊天里替你说话。</p>
+          <button
+            class="cs-btn cs-btn-ink cs-idle-btn"
+            type="button"
+            onclick={relock}
+            disabled={locking || relockPending}
+          >
+            {locking ? '正在锁…' : relockPending ? '已请求，下一轮生效' : '锁定当前会话'}
+          </button>
+        </div>
+      {:else if !gateOpen}
+        <!--
+        ══ 闸关着。这不是「在等」，是「故意不动手」══
+        ⚠ 2026-10-11 实机：这一支早先不存在，闸关着的时候界面显示的还是
+        「在等〈新会话〉的新消息」——用户会以为程序正盯着那个新会话，
+        而它其实什么都没做。硬约束第 1 条要求这道闸是**看得见**的。
+      -->
+        <div class="cs-idle">
+          <p class="cs-idle-lead">不认这个人，就不动手</p>
+          <p class="cs-idle-sub">{reason}</p>
           <button
             class="cs-btn cs-btn-ink cs-idle-btn"
             type="button"
