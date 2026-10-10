@@ -43,7 +43,13 @@ pub struct ImagePayload {
     pub base64: String,
     /// 送出这一张要花多少视觉 token。**实际值，不是预算值。**
     pub tokens: u32,
+    /// 缩放后的宽（像素）。
+    ///
+    /// 缩放预算的中间产物，**推理层不拿它算图**——
+    /// 视觉 token 的账已经落在 [`ImagePayload::tokens`] 上，
+    /// 宽高留着是为了让调用方能对账「这张图被缩到了多大」。
     pub width: u32,
+    /// 缩放后的高（像素）。与 [`ImagePayload::width`] 一起构成缩放预算。
     pub height: u32,
 }
 
@@ -97,6 +103,14 @@ pub trait Describer {
         true
     }
 
+    /// 把一张图折成一段文字。**入参只有一张图**——
+    /// 拿不到聊天窗格、拿不到 OCR 结果，所以它的输出**在类型层面**
+    /// 就不可能拿去读气泡文字。
+    ///
+    /// 返回的 `Err` 不会中断链路：[`VisionBridge::fold`] 收到错误就降级成
+    /// [`PLACEHOLDER`]，并记一次降级。所以实现方报错时**别把异常吞了**，
+    /// 把原因写进 `Err` 的文本——那是界面上唯一能解释
+    /// 「为什么这张图变成了『对方发来一张图片』」的线索。
     fn describe(&mut self, img: &ImagePayload) -> Result<String, String>;
 }
 
@@ -134,6 +148,12 @@ impl VisionBridge {
         Self::new(Box::new(NoVision))
     }
 
+    /// 用一个描述器建桥。**描述器自己决定发不发请求**——
+    /// 传 [`NoVision`] 就是关闭状态，与 [`VisionBridge::off`] 等价。
+    ///
+    /// 缓存和计数都是空的，全新开始。**计数从这一刻算起**，
+    /// 因为 [`Describer`] 可能是个带自己缓存的实现，
+    /// 想断言「视觉调用了几次」就得连描述器一起新建。
     pub fn new(describer: Box<dyn Describer>) -> Self {
         Self {
             describer,

@@ -144,7 +144,7 @@ fn histogram(frame: &Frame, r: Rect) -> Vec<(Rgb, usize)> {
         }
     }
     let mut v: Vec<(Rgb, usize)> = hist.into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|a| std::cmp::Reverse(a.1));
     v
 }
 

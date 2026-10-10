@@ -131,6 +131,12 @@ pub struct Context {
 }
 
 impl Context {
+    /// 建一个空的上下文缓存。**没有会话状态**——
+    /// 摘要按 `session` 惰性建，第一次 [`Context::trim`] 到那个会话才出现。
+    ///
+    /// 等价于 [`Context::default`]：显式留一个构造函数，
+    /// 是为了让「怎么建」在类型上只有一个答案，不给别处留直接
+    /// `Context { sessions: … }` 的口子。
     pub fn new() -> Self {
         Self::default()
     }

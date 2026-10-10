@@ -31,18 +31,6 @@
         "dragDropEnabled": false
       },
       {
-        "label": "settings",
-        "title": "设置",
-        "url": "/settings",
-        "width": 640,
-        "height": 520,
-        "resizable": true,
-        "decorations": true,
-        "visible": true,
-        "focus": false,
-        "dragDropEnabled": false
-      },
-      {
         "label": "debug",
         "title": "识别画布",
         "url": "/debug",
@@ -57,8 +45,7 @@
     ],
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
-    },
-    "appDirectoriesOverride": "./app-data"
+    }
   },
   "bundle": {
     "active": true,

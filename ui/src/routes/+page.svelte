@@ -1,13 +1,24 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+  import { ArrowLeft, Settings2 } from '@lucide/svelte/icons';
   import WinCtl from '$lib/WinCtl.svelte';
   import MessageStream from '$lib/MessageStream.svelte';
+  import PanelSettings from '$lib/PanelSettings.svelte';
   import { IS_DEMO as DEMO } from '$lib/runtime';
-  // ⚠ 这里只导 `FullReadout`——它是 `readout` 事件的真实载荷类型。
-  // `ReadoutPayload` 是上一版的中间形态，契约重构之后已经没有推送方了；
-  // 留着它会让人以为「面板收到的是那个形状」。
   import type { Candidate, DispatchReply, Message, Phase, Tier } from '$lib/types';
+
+  /**
+   * 头部那颗返回记号的规格。**和 WinCtl 的三颗一样**（14 / 1.75）。
+   *
+   * ⚠ 为什么是同一个数：`←` 挨着 `··· − ×` 站着，它们是**同一排记号**。
+   * 差一号就会读成「这排是三颗，那颗是别的什么东西」。
+   *
+   * 形制上它取 `lucide` 的 `ArrowLeft` 而不是手搓 —— 见 `WinCtl.svelte`
+   * 开头那条纪律：「先查库，再谈设计」。
+   */
+  const ICON_SIZE = 14;
+  const ICON_SW = 1.75;
 
   /**
    * 脱离 Tauri 运行？**判据在 `$lib/runtime`** —— 「是不是演示模式」
@@ -102,8 +113,15 @@
   async function pullLocalPrefs() {
     if (DEMO) return;
     try {
-      closeBehavior = (await invoke<'exit' | 'tray'>('get_close_behavior')) ?? 'exit';
-    } catch {
+      const raw = await invoke<'exit' | 'tray'>('get_close_behavior');
+      closeBehavior = raw ?? 'exit';
+    } catch (e) {
+      // ⚠ 这里原来是一个空的 `catch {}`。
+      //
+      // 实测（2026-10-10）：整个「`−` 不出现」的排查之所以绕了这么大一圈，
+      // 就是因为它在吞异常。写进 `reason` 是因为正文里已经有这条异常条的
+      // 位置——读不到 Rust 的推送本来就要让人看见，不该多一种悄悄的失败。
+      reason = `读不到「关闭时」：${String(e)}`;
       /* 读不到就按「退出」处理 —— 那是最不容易出事的那个 */
     }
   }
@@ -204,10 +222,70 @@
   let showMessages = $state(false);
 
   /**
-   * 「更多」浮层开没开。识别画布和设置都收在这里，
+   * 「更多」浮层开没开。识别画布都收在这里，
    * 所以标题栏永远只有三颗记号 + 一个当前档位名。
    */
   let moreOpen = $state(false);
+
+  /**
+   * 面板当前是主区还是设置。**两者是同一块面板的两种显示，不是两个窗口。**
+   *
+   * 早先「设置」调 `open_settings` 弹出另一个 640 × 520 的应用窗口 ——
+   * 在 380px 的窄面板里点一下，突然跳到宽一倍的独立窗口，空间关系是拧的。
+   * 设置内容不少，但 `docs/面板设计.md` 第一条结构性决定是「修问题的按钮
+   * 和问题在同一屏」：设置该用**分节滚动**装进这块面板，不是用开第二个窗口。
+   *
+   * ⚠ 那个独立窗口已经**删干净了**：`tauri.conf.json` 里不再有 `settings`
+   * 条目，`routes/settings` 路由和 `park_settings` 一起删掉。
+   * 留着它有两个真实代价，不只是「多一个文件」：
+   * 1. 它在 `.setup()` 之前就被创建，于是启动时白跑一份完整的设置界面，
+   *    还会**多问一次 `get_close_behavior`**——这正是「`−` 不出现」那次
+   *    排查里最早让人搞错方向的那个诱饵（同一进程里它拿到 `tray`、
+   *    面板拿到 `exit`）。
+   * 2. 托盘菜单的「打开设置」还指着它，等于留了一条回到旧界面的路，
+   *    一个程序里就有两套设置界面。
+   */
+  let settingsOpen = $state(false);
+
+  /**
+   * 进入 / 退出设置。
+   *
+   * ⚠ **进设置前先关掉浮层**：浮层开着的时候切视图，它会**留在设置这一屏上**
+   * —— 它的 DOM 在主区里面，而主区被 `{#if}` 换掉了，两边不同步就成了一块
+   * 点不掉的残留。
+   */
+  function toggleSettings(next: boolean) {
+    moreOpen = false;
+    settingsOpen = next;
+  }
+
+  /**
+   * 托盘菜单「打开设置」走的事件。Rust 那边 `open_settings` 先把面板
+   * show 出来，再 emit 这条。
+   *
+   * **必须在这里集中处理，别让 Rust 去开第二个窗口**：设置已经在面板里了，
+   * Rust 能做的只有「把面板叫到前面」和「告诉它切屏」两件事。
+   *
+   * 顺带一提，Rust 侧那个事件名原本该进 `events` 常量表；
+   * 这里保持字符串字面量，是因为该模块目前是 `pub mod events` 但前端
+   * 这侧没有生成绑定。改的时候两边必须一起改。
+   */
+  onMount(() => {
+    let un: (() => void) | undefined;
+    let dead = false;
+    void (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      if (dead) return;
+      un = await listen('menu:settings', () => toggleSettings(true));
+    })().catch(() => {
+      /* 演示模式没有 IPC。收不到这条事件只是托盘菜单点不到设置，
+         面板自己的 `··· → 设置` 不受影响。 */
+    });
+    return () => {
+      dead = true;
+      un?.();
+    };
+  });
 
   /**
    * 「关闭时」的行为。
@@ -480,6 +558,19 @@
     return () => node.ownerDocument.removeEventListener('pointerdown', outside, true);
   }
 
+  /**
+   * ⚠ **这里曾经有过一个 `changeTier`，已经删掉。**
+   *
+   * 改档现在走 `PanelSettings` 的 `bind:tier`——设置搬进面板之后，
+   * 面板自己不再持有改档入口。两处各写一遍 `set_tier` 就是两处可能
+   * 写错的地方，而其中一处（这个）已经变成死代码、连 eslint 都在报。
+   *
+   * 保留的教训：**用 Rust 回传的真实生效值覆盖界面**。硬约束第 5 条
+   * 「默认档最低」，Rust 有可能在解析失败时把档位夹回 Manual，
+   * 界面必须显示程序认定的那个，不是用户点过的那个。
+   * `PanelSettings` 里那份实现守的就是这条。
+   */
+
   async function act(c: Candidate, action: 'fill' | 'confirm') {
     busy = true;
     if (DEMO) {
@@ -564,12 +655,77 @@
     会变成拖窗口。
   -->
   <header class="cs-head" data-tauri-drag-region>
-    <span class="cs-peer" class:unknown={!peer} data-tauri-drag-region title={peer || '没认出会话'}>
-      {peer || '没认出会话'}
-    </span>
+    <!--
+      ⚠ **返回记号长在头部，不在设置内容里面。**
+
+      三条理由，任意一条都够：
+
+      1. 头部是 `flex: none`，**永远在滚动区之外**。设置是一整列要滚的
+         内容，把 `←` 放在里面，它会跟着内容滚走 —— 而用户正是最需要
+         它的时候（滚到一半想回去）在找不到它。
+      2. 头部的**位置不随节数变化**。放在内容里的话，加一节它就挪一格，
+         肌肉记忆永远对不上。
+      3. 设置这一屏需要**一直看得见的出口**，不是要一个「取消本次改动」。
+         这里所有改动都是即发的（Rust 侧改完就生效），所以那颗记号必须说
+         「回到主区」，**不能**写成「取消」—— 界面不能承诺它做不到的事。
+
+      `···` 也留着同样的入口：设置态下它那一条变成「回到主区」，
+      两条路通同一个地方。
+    -->
+    {#if settingsOpen}
+      <button
+        class="cs-back"
+        type="button"
+        data-no-drag
+        onclick={() => toggleSettings(false)}
+        title="回到主区"
+        aria-label="回到主区"
+      >
+        <ArrowLeft {ICON_SIZE} {ICON_SW} strokeWidth={ICON_SW} />
+      </button>
+      <span class="cs-view-title">设置</span>
+    {:else}
+      <span
+        class="cs-peer"
+        class:unknown={!peer}
+        data-tauri-drag-region
+        title={peer || '没认出会话'}
+      >
+        {peer || '没认出会话'}
+      </span>
+    {/if}
 
     <div class="cs-head-right">
-      <span class="cs-tier-name">{TIER_NAME[tier]}</span>
+      {#if !settingsOpen}
+        <span class="cs-tier-name">{TIER_NAME[tier]}</span>
+        <!--
+          ⚠ 设置是**直接给出来**的，不藏在 `···` 里面。（2026-10-10 实测反馈）
+
+          早先是 `··· → 设置` 两步：先点开一个浮层，**浮层本身还要再占一屏**，
+          然后才点得到设置。一个一年可能用两次的入口，让人先开一次菜单、
+          再在一组新出现的按钮里挑——这既慢，又让「设置在哪」变成一个需要
+          记住的事。**常用度低不等于可以藏起来**：正因为低频，它才必须在原地
+          等着，不能要求用户记得路径。
+
+          所以：齿轮直接在头部，`···` 里**不再有**设置那一项。同一时刻只留
+          一颗控制设置的记号——设置态下齿轮让位给头部那颗 `←`，位置不变。
+          一颗键不能有两种含义，两颗键也不能管同一件事。
+
+          位置在 WinCtl **左边**：窗口三键永远在最右，这是系统约定，
+          别的键插到它左边才对。
+        -->
+        <button
+          class="cs-gear"
+          class:on={settingsOpen}
+          type="button"
+          data-no-drag
+          onclick={() => toggleSettings(true)}
+          title="设置"
+          aria-label="设置"
+        >
+          <Settings2 {ICON_SIZE} {ICON_SW} strokeWidth={ICON_SW} />
+        </button>
+      {/if}
       <WinCtl
         {closeBehavior}
         onquit={() => invoke('quit_app').catch(() => {})}
@@ -579,74 +735,85 @@
     </div>
   </header>
 
-  <!-- 证据条：**它回答「读到哪了、轮到谁了」**，
-       不让用户为了确认状态去展开。展开完整消息列表在同一行最右。 -->
-  <div class="cs-strip">
-    <button
-      class="cs-strip-btn"
-      type="button"
-      onclick={() => (showMessages = !showMessages)}
-      aria-expanded={showMessages}
-    >
-      {#if drafting}
-        <span class="cs-strip-lead">正在起草</span>
-      {:else if !peer}
-        <span class="cs-strip-lead">还没认出会话</span>
-      {:else}
-        <span class="cs-strip-lead">对方 {themCount} · 我 {mineCount}</span>
-      {/if}
-      <span class="cs-strip-caret" class:up={showMessages}>▴</span>
-    </button>
-  </div>
-
   <!--
+    ⚠ **设置是一块互斥的主区，不是叠在主区上面的一层。**
+
+    早先的 `open_settings` 是**另一个窗口**，于是设置和主区可以同时占着
+    屏幕。现在它是同一块面板的另一种显示 —— 两个都显示会让「我现在看到
+    的到底是不是正在替我说话的那一句」变得没法回答。
+
+    所以这里用 `{#if}` 换，不是用 `position: absolute` 盖：
+    盖住的话底层那份内容还在滚，滚轮会滚到看不见的那一层去。
+
+    顶边那条 3px 档位条和头部**留在外面**：
+    - 顶边 = 「你交出去多少控制权」，设置里也要改它，它得一直在。
+    - 头部 = 窗口唯一的出口 + 返回主区的那颗记号，不能跟着内容消失。
+  -->
+  {#if settingsOpen}
+    <!--
+      ⚠ `···` 这一行**必须在 `PanelSettings` 之前**。
+
+      `PanelSettings` 是 `flex: 1 1 auto` + 自己的滚动容器，它会把后面的
+      兄弟节点顶到面板最底下 —— 浮层就会掉到所有设置项的下面去，
+      变成「点 `···` 然后去屏幕最下面找」。放在前面它就贴在头部下面，
+      和主区里的位置一致。
+    -->
+    {@render moreMenu()}
+    <!--
+      `tier` / `closeBehavior` 是 `$bindable` 双向绑：设置里改档，
+      面板顶边那条 3px 和头部的 `−` 立刻跟着变。**不留第二份。**
+    -->
+    <PanelSettings bind:tier bind:closeBehavior />
+  {:else}
+    <!-- 证据条：**它回答「读到哪了、轮到谁了」**，
+       不让用户为了确认状态去展开。展开完整消息列表在同一行最右。 -->
+    <div class="cs-strip">
+      <button
+        class="cs-strip-btn"
+        type="button"
+        onclick={() => (showMessages = !showMessages)}
+        aria-expanded={showMessages}
+      >
+        {#if drafting}
+          <span class="cs-strip-lead">正在起草</span>
+        {:else if !peer}
+          <span class="cs-strip-lead">还没认出会话</span>
+        {:else}
+          <span class="cs-strip-lead">对方 {themCount} · 我 {mineCount}</span>
+        {/if}
+        <span class="cs-strip-caret" class:up={showMessages}>▴</span>
+      </button>
+    </div>
+
+    <!--
     展开时才出现的完整消息列表。**默认不占地方。**
     展开是把内容**往下推**，不是盖在台词上面 —— 实测台词从 y=107 挪到
     y=300。盖住不行：用户要一边看原话一边看拟的那句，那是这个动作的全部意义。
   -->
-  {#if showMessages}
-    <MessageStream {messages} />
-  {/if}
+    {#if showMessages}
+      <MessageStream {messages} />
+    {/if}
 
-  <!--
-    「更多」浮层。识别画布和设置只在这里，
-    所以标题栏永远只有三颗记号 + 一个当前档位名。
+    <!--
+    「更多」浮层。**两种视图下都在**（snippet，两个地方渲染同一份）。
+
+    早先它只写在主区里。设置搬进面板之后如果还留在那儿，设置态下点 `···`
+    会**什么也不发生** —— 头部的记号还在，浮层不在。那是「点下去没反应」，
+    正是这个项目反复在修的东西。所以这里提成一个 snippet，两边渲染同一份。
+
+    它是**文档流里的一行**，不是浮在上面的层：浮层会盖住面板内容，
+    而这一屏的记号只有三颗 + 一个档位名，不该再被一层临时的东西遮住。
   -->
-  {#if moreOpen}
-    <div class="cs-more" {@attach dismissMore}>
-      <button
-        class="cs-more-item"
-        type="button"
-        onclick={() => {
-          moreOpen = false;
-          invoke('open_debug').catch(() => {});
-        }}
-        disabled={DEMO}
-      >
-        识别画布
-      </button>
-      <button
-        class="cs-more-item"
-        type="button"
-        onclick={() => {
-          moreOpen = false;
-          invoke('open_settings').catch(() => {});
-        }}
-        disabled={DEMO}
-      >
-        设置
-      </button>
-    </div>
-  {/if}
+    {@render moreMenu()}
 
-  <!--
+    <!--
     主区。候选是**产出**，它会在用户没操作时自己出现，所以必须
     `aria-live`。`polite` 而非 `assertive`：候选不是错误，不该打断
     当前朗读。
   -->
-  <section class="cs-body" aria-label="候选回复" aria-live="polite">
-    {#if armedId && shown}
-      <!--
+    <section class="cs-body" aria-label="候选回复" aria-live="polite">
+      {#if armedId && shown}
+        <!--
         ══ S5 · 待发射 ══
 
         ⚠ **那句话必须留在屏上。**
@@ -667,7 +834,7 @@
         用户自己在微信里看得见也能改。说自己做不到的事就是假话。
         「先不发」是用户犹豫时嘴里的话，也是真的。
       -->
-      <!--
+        <!--
         **状态行说「在哪」，不说「会怎样」。**
 
         「按下去就发出去了」跟旁边那颗写着「发送」的按钮是同一句话，
@@ -676,11 +843,11 @@
         真正需要说清的是**它已经在哪儿了** —— 这一件事整屏没有任何
         别的地方写着，而它决定了用户此刻站在哪个环节上。
       -->
-      <p class="cs-armed-where">在小周的输入框里</p>
-      <p class="cs-line selectable">{shown.text}</p>
+        <p class="cs-armed-where">在小周的输入框里</p>
+        <p class="cs-line selectable">{shown.text}</p>
 
-      <div class="cs-armed-row">
-        <!--
+        <div class="cs-armed-row">
+          <!--
           按钮写**动作**，而且是准确的那个动作。
 
           按下去清掉的只是「程序要替你发」这件事 —— 输入框里那行字
@@ -689,113 +856,146 @@
 
           「先不发」是用户犹豫时嘴里的话，也是真的：程序不再替你发。
         -->
-        <button
-          class="cs-btn cs-btn-ghost"
-          type="button"
-          onclick={() => (armedId = '')}
-          disabled={busy || DEMO}
-        >
-          先不发
-        </button>
-        <button
-          class="cs-btn cs-btn-live"
-          type="button"
-          onclick={() => act(shown, 'confirm')}
-          disabled={busy || DEMO}
-        >
-          发送
-        </button>
-      </div>
-    {:else if sorted.length > 0}
-      <!-- ══ S4 · 已起草 ══ -->
-      <p class="cs-caption">替你对{peer}说</p>
-      <p class="cs-line selectable">{shown.text}</p>
+          <button
+            class="cs-btn cs-btn-ghost"
+            type="button"
+            onclick={() => (armedId = '')}
+            disabled={busy || DEMO}
+          >
+            先不发
+          </button>
+          <button
+            class="cs-btn cs-btn-live"
+            type="button"
+            onclick={() => act(shown, 'confirm')}
+            disabled={busy || DEMO}
+          >
+            发送
+          </button>
+        </div>
+      {:else if sorted.length > 0}
+        <!-- ══ S4 · 已起草 ══ -->
+        <p class="cs-caption">替你对{peer}说</p>
+        <p class="cs-line selectable">{shown.text}</p>
 
-      <div class="cs-meta">
-        <span class="cs-meta-pct">把握 {pctOf(shown)}%</span>
-        {#if alts.length > 0}
-          <span class="cs-meta-alt">{alts.length} 个备选 ↑↓</span>
+        <div class="cs-meta">
+          <span class="cs-meta-pct">把握 {pctOf(shown)}%</span>
+          {#if alts.length > 0}
+            <span class="cs-meta-alt">{alts.length} 个备选 ↑↓</span>
+          {/if}
+        </div>
+
+        {#if alts.length > 0 && !armedId}
+          <div class="cs-alts" role="group" aria-label="备选">
+            {#each alts as c (c.id)}
+              <button
+                class="cs-alt"
+                type="button"
+                onclick={() => (pickedId = c.id)}
+                title={`${c.text}（把握 ${pctOf(c)}%）`}
+              >
+                <span class="cs-alt-pct">{pctOf(c)}%</span>
+                <span class="cs-alt-txt">{preview(c.text)}</span>
+              </button>
+            {/each}
+          </div>
         {/if}
-      </div>
 
-      {#if alts.length > 0 && !armedId}
-        <div class="cs-alts" role="group" aria-label="备选">
-          {#each alts as c (c.id)}
-            <button
-              class="cs-alt"
-              type="button"
-              onclick={() => (pickedId = c.id)}
-              title={`${c.text}（把握 ${pctOf(c)}%）`}
-            >
-              <span class="cs-alt-pct">{pctOf(c)}%</span>
-              <span class="cs-alt-txt">{preview(c.text)}</span>
-            </button>
-          {/each}
+        <div class="cs-act-row">
+          <span class="cs-act-label">填入输入框</span>
+          <button
+            class="cs-btn cs-btn-ink"
+            type="button"
+            onclick={() => act(shown, 'fill')}
+            disabled={busy || DEMO}
+          >
+            填入
+          </button>
+        </div>
+        <p class="cs-act-note">停在你微信的光标处，不发。</p>
+      {:else if drafting}
+        <!-- ══ S3 · 起草中 ══ -->
+        <div class="cs-idle">
+          <p class="cs-idle-lead cs-idle-busy">正在成形…</p>
+          <p class="cs-idle-sub">通常几秒</p>
+        </div>
+      {:else if phase.phase === 'failed'}
+        <!-- ══ S6 · 出错。修问题的按钮就在正文里 ══ -->
+        <div class="cs-idle">
+          <p class="cs-idle-lead">{phase.error}</p>
+          <button
+            class="cs-btn cs-btn-ink cs-idle-btn"
+            type="button"
+            onclick={refresh}
+            disabled={refreshing}
+          >
+            {refreshing ? '正在读…' : '再试一次'}
+          </button>
+        </div>
+      {:else if !peer}
+        <!-- ══ S1 · 没认出会话。重锁按钮就在正文里 ══ -->
+        <div class="cs-idle">
+          <p class="cs-idle-lead">面板不认人，就不动手</p>
+          <p class="cs-idle-sub">这是硬约束，不是故障。认错人 → 在错的聊天里替你说话。</p>
+          <button
+            class="cs-btn cs-btn-ink cs-idle-btn"
+            type="button"
+            onclick={relock}
+            disabled={locking || relockPending}
+          >
+            {locking ? '正在锁…' : relockPending ? '已请求，下一轮生效' : '锁定当前会话'}
+          </button>
+        </div>
+      {:else}
+        <!-- ══ S2 · 静默。这是面板 90% 时间的样子 ══ -->
+        <div class="cs-idle">
+          <p class="cs-idle-lead">在等{peer}的新消息</p>
+          <p class="cs-idle-sub">发来了才起草，不会空转</p>
         </div>
       {/if}
+    </section>
 
-      <div class="cs-act-row">
-        <span class="cs-act-label">填入输入框</span>
-        <button
-          class="cs-btn cs-btn-ink"
-          type="button"
-          onclick={() => act(shown, 'fill')}
-          disabled={busy || DEMO}
-        >
-          填入
-        </button>
-      </div>
-      <p class="cs-act-note">停在你微信的光标处，不发。</p>
-    {:else if drafting}
-      <!-- ══ S3 · 起草中 ══ -->
-      <div class="cs-idle">
-        <p class="cs-idle-lead cs-idle-busy">正在成形…</p>
-        <p class="cs-idle-sub">通常几秒</p>
-      </div>
-    {:else if phase.phase === 'failed'}
-      <!-- ══ S6 · 出错。修问题的按钮就在正文里 ══ -->
-      <div class="cs-idle">
-        <p class="cs-idle-lead">{phase.error}</p>
-        <button
-          class="cs-btn cs-btn-ink cs-idle-btn"
-          type="button"
-          onclick={refresh}
-          disabled={refreshing}
-        >
-          {refreshing ? '正在读…' : '再试一次'}
-        </button>
-      </div>
-    {:else if !peer}
-      <!-- ══ S1 · 没认出会话。重锁按钮就在正文里 ══ -->
-      <div class="cs-idle">
-        <p class="cs-idle-lead">面板不认人，就不动手</p>
-        <p class="cs-idle-sub">这是硬约束，不是故障。认错人 → 在错的聊天里替你说话。</p>
-        <button
-          class="cs-btn cs-btn-ink cs-idle-btn"
-          type="button"
-          onclick={relock}
-          disabled={locking || relockPending}
-        >
-          {locking ? '正在锁…' : relockPending ? '已请求，下一轮生效' : '锁定当前会话'}
-        </button>
-      </div>
-    {:else}
-      <!-- ══ S2 · 静默。这是面板 90% 时间的样子 ══ -->
-      <div class="cs-idle">
-        <p class="cs-idle-lead">在等{peer}的新消息</p>
-        <p class="cs-idle-sub">发来了才起草，不会空转</p>
-      </div>
-    {/if}
-  </section>
-
-  <!--
+    <!--
     只在**真出事**时出现。正常时不占地方 —— 一条一直显示「一切正常」
     的横幅会把真的异常稀释掉。
   -->
-  {#if problem && !drafting && sorted.length === 0}
-    <p class="cs-alarm" role="alert">{problem}</p>
+    {#if problem && !drafting && sorted.length === 0}
+      <p class="cs-alarm" role="alert">{problem}</p>
+    {/if}
   {/if}
 </main>
+
+<!--
+  「更多」浮层。定义在 `<main>` 之外、但**归属这个面板**。
+
+  ⚠ 为什么不是组件：它只有两个按钮、四个状态（`moreOpen` / `settingsOpen`
+  / `DEMO` / `dismissMore` attachment），而 `dismissMore` 要拿
+  `node.ownerDocument`。抽成组件就得把这一整套当 props 递下去 ——
+  那一层封装换来的只是文件变短，代价是多一层间接。
+  Svelte 5 的 `{#snippet}` 就是为「同一段标记，两个地方渲染」准备的。
+
+  「设置」这一项**从浮层里拿掉了**（2026-10-10 实测反馈）：设置改成头部
+  的齿轮直达，浮层里再来一项就是同一件事有两个入口。设置现在是这一块面板
+  的一屏，不是另一个窗口——Rust 侧的 `open_settings` 只服务托盘菜单，
+  它把面板叫到前面再 emit `menu:settings` 让面板自己切屏。
+-->
+{#snippet moreMenu()}
+  {#if moreOpen}
+    <div class="cs-more" {@attach dismissMore}>
+      <button
+        class="cs-more-item"
+        type="button"
+        onclick={() => {
+          moreOpen = false;
+          invoke('open_debug').catch(() => {});
+        }}
+        disabled={DEMO}
+      >
+        识别画布
+      </button>
+    </div>
+  {/if}
+{/snippet}
 
 <style>
   /* ══════════════════════════════════════════════════════════════
@@ -880,6 +1080,77 @@
   .cs-peer.unknown {
     color: var(--cs-mark);
     font-weight: 400;
+  }
+
+  /* ── 返回主区（设置态）────────────────────────────────────────
+   *
+   * ⚠ **盘子、圆角、悬停底色逐项照抄 `.cs-win`（WinCtl 里那颗）。**
+   * 它和 `··· − ×` 是同一排记号，一颗换了规格，这一排就散了。
+   *
+   * 唯一的两处差别，都有理由：
+   * - **不悬停变红。** 红只给不可逆（发送、退出）。返回不是不可逆，
+   *   它随时能再进来。红色一旦给了「可逆的导航」，它就不再是信号了。
+   * - 悬停是墨的 7%，和 `···` 一样，不比 `×` 重 —— 「最容易误点的键
+   *   不该长成主要动作的样子」这条已经写在 WinCtl 的注释里。 */
+  .cs-back {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 32px;
+    flex: none;
+    margin-left: -4px;
+    border-radius: var(--cs-radius-sm);
+    color: var(--cs-mark);
+    transition:
+      background var(--cs-dur-fast) var(--cs-ease),
+      color var(--cs-dur-fast) var(--cs-ease);
+  }
+
+  .cs-back:hover {
+    background: rgb(20 26 31 / 7%);
+    color: var(--cs-ink);
+  }
+
+  .cs-back:active {
+    background: rgb(20 26 31 / 12%);
+  }
+
+  /* 齿轮。**和 `.cs-back` 同一副样子** —— 它们是同一件事的两种朝向：
+     齿轮进设置，`←` 回主区。位置都在头部左边，形态就该一模一样，
+     否则用户会以为它们是两个功能。 */
+  .cs-gear {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 32px;
+    border-radius: var(--cs-radius-sm);
+    color: var(--cs-mark);
+    flex: none;
+    transition:
+      background var(--cs-dur-fast) var(--cs-ease),
+      color var(--cs-dur-fast) var(--cs-ease);
+  }
+
+  .cs-gear:hover {
+    background: rgb(20 26 31 / 7%);
+    color: var(--cs-ink);
+  }
+
+  .cs-gear:active {
+    background: rgb(20 26 31 / 12%);
+  }
+
+  /* 设置态的标题。**不是 `<h1>`** —— 面板不是文档，这一屏没有标题层级，
+   * 它只是「头部那两个字告诉你在哪」。14px / 600，与 `.cs-peer` 同规格：
+   * 会话名和「设置」是同一个位置上的同一个角色。 */
+  .cs-view-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--cs-ink);
+    white-space: nowrap;
+    cursor: grab;
   }
 
   .cs-head-right {
@@ -1108,6 +1379,18 @@
   .cs-btn-live {
     background: var(--cs-live);
     color: #fff;
+    /* ⚠ 这条**透明**边框是给尺寸对齐用的，不是装饰。
+     *
+     * 2026-10-10 本机实测：这一行里两颗按钮虽然都是 `flex: 1 1 0`，
+     * 但 `box-sizing: border-box` 下 flex 均分的是**内容盒**——
+     * `.cs-btn-ghost` 有 `border: 1px solid`，边框留在外框上，
+     * 于是「先不发」外宽 173px、「发送」171px，差 2px。
+     * 而上面那句注释写的是「撤回：和白底主按钮**同尺寸**」——
+     * 设计意图是同尺寸，实测不是。这里补一条透明边框把外框补齐。
+     *
+     * 为什么用 transparent 而不是去掉 ghost 的边框：ghost 那颗的
+     * 描边**就是它的样子**（白底 + 描边），去掉就不是那颗按钮了。 */
+    border: 1px solid transparent;
   }
 
   .cs-btn-live:hover:not(:disabled) {

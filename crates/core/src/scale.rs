@@ -50,12 +50,18 @@ use std::fmt;
 ///   `tile_px` 见方块的价钱。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Billing {
+    /// 按 patch 计费：每 `patch_px` 见方算1 个 token，**没有底账**。
     Patch {
+        /// patch 的边长（像素）。每 `patch_px` 见方算 1 个 token。
         patch_px: u32,
     },
+    /// 按 tile 计费：`base` 是与图无关的底账，`per_tile` 是每个 tile 的价钱。
     Tile {
+        /// tile 的边长（像素）。
         tile_px: u32,
+        /// **与图无关的底账**——哪怕图退化成一个像素也要收这么多。
         base: u32,
+        /// 每个 tile 的价钱。
         per_tile: u32,
     },
 }
@@ -121,7 +127,12 @@ impl Billing {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unfit {
     /// 底账就超了预算——**再小也发不了**，只能换模型或加预算。
-    BelowBase { base: u32, budget: u32 },
+    BelowBase {
+        /// 该模型的底账。
+        base: u32,
+        /// 用户给的预算。
+        budget: u32,
+    },
 }
 
 impl fmt::Display for Unfit {
@@ -147,7 +158,9 @@ const SCALE_UNITS: u32 = 10_000;
 /// 一张图在预算内的**最终尺寸**。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Fitted {
+    /// 送出去的宽（像素）。
     pub width: u32,
+    /// 送去的高（像素）。
     pub height: u32,
     /// 送出去要花多少视觉 token。**实际值，不是预算值。**
     pub tokens: u32,

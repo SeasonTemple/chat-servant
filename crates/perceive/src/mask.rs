@@ -55,6 +55,9 @@ pub const FLAT_MIN_PURITY: f32 = 0.35;
 /// 依据可追是 CONTEXT.md 的要求：误判必须可见。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SurfaceVerdict {
+    /// 是不是一片平表面。两个判据都过才算 `true`——
+    /// 只看色种数会放过「3 种色的渐变背景」，只看众数占比会漏掉
+    /// 实测众数高达 0.51 的照片区（大片纯黑背景）。
     pub is_flat: bool,
     /// 众数占比。
     pub purity: f32,
@@ -63,6 +66,10 @@ pub struct SurfaceVerdict {
 }
 
 impl SurfaceVerdict {
+    /// 把结论连同两个实测数字讲成人话。
+    ///
+    /// 判成「不是平表面」时把主判据 [`FLAT_MAX_COLORS`] 也写出来，
+    /// 否则看到「内容区」无从知道它是卡在哪一条上。
     pub fn explain(&self) -> String {
         if self.is_flat {
             format!("平表面（{} 种色 · 众数 {:.2}）", self.colors, self.purity)
@@ -129,8 +136,16 @@ pub fn distinct_colors(frame: &Frame, r: Rect) -> Option<usize> {
 /// 一行文字所在区域被判成噪声时，**丢弃原因**。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rejection {
+    /// 被丢弃那行文字在帧里的位置，调试视图靠它上色。
     pub rect: Rect,
+    /// 它被归成了哪一类噪声（标题、灰字、图内字、碎片……）。
     pub noise: NoiseClass,
+    /// 丢弃理由，一句人能读的话。
+    ///
+    /// 两种来源：区域压根读不出像素时是固定文案；
+    /// 判成图内字时直接取 [`SurfaceVerdict::explain`]——它带上了色种数与
+    /// 众数占比，所以「为什么被当成图里的字」能一路追到实测数字，
+    /// 调试视图要上色也只有这一个字符串可依据。
     pub reason: String,
 }
 

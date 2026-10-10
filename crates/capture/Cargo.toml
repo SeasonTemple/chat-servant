@@ -21,6 +21,9 @@ wgc.workspace = true
 image.workspace = true
 # API 的图块要 base64。只取编码那一半，不引解码与全部算法。
 base64 = { version = "0.22", default-features = false, features = ["std"] }
+# 预下载 OCR 模型（PP-OCRv4 ONNX 导出）。**纯 Rust 推理**，不引 C++ 运行时。
+# 见根 Cargo.toml 里为什么选它而不是 `ort`。
+tract-onnx.workspace = true
 
 # ── 继承工作区 lint 策略（见根 Cargo.toml 的 `[workspace.lints]`）──
 #

@@ -19,7 +19,6 @@ fn main() {
             // 都从全局取它，晚一步的话第一次刷新就会静默失败。
             commands::set_app_handle(app.handle().clone());
             build_tray(app.handle());
-            commands::park_settings(app.handle());
             // 观察循环**在这里起**。它自己的线程里跑
             // （WGC 会话对象不是 Send，不能跨线程 move）。
             commands::start(app.handle());
@@ -39,8 +38,8 @@ fn main() {
                 let app = window.app_handle().clone();
                 let label = window.label().to_string();
                 match label.as_str() {
-                    // 设置 / 识别画布：本来就有标题栏，关掉就关掉。
-                    "settings" | "debug" => {}
+                    // 识别画布：本来就有标题栏，关掉就关掉。
+                    "debug" => {}
                     // 主面板：关不掉。它只能「收进托盘」。
                     _ => {
                         let _ = commands::hide_panel(app);
@@ -83,41 +82,41 @@ fn main() {
 
 /// 建托盘图标。
 ///
-/// **这是一个必须存在的出口。** 主窗口同时设了 `decorations: false`
-/// （没有标题栏）、`skipTaskbar: true`（不在任务栏）、`alwaysOnTop: true`，
-/// 三者叠在一起意味着系统层面没有任何可见的关闭入口。托盘是唯一的。
-///
-/// ⚠ 这里原本写成 `+ skipTaskbar: true + alwaysOnTop: true`——
-/// 行首那个 `+` 被 Markdown 当成**列表项**，rustdoc 会把这段渲染成一串
-/// 列表而不是一句话，clippy 也报 `doc list item without indentation`。
+/// **这是一个必须存在的出口。** 主窗口 `decorations: false`（没有标题栏）、
+/// `skipTaskbar: true`（不在任务栏）、`alwaysOnTop: true`，三者叠在一起
+/// 意味着系统层面没有任何可见的关闭入口。托盘是唯一的。
 ///
 /// `tray-icon` 这个 feature 一直开着，只是**一次都没被用上**。
 fn build_tray(app: &tauri::AppHandle) {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    // ⚠ **图标必须显式给，不能指望 `default_window_icon` 兜底。**
-    // 2026-10-11 实机：这个图标**注册成功、tooltip 也对**（悬停读出来是
-    // 「没认出会话 · 只填入」，正是 `tray_status_line()` 的输出），但
-    // **画出来是一格空白**——shell 给一个没有图的图标照样留了通知区的位。
-    // 于是「托盘菜单 → 显示面板」这个唯一的后台出口，界面上根本点不着：
-    // 菜单收起来以后，用户不知道还有一个图标在那儿。
+    // ⚠ **图标必须显式给。**（实测 2026-10-10）
     //
-    // 所以这里**编译期把 PNG 嵌进二进制**：不依赖运行时的
-    // `default_window_icon()`（它在 dev 模式下可能是空的），也不依赖
-    // 应用目录里有没有那个文件——那会让「图标在不在」取决于用户装在哪。
-    let icon = match tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png")) {
+    // `TrayIconBuilder::with_id(...)` 不像 `new(app)` 那样自动取应用图标，
+    // 而 `tauri.conf.json` 的主窗口也没有 `icon` 字段（`bundle.icon` 只喂
+    // 安装包，不喂窗口）。两头都没有 → 托盘**条目在、图标是空的**：
+    // 日志照样打「托盘图标已就绪」，但用户看到的是一个空白格子。
+    //
+    // 这比「图标没出来」更难查，因为它看起来像图标加载慢。
+    // 所以图直接编译进二进制（`include_bytes!`），不依赖运行期资源路径。
+    //
+    // 解码与「Auto 档盖红点」都在 `commands::tray_icon` 里——**只有那一份**，
+    // 这样 `refresh_tray` 换档时不会做出一个跟初始图标不一致的版本。
+    let icon = match commands::tray_icon(commands::current_tier_is_auto()) {
         Ok(i) => i,
         Err(e) => {
-            tracing::error!("托盘图标解不开（程序仍可运行，但没有后台出口）：{e}");
+            tracing::error!("托盘图标读不出来（程序仍可运行，但没有可见的托盘入口）：{e}");
+            commands::set_tray_ready(false);
             return;
         }
     };
 
-    // 菜单在 `commands` 里构造 —— 它要读档位和会话名。
+    // 菜单在 `commands` 里构造 —— 它要读档位。
     let menu = match commands::build_tray_menu(app) {
         Ok(m) => m,
         Err(e) => {
             tracing::error!("托盘菜单建不起来：{e}");
+            commands::set_tray_ready(false);
             return;
         }
     };
@@ -125,7 +124,7 @@ fn build_tray(app: &tauri::AppHandle) {
     let built = TrayIconBuilder::with_id(commands::TRAY_ID)
         .icon(icon)
         .menu(&menu)
-        .tooltip("chat-servant")
+        .tooltip(commands::tray_tooltip())
         // 菜单默认**只在右键**出现。左键不接管的话，用户点了图标
         // 什么都不会发生 —— 那个图标看着就是坏的。
         .show_menu_on_left_click(false)
@@ -175,7 +174,14 @@ fn build_tray(app: &tauri::AppHandle) {
         // 而此时设置里的「收进托盘」会被 `tray_available` 拒掉，
         // 「关闭时 = 退出」照常工作。**降级要看得见。**
         tracing::error!("托盘图标建不起来（程序仍可运行，但没有后台出口）：{e}");
+        commands::set_tray_ready(false);
     } else {
+        // ⚠ **成功就是权威结论，不是「等它能被查到」。**
+        //
+        // 「关闭时 = 收进托盘」这一档的成立与否由这里说了算。见
+        // `commands::set_tray_ready` 的注释：查 `tray_by_id` 在启动后
+        // 头 ~200ms 里恒为 `false`，会让面板把自己的出口判成「退出」。
+        commands::set_tray_ready(true);
         tracing::info!("托盘图标已就绪");
     }
 }

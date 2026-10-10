@@ -98,7 +98,7 @@ pub fn analyze(frame: &Frame) -> Diagnostics {
         .iter()
         .map(|(&q, &n)| (q, n, n as f64 / total as f64))
         .collect();
-    top_colors.sort_by(|a, b| b.1.cmp(&a.1));
+    top_colors.sort_by_key(|a| std::cmp::Reverse(a.1));
     top_colors.truncate(8);
 
     // --- 面板底色：右半边最常见的颜色 ---

@@ -9,9 +9,13 @@
 /// 前端拿到的坐标只用来渲染，不用来重算。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Rect {
+    /// 左边界，含。
     pub x0: i32,
+    /// 上边界，含。
     pub y0: i32,
+    /// 右边界，**不含**。
     pub x1: i32,
+    /// 下边界，**不含**。
     pub y1: i32,
 }
 
@@ -21,14 +25,18 @@ impl Rect {
         Self { x0, y0, x1, y1 }
     }
 
+    /// 宽。**饱和减法**——负尺寸（`x1 < x0`）读成 0 而不是绕回一大片。
     pub fn width(self) -> i32 {
         self.x1.saturating_sub(self.x0).max(0)
     }
 
+    /// 高。同 [`Rect::width`] 的饱和语义。
     pub fn height(self) -> i32 {
         self.y1.saturating_sub(self.y0).max(0)
     }
 
+    /// 面积。走 `i64`——4K 全屏 `1920*1080*4` 级别的乘法在 `i32` 里是安全的，
+    /// 但夹具里有更大的合成图，别让面积成为溢出的来源。
     pub fn area(self) -> i64 {
         i64::from(self.width()) * i64::from(self.height())
     }
@@ -39,6 +47,8 @@ impl Rect {
         Rect::new(self.x0, self.y0, self.x1, self.y0 + height)
     }
 
+    /// 空矩形。宽或高为 0 就算空——**不检查 x0/x1 的先后**，
+    /// 因为退化矩形在 OCR 里是常态（气泡被裁掉一半）。
     pub fn is_empty(self) -> bool {
         self.width() == 0 || self.height() == 0
     }
@@ -93,18 +103,24 @@ impl Frame {
         Some(Self { width, height, rgb })
     }
 
+    /// 宽（像素）。
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// 高（像素）。
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    /// 原始 RGB 缓冲，行主序、3 字节/像素。**只读借用**——
+    /// 这帧永不落盘，所以这里没有 `&mut` 版本是刻意的。
     pub fn as_bytes(&self) -> &[u8] {
         &self.rgb
     }
 
+    /// 取一个像素。越界返回 `None` 而不是 panic——
+    /// OCR 框会给出退化坐标，调用方不该为此崩。
     pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 3]> {
         if x >= self.width || y >= self.height {
             return None;

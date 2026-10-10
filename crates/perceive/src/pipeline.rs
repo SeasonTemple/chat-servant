@@ -37,7 +37,13 @@ use crate::merge::{self, Message};
 /// 一次完整读取的结果。中间态也留着——调试视图与回归测试都要看。
 #[derive(Debug, Clone)]
 pub struct Read {
+    /// 这一帧量出来的锚点：消息区矩形、输入框上沿、会话名位置。
+    ///
+    /// 留着是因为它**每帧都可能变**（窗口缩放、字号改、切会话），
+    /// 下游必须拿同一次读取的锚点，不能复用上一帧的。
     pub anchor: PaneAnchor,
+    /// 从这一帧学到的配色基准。整个归类都靠它定「在不在气泡里」，
+    /// 所以它和 [`Read::attributions`] 必须来自同一帧。
     pub palette: Palette,
     /// 逐行判定，含被判成噪声的。调试视图按这个上色。
     pub attributions: Vec<Attribution>,
@@ -45,17 +51,29 @@ pub struct Read {
     pub messages: Vec<Message>,
 }
 
+/// [`read`] 在哪一步失败。
+///
+/// 全部可恢复：调用方拿到它只该**这一帧不算数**，不该中止整个会话。
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {
+    /// 推不出锚点。微信改版或窗口被折叠时会发生，重试可能就好了。
     #[error("锚点推不出来：{0}")]
     Anchor(#[from] AnchorError),
 
+    /// 聊天区太平，学不出面板底色。多半是空会话。
+    ///
+    /// **上层应降级，绝不退回硬编码颜色**——换主题时硬编码会静默失效，
+    /// 失败得比认错颜色明显得多。
     #[error("学不到配色（聊天区太平，可能是空会话）——上层应降级，不许退回硬编码颜色")]
     NoPalette,
 
+    /// 锚点推出来了，却裁不出合法的消息区。
+    ///
+    /// 锚点本身有效但矩形退化（宽或高 ≤ 0），通常是帧比锚点先来的时序问题。
     #[error("按锚点裁不出消息区")]
     NoPane,
 
+    /// OCR 这一步失败。前面的锚点与配色都已经算好了，可以直接重试整条链路。
     #[error(transparent)]
     Ocr(#[from] OcrError),
 }
