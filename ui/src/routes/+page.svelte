@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
-  import { ArrowLeft, Settings2 } from '@lucide/svelte/icons';
+  import { ArrowLeft, Settings } from '@lucide/svelte/icons';
   import WinCtl from '$lib/WinCtl.svelte';
   import MessageStream from '$lib/MessageStream.svelte';
   import PanelSettings from '$lib/PanelSettings.svelte';
@@ -730,6 +730,17 @@
           位置在 WinCtl **左边**：窗口三键永远在最右，这是系统约定，
           别的键插到它左边才对。
         -->
+        <!--
+          ⚠ 图标必须用 `Settings`（齿轮），**不是 `Settings2`**。
+
+          2026-10-11 实机截图：表头里那个记号是**两根调节滑块**——
+          那是 lucide 的 `settings-2`，而 `settings` 才是齿轮。
+          它紧挨着 SegSlider 摆着，一个滑块记号在那里会被读成「档位调节」，
+          而它管的是「设置」。**代码自称齿轮、画面画的是滑块**，
+          这正是本项目反复在查的那类不一致。
+
+          一颗键不能有两种含义：这一颗进设置，档位是隔壁那颗滑块的事。
+        -->
         <button
           class="cs-gear"
           class:on={settingsOpen}
@@ -739,7 +750,7 @@
           title="设置"
           aria-label="设置"
         >
-          <Settings2 {ICON_SIZE} {ICON_SW} strokeWidth={ICON_SW} />
+          <Settings {ICON_SIZE} {ICON_SW} strokeWidth={ICON_SW} />
         </button>
       {/if}
       <WinCtl
