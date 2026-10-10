@@ -53,6 +53,10 @@ impl Intent {
 /// 一条候选回复。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Candidate {
+    /// 回复正文。**到这里应当已经是干净的**——
+    /// 推理层在 [`crate::seam::turn`] 的最后一步统一清洗，模型爱加的
+    /// `1. ` 编号、`me:` 前缀、加粗壳都在那一步剥掉。
+    /// 脏文本不该从任何路径流到输入框或界面上。
     pub text: String,
     /// 胜出概率 0..=1。界面按它排序，**不按生成顺序**。
     pub probability: f32,
@@ -61,6 +65,8 @@ pub struct Candidate {
 /// 一组候选。**至少一条**——空集是错误，不是「没有结果」。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DraftSet {
+    /// 候选正文。顺序是**起草给出的原始顺序**，不是展示顺序——
+    /// 展示一律走 [`DraftSet::sorted`]，按概率排。
     pub candidates: Vec<Candidate>,
     /// 判断失败时为 `true`。界面据此显示降级提示。
     pub blind: bool,
@@ -83,6 +89,11 @@ impl DraftSet {
         v
     }
 
+    /// 推荐条：概率最高的那一条。
+    ///
+    /// 返回 `None` 只意味着**一条候选都没有**——正常推理路径上
+    /// [`crate::seam::turn`] 已经把空集拦成 [`ReasonError::EmptyDraft`]，
+    /// 所以拿到 `None` 说明这个 `DraftSet` 是调用方自己拼的，它得自己兜住。
     pub fn recommended(&self) -> Option<&Candidate> {
         self.sorted().first().copied()
     }
@@ -126,8 +137,20 @@ pub trait Reasoner {
 /// 三段式各自的调用次数。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct StageCalls {
+    /// 判断这一段发出的请求数。
+    ///
+    /// 预置传输不发请求，这个数恒为 0——**「判断 0 次」是正常状态**，
+    /// 别拿它反推判断功能坏了。
     pub judge: u32,
+    /// 起草这一段发出的请求数。
+    ///
+    /// 随文带图的轮次，图也走**这一次**请求，不另计——
+    /// 额外的视觉调用挂在 [`crate::vision::VisionBridge`] 上，默认关闭时恒为 0。
     pub draft: u32,
+    /// 排序这一段发出的请求数。
+    ///
+    /// 判断失败降级成盲拟时它**照发**：盲拟出来的候选同样要排，
+    /// 否则用户看到的顺序就是模型的生成顺序。
     pub rank: u32,
 }
 
@@ -169,14 +192,35 @@ impl TurnContext {
     }
 }
 
+/// 三段式报出来的失败。**按段分开是有意的**：调用方要靠这一层决定
+/// 怎么降级、要不要重试，合成一个 `Other(String)` 就只剩「重试一下试试」。
+///
+/// 三段的风险等级本来就不同：判断挂了可以退化成盲拟再来，
+/// 起草挂了重试也只是再花一次钱、拿不到东西，排序挂了压根不必重试。
+/// 携带的文本来自传输层，**已过 [`crate::transport::redact`]**，不含 API key。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ReasonError {
+    /// **第一段判断失败**：请求发不出去、超时、限流，或模型没回合法 JSON。
+    ///
+    /// 这一段**有降级路径**：[`crate::seam::turn`] 会把它降级成
+    /// [`Intent::unknown`] 继续起草，界面上显示「没读懂对话」并标 `judged = false`。
+    /// 所以这一条**不该冒泡成错误提示**——它出现时用户仍然拿得到候选。
     #[error("判断失败：{0}")]
     Judge(String),
 
+    /// **第二段起草失败**：候选正文的唯一来源，这一段挂了就没有候选了。
+    ///
+    /// **没有任何降级路径**——拿不出正文时给一条瞎编的，比明说「没写出来」糟得多。
+    /// [`crate::seam::turn`] 直接往上抛，界面要显示错误并停在原地。
+    /// 可重试，但每次重试都要重新付一次起草的钱。
     #[error("起草失败：{0}")]
     Draft(String),
 
+    /// **第三段排序失败**：请求失败，或响应里根本没有 `order` 数组。
+    ///
+    /// 这一段**有降级路径**：[`crate::seam::turn`] 保留起草给的候选，
+    /// 按起草时附带的 `probability` 排。所以它出现时**候选照常可用**，
+    /// 调用方不必把它当成失败处理。
     #[error("排序失败：{0}")]
     Rank(String),
 
@@ -200,6 +244,15 @@ pub enum ReasonError {
     #[error("静默期：没有新消息，不该调用模型")]
     NothingToDo,
 
+    /// 候选清洗后变成了空串——原文只剩壳（引号、编号、加粗标记之类）。
+    ///
+    /// 携带原文（用 `:?` 转义）是给**指认具体是哪一条**用的：
+    /// 只知道「有候选洗空了」没法排查，而清洗失败往往就是模型
+    /// 照抄了某种格式壳。
+    ///
+    /// 当前 [`crate::seam::turn`] 在这个情形上报的是 [`ReasonError::EmptyDraft`]
+    /// （并把洗空的候选直接剔除）——它不需要指认是哪一条；
+    /// 这个变体留给需要知道是哪条的调用方。
     #[error("候选清洗后变成空串：原文 {0:?}")]
     CleanedToEmpty(String),
 }

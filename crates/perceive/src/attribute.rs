@@ -79,7 +79,16 @@ pub const MIN_TEXT_HEIGHT: i32 = 8;
 /// 谁说的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Speaker {
+    /// 我方。判据是气泡底色**饱和**（彩度 ≥ [`SATURATED_MIN_CHROMA`]）。
+    ///
+    /// 实测我方气泡 `rgb(114,205,144)` 彩度 **91**，是面板底色与对方气泡
+    /// （两者都是 1）之间唯一分得开的一档——所以「我方」只能靠饱和度认。
     Me,
+    /// 对方。判据是**在气泡里**（底色 ≠ 面板底色）且**不饱和**。
+    ///
+    /// ⚠ 对方与面板的彩度都是 1，分开靠的是第 1 条判据（底色相等性），不是彩度。
+    /// 又因为对方正文对比度 178.4 **高过**标题阈值 140，判据顺序一旦反过来，
+    /// 它就会被判成标题——先判「在不在气泡里」是钉死的。
     Them,
     /// 不属于任何一方（系统、时间戳、引用块……）
     System,
@@ -108,6 +117,11 @@ pub enum NoiseClass {
 /// 强行学「那个」气泡色只会引入不确定性（实测就随机学成了对方那侧）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
+    /// 学到的面板底色，取自聊天区的众数。
+    ///
+    /// 「在不在气泡里」全靠它与外圈底色**相等**判定（不是距离），
+    /// 所以必须是精确的面板色。学不到时 [`Palette::learn`] 返回 `None`、
+    /// 上层降级，**不退回硬编码颜色**——换主题/换版本时硬编码会静默失效。
     pub panel_bg: Rgb,
 }
 
@@ -138,6 +152,9 @@ pub struct Evidence {
     pub chroma: i32,
     /// 外圈众数占比
     pub purity: f32,
+    /// 文字框行高。低于 [`MIN_TEXT_HEIGHT`] 直接判成 [`NoiseClass::Fragment`]。
+    ///
+    /// 实测所有真实正文都是 11~12 px，比这更矮的是字形碎片或图标。
     pub height: i32,
 }
 
@@ -168,11 +185,20 @@ impl std::fmt::Display for Evidence {
 /// 一行文字的归类结果。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribution {
+    /// 谁说的。只有 [`NoiseClass::Text`] 才可能是 [`Speaker::Me`] / [`Speaker::Them`]，
+    /// 其余一律 [`Speaker::System`]——噪声不参与消息流。
     pub speaker: Speaker,
+    /// 这行算正文还是噪声。只有 [`NoiseClass::Text`] 会进 [`crate::merge::group`]。
     pub noise: NoiseClass,
     /// OCR 认出来的原文。归并成消息时要用，不能丢。
     pub text: String,
+    /// 文字框在帧内的位置，坐标系与传入的 `Frame` 一致（左上角为原点）。
+    ///
+    /// 归并（按 [`crate::merge::MERGE_GAP_RATIO`] 量垂直间距）与媒体检测
+    /// 都要用它，所以坐标系错一步后面全都错。
     pub rect: Rect,
+    /// 这一行是**凭什么**这么判的。认错了要能立刻定位到是哪条判据错的，
+    /// 所以 [`classify`] 把每一步的中间量都留在了这里。
     pub evidence: Evidence,
 }
 

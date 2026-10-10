@@ -68,7 +68,10 @@ pub const AVATAR_SQUARE: i32 = 12;
 /// 只 derive `PartialEq` 不 derive `Eq`：`purity` 是 `f32`，`Eq` 编不过。
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct MediaRegion {
+    /// 检出区域。横向是「有内容」的包围盒，纵向是合并后的横条带——
+    /// 候选横条本来横贯整个消息区宽度，直接用会把整条面板宽度算进来。
     pub rect: Rect,
+    /// 归成了哪类。只按长边与长宽比分头像/图片，分不出就留 [`MediaKind::Unknown`]。
     pub kind: MediaKind,
     /// 判定依据之一：色种数。
     pub colors: usize,
@@ -79,13 +82,23 @@ pub struct MediaRegion {
 /// 媒体种类。区分不出来就 [`MediaKind::Unknown`]——**不要瞎猜成 Photo**。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum MediaKind {
+    /// 照片/图片。当前归类只有这一档与头像两档，其余全落到 [`MediaKind::Unknown`]。
     Photo,
+    /// 表情包。**当前实现还分不出来**——判据只有尺寸与色种数，
+    /// 表情与照片在这两项上没有实测差异，所以不会被判成这里。
     Sticker,
+    /// 头像。判据是长边 ≤ [`AVATAR_MAX`] 且长短边差 ≤ [`AVATAR_SQUARE`]。
+    ///
+    /// ⚠ [`AVATAR_MAX`] / [`AVATAR_SQUARE`] 本身未实测：手头的帧里没有头像
+    /// （夹具已把它们刷成块底色），所以这一档目前是在无样本的情况下定的。
     Avatar,
+    /// 分不出来。宁可留未知，也不要瞎猜——猜错的代价是把这块的内容
+    /// 按错误的类别描述给下游。
     Unknown,
 }
 
 impl MediaKind {
+    /// 中文短标签，给界面与调试输出用。
     pub fn label(self) -> &'static str {
         match self {
             Self::Photo => "图片",
@@ -99,6 +112,9 @@ impl MediaKind {
 /// 检出结果。**空的 vec 是合法结果**，不是错误。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Found {
+    /// 检出的区域，**顺序即自上而下**。
+    ///
+    /// 空 vec 是合法结果——纯文字聊天就该是空的，调用方别把它当失败。
     pub regions: Vec<MediaRegion>,
 }
 

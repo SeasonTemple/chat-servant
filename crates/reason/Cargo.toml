@@ -37,3 +37,17 @@ ureq = { version = "2", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+
+# ── 继承工作区 lint 策略（见根 Cargo.toml 的 `[workspace.lints]`）──
+#
+# Effective Rust Item 29：让代码 clippy-warning-free，
+# 新警告出现时才「obvious」。缺的是把策略**写下来**——
+# 这段就是那个策略。
+#
+# ⚠ **为什么 per-crate 的 `unsafe_code = "forbid"` 写在 `src/lib.rs`
+# 而不在这里。** cargo **不允许「继承 + 局部覆盖」并存**：只要这里写
+# `[lints.rust]`，就报 `cannot override workspace.lints in lints`，
+# 整个工作区连 manifest 都解析不了（2026-10-10 本机 cargo 1.98 实测）。
+# 策略仍由根 Cargo.toml 单一出处，per-crate 不变量写在源码里。
+[lints]
+workspace = true

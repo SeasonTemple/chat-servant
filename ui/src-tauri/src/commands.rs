@@ -5,7 +5,12 @@
 //! 在那之前先不接注入，免得把「以为成功了」写进产品。
 
 use chatservant_core::dispatch::{DeliveryReceipt, Dispatch, Dispatcher};
-use serde::Serialize;
+// `Deserialize` 不只是给某个命令用的：`CloseBehavior` 是 `#[tauri::command]`
+// 的**入参**，Tauri 要求命令参数类型实现 `CommandArg`，
+// 而它的 blanket impl 建立在 `Deserialize` 上。
+// 只 derive `Serialize` 的话编译报 E0277（2026-10-10 本机实测）。
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
@@ -336,15 +341,12 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
 
 /// 档位 → **枚举 id**（`"Manual"` / `"Confirm"` / `"Auto"`）。**IPC 契约用这个。**
 ///
-/// 回读用——让用户看到程序此刻认定的档位，而不是他记得自己点过什么。
-///
-/// ⚠ 这里和 `tier_name` 是**两回事**，2026-10-10 实测踩过（另一台设备先发现，
-/// 2026-10-11 并入）：早先 `get_tier` / `set_tier` 直接返回 `tier_name`
-/// （中文「只填入」），而前端 `types.ts` 的契约是
-/// `type Tier = 'Manual' | 'Confirm' | 'Auto'`。于是设置页里
-/// `TIER_NAME[tier]` 是 `undefined`、档位控件拿 `"只填入"` 去匹配 `data-val`
-/// 也**一个都匹配不上**，控件因此不定位。
-/// **id 归 Rust 定、显示名归前端 `TIER_NAME` 与托盘**——
+/// ⚠ 这里和 `tier_name` 是**两回事**，2026-10-10 实测踩过：
+/// 早先 `get_tier` / `set_tier` 直接返回 `tier_name`（中文「只填入」），
+/// 而前端 `types.ts` 的契约是 `type Tier = 'Manual' | 'Confirm' | 'Auto'`。
+/// 于是 `TIER_NAME[tier]` 是 `undefined` → 面板头部档位名**整格空白**，
+/// `SegSlider` 拿 `"只填入"` 去匹配 `data-val` 也**一个都匹配不上**，
+/// 滑块因此不定位。**id 归 Rust 定、显示名归前端 `TIER_NAME` 与托盘**——
 /// 中文名一改字，前端要跟着改代码才能跟上。
 #[tauri::command]
 pub fn get_tier() -> String {
@@ -476,8 +478,15 @@ fn candidate_text(id: &str) -> Option<String> {
     .flatten()
 }
 
-/// 把某个隐藏窗口挪到屏幕内并显示。**共用一条路径**——
-/// 三个窗口的「打开」逻辑一样，写三遍就是三处能写错的地方。
+/// 把某个隐藏的**辅助**窗口挪到屏幕内并显示。
+///
+/// ⚠ 现在只有 `debug` 一个调用方，注释里原来那句「三个窗口共用一条路径」
+/// 已经不成立了——**因为剩下两个窗口的行为并不一样**：
+///
+/// - 主面板**不能挪**。它停在用户放的位置（`show_panel` 只 show + 聚焦）。
+///   托盘菜单里点「打开设置」时如果把它 `set_position(120,120)`，
+///   用户会发现面板凭空跳了个位置——打开设置这件事不该有副作用。
+/// - 辅助窗口创建时就 park 在屏幕外（`-32000, -32000`），不给坐标就找不到它。
 fn show_window(app: &AppHandle, label: &str) -> Result<(), String> {
     let w = app
         .get_webview_window(label)
@@ -488,30 +497,26 @@ fn show_window(app: &AppHandle, label: &str) -> Result<(), String> {
     w.set_focus().map_err(|e| e.to_string())
 }
 
+/// 打开设置。**设置是主面板里的一屏，不是另一个窗口。**
+///
+/// 早先这里 `show_window(&app, "settings")`，弹的是 640 × 520 的独立窗口。
+/// 现在那个窗口已经删掉了（`tauri.conf.json` 里不再有它），设置搬进了
+/// 面板本身（`PanelSettings.svelte`）。所以这条命令改成两步：
+/// **把面板叫到前面来，再告诉它「切到设置那一屏」**。
+///
+/// 两步都要：面板可能正收在托盘里，也可能停在主区。
+/// 只 emit 不 show 的话，用户点了托盘菜单什么也看不见。
+///
+/// 用 `show_panel` 而不是 `show_window` —— 见上面那条注释：**面板不许挪位置**。
 #[tauri::command]
 pub fn open_settings(app: AppHandle) -> Result<(), String> {
-    show_window(&app, "settings")
+    show_panel(app.clone())?;
+    app.emit("menu:settings", ()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn open_debug(app: AppHandle) -> Result<(), String> {
     show_window(&app, "debug")
-}
-
-/// 把 `settings` 窗口挪到屏幕外。
-///
-/// **为什么要挪而不是直接 `visible: false`**：Tauri 2 的窗口配置里
-/// `visible: false` 会让 WebView2 跳过 drop target 与合成器的注册，
-/// 首次 show 出来可能是白屏或黑屏。挪到屏幕外让它正常初始化，
-/// 用户看不见，但合成器已经就位。
-///
-/// 这条是 ADR-0001 记的 Windows 坑之一。
-pub fn park_settings(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("settings") else {
-        return;
-    };
-    let _ = w.set_position(PhysicalPosition::new(-32000.0, -32000.0));
-    let _ = w.hide();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -527,7 +532,7 @@ pub fn park_settings(app: &AppHandle) {
 // ═══════════════════════════════════════════════════════════════
 
 /// 「关闭时」的行为。与前端 `types.ts` 的 `closeBehavior` 镜像。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CloseBehavior {
     /// 按 × 就是退出。**默认值** —— 没有托盘时这是唯一安全的落点。
@@ -546,13 +551,6 @@ impl Default for CloseBehavior {
     }
 }
 
-/// 关闭行为那个设置文件的**词干**（不含 `.txt`）。
-///
-/// ⚠ 早先它是个没人用的常量，而 `prefs_path` 里另写了一份
-/// `"close_behavior.txt"`——**同一个事实两份拷贝**，改名时必然只改一处。
-/// 现在 `prefs_path` 直接用它拼文件名，这里是唯一的事实来源。
-const CLOSE_BEHAVIOR_FILE: &str = "close_behavior";
-
 /// 读「关闭时」。**读不到就按默认的 `Exit`** —— 那是最不容易出事的那个。
 #[tauri::command]
 pub fn get_close_behavior(app: AppHandle) -> CloseBehavior {
@@ -560,25 +558,12 @@ pub fn get_close_behavior(app: AppHandle) -> CloseBehavior {
 }
 
 /// 写「关闭时」。前端设置页调它。
-///
-/// ⚠ **参数收 `String`，不收 `CloseBehavior`。**
-/// Tauri 的命令参数必须实现 `CommandArg`，也就是要能 `Deserialize`。
-/// `CloseBehavior` 只派生了 `Serialize`（那是**往外发**用的），
-/// 直接当参数会报 `the trait bound CloseBehavior: CommandArg is not satisfied`。
-///
-/// 收字符串再自己解析，和 [`set_tier`] 保持同一套写法——
-/// **一个记法认不出来的值一律走默认档并说明原因**，而不是静默升档。
 #[tauri::command]
-pub fn set_close_behavior(app: AppHandle, behavior: String) -> Result<(), String> {
-    let behavior = match behavior.as_str() {
-        "exit" => CloseBehavior::Exit,
-        "tray" => CloseBehavior::Tray,
-        other => return Err(format!("「{other}」不是合法的关闭行为（只认 exit / tray）")),
-    };
+pub fn set_close_behavior(app: AppHandle, behavior: CloseBehavior) -> Result<(), String> {
     // ⭐ **先验证落点存不存在，再写。**
     // 选了「收进托盘」却没有托盘 = 一个没有落点的动作 = 用户把面板
     // 收走之后它就变成了看不见的僵尸。所以这一档必须在托盘可用时才成立。
-    if behavior == CloseBehavior::Tray && !tray_available(&app) {
+    if behavior == CloseBehavior::Tray && !tray_usable() {
         return Err("托盘不可用，不能设成「收进托盘」—— 那样关掉面板它就藏起来了。".into());
     }
     let path = prefs_path(&app);
@@ -603,7 +588,7 @@ fn prefs_path(app: &AppHandle) -> std::path::PathBuf {
     app.path()
         .app_config_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .join(format!("{CLOSE_BEHAVIOR_FILE}.txt"))
+        .join("close_behavior.txt")
 }
 
 fn read_close_behavior(app: &AppHandle) -> CloseBehavior {
@@ -611,19 +596,59 @@ fn read_close_behavior(app: &AppHandle) -> CloseBehavior {
         return CloseBehavior::default();
     };
     match s.trim() {
-        "tray" if tray_available(app) => CloseBehavior::Tray,
+        "tray" if tray_usable() => CloseBehavior::Tray,
         // 「tray」但托盘没了 → 退回 Exit。**一个失效的设置比没有设置更危险**：
         // 用户以为它还在后台跑，其实它可能已经退出了。
         _ => CloseBehavior::Exit,
     }
 }
 
-/// 托盘是不是真的建起来了。
+/// 托盘的状态。**由 `build_tray` 报结果，不是谁去查谁就知道。**
 ///
-/// **不查「我建过托盘吗」，查「现在还能拿到托盘吗」**——托盘初始化失败
-/// 时 `TrayIcon` 会是 None，而设置里可能还留着 `tray`。
-fn tray_available(app: &AppHandle) -> bool {
-    app.tray_by_id(TRAY_ID).is_some()
+/// 实测（2026-10-10，本机 release + debug 各验）：`tauri.conf.json` 里
+/// 定义的窗口在 `.setup()` **之前**就创建并开始加载，所以主面板会在
+/// `build_tray` 跑之前发出它的第一个 IPC。日志实测顺序：
+///
+/// ```
+/// 07:27:44.79x  托盘图标已就绪            <- build_tray
+/// （更早，面板已拿到 closeBehavior=exit）  <- 面板的第一次提问
+/// ```
+///
+/// 于是面板问的时候托盘「还没报」，两秒后设置视图再问就报 `tray`。
+/// 同一个进程、同一个文件，答案不一样。
+///
+/// 关键是：**「还没报」和「报失败了」不是同一件事。**
+/// 早先的实现把两者都当成 `false`（先是查 `tray_by_id()`，后来换成
+/// 一个默认 `false` 的 AtomicBool），于是「还没报」被当成「用户其实
+/// 没选托盘」，把用户的设置悄悄改掉了——这正是 `−` 永远不出现的原因。
+/// 连跑 5 次，5 次都是先 exit 后 tray。
+///
+/// 只有**明确失败**才配降级：托盘真的建不起来时，一个失效的设置比没有
+/// 设置更危险（用户以为它还在后台跑，其实它已经退出了）。
+static TRAY_STATE: AtomicU8 = AtomicU8::new(TRAY_PENDING);
+
+const TRAY_PENDING: u8 = 0;
+const TRAY_READY: u8 = 1;
+const TRAY_FAILED: u8 = 2;
+
+/// `build_tray` 报结果。两个方向都要显式报——
+/// 「建失败」不报的话，`Pending` 会被当成可用，设置就落在了一个
+/// 没有落点的动作上。
+pub fn set_tray_ready(ready: bool) {
+    TRAY_STATE.store(
+        if ready { TRAY_READY } else { TRAY_FAILED },
+        Ordering::Relaxed,
+    );
+}
+
+/// 「收进托盘」这一档现在能不能成立。
+///
+/// **`Pending` 算能成立**：`build_tray` 是 `.setup()` 的第一件事，
+/// 它一定会跑完。押这一票不会把设置落在不存在的落点上——
+/// 万一它真失败，`read_close_behavior` 下次读的时候会把这一档降回
+/// `Exit`。这才是「失效比没有更危险」要防的方向。
+fn tray_usable() -> bool {
+    TRAY_STATE.load(Ordering::Relaxed) != TRAY_FAILED
 }
 
 /// 托盘图标 id。与 `main.rs` 里建的那一个必须是同一个。
@@ -667,7 +692,7 @@ pub fn quit_app(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 托盘图标跟着档位变。Auto 档开着时带红点 —— 面板看不见的时候，
+/// 托盘图标跟着档位变。**Auto 档带红点** —— 面板看不见的时候，
 /// 这是唯一告诉用户「它还在，而且开着自动」的地方。
 pub fn refresh_tray() {
     let Some(app) = APP.get() else {
@@ -679,72 +704,174 @@ pub fn refresh_tray() {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
-    let title = tray_status_line();
-    let _ = tray.set_tooltip(Some(&title));
-    // 菜单首行就是状态行。**只有这一处** —— 面板和菜单不各写一遍。
+    // 菜单里**没有文字行**了（见 `build_tray_menu`），档位信号走图标 +
+    // tooltip。这两处都不影响菜单尺寸。
+    if let Ok(icon) = tray_icon(current_tier() == Dispatch::Auto) {
+        let _ = tray.set_icon(Some(icon));
+    }
+    let tip = tray_tooltip();
+    let _ = tray.set_tooltip(Some(&tip));
     if let Ok(menu) = build_tray_menu(app) {
         let _ = tray.set_menu(Some(menu));
     }
 }
 
-/// 托盘状态行：「谁 · 什么档位」。
+/// 托盘 tooltip：应用名 + 当前档位。
 ///
-/// ⚠ 报的是**程序锁定并正在处理的**那个会话，不是窗口里当前显示的
-/// 那个 —— 会话身份闸要求只对锁定会话动手，所以这里要回答的是
-/// 「我到底在替谁说话」。
-pub fn tray_status_line() -> String {
-    let peer = current_peer();
-    let who = if peer.is_empty() {
-        "没认出会话".to_string()
-    } else {
-        peer
+/// ⚠ 「副驾 · chat-servant」这个前缀**只有这一处**。早先 `build_tray` 写死
+/// 了一遍、`refresh_tray` 又用状态行整体盖掉一遍，于是名字在两处各活一份。
+pub fn tray_tooltip() -> String {
+    format!("{} · {}", APP_NAME, tray_status_line())
+}
+
+/// 应用名。tooltip 与窗口标题共用。
+const APP_NAME: &str = "副驾 · chat-servant";
+
+/// 托盘图标。`auto` 为真时右下角盖一颗红点。
+///
+/// ⚠ **图标必须显式给**（实测 2026-10-10）：`TrayIconBuilder::with_id(...)`
+/// 不像 `new(app)` 那样自动取应用图标，`bundle.icon` 只喂安装包不喂窗口，
+/// 两头都没有 → 条目在、图标空，而日志照样打「托盘图标已就绪」。
+/// 图编进二进制（`include_bytes!`），不依赖运行期资源路径。
+pub fn tray_icon(auto: bool) -> tauri::Result<tauri::image::Image<'static>> {
+    use std::sync::OnceLock;
+    // 底图只解一次。`refresh_tray` 在每次档位/会话变化时都会跑，
+    // 每回重解一张 PNG 是白烧。
+    static BASE: OnceLock<tauri::Result<(Vec<u8>, u32, u32)>> = OnceLock::new();
+    let cell = BASE.get_or_init(|| {
+        tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
+            .map(|i| (i.rgba().to_vec(), i.width(), i.height()))
+    });
+    let (src, w, h) = match cell {
+        // `cell` 是 `&Result`，所以元组里每一项都是引用——直接透传会变成
+        // `&u32` 传进要 `u32` 的地方，错误信息还指向调用点而不是这里。
+        Ok((s, w, h)) => (s, *w, *h),
+        Err(e) => return Err(tauri::Error::Anyhow(e.into())),
     };
-    format!("{who} · {}", current_tier_cn())
+    let mut px = src.clone();
+    if auto {
+        stamp_auto_dot(&mut px, w, h);
+    }
+    Ok(tauri::image::Image::new_owned(px, w, h))
+}
+
+/// 在 RGBA 缓冲右下角盖一颗实心红点（行主序，4 字节/像素）。
+///
+/// ⚠ 就地改，**不改尺寸**——托盘那边按图标原始尺寸建资源，
+/// 尺寸一变就要重建整个托盘图标。
+fn stamp_auto_dot(px: &mut [u8], w: u32, h: u32) {
+    // ⚠ 半径与圆心是**量出来的，不是随手取的**（2026-10-10 实测）。
+    //
+    // `icons/32x32.png` 里的绿色对话气泡占 x 9..22 / y 8..23。原先半径
+    // 取边长 1/4、圆心 `(w-r-r/3, …)` = (22,22)，圆盘跨到 y=14 ——
+    // 直接压在气泡上，而且红绿撞色，16px 下是一团脏东西。
+    //
+    // 半径 1/6（32px 上是 5）、圆心贴角 (26,26)：圆盘落在 x 21..31 / y 21..31，
+    // 与气泡包围盒**完全不相交**，缩到 16px 还有约 4.5px 直径，认得出。
+    let r = (w.min(h) / 6).max(2) as i64;
+    let cx = w as i64 - r - 1;
+    let cy = h as i64 - r - 1;
+    for y in 0..h as i64 {
+        for x in 0..w as i64 {
+            let dx = x - cx;
+            let dy = y - cy;
+            if dx * dx + dy * dy <= r * r {
+                let i = ((y * w as i64 + x) * 4) as usize;
+                if i + 3 < px.len() {
+                    px[i] = 0xDC;
+                    px[i + 1] = 0x26;
+                    px[i + 2] = 0x26;
+                    px[i + 3] = 0xFF;
+                }
+            }
+        }
+    }
+}
+
+/// 托盘状态：**只报档位**。
+///
+/// ⚠ 菜单里**不再摆这行字**了（用户 2026-10-10：「顶部非要显示个文字行？
+/// 很好看？很有设计感？」）。一个灰的、点不动的首行是 Windows 托盘的老套路，
+/// 不是设计——而且它让菜单凭空多高一行。它现在只喂 tooltip。
+///
+/// ⚠ **会话名不进托盘**（同上，用户判断 + 本机像素实测）。
+///
+/// - 用户看到托盘菜单时，**上下文里根本有那个会话**——菜单是从那个
+///   聊天窗口旁边的托盘点开的。菜单上再写一遍名字不回答任何问题。
+/// - 它曾是菜单里唯一由 **OCR 文本**驱动的字符串，认错字就把菜单撑宽
+///   （实测 3 字名 → 181px，12 字名 → 230px）。
+///   **一个识别错误不该改变界面布局。**
+/// - 档位是**安全相关**的那一半：「自动发送」意味着程序会自己按下去。
+///   它现在由托盘图标的红点承担。
+///
+/// 会话名仍然完整地显示在面板头部（`cs-peer`）和设置里——**托盘不复述，
+/// 不是删掉**。
+pub fn tray_status_line() -> String {
+    tray_status_line_from(&current_tier_cn())
+}
+
+/// 状态行的纯逻辑，单独抽出来是为了能测——`STATE` 是进程级全局，
+/// 测试去动它会跟别的用例互相踩。
+///
+/// ⚠ 空档位**不能变成空字符串**。宁可退回最低档 `Manual`。
+fn tray_status_line_from(tier: &str) -> String {
+    let t = tier.trim();
+    if t.is_empty() {
+        tier_name(Dispatch::Manual)
+    } else {
+        t.to_string()
+    }
 }
 
 /// 托盘菜单。**构造在这里，不在 `main.rs`** —— 它要读档位和会话名，
 /// 那是这个模块的事；`main.rs` 只负责把图标建出来。
-///
-/// ## 为什么不用「build 失败就退化成一条分隔线」
-///
-/// 早先这里给每个 item 写了 `.unwrap_or_else(|_| sep())`，意思是
-/// 「这一项建不出来就拿分隔线顶上」。那是**把失败藏起来**：
-/// 菜单里会安静地少一项，而界面上没有任何地方说明少了什么。
-///
-/// 分隔线本来就该用 `.separator()`——它已经在链上了，不需要兜底。
-/// 真要失败，让它**响**地失败（`?`），菜单建不出来时上层会看到原因。
 pub fn build_tray_menu(app: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
     let mb = MenuBuilder::new(app);
-    // `MenuItemBuilder::build(&M)` 与 `MenuBuilder::build(&M)` **都要传 manager**。
-    // 这是 Tauri 2 的签名，云端那版两处都写成了零参。
-    let item = |id: &str, text: &str, enabled: bool| {
-        MenuItemBuilder::with_id(id, text)
-            .enabled(enabled)
-            .build(app)
-    };
-    // ⚠ 末尾**不用** `Ok(...?)`：`MenuBuilder::build()` 返回的就是
-    // `Result<Menu<R>, tauri::Error>`，与本函数的返回类型一致，
-    // 多包一层 clippy 会报 "enclosing Ok and ? operator are unneeded"。
+    // ⚠ **任何一项建不起来就让整个菜单失败，不降级。**（2026-10-10 本机实测修正）
     //
-    // 另注：这里零参、而上面的 `MenuItemBuilder::build(app)` 要传 manager——
-    // 两个同名方法在同一段代码里，签名还不一样。
+    // 原来每项都写着 `.build().unwrap_or_else(|_| sep())`——
+    // 建失败的菜单项被换成一条**分隔线**。那个降级方向是反的：
+    // 这个菜单里唯一的出口就是末尾那颗「退出」，它一旦建失败就被抹成
+    // 一条横线，于是用户把面板收进托盘之后，**程序又变成停不掉的那个**——
+    // 正好是这次改动要消灭的东西——而且失败是静默的，界面上看不出来。
+    //
+    // 现在让 `?` 直接往上抛：`main.rs` 的 `build_tray` 会 `tracing::error!`
+    // 记下来并**不建托盘**，于是设置里的「收进托盘」会被 `tray_available`
+    // 拒掉，「关闭时 = 退出」照常工作。**降级要看得见。**
+    //
+    // `build(app)` 的 manager 参数是 Tauri 2.12 要求的——零参 `.build()`
+    // 编译不过（E0061）；`PredefinedMenuItem::Separator` 更是 Tauri 1 的
+    // 名字，2.x 里是 `PredefinedMenuItem::separator`。
+    // 直接把 `MenuBuilder` 的结果交出去——`.build()` 本身就返回
+    // `Result<Menu<Wry>, tauri::Error>`，套 `Ok(...?)` 是多余的
+    // （clippy::needless_question_mark，2026-10-10 门禁实测）。
     mb
-        // 首行是**状态，不可点**。面板收起来之后，这是唯一告诉用户
-        // 「它还在、而且开着自动」的地方。
-        .item(&item("status", &tray_status_line(), false)?)
+        // ⚠ **首行没有状态文字行**（2026-10-10，用户要求删掉）。
+        //
+        // 原来是 `MenuItemBuilder::with_id("status", …).enabled(false)`
+        // —— 一行灰的、点不动的文字 + 一条分隔线。它是 Windows 托盘的老套路，
+        // 不是设计，而且白占一行高度。档位信号改由**托盘图标的红点**
+        // 和 **tooltip** 承担，见 `tray_icon` / `tray_tooltip`。
+        .item(&MenuItemBuilder::with_id("show", "显示面板").build(app)?)
+        .item(&MenuItemBuilder::with_id("relock", "锁定当前会话").build(app)?)
+        .item(&MenuItemBuilder::with_id("settings", "打开设置").build(app)?)
+        .item(&MenuItemBuilder::with_id("debug", "识别画布").build(app)?)
         .separator()
-        .item(&item("show", "显示面板", true)?)
-        .item(&item("relock", "锁定当前会话", true)?)
-        .item(&item("settings", "打开设置", true)?)
-        .item(&item("debug", "识别画布", true)?)
-        .separator()
-        .item(
-            &MenuItemBuilder::with_id("quit", "退出")
-                .accelerator("CmdOrCtrl+Q")
-                .build(app)?,
-        )
-        // 零参的是 `MenuBuilder`，**要传参的是 `MenuItemBuilder`**。
+        // ⚠ **「退出」上没有加速键，这是量出来的，不是忘了**（2026-10-10 实测）。
+        //
+        // 原来挂着 `CmdOrCtrl+Q`。Win32 只要**任何一项**带加速键，就给整份
+        // 菜单预留一整列右对齐的空白，所有项都得给它让位——本机像素实测：
+        // 菜单宽 = 最长项文字 + 137px 固定开销，其中加速键列占掉 **73px**，
+        // 整整三分之一，而那一列里除了「Ctrl+Q」五个字符全是空的。
+        //
+        // 换来的功能是「菜单已经用鼠标点开了，再按一下 Ctrl+Q」。
+        // 这个菜单只能右键打开，键盘用户根本到不了这一步，
+        // 那 73px 却要每一行、每一次弹出都付。撤掉。
+        //
+        // 全项目仅此一处加速键，没注册过任何全局快捷键插件（`rg` 实测），
+        // 所以撤掉不会连带失去任何全局热键。要加回就一行。
+        .item(&MenuItemBuilder::with_id("quit", "退出").build(app)?)
         .build()
 }
 
@@ -753,14 +880,17 @@ pub fn build_tray_menu(app: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>,
 /// ⚠ **复用 `get_tier` 那条路径**（`with_state` + `tier_name`），不自己
 /// 再解析一遍。读锁拿不到就按最低档 `Manual` —— **绝不能猜一个更宽松的值**。
 fn current_tier_cn() -> String {
-    with_state(|s| s.tier.get())
-        .map(tier_name)
-        .unwrap_or_else(|| tier_name(Dispatch::Manual))
+    tier_name(current_tier())
 }
 
-/// 程序锁定并正在处理的会话名。空 = 没认出来。
-fn current_peer() -> String {
-    with_state(|s| s.peer.clone()).unwrap_or_default()
+/// 当前档位。读锁拿不到就按最低档 `Manual` —— **绝不能猜一个更宽松的值**。
+fn current_tier() -> Dispatch {
+    with_state(|s| s.tier.get()).unwrap_or(Dispatch::Manual)
+}
+
+/// 当前是不是 Auto 档。`main.rs` 建托盘时要问这个，别自己再读一遍 `STATE`。
+pub fn current_tier_is_auto() -> bool {
+    current_tier() == Dispatch::Auto
 }
 
 /// 当前支持的模型供应商。
@@ -1094,10 +1224,8 @@ pub fn start(app: &AppHandle) {
                     if peer_changed {
                         // 托盘首行写的是「我到底在替谁说话」，
                         // 会话换了就得跟着换。
-                        //
-                        // ⚠ 直接调 `refresh_tray()`，**不要写 `commands::`**——
-                        // 这段代码就在 `commands` 模块里，`commands::`
-                        // 在自己模块内不是一个可解析的路径。
+                        // 同模块内直接调——`commands::` 前缀在这里是
+                        // 2015 edition 的写法，2018 之后不解析（E0433）。
                         refresh_tray();
                     }
                     // ⚠ **不要吞掉 emit 的错误。**
@@ -1324,11 +1452,43 @@ mod budget_ceiling_tests {
         assert!(a.arm("c0", 11), "在新一轮里重新装填后，第二次点击放行");
     }
 
+    /// **托盘状态行就是档位，一个字的修饰都不加。**
+    ///
+    /// 这条锁的是用户 2026-10-10 的判断：菜单是从那个聊天窗口旁边的
+    /// 托盘点开的，**会话名就在用户眼前**，复述它不回答任何问题。
+    /// 而且它曾是菜单里唯一由 OCR 文本驱动的字符串——一个识别错字
+    /// 不该改变界面布局（实测 3 字名 → 菜单 181px，12 字名 → 230px）。
+    ///
+    /// 会话名仍然完整显示在面板头部；这里只是**不复述**。
+    #[test]
+    fn the_status_line_is_exactly_the_tier_and_nothing_else() {
+        for tier in ["只填入", "确认后发", "自动发送"] {
+            let line = tray_status_line_from(tier);
+            assert_eq!(line, tier, "档位被改写了");
+            assert!(
+                !line.contains('·') && !line.contains(' '),
+                "状态行带了修饰：{line:?} —— 会话名就是这么漏回来的"
+            );
+        }
+    }
+
+    /// **首行永远不为空。**
+    ///
+    /// tooltip 里一个空档位读起来就是「副驾 · chat-servant · 」。
+    #[test]
+    fn the_status_line_is_never_blank() {
+        for tier in ["", "   ", "\t\n"] {
+            let line = tray_status_line_from(tier);
+            assert!(!line.trim().is_empty(), "空档位 {tier:?} 让状态空了");
+            assert_eq!(line, tier_name(Dispatch::Manual));
+        }
+    }
+
     /// **`get_tier` / `set_tier` 必须回枚举 id，不能回中文名。**
     ///
-    /// 这是 2026-10-10 实机验出来的缺陷（另一台设备先发现）：
-    /// 后端回「只填入」，前端按 `type Tier = 'Manual' | 'Confirm' | 'Auto'`
-    /// 去索引 → `undefined`，设置页档位控件定位不到滑块。
+    /// 这是 2026-10-10 实机验出来的缺陷：后端回「只填入」，前端按
+    /// `type Tier = 'Manual' | 'Confirm' | 'Auto'` 去索引 → `undefined`，
+    /// 面板头部档位名整格空白，`SegSlider` 也定位不到滑块。
     ///
     /// 判据写死成**前端契约里的三个字面量**，不是「不是中文就行」——
     /// 前端要改 `Tier` 的话，这个测试就该红，那正是它该红的时候。
@@ -1363,6 +1523,76 @@ mod budget_ceiling_tests {
             "nope",
         ] {
             assert_eq!(parse_tier(raw), Dispatch::Manual, "{raw:?} 不该被升档");
+        }
+    }
+
+    /// **tooltip 必须带应用名。**
+    ///
+    /// 早先 `build_tray` 写死一份「副驾 · chat-servant」、`refresh_tray`
+    /// 又用状态行整体盖掉它，于是名字在两处各活一份。现在只有一处。
+    #[test]
+    fn the_tray_tooltip_keeps_the_app_name() {
+        let tip = tray_tooltip();
+        assert!(tip.starts_with(APP_NAME), "tooltip 丢了应用名：{tip:?}");
+        assert!(tip.contains("·"), "tooltip 没有档位那半：{tip:?}");
+        assert_eq!(
+            tip,
+            format!("{APP_NAME} · 只填入"),
+            "状态是全局的，别硬编码"
+        );
+    }
+
+    /// **Auto 红点必须落在角落，且绝不压到图标本体上。**
+    ///
+    /// 用**真实的底图**跑，不是造一张全零缓冲——气泡在哪只有真图说了算。
+    /// 判据是「红色像素集合」与「底图里非暗像素集合」不相交，
+    /// 不是钉死某个坐标（圆心/半径是实现细节）。
+    #[test]
+    fn the_auto_dot_never_covers_the_logo() {
+        let base = tray_icon(false).expect("底图解不出来");
+        let (w, h) = (base.width(), base.height());
+        let src = base.rgba().to_vec();
+        let mut dotted = src.clone();
+        stamp_auto_dot(&mut dotted, w, h);
+
+        assert_eq!(src.len(), dotted.len(), "红点改了缓冲长度");
+
+        let px = |buf: &[u8], x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * w + x) * 4) as usize;
+            [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+        };
+        const RED: [u8; 4] = [0xDC, 0x26, 0x26, 0xFF];
+
+        let mut red = Vec::new();
+        let mut touched = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                let before = px(&src, x, y);
+                let after = px(&dotted, x, y);
+                if before != after {
+                    touched += 1;
+                }
+                if after == RED {
+                    red.push((x, y, before));
+                }
+            }
+        }
+
+        assert!(!red.is_empty(), "红点一个像素都没画出来");
+        assert_eq!(touched, red.len(), "除了红点还有别的东西被动过");
+        assert!(
+            red.len() < (w * h) as usize / 4,
+            "红点占了 {} 个像素，缩到 16px 会糊成一坨",
+            red.len()
+        );
+
+        // ⚠ 底图上这里本来就是「logo 的一部分」，被红点盖掉就等于毁了图标。
+        // 深色圆底（≈#2b2b2b）不算 logo，绿色气泡算。
+        for (x, y, before) in &red {
+            let covers_ink =
+                before[3] > 32 && (before[0] as i32 + before[1] as i32 + before[2] as i32) > 150;
+            assert!(!covers_ink, "红点 ({x},{y}) 盖住了图标的 {before:?}");
+            assert!(*x > w / 2 && *y > h / 2, "红点 ({x},{y}) 不在右下角");
         }
     }
 }

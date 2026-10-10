@@ -27,6 +27,8 @@ use crate::model::{Candidate, DraftSet, Intent, ReasonError, Reasoner, TurnConte
 pub struct Turn {
     /// 判断结果。**判断失败时是 [`Intent::unknown`]**，`Intent::summary()` 会说「没判断」。
     pub intent: Intent,
+    /// 候选集合。**已排序、已清洗**：这一份可以直接交给界面或输入框，
+    /// 不用再做任何后处理——排序与清洗都在 [`turn`] 里做完了。
     pub draft: DraftSet,
     /// 这个 `Intent` 是真的判断出来的，还是降级来的。
     pub judged: bool,
@@ -56,6 +58,11 @@ impl Turn {
         }
     }
 
+    /// 推荐条：排序后第一条，也就是用户最可能选的那一条。
+    ///
+    /// 走 [`DraftSet::recommended`]——排序失败降级成按概率排时，
+    /// 「第一条」的含义不变：它仍然是概率最高的那条，不是生成顺序的第一条。
+    /// `None` 只在一条候选都没有时出现，而 [`turn`] 保证不会这样返回。
     pub fn recommended(&self) -> Option<&Candidate> {
         self.draft.sorted().first().copied()
     }

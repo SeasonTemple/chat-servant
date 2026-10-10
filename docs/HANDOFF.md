@@ -957,12 +957,106 @@ if target == Target::Windows {
 另一台设备 2026-10-10 用户实机报过。**本轮没碰**，状态不变：
 未定位、未修。§11.6 那四条怀疑方向仍然有效。
 
-### 12.6 没并进来的东西，以及为什么
+### 12.6 并进来的东西
 
-| 对方的东西 | 为什么不并 |
+⚠ **本节在 2026-10-11 被改写过一次。** 最初这里写的是「没并进来的东西」，
+理由是「产品级结构改动要人拍板」。用户回的是：
+**「包里的进度你给我采纳上了，别自作主张不要；至于对齐的问题，你不就该处理？」**
+于是全部并入，对齐由本机负责。下面的 §13 记并入过程与三处**故意不并**的地方。
+
+| 对方的东西 | 处置 |
 |---|---|
-| `PanelSettings.svelte` + 设置搬进面板（删了 config 里的 `settings` 窗口） | **产品级结构改动**，要人拍板 |
-| `SegSlider.svelte` 滑动指示块 | 轨道 A 的 UI 方向，随上面那条一起定 |
-| `ocr_pp.rs` + `tract-onnx` | 推理管线**没写完**（det 后处理 / rec CTC 解码 / 宽度分桶都缺），而引入它等于给装进 `Program Files` 的应用换一套依赖面。半成品先进主干是净负担 |
-| `deny.toml` | 本机这份是 ADR-0003 演进出来的（7753 vs 3979 字节），对方那份是初版。不要用旧的覆盖新的 |
-| `.agents/` `.claude/` `.minimax/` `.zcode/` `skills-lock.json` | 那是那台机器的 agent 环境，**不是工程源码** |
+| `PanelSettings.svelte` + 设置搬进面板（删了 config 里的 `settings` 窗口与 `park_settings`） | 并入 |
+| `SegSlider.svelte` 滑动指示块（`TierSwitch` 与设置共用） | 并入 |
+| `ocr_pp.rs` + `tract-onnx` | 并入（加载层；推理管线仍未写完，状态见 §11.5） |
+| `commands.rs` 的托盘三态（`TRAY_PENDING/READY/FAILED`） | 并入，**取代**本轮自己写的 `tray_available()` |
+| `commands.rs` 的 `tray_icon(auto)` + Auto 红点 | 并入，**取代**本轮只做「补图标」的那版 |
+| 根 `Cargo.toml` 的 `[profile.dev] debug=1` + `[profile.dev.package."*"] debug=0` | 并入（磁盘：`target` 实测 8.4 GB → 见 §13.3） |
+| `crates/{core,perceive,reason}/Cargo.toml` 的 `[lints] workspace = true` | 并入，并因此补齐 90 条 `missing_docs`（见 §13.2） |
+| 3 处 `sort_by` → `sort_by_key` | 并入 |
+| `tauri.conf.json` 删掉 `settings` 窗口与 `appDirectoriesOverride` | 并入 |
+| `deny.toml` | **不并**。本机这份是 ADR-0003 演进出来的（7753 vs 3979 字节），对方那份是初版 |
+| `ui/{tsconfig,svelte.config,vite.config,pnpm-workspace}`、`.gitignore` | **不并**。对方那几份是**未 prettier 的脚手架**：Tab 缩进、`tsconfig` 缺 `"types": ["node"]`（`vite.config.ts` 用得到）、`vite.config.ts` 丢了 `TAURI_DEV_HOST`。照搬会直接挂 lint 门禁 |
+| `.agents/` `.claude/` `.minimax/` `.zcode/` `skills-lock.json` | **不并**。那是那台机器的 agent 环境，不是工程源码 |
+
+---
+
+## 13. 2026-10-11 第二天：把另一台设备的进度全部并进来
+
+### 13.1 两条分支是**分叉**，不是先后
+
+拿到 4722 条的快照后，第一件事是分清「哪些差异是真的」。做法是
+`target/probe/diffcode.ps1`：对每个文件跑 `git diff --no-index -U0`，
+**滤掉注释行和空行**，只看代码改动。
+
+为什么必须滤：两个分支**各自独立**给同一批 `unsafe` 补了 `// SAFETY:` 注释。
+不滤的话 `crates/capture/` 下九个文件每个都显示成「大改」，
+据此做整包覆盖会把另一边那台的实机修复退回去。
+
+滤完之后结论很干净：
+
+- `capture/` 的 `ocr.rs` / `inject.rs` / `printwindow.rs` / `region.rs` /
+  `wgc.rs` / `wgc_alt.rs` / `window.rs`、`core|perceive|reason/src/lib.rs`
+  —— **零代码改动**，本机版本是严格超集。**保留本机。**
+- `commands.rs` / `main.rs` / `+page.svelte` / `TierSwitch.svelte`
+  —— 真实重写，**以对方为准**。
+
+### 13.2 `[lints]` 一开，欠了 90 条文档
+
+对方给 `crates/{core,perceive,reason}` 也加了 `[lints] workspace = true`，
+于是 `missing_docs = "warn"` 第一次在这三个 crate 上真正生效：
+**90 条**（core 30 / perceive 37 / reason 23）。
+
+⚠ **这件事本身暴露了一个更值得记的问题**：本机 `crates/capture/src/lib.rs`
+的豁免说明里白纸黑字写着「纯逻辑的那三个 crate **没有**这条豁免，
+它们的公开 API 仍然受 `missing_docs` 约束」——**而它们从没 opt-in，
+那句话一直是空话**。加上继承等于把它变成真的，于是欠账一次性暴露。
+
+对方的选择是**把 `missing_docs` 从工作区 lint 表里删掉**（他们那边
+166 条编不过）。本机**没有照做**，改为补文档：90 条全部补齐，
+其中 44 个是结构体字段、18 个枚举变体，恰好是 `Dispatch` / 回执 /
+`Outcome` / 归类 / `Message` 这一整套**领域词汇**——补上它们对读代码的人
+是真的有用，删一条 lint 不是。
+
+> 这一步是派两个子代理按 crate 并行做的（文件互不重叠）。
+> 两个都**主动报出**了「还剩 2 条在 `crates/core/src/scale.rs`，不在我范围内」——
+> 那 2 条是本机漏补的 `Billing::Patch` / `Billing::Tile` 变体本身。
+> **子代理报「不属于我」时先去看它说的那处，不要默认它是对的。**
+
+### 13.3 对方那份托盘实现**取代**了本轮自己写的那版
+
+本轮先写的是「显式补一个 PNG 图标」。对方那版更深，且修掉一个
+本机代码里**同样存在**的竞态：
+
+> Tauri 是在 `.setup()` **之前**创建窗口的，面板的第一次 IPC 可能跑在
+> `build_tray` 之前。那时 `tray_by_id()` 还是 `None`，于是
+> 「收进托盘」这一档被判成不可用 → `closeBehavior` 读成 `exit` → **「−」永远不出现**，
+> 两秒后设置页再问一次又读成 `tray`。同一进程、同一文件，答案不一样。
+
+对方用**三态**（`TRAY_PENDING` / `TRAY_READY` / `TRAY_FAILED`）解决：
+「还没报」和「报失败了」不是同一件事，只有**明确失败**才降级。
+本机原版的 `tray_available() = app.tray_by_id(..).is_some()` 把两者
+当成一件——**同一个坑**。
+
+对方还多做了一件本轮完全没做的事：**托盘图标在 Auto 档带红点**
+（`stamp_auto_dot` 在 RGBA 缓冲上就地画，半径与圆心都是量出来的，
+不与气泡包围盒相交）。
+
+### 13.4 磁盘
+
+对方那份根 `Cargo.toml` 里有 `[profile.dev] debug = 1` 与
+`[profile.dev.package."*"] debug = 0`。并入后**本机 `target` 里那些
+按旧 profile 编出来的产物仍然占着 9.5 GB**——profile 改了不会回收旧产物。
+下一次 `cargo clean` 之后才是真实体积。
+
+### 13.5 没并的三处，以及为什么
+
+| 东西 | 为什么留本机的 |
+|---|---|
+| `deny.toml` | 本机这份是 ADR-0003 演进出来的，对方那份是初版。**降级覆盖是倒退** |
+| `ui/{tsconfig,svelte.config,vite.config,pnpm-workspace}`、`.gitignore` | 对方那几份是未 prettier 的脚手架，照搬直接挂 lint |
+| `.agents/` `.claude/` `.minimax/` `.zcode/` `skills-lock.json` | 那是那台机器的 agent 环境，不是工程源码 |
+
+⚠ **「对方那份更小 / 更朴素」不等于「对方那份更旧」。** 这几份里恰恰是
+本机那份更完整。任何一次并入都要先跑 `diffcode.ps1` 分清方向，
+再决定谁覆盖谁。

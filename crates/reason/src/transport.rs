@@ -76,7 +76,17 @@ impl Provider {
 /// 各家模型 API 的差异都收在这一处。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
+    /// OpenAI：走 **OpenAI 兼容**协议（`POST /v1/chat/completions?model=…`）。
+    ///
+    /// 是 [`Provider::is_openai_compatible`] 判定的基准那一家，
+    /// 新接的兼容服务默认跟它对齐，差异只在端点与模型名两项数据上。
     OpenAi,
+    /// Anthropic：**原生协议**，不是 OpenAI 兼容的。
+    ///
+    /// 三处都不一样：鉴权头（`x-api-key` 而非 `Bearer`）、
+    /// 模型的传递方式（请求体而非 query）、响应里取文字的指针
+    /// （`/content/0/text`）。而且图要排在文字**前面**。
+    /// 所以「加一家 provider 就是加一行」在这里不成立，它要占一个独立 arm。
     Anthropic,
     /// MiniMax，走 **OpenAI 兼容**接口。
     ///
@@ -93,6 +103,11 @@ pub enum Provider {
 }
 
 impl Provider {
+    /// 配置、设置页、命令行里用的短名。**稳定标识，不是显示名**——
+    /// 改名会让用户已存的配置读不出来。
+    ///
+    /// 反向是 [`Provider::from_key`]；日志里报 provider 用的也是它
+    /// （而不用枚举的 Debug，那是给开发者看的）。
     pub fn key(self) -> &'static str {
         match self {
             Self::OpenAi => "openai",
@@ -322,6 +337,12 @@ impl std::fmt::Debug for HttpReasoner {
 }
 
 impl HttpReasoner {
+    /// 装好一个发真请求的推理器。**模型名取 [`Provider::models`] 的默认值**，
+    /// 两段同一个模型——判断那段的输出只有几十个字，换模型换不出什么，
+    /// 却是多一份费用和一份延迟。
+    ///
+    /// 超时固定 20 秒，出网全在 [`Http`] 后面，
+    /// 所以测试传假 `Http` 就完全不联网。
     pub fn new(
         http: std::sync::Arc<dyn Http + Send + Sync>,
         provider: Provider,
@@ -341,6 +362,12 @@ impl HttpReasoner {
         }
     }
 
+    /// 累计发出的模型请求数（三段合计）。
+    ///
+    /// **失败的请求也算一次**——计数在发送前就加了，理由是它要回答
+    /// 「我花了多少次请求」，而不是「成功了几次」。
+    /// 「静默期零调用」那条硬约束就靠它在静默期断言为 0；
+    /// 分段数字走 [`Reasoner::stage_calls`]。
     pub fn calls(&self) -> u32 {
         self.calls.get()
     }

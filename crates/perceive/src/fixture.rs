@@ -55,6 +55,8 @@ use std::collections::{HashMap, VecDeque};
 
 use chatservant_core::frame::{Frame, Rect};
 
+/// 一个像素的 RGB。用定长数组而不是自定义类型，是因为所有判据都是
+/// 逐通道比数值，没有需要挂在它上面的行为。
 pub type Rgb = [u8; 3];
 
 /// 颜色比较容差。实测面板底色在帧内完全一致，只有抗锯齿边缘会差一点点。
@@ -126,6 +128,11 @@ struct BlockInfo {
     purity: f32,
 }
 
+/// 两个颜色是否近到可以当同一个（每个通道差 ≤ [`COLOR_TOL`]）。
+///
+/// 这是**宽松**比较，只在「这块区域大致是什么底色」这类粗判据上用。
+/// ⚠ 脱敏的判定闸是 [`IS_BG_TOL`]（容差 2）而不是这里——宽松容差会让气泡内深字
+/// `rgb(22,22,22)` 被当成面板底色，正是「绿气泡上正文仍是深色麻点」的成因。
 pub fn near_color(a: Rgb, b: Rgb) -> bool {
     near_with(a, b, COLOR_TOL)
 }
@@ -173,7 +180,7 @@ fn scan(frame: &Frame, r: Rect, accept: impl Fn(Rgb) -> bool) -> HashMap<Rgb, us
 /// 一个矩形里出现最多的若干个精确色。
 pub fn dominant_in(frame: &Frame, r: Rect, limit: usize) -> Vec<Rgb> {
     let mut v: Vec<(Rgb, usize)> = scan(frame, r, |_| true).into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|a| std::cmp::Reverse(a.1));
     v.into_iter().take(limit).map(|(c, _)| c).collect()
 }
 

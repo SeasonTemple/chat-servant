@@ -25,6 +25,7 @@ pub mod anchor_diag;
 pub mod inject;
 pub mod media;
 pub mod ocr;
+pub mod ocr_pp;
 pub mod printwindow;
 pub mod region;
 pub mod surface;

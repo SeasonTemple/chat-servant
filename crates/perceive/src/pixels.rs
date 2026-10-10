@@ -4,12 +4,17 @@ use std::collections::HashMap;
 
 use chatservant_core::frame::{Frame, Rect};
 
+/// 一个像素的 RGB，三个通道各 0~255。
 pub type Rgb = [u8; 3];
 
 /// 两个颜色的容差。实测面板底色在帧内**完全一致**（`rgb(30,30,31)` 到处一样），
 /// 只有文字抗锯齿边缘会差一点点，所以 12 有很大余量。
 pub const COLOR_TOL: i32 = 12;
 
+/// 两个颜色是否近到可以当同一个（**逐通道**比，容差 [`COLOR_TOL`]）。
+///
+/// 注意这是逐通道而非欧氏距离：面板底色的判据要的是「同一个颜色到处都一模一样」，
+/// 抗锯齿边缘只会让某一个通道差一点点，逐通道比才不会把它们误算成不同底色。
 pub fn near(a: Rgb, b: Rgb) -> bool {
     let d = |x: u8, y: u8| (x as i32 - y as i32).abs();
     d(a[0], b[0]) <= COLOR_TOL && d(a[1], b[1]) <= COLOR_TOL && d(a[2], b[2]) <= COLOR_TOL

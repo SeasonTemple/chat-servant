@@ -114,6 +114,17 @@ wgc = "2.0"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+# ── OCR：PP-OCRv4 的 ONNX 推理（`crates/capture/src/ocr_pp.rs`）──
+#
+# 选 `tract-onnx` 而不是 `ort`：**纯 Rust**，不需要 ONNX Runtime 的 C++
+# 动态库。`ort` 会给一个装进 `C:\Program Files` 的应用塞一份额外二进制依赖，
+# 而这份程序是**单机、离线、零 token** 的——多一个运行时就是多一个装不上的理由。
+#
+# 许可证 MIT OR Apache-2.0（`cargo info` 核实过），符合 ADR-0003 的门槛。
+# ⚠ 模型权重（RapidOCR，PP-OCRv4 的 ONNX 导出）约 16MB，**不提交进仓库**，
+# 运行时从 `%APPDATA%\dev.chatservant.app\models\` 读；没放就退回
+# `Windows.Media.Ocr`，而不是启动失败。
+tract-onnx = "0.23"
 # 夹具 manifest 记 sha256，黄金测试据此报出「是哪一个夹具被改坏了」。
 # RustCrypto 的 `sha2` 是 MIT OR Apache-2.0，符合本仓库的许可门槛（ADR-0003）。
 sha2 = "0.10"
@@ -127,3 +138,30 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# ── dev profile：调试信息瘦身（实测 2026-10-10，另一台设备先做）──
+#
+# 之前根本没有 `[profile.dev]`，于是吃的是默认值 `debug = 2`（**全量**
+# 调试信息）。单 `chat_servant_app.pdb` 就173 MB，加上反复改配置留下的
+# 旧 PDB，`target/debug` 一度到 **6.8 GB**、`target` 合计 **8.4 GB**。
+# 整个工作区的构建产物全部躺在项目里，而这是唯一一台机器。
+#
+# ## `debug = 1` 而不是 `0`
+#
+# `1` = 只保留**行号表**：断点还能落在正确的行上，panic 回溯还带行号，
+# 但不再携带完整类型与变量信息。`0` 会把行号表也砍掉，断点直接失效——
+# 那等于把调试能力换成了空间，不划算。
+#
+# ⚠ 用 `-D warnings` 的门禁跑不到这里；`debug` 不影响正确性，
+# 只影响产物大小和调试体验，所以它不属于 lint 策略那一层。
+[profile.dev]
+debug = 1
+
+# 依赖 crate **不要**调试信息。
+#
+# 这一条才是大头：`target/debug/deps` 实测 3.5 GB，光 `libwindows-*.rlib`
+# 一个就 201 MB。而我们从来没有断进 `windows` / `tauri` 里去——
+# 要断的是自己那几百行。给依赖留全量调试信息，是为一个从没用过的能力
+# 付每一兆。
+[profile.dev.package."*"]
+debug = 0

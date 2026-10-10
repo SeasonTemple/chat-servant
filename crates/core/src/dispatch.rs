@@ -104,7 +104,9 @@ impl fmt::Display for Dispatch {
 
 /// 指数退避的上限与次数。
 pub const MAX_RETRIES: u32 = 3;
+/// 第一次重试等多久（毫秒）。之后每翻一倍。
 pub const BASE_BACKOFF_MS: u64 = 800;
+/// 退避的封顶。再翻下去用户等不起，等不起就会以为程序死了。
 pub const MAX_BACKOFF_MS: u64 = 8_000;
 
 /// 第 `attempt` 次重试要等多久（`attempt` 从 0 起）。
@@ -122,11 +124,24 @@ pub fn backoff_ms(attempt: u32) -> Option<u64> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Next {
     /// 到点了，可以再投一次。
-    Retry { after_ms: u64, attempt: u32 },
+    Retry {
+        /// 距现在至少要等这么久。
+        after_ms: u64,
+        /// 这是第几次重试，从 0 起。用来把界面上「又失败一次」说清楚。
+        attempt: u32,
+    },
     /// 停下来等**人**。程序不许自己继续。
-    Halt { reason: String },
+    Halt {
+        /// 为什么停下来。**必须是人能读懂的一句话**，不是错误码。
+        reason: String,
+    },
     /// 投递失败，但要降档重试——必须由**人**确认后才继续。
-    NeedsConfirmation { proposed: Dispatch, reason: String },
+    NeedsConfirmation {
+        /// 建议切到哪一档。**只是建议**，程序不会自己切。
+        proposed: Dispatch,
+        /// 为什么需要人确认。
+        reason: String,
+    },
 }
 
 impl Next {
@@ -158,6 +173,7 @@ impl Dispatcher {
         }
     }
 
+    /// 当前档位。**只读**——升档的唯一入口是 [`Dispatcher::set_tier`]。
     pub fn tier(&self) -> Dispatch {
         self.tier
     }
