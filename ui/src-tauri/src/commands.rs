@@ -334,27 +334,29 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
     }
 }
 
-/// 档位 → 界面认得的字符串。**回读用**——让用户看到程序此刻认定的档位，
-/// 而不是他记得自己点过什么。
+/// 档位 → **枚举 id**（`"Manual"` / `"Confirm"` / `"Auto"`）。**IPC 契约用这个。**
+///
+/// 回读用——让用户看到程序此刻认定的档位，而不是他记得自己点过什么。
+///
+/// ⚠ 这里和 `tier_name` 是**两回事**，2026-10-10 实测踩过（另一台设备先发现，
+/// 2026-10-11 并入）：早先 `get_tier` / `set_tier` 直接返回 `tier_name`
+/// （中文「只填入」），而前端 `types.ts` 的契约是
+/// `type Tier = 'Manual' | 'Confirm' | 'Auto'`。于是设置页里
+/// `TIER_NAME[tier]` 是 `undefined`、档位控件拿 `"只填入"` 去匹配 `data-val`
+/// 也**一个都匹配不上**，控件因此不定位。
+/// **id 归 Rust 定、显示名归前端 `TIER_NAME` 与托盘**——
+/// 中文名一改字，前端要跟着改代码才能跟上。
 #[tauri::command]
 pub fn get_tier() -> String {
-    with_state(|s| s.tier.get())
-        .map(tier_name)
-        .unwrap_or_else(|| tier_name(Dispatch::Manual))
+    tier_id(with_state(|s| s.tier.get()).unwrap_or(Dispatch::Manual))
 }
 
-/// 改档。**返回真实生效值**——界面上要显示程序认定的那个。
+/// 改档。**返回真实生效的 id**——界面上要显示程序认定的那个。
 #[tauri::command]
 pub fn set_tier(tier: String) -> String {
     // 认不出来的一律当 Manual。**不许因为解析失败就升档。**
-    let d = match tier.as_str() {
-        "Auto" => Dispatch::Auto,
-        "Confirm" => Dispatch::Confirm,
-        _ => Dispatch::Manual,
-    };
-    let real = with_state(|s| s.tier.set(d))
-        .map(tier_name)
-        .unwrap_or_else(|| tier_name(Dispatch::Manual));
+    let d = parse_tier(&tier);
+    let real = tier_id(with_state(|s| s.tier.set(d)).unwrap_or(Dispatch::Manual));
     // ⭐ 在 `with_state` **之后**刷——锁已经放掉了，这里再拿就是死锁。
     // 档位变了，托盘首行和图标状态必须跟着变：面板看不见的时候，
     // 它是唯一告诉用户「开着自动」的地方。
@@ -362,6 +364,29 @@ pub fn set_tier(tier: String) -> String {
     real
 }
 
+/// 前端 id → 档位。**解析失败一律落到 `Manual`**（最低档），
+/// 不升档、不报错——面板刚起来时还没有状态可读，报错只会让用户看见一句红字。
+fn parse_tier(raw: &str) -> Dispatch {
+    match raw {
+        "Auto" => Dispatch::Auto,
+        "Confirm" => Dispatch::Confirm,
+        _ => Dispatch::Manual,
+    }
+}
+
+/// 档位 → IPC 契约里的枚举 id。见 `get_tier` 的说明：这是**给前端拿去索引
+/// `TIER_NAME` / `data-val` 的键**，不是给人看的字。
+fn tier_id(d: Dispatch) -> String {
+    match d {
+        Dispatch::Manual => "Manual",
+        Dispatch::Confirm => "Confirm",
+        Dispatch::Auto => "Auto",
+    }
+    .to_string()
+}
+
+/// 档位 → **中文显示名**。**只给人看**：托盘 tooltip、投递回执的说明文字。
+/// 前端拿不到这个，它自己有 `TIER_NAME`。
 fn tier_name(d: Dispatch) -> String {
     match d {
         Dispatch::Manual => "只填入",
@@ -1297,5 +1322,47 @@ mod budget_ceiling_tests {
         assert!(!a.arm("c0", 10));
         assert!(!a.arm("c0", 11), "readout 前进后旧装填必须作废");
         assert!(a.arm("c0", 11), "在新一轮里重新装填后，第二次点击放行");
+    }
+
+    /// **`get_tier` / `set_tier` 必须回枚举 id，不能回中文名。**
+    ///
+    /// 这是 2026-10-10 实机验出来的缺陷（另一台设备先发现）：
+    /// 后端回「只填入」，前端按 `type Tier = 'Manual' | 'Confirm' | 'Auto'`
+    /// 去索引 → `undefined`，设置页档位控件定位不到滑块。
+    ///
+    /// 判据写死成**前端契约里的三个字面量**，不是「不是中文就行」——
+    /// 前端要改 `Tier` 的话，这个测试就该红，那正是它该红的时候。
+    #[test]
+    fn the_ipc_tier_is_the_frontend_enum_id_not_a_display_name() {
+        for (d, id) in [
+            (Dispatch::Manual, "Manual"),
+            (Dispatch::Confirm, "Confirm"),
+            (Dispatch::Auto, "Auto"),
+        ] {
+            assert_eq!(tier_id(d), id, "{d:?} 的 IPC id 与前端 Tier 契约不符");
+            assert_eq!(parse_tier(id), d, "{id:?} 解析回来不是同一个档");
+            // 显示名是另一条路。它一进来，滑块就又不动了。
+            assert_ne!(tier_id(d), tier_name(d), "{d:?} 的 id 和显示名撞了");
+        }
+    }
+
+    /// **认不出来的档位一律落到最低档，不许升档。**
+    ///
+    /// 面板刚起来、状态还读不到时会传空串过来；那里不能报错弹红字，
+    /// 更不能猜一个更宽松的值。
+    #[test]
+    fn an_unparsable_tier_falls_back_to_manual_never_up() {
+        for raw in [
+            "",
+            "   ",
+            "auto",
+            "AUTO",
+            "自动发送",
+            "只填入",
+            "Manual ",
+            "nope",
+        ] {
+            assert_eq!(parse_tier(raw), Dispatch::Manual, "{raw:?} 不该被升档");
+        }
     }
 }

@@ -5,7 +5,7 @@
 >
 > 文档里所有「实测」结论都带日期和证据来源。没写「实测」的是推断，别当事实用。
 >
-> 最后更新：2026-10-09
+> 最后更新：2026-10-10
 
 ---
 
@@ -15,8 +15,45 @@ Windows 桌面程序：在你自己的微信单聊窗口旁边挂一块悬浮面
 调模型起草 2~3 条回复，落在面板上，你点一下填进输入框，再点一次才发。
 **默认档只填不发。**
 
-全链路已在真机上跑通并**真的发出去一条消息**。现在卡在三个点上：
-界面还要再设计一轮、OCR 识别率不够、要一个能在没有微信的情况下改代码的姿势。
+全链路已在真机上跑通并**真的发出去一条消息**。
+
+> ⚠ **本次交接（2026-10-10）先读这一节。** 下面 §1~§10 是长期积累的
+> 背景与「已证伪的路」，仍然有效；但**当天的进展与新发现集中在 §11**，
+> 包括一个**未修的产品缺陷：切换微信会话后聊天内容不更新**。
+
+---
+
+## 0.1 本次交接状态快照（2026-10-10）
+
+### 门禁（全部实跑过，不是抄的）
+
+| 门禁 | 结果 |
+|---|---|
+| `cargo clippy --workspace --all-targets -- -D warnings` | **EXIT=0** |
+| `cargo test --workspace --lib --bins --tests` | **250 passed / 0 failed** |
+| `pnpm run check` | 0 errors 0 warnings |
+| `cargo deny check` | licenses / bans / sources **ok**；**advisories FAILED**（4 条，见 §11.4） |
+
+⚠ **doctest 跑不起来是本机缺 `rustdoc.exe`**（`rustdoc.pdb` 在、`.exe` 不在），
+不是代码问题。门禁一律用 `--lib --bins --tests`。
+
+### 进程状态
+
+**全部已停**：应用进程 0、node 0、1420 端口无人监听。
+打包时 `target/` 与 `node_modules/` 已排除。
+
+### 做完的（当天）
+
+1. **档位 IPC 契约缺陷**（既有缺陷，本轮修掉）——见 §11.1。
+2. **分段控件改滑动指示块**——见 §11.2。
+3. **cargo-deny 装好并跑通**，新建 `deny.toml`——见 §11.3。
+4. **OCR 加载层跑通**（PP-OCRv4 det/rec 都能编译、能推理）——见 §11.5。
+
+### 没做完的（别当已交付）
+
+- **OCR 推理管线**：det 后处理、rec CTC 解码、**rec 宽度分桶**都还没写。
+- **新发现的缺陷：切换微信会话后聊天内容不更新**——见 §11.6。**未修，未定位。**
+- **cargo deny 的 4 条 advisories** 未决——见 §11.4。
 
 ---
 
@@ -615,3 +652,317 @@ pwsh -File scripts\uia-set.ps1 <hwnd> "文本"   # UIA 写入，不抢鼠标
 | `d55ec51` | Confirm 档死胡同 + 两份拼接 + 夹具模式 + `docs/HANDOFF.md` |
 | `3adb9c6` | `?demo` 模式——界面脱离 Tauri 在浏览器跑 |
 | `9d88249` | 部署用瘦源码副本脚本 |
+
+---
+
+## 11. 2026-10-10 当天进展（**先读这一节**）
+
+> §1~§10 是长期背景。这节只记当天做的事与**当天撞到的东西**。
+
+### 11.1 档位 IPC 契约缺陷（**已修**，既有缺陷不是当天引入的）
+
+**症状**：面板主视图头部**档位名整格空白**；设置里的档位滑块不定位。
+放大截图 `%TEMP%\cs-header-zoom.png` 证实：头部显示
+「没认出会话 | ⚙ | ··· | − | ×」，**档位槽是空的**。
+
+**根因**：`ui/src-tauri/src/commands.rs` 里，`get_tier` / `set_tier`
+**返回中文显示名**，而前端契约 `ui/src/lib/types.ts` 要的是枚举 id：
+
+```ts
+export type Tier = 'Manual' | 'Confirm' | 'Auto';
+```
+
+于是 `+page.svelte:562` 拿到「只填入」，`+page.svelte:690` 的
+`TIER_NAME[tier]` 是 `undefined` → 渲染空白；
+`SegSlider` 拿 `"只填入"` 去匹配 `data-val` 也**一个都匹配不上** → 滑块不定位。
+
+**修法**：把「IPC 用的 id」和「给人看的中文名」**拆成两个函数**：
+
+| 函数 | 返回 | 谁在用 |
+|---|---|---|
+| `tier_id(Dispatch)` | `"Manual"` / `"Confirm"` / `"Auto"` | `get_tier` / `set_tier`（IPC） |
+| `tier_name(Dispatch)` | 「只填入」/「确认后发」/「自动发送」 | 托盘 tooltip、投递回执说明文字 |
+
+外加 `parse_tier(&str) -> Dispatch`，**解析失败一律落 `Manual`**（最低档）。
+
+**为什么这么分**：中文名一改字，前端要跟着改代码才能跟上；而 Rust 已经是
+显示名的唯一事实来源。**id 是契约，中文名是显示**，两件事不该共用一个出口。
+
+**新增测试**（`commands.rs`）：
+- `the_ipc_tier_is_the_frontend_enum_id_not_a_display_name`——把前端的三个
+  字面量**写死进断言**。前端要改 `Tier` 的话这个测试就该红，那正是它该红的时候。
+  外加一条 `assert_ne!(tier_id(d), tier_name(d))` 专门拦「两者又合回去」。
+- `an_unparsable_tier_falls_back_to_manual_never_up`——8 个反例，含
+  `"auto"`、`"AUTO"`、`"自动发送"`、`"Manual "`（尾随空格）。
+
+⚠ **这条契约以前没有测试守着**，所以它能错这么久。别的 IPC 命令也值得
+照这个方式补一条。
+
+### 11.2 分段控件改滑动指示块（`SegSlider.svelte`）
+
+用户原话：「按钮选中方式为何不做成表面一层的滑块（窗口关闭和档位切换不都可以用
+这个方案？还不用加个什么文字默认）」。
+
+- **新建 `ui/src/lib/SegSlider.svelte`**：`{@attach slideTo(value)}` + `.cs-pill`，
+  墨底反白（红色只留给不可逆的动作）。
+- `PanelSettings.svelte` 的「关闭窗口的行为」与 `TierSwitch.svelte` **共用同一个组件**。
+- **删掉「退出（默认）」里的「（默认）」文字**——它是控件组的默认值，
+  不是某枚按钮的属性，而且让同组两项长度差一倍。
+- 删掉随之死掉的 `.cs-seg` / `.cs-seg-item` / `.cs-seg-item.on`。
+
+**调用了 `ui-ux-pro-max` skill**（此前从未调用过——用户质问「设计、规范 skill
+你是一点没照办？」是对的），`search.py "segmented control selected state indicator" --domain ux`
+命中两条直接相关的规范，都已落地：
+
+| 规范 | 落地方式 |
+|---|---|
+| **Compact Control Semantics（Critical）**：紧凑控件需原生 role + 可访问选中状态 + 键盘操作 + 可见焦点 | `role="radiogroup"` / `aria-checked`；`onKeydown` 方向键 + Home/End；全局已有 `:focus-visible`（`app.css:140`，2px 墨色） |
+| **Cancellable State Transitions（High）**：快速连切要 cancel/replace 既有动效，不依赖 `animationend` | `attach.ts` 的 `slideTo` 用 `overwrite: 'auto'`；无位移时直接 `gsap.set`，不等动效结束 |
+
+**补了 roving tabindex**：选中项 `tabindex=0`，其余 `-1`，整组 `-1`。
+这是 ARIA APG 对 `role="radiogroup"` 的硬要求——每个按钮都 `tabindex=0`
+会让读屏用户同时拿到两套导航，是已知反模式。
+
+**踩到并修掉的一个坑**：搬组件时漏了 `align-self: flex-start`。
+父容器是 `flex-direction: column` + `align-items: stretch`，槽会被拉成
+**横贯整个面板的空杠**。
+
+### 11.3 cargo-deny（**已装已跑**）
+
+- 预编译 `cargo-deny 0.20.2`（`EmbarkStudios/cargo-deny` releases，
+  `x86_64-pc-windows-msvc.tar.gz`），SHA256 校验通过。
+- 装在 `C:\Users\zhanghj40\.cargo\bin\` 与 `E:\DevCache\cargo\bin\`（本机 `CARGO_HOME` 指向 E 盘）。
+- ⚠ clone RustSec advisory-db **需要 `git config --global http.proxy`**。
+
+**新建 `deny.toml`**（此前不存在 → cargo-deny 用极严默认白名单，
+产生 **876 条无意义 license 报错**）。踩了四个 schema 错，记下来：
+
+| 踩的坑 | 正确写法 |
+|---|---|
+| `[graph]` 不存在 | `all-features` / `exclude-dev` 就放 `[graph]` 里 |
+| `[multiple-versions]` 不存在 | 应为 `[bans] multiple-versions = "warn"`（0.20 只收 LintLevel；`wildcards` / `highlight` 是旧写法） |
+| `allow`/`deny`/`skip` 放错节 | 属 `[licenses]`，**不**属 `[bans]` |
+
+**故意不加 `[advisories] ignore`**——静默掉真实漏洞是错的，留给人决定。
+
+MPL-2.0 / LGPL 全部来自 **Tauri 传递依赖**（dom_query / cssparser /
+dirs-sys / getrandom），**与 tract 无关**；理由已写进 `deny.toml` 注释。
+
+### 11.4 cargo deny advisories：4 条待人决策
+
+`cargo deny check` 的 `advisories` 项 FAILED（exit=1），4 条**都不是
+tract-onnx 引入的**：
+
+| ID | 组件 | 性质 |
+|---|---|---|
+| RUSTSEC-2024-0370 | `proc-macro-error` | unmaintained |
+| RUSTSEC-2026-0194 | `xml-rs` | 重复属性检查二次复杂度 |
+| RUSTSEC-2026-0195 | `xml-rs` | 命名空间分配无界 → 内存耗尽 |
+| RUSTSEC-2025-0134 | `rustls-pemfile` | unmaintained（经 `ureq` → `chatservant-reason`） |
+
+⚠ `xml-rs` 那两条**能被内存耗尽打爆**，不是纯维护性告警。
+处理方式（升级 / 换依赖 / 显式 ignore 并写理由）**需要人定**，本轮没动。
+
+### 11.5 OCR（PP-OCRv4）：**地基与加载层已通，推理管线未写**
+
+#### 已完成
+
+- `crates/capture/Cargo.toml` 加 `tract-onnx.workspace = true`；
+  根 `Cargo.toml` 加 `tract-onnx = "0.23"`。
+  **选 tract 而非 `ort`**：纯 Rust、无 C++ 运行时，避免给装进
+  `C:\Program Files` 的应用塞 ONNX Runtime 动态库。
+- 权重已下载到 `%APPDATA%\dev.chatservant.app\models\`（**不进仓库**），
+  SHA256 与 RapidOCR 官方清单逐一校验通过。
+  **权重 URL 是从 RapidOCR `python/rapidocr/default_models.yaml` 读出来的**，
+  不是猜的；字典 `dict_url` 在同文件的 `paddle/` 段
+  （`onnx/PP-OCRv4/rec/ppocr_keys_v1.txt` **返回 404**，正确路径是
+  `paddle/PP-OCRv4/rec/ch_PP-OCRv4_rec_mobile/ppocr_keys_v1.txt`）。
+- **新建 `crates/capture/src/ocr_pp.rs`**——加载层已通（7 个测试全绿）。
+
+#### ⭐ 本机实测出来的模型形状（**别再照着 PaddleOCR 的惯例猜**）
+
+三条假设都被实测打回，全部已写进断言与注释：
+
+| 事实 | 原本的错误假设 | 证据 |
+|---|---|---|
+| rec 输入是 **`[-1,3,-1,-1]`，四维全动态** | 「高固定 48」（那是 `RecImageGenerator` 数据增强侧的行为，**不是模型**） | `model_io` 探针 |
+| rec 输出是 **`[1, T, 6625]`——类在最后一维** | 「`[1, 6625, T]`」（按训练侧布局想当然） | 真跑 64px 空白图得 `[1, 8, 6625]` |
+| det 输入是 **`[-1,3,-1,-1]`，batch 也是动态的** | 「batch 固定 1」（按惯例） | `model_io` 探针 |
+
+det 输出 `[1,1,H,W]`（逐像素文字概率）由**真跑一次**确认，不是读 fact。
+
+⚠ ⚠ **`[1, T, 6625]` 写反了不报错**，只会得到一整段空白。
+所以这类形状**只能靠真跑一次钉死**，读 fact 读不到——
+`model_io` 里 `analyse` 之后输出维仍然是空的（详见该函数注释里的三次踩坑记录：
+①`model_for_path` 没推导 ②`analyse` 也读不到 ③`into_optimized` 必须先给具体
+输入事实，而 tract 的**动态维不能用 `-1` 表示**——`TDim` 断言每维 `>= 0`，
+动态维是符号 `s0`/`s1`）。
+
+#### ⛔ 未完成（下一刀就切这里）
+
+1. **det 后处理**：概率图 → 二值化（阈值 0.3）→ **连通域** → 外框 →
+   unclip（`area * 1.6 / min_side`）→ 按 `box_thresh=0.5` 过滤。
+   *刻意不搬 OpenCV 的 `minAreaRect` + `unclip`*：本项目输入是聊天窗口
+   （左右对齐消息气泡），连通域 + 轴对齐外框更贴切也短得多。
+2. **rec CTC 贪心解码**：按 `[t][c]` 取 argmax → 折叠重复 → 去 blank（索引 0）。
+   词典 **6624 类**（`ppocr_keys_v1.txt` 6623 行 **+ blank**）。
+   ⚠ Windows 上下载的权重每行带尾随 `\r`，不剥掉会让每个词末尾挂一个
+   **看不见的回车符**——已处理并有测试守着。
+3. **⚠ rec 宽度分桶（最大的一个坑）**：rec 是全动态的，而 tract 的形状是
+   **编译期**决定的——**每个宽度不同都要重编一次图**，几十到几百毫秒。
+   不能对每个文本框都这么做。要么按长度分桶缓存几个宽度，要么固定宽度
+   （代价是真帧上的长文本会被缩窄）。**这一条本轮没做，是下一步最可能翻车的地方。**
+4. **两套 OCR 的切换**没接：`ocr::recognize` 仍直接走 `Windows.Media.Ocr`。
+   `CHATSERVANT_OCR_BACKEND` 的 `Backend` 枚举只是文档里写了，代码里还没有。
+5. **与 `Windows.Media.Ocr` 的真实帧对比**没做。**对比不过就保留旧路径**——
+   不为「用了模型」而替换。
+
+### 11.6 🐛 新发现的产品缺陷（**未修、未定位**）
+
+**切换微信会话后，面板里的聊天内容不更新。**
+
+- **报障时间**：2026-10-10，用户实机发现。
+- **现状**：**没有定位到根因，也没有修。** 不要当成已修。
+- **待查的方向**（按怀疑度排序）：
+  1. **观察循环是否还活着**。切会话不改变窗口 HWND，如果循环是靠
+     「窗口句柄变化」或「一次性捕获会话」驱动，切会话可能根本触发不了新一轮。
+     `AGENTS.md` 里记着「**WGC 会话别每帧新建**」——那么反过来，
+     **这个会话是不是被缓存住、再也不刷新了**？
+  2. **帧条件化 / 去重**。§9 的 `docs/adr/0002-frame-conditioning-pipeline.md`
+     是「帧 → 条件化 → 归类」。切会话后画面变了，但**去重集合**里
+     可能已经把这一帧判成「跟上一帧一样」丢掉了。
+  3. **会话锁定**。「锁定当前会话」如果锁的是 HWND 而不是**微信内部的
+     会话标识**，切会话后会拿新会话的画面配旧会话的名字——
+     症状会表现为「内容不更新」或「名字对不上」，两者要分清。
+  4. **感知层**。`crates/perceive` 把 OCR 框归类成对话人 / 噪声；
+     切会话后左右气泡的分布变了，归类阈值可能整片失效。
+- **复现前先确认**：这是「面板停在旧内容」，还是「面板清空了」？
+  **两者的根因完全不同**，先分清再动手。
+
+### 11.7 ⚠ 当天又踩一次的坑：PS 5.1 的 `Set-Content` 双重编码
+
+`AGENTS.md` 已经写着「别用 `Set-Content -Encoding UTF8` 改源码」，**当天还是踩了**：
+用 PS 5.1 的 `(Get-Content -Raw) -replace ... | Set-Content -Encoding UTF8`
+做一次机械替换，结果**整份 `ocr_pp.rs` 的中文全成乱码**（UTF-8 被按 ANSI
+读回再写），且有字符不可逆丢失。
+
+**只能用 `write` / `edit` 工具改源码。** 万一必须用 shell，
+走 `.NET` 直写并显式指定**无 BOM**：
+
+```powershell
+$p = "path.rs"
+$c = [IO.File]::ReadAllText($p)
+$c = $c.Replace("old", "new")
+[IO.File]::WriteAllText($p, $c, (New-Object Text.UTF8Encoding $false))
+```
+
+编码是**静默**损坏的：编译照样过、测试照样跑，只有中文注释在变乱码。
+肉眼看 diff 才发现。
+
+---
+
+## 12. 2026-10-11 进展（并入另一台设备的快照之后）
+
+> §1~§11 是背景。这节记本机当天做的事。
+
+### 12.0 先说清楚分支关系
+
+收到另一台设备 2026-10-10 的完整工程快照（`chat-servant-handoff-20261010.zip`，
+4722 个条目）。**那不是「我们落后了」，是分叉**：两边从同一祖先各走各的。
+
+| | 本机（`chat-servant-m31f`） | 另一台（快照） |
+|---|---|---|
+| 有而对方没有 | `scripts/`（48 个诊断脚本）、`.scratch/` 票据、`CONTEXT.md`、`README.md`、`pnpm-lock.yaml`、`deny.toml` 的 ADR-0003 演进版、`capture/lib.rs` 的 `#![allow(missing_docs)]` 说明、49 处 `// SAFETY:`、门禁修绿 | — |
+| 对方有而本机没有 | — | `SegSlider.svelte`、`PanelSettings.svelte`（设置搬进面板）、`ocr_pp.rs` + `tract-onnx`、§0.1 与 §11 的进展记录、更详细的本机待验清单 |
+| 两边都改 | `commands.rs`、`main.rs`、`+page.svelte`、`deny.toml`、配置若干 | |
+
+处理原则：**逐项并，不整包覆盖**。基建留本机的，产品改动按下面的判断走。
+
+### 12.1 🐛 托盘图标画不出来（**已定位并修**）
+
+**症状**：通知区里**留了一格空白**。悬停 tooltip 读出来是
+「没认出会话 · 只填入」——那正是 `tray_status_line()` 的输出，
+**说明图标确实注册成功了**，只是画不出东西。
+
+**根因**：Tauri 在 Windows 上是这么取默认应用图标的
+（`tauri-codegen-2.7.1/src/context.rs:211`）：
+
+```rust
+if target == Target::Windows {
+  quote!(#root::image::default_window_icon_from_app_icon_resource())
+}
+```
+
+——从**可执行文件的图标资源**里读。而那份资源只有 `tauri build`
+打安装包时才嵌进去。`cargo` / `tauri dev` 出来的二进制里没有，
+于是 dev 模式下 `default_window_icon()` **恒为 `None`**，
+托盘 `NIM_ADD` 带了个空 `hIcon`。shell 对一个没有图的图标
+**照样留了通知区的位**，tooltip 也照常（那是我们自己写的文本）。
+
+**为什么这个缺陷特别坏**：托盘是 `decorations:false` +
+`skipTaskbar:true` + `alwaysOnTop:true` 这个组合下**唯一的后台出口**。
+它画不出来，意味着用户收进托盘之后就找不回来了。
+
+**修法**：编译期把 PNG 嵌进二进制，自己解一份带进去。
+`Cargo.toml` 开 `tauri` 的 `image-png` feature——
+`image` / `png` **本来就在依赖树里**，不引入新的许可证面。
+
+**实机验证**：溢出浮层第一格从空白变成绿气泡图标；右键菜单正常弹出，
+首行「没认出会话 · 只填入」是**灰色不可点**的状态行，下面
+显示面板 / 锁定当前会话 / 打开设置 / 识别画布 / 退出（Ctrl+Q）。
+
+### 12.2 档位 IPC 契约缺陷：**本机确认同病**，已修（并入 §11.1 的修法）
+
+§11.1 记的是另一台设备发现的。本机核对后发现**同一个缺陷在**，
+只是症状不同：
+
+- 面板头部**正常**显示「只填入」——因为那里的 `tier` 来自
+  readout 事件，Rust 推的是枚举 id。
+- 出问题的是**设置页**：`get_tier` / `set_tier` 回的是中文名，
+  前端 `TIER_NAME["只填入"]` 是 `undefined`，档位控件定位不到。
+
+修法照搬：拆出 `tier_id`（IPC 契约）/ `parse_tier`（失败落 `Manual`），
+`tier_name` 只留给托盘与回执文字。并补上那两条测试——
+`the_ipc_tier_is_the_frontend_enum_id_not_a_display_name` 把前端的
+三个字面量写死进断言，`an_unparsable_tier_falls_back_to_manual_never_up`
+用 8 个反例钉住「解析失败不许升档」。两条都实测通过。
+
+### 12.3 🐛 设置窗口停在离屏（**新发现，未定位**）
+
+`tauri.conf.json` 里 `settings` 窗口写的是 `"visible": true`，
+但实机枚举该进程的**全部**顶层窗口（含不可见的）得到：
+
+```
+0x30E3E  vis=False  Tauri Window  '设置'  656x559 @ (-32000,-32000)
+```
+
+`(-32000,-32000)` 是 Windows 最小化窗口的标准位置。
+同一份配置里的 `识别画布`（`visible: false`）停在该停的地方，
+主面板 `副驾` 正常可见。**所以不是「没建」，是「建了但被最小化/藏起来了」**，
+而 `winscan.ps1` 只报可见窗口，会把这两件事混为一谈。
+下一步要么查 `open_settings` 的调用路径，要么复现一次确认是不是误操作。
+
+### 12.4 ⚠ 本轮没验成的：光标被前台游戏抓走了
+
+`点 − 收进托盘`、`Alt+F4 拦截`、`拖动窗口` 这三条**都没验成**，
+**不是应用缺陷，是环境**：当时前台是《地下城与勇士》，
+`SetCursorPos` 直接**不生效**（设置 (639,349)、读回仍是 (1707,824)）。
+症状是面板所有按钮的 `:hover` 底色都不出现——事件压根没进 WebView。
+
+⚠ **`SetCursorPos` 不生效时不要去查「按钮为什么不响应」**，
+先读回 `GetCursorPos` 确认指针真的动了没有。
+
+### 12.5 🐛 切换微信会话后面板内容不更新（§11.6 复述，仍未定位）
+
+另一台设备 2026-10-10 用户实机报过。**本轮没碰**，状态不变：
+未定位、未修。§11.6 那四条怀疑方向仍然有效。
+
+### 12.6 没并进来的东西，以及为什么
+
+| 对方的东西 | 为什么不并 |
+|---|---|
+| `PanelSettings.svelte` + 设置搬进面板（删了 config 里的 `settings` 窗口） | **产品级结构改动**，要人拍板 |
+| `SegSlider.svelte` 滑动指示块 | 轨道 A 的 UI 方向，随上面那条一起定 |
+| `ocr_pp.rs` + `tract-onnx` | 推理管线**没写完**（det 后处理 / rec CTC 解码 / 宽度分桶都缺），而引入它等于给装进 `Program Files` 的应用换一套依赖面。半成品先进主干是净负担 |
+| `deny.toml` | 本机这份是 ADR-0003 演进出来的（7753 vs 3979 字节），对方那份是初版。不要用旧的覆盖新的 |
+| `.agents/` `.claude/` `.minimax/` `.zcode/` `skills-lock.json` | 那是那台机器的 agent 环境，**不是工程源码** |
