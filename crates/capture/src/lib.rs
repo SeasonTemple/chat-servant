@@ -26,6 +26,7 @@ pub mod inject;
 pub mod media;
 pub mod ocr;
 pub mod ocr_pp;
+pub mod ocr_pp_pipeline;
 pub mod printwindow;
 pub mod region;
 pub mod surface;
