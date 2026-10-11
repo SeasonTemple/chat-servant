@@ -59,6 +59,8 @@ fn main() {
             commands::save_setting,
             commands::forget_key,
             commands::probe_key,
+            commands::get_model,
+            commands::set_model,
             commands::get_recent_n,
             commands::set_recent_n,
             commands::get_token_budget,

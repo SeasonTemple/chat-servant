@@ -12,12 +12,13 @@ pub mod model;
 pub mod peer;
 pub mod seam;
 pub mod transport;
-pub mod ureq_http;
 pub mod vision;
 pub mod voice;
 
 #[cfg(test)]
 mod gate;
+#[cfg(test)]
+mod mock_upstream;
 #[cfg(test)]
 mod quiet;
 
@@ -25,7 +26,6 @@ pub use context::{Context, Summarizer, Trimmed};
 pub use model::{Candidate, DraftSet, Intent, ReasonError, Reasoner, StageCalls, TurnContext};
 pub use peer::{same_peer, similarity};
 pub use seam::{Turn, turn};
-pub use transport::{Http, HttpReasoner, Provider, probe_connectivity, redact};
-pub use ureq_http::UreqHttp;
+pub use transport::{HttpReasoner, ModelCell, Provider, probe_connectivity, redact};
 pub use vision::{Describer, ImagePayload, VisionBridge, VisionMode};
 pub use voice::{VOICE_MAX_CHARS, VOICE_MAX_SAMPLES, voice_samples};

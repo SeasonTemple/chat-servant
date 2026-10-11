@@ -51,6 +51,11 @@ struct AppState {
     token_budget: TokenBudget,
     /// 图片外发总闸。**默认关。**
     images_out: crate::watch::ImagesOut,
+    /// 「用哪个模型」。**同样必须与推理器共用同一格**——
+    /// 新造一个的话设置页会显示「已切到 X」，而出网时发的还是旧模型。
+    ///
+    /// `None` = 没有真实传输（没 key），此时设置页**不列模型**。
+    model: Option<chatservant_reason::ModelCell>,
     /// 发送档位。**唯一事实来源**，前端只请求改。
     tier: crate::watch::TierCell,
     /// 「重新锁定当前会话」的请求。与循环共用同一个格子。
@@ -916,15 +921,79 @@ pub struct ProviderView {
     pub masked: String,
     /// 没配时给的下一步指引。**不能是空字符串或静默失败。**
     pub hint: String,
+    /// 这家**实测能通**的模型清单。Rust 是唯一出处——
+    /// 前端不自己列，也不多显示一个没验过的名字。
+    pub models: Vec<String>,
+    /// 当前选中的那一个（回显用的**真实生效值**）。
+    pub model: String,
+}
+
+/// 设置页那个模型选择器要的回包。
+#[derive(Serialize)]
+pub struct ModelView {
+    pub provider: String,
+    pub models: Vec<String>,
+    pub model: String,
+}
+
+/// 读「当前用的是哪个模型」。**Rust 侧读自己那一个格子**，前端不缓存。
+#[tauri::command]
+pub fn get_model() -> Result<ModelView, String> {
+    let cell = with_state(|s| s.model.clone()).flatten();
+    cell.map(|c| model_view(&c)).ok_or_else(no_transport_note)
+}
+
+/// 切模型。**立即生效，不用重启**——推理器每一次发请求都重读那个格子。
+///
+/// ⚠ 不在实测清单里的名字**当场拒收**：放行的话症状是
+/// 「设置成功、一调用就 404」，而那个 404 会被归类成上游失败，
+/// 用户完全看不出是自己刚选了个不存在的模型。
+#[tauri::command]
+pub fn set_model(model: String) -> Result<ModelView, String> {
+    with_state(|s| s.model.clone())
+        .flatten()
+        .ok_or_else(no_transport_note)
+        .and_then(|c| c.set(&model).map(|_| model_view(&c)))
+}
+
+/// 「没有真实传输」时那句话。**统一一处**，免得三处各写一遍、
+/// 然后慢慢说成三个意思。
+fn no_transport_note() -> String {
+    "还没接上真实传输（没有可用 key），所以现在没有模型可选".to_string()
+}
+
+fn model_view(cell: &chatservant_reason::ModelCell) -> ModelView {
+    let p = cell.provider();
+    ModelView {
+        provider: p.key().to_string(),
+        models: p.models().iter().map(|m| (*m).to_string()).collect(),
+        model: cell.get(),
+    }
 }
 
 #[tauri::command]
 pub fn get_settings() -> SettingsView {
+    // 换供应商只需在 `PROVIDERS` 加一项。
+    let cell = with_state(|s| s.model.clone()).flatten();
     SettingsView {
         providers: PROVIDERS
             .iter()
             .map(|p| {
                 let s: KeyStatus = secret::status(p);
+                // 模型一栏**只对当前生效的那一家给内容**。
+                // 其余两家此刻并不会被用到，给一个「看着能选、其实选了没用」
+                // 的下拉框就是在骗人。
+                let mine = cell.as_ref().filter(|c| c.provider().key() == *p);
+                let models = mine
+                    .map(|c| {
+                        c.provider()
+                            .models()
+                            .iter()
+                            .map(|m| (*m).to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let model = mine.map(|c| c.get()).unwrap_or_default();
                 ProviderView {
                     id: (*p).to_string(),
                     configured: s.configured,
@@ -935,6 +1004,8 @@ pub fn get_settings() -> SettingsView {
                     } else {
                         secret::missing_hint(p)
                     },
+                    models,
+                    model,
                 }
             })
             .collect(),
@@ -1142,7 +1213,7 @@ pub fn forget_key(provider: String) -> Result<(), String> {
 /// 上游的错误正文可能带 key。
 #[tauri::command]
 pub fn probe_key(provider: String) -> Result<bool, String> {
-    use chatservant_reason::{Provider, UreqHttp, probe_connectivity};
+    use chatservant_reason::{Provider, probe_connectivity};
 
     let p = match provider.as_str() {
         "openai" => Provider::OpenAi,
@@ -1157,8 +1228,11 @@ pub fn probe_key(provider: String) -> Result<bool, String> {
     // 真的发一次请求。早先这里恒返回 false，注释说「网络层 ticket 10 接上」——
     // 但网络层早就是真的了，于是这个按钮**永远说不通**。
     // 恒假的指示器比没有更糟：用户会以为 key 坏了，反复重填。
-    let http = UreqHttp::new(std::time::Duration::from_secs(10));
-    match probe_connectivity(&http, p, &key, std::time::Duration::from_secs(10)) {
+    //
+    // ⚠ **探针走 `GET /v1/models`，不调模型**：不产生 token、不花钱。
+    // 协议层归 genai 之后，这条 GET 是**唯一**一处没外包出去的网络调用，
+    // 因为 genai 的 `WebClient` 是私有的、而 `/v1/models` 不是任何适配器的操作。
+    match probe_connectivity(p, &key, std::time::Duration::from_secs(10)) {
         Ok(()) => Ok(true),
         // 失败原因已经过 `redact`，可以安全显示。
         Err(e) => Err(e),
@@ -1167,11 +1241,11 @@ pub fn probe_key(provider: String) -> Result<bool, String> {
 
 /// 起观察循环。**只在启动时调一次。**
 ///
-/// 有 key 就组装**真实传输**（`UreqHttp` + `HttpReasoner`）；
+/// 有 key 就组装**真实传输**（genai 的 `HttpReasoner`）；
 /// 没 key 就用**明确标注的预置传输**——界面上每条候选都带「预置」字样，
 /// 不能让用户以为模型接通了。
 pub fn start(app: &AppHandle) {
-    let cfg = build_loop_config();
+    let (cfg, model) = build_loop_config();
     let transport_ready = cfg.transport_ready;
     // 关键：**先把句柄 clone 一份给命令层，再把 cfg move 进循环。**
     // 两边指的是同一个 `Arc<AtomicUsize>`，所以 `set_recent_n` 写进去的
@@ -1190,6 +1264,7 @@ pub fn start(app: &AppHandle) {
             recent_n,
             token_budget,
             images_out,
+            model,
             tier,
             relock,
             armed: Arming::default(),
@@ -1275,8 +1350,13 @@ pub fn start(app: &AppHandle) {
 const LOCKED_PEER: &str = "小号";
 
 /// 组装循环配置。**key 从凭据管理器读**，读不到就用预置传输。
-fn build_loop_config() -> LoopConfig {
-    use chatservant_reason::{HttpReasoner, Provider, UreqHttp};
+///
+/// 第二个返回值是「用哪个模型」那个格子的句柄。**它不在 `LoopConfig` 里**：
+/// 循环自己不读这个格子，读它的是推理器内部——而推理器已经被
+/// `Box<dyn Reasoner>` 吃掉了，从外面拿不回来。命令层要改模型就必须
+/// 拿到**同一个**格子，所以在这里一并交出去。
+fn build_loop_config() -> (LoopConfig, Option<chatservant_reason::ModelCell>) {
+    use chatservant_reason::{HttpReasoner, ModelCell, Provider};
 
     // 谁有 key 就用谁。**默认先试 OpenAI**——设置页上它是第一个选项。
     for (name, provider) in [
@@ -1285,40 +1365,58 @@ fn build_loop_config() -> LoopConfig {
         ("minimax", Provider::MiniMax),
     ] {
         if let Some(key) = secret::load(name) {
-            // `Box<dyn Reasoner>` 不是 `Send` 的边界——循环自己起线程，
-            // 所以这里不需要 Send。`Http` 那边要 Send+Sync 是因为
-            // `HttpReasoner` 内部用 `Arc` 共享 agent。
-            let http = UreqHttp::default();
-            let r = HttpReasoner::new(std::sync::Arc::new(http), provider, key);
-            return LoopConfig {
-                source: crate::watch::FrameSource::from_env(),
-                ignore_top: IGNORE_TOP,
-                reasoner: Box::new(r),
-                transport_ready: true,
-                recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
-                locked_peer: LOCKED_PEER.to_string(),
-                token_budget: TokenBudget::new(BUDGET_DEFAULT),
-                images_out: crate::watch::ImagesOut::off(),
-                tier: crate::watch::TierCell::default_manual(),
-                relock: crate::watch::Relock::new(),
-                provider,
+            // 模型格子**先建一份**，推理器和命令层各拿一个 clone ——
+            // 两边指的是同一格，所以设置页改完下一次生成就用新的。
+            let model = ModelCell::new(provider);
+            // ⚠ **起不起得来传输不是「配好了」的同义词。** genai 那条路要起一个
+            // tokio runtime，那是真会失败的一步。失败就**退回预置传输**，
+            // 不能让整个面板起不来——而预置候选每条都带自曝标记，
+            // 用户不会把它当成模型输出。
+            let Ok(r) = HttpReasoner::with_model_cell(provider, key, model.clone()) else {
+                tracing::error!(
+                    "provider={} 有 key，但装不起真实传输——退回预置传输",
+                    provider.key()
+                );
+                break;
             };
+            return (
+                LoopConfig {
+                    source: crate::watch::FrameSource::from_env(),
+                    ignore_top: IGNORE_TOP,
+                    reasoner: Box::new(r),
+                    transport_ready: true,
+                    recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
+                    locked_peer: LOCKED_PEER.to_string(),
+                    token_budget: TokenBudget::new(BUDGET_DEFAULT),
+                    images_out: crate::watch::ImagesOut::off(),
+                    tier: crate::watch::TierCell::default_manual(),
+                    relock: crate::watch::Relock::new(),
+                    provider,
+                },
+                Some(model),
+            );
         }
     }
 
-    LoopConfig {
-        source: crate::watch::FrameSource::from_env(),
-        ignore_top: IGNORE_TOP,
-        reasoner: Box::new(PresetReasoner),
-        transport_ready: false,
-        recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
-        locked_peer: LOCKED_PEER.to_string(),
-        token_budget: TokenBudget::new(BUDGET_DEFAULT),
-        images_out: crate::watch::ImagesOut::off(),
-        tier: crate::watch::TierCell::default_manual(),
-        relock: crate::watch::Relock::new(),
-        provider: chatservant_reason::Provider::OpenAi,
-    }
+    (
+        LoopConfig {
+            source: crate::watch::FrameSource::from_env(),
+            ignore_top: IGNORE_TOP,
+            reasoner: Box::new(PresetReasoner),
+            transport_ready: false,
+            recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
+            locked_peer: LOCKED_PEER.to_string(),
+            token_budget: TokenBudget::new(BUDGET_DEFAULT),
+            images_out: crate::watch::ImagesOut::off(),
+            tier: crate::watch::TierCell::default_manual(),
+            relock: crate::watch::Relock::new(),
+            provider: chatservant_reason::Provider::OpenAi,
+        },
+        // ⚠ **没有真实传输就没有模型格子。** 返回 `None` 而不是造一个：
+        // 造一个的话设置页会列出一堆「可选模型」，而点下去什么也不会发生
+        // ——那正是这个项目一直在删的「调了没反应的控制项」。
+        None,
+    )
 }
 
 /// 顶部跳过多高（置顶公告条）。**由 ChatSurface 给，不该写死在引擎里**；

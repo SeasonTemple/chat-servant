@@ -583,7 +583,7 @@ fn probe_ocr(file: &Path, scale: u32) -> Result<()> {
 fn real_reasoner(
     only: Option<&str>,
 ) -> Result<Option<Box<dyn chatservant_reason::Reasoner + Send>>> {
-    use chatservant_reason::{HttpReasoner, Provider, UreqHttp};
+    use chatservant_reason::{HttpReasoner, Provider};
 
     let order: Vec<Provider> = match only {
         Some(k) => vec![Provider::from_key(k).ok_or_else(|| {
@@ -594,19 +594,14 @@ fn real_reasoner(
 
     for p in order {
         let Some(key) = key_from_env(p) else { continue };
-        let (judge, draft) = p.models();
         println!(
-            "传输 = {}（模型：判断 {} / 起草 {}）",
+            "传输 = {}（协议层 genai，模型：{}）",
             p.key(),
-            judge,
-            draft
+            p.default_model()
         );
-        let http = UreqHttp::new(std::time::Duration::from_secs(60));
-        return Ok(Some(Box::new(HttpReasoner::new(
-            std::sync::Arc::new(http),
-            p,
-            key,
-        ))));
+        return Ok(Some(Box::new(HttpReasoner::new(p, key).map_err(|e| {
+            anyhow::anyhow!("装不起 {} 的传输：{e}", p.key())
+        })?)));
     }
     Ok(None)
 }

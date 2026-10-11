@@ -17,23 +17,47 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-# HTTP 传输。选 ureq 而不是 reqwest 的理由（三条，都是实测/读文档得来的）：
-#   ① **阻塞 I/O**。推理层每条新消息最多 3 次调用，异步运行时买不到任何东西，
-#      却要多背一整个 tokio 依赖树。
-#   ② **必须显式开 TLS 后端**。`native-certs` 只是**证书加载器**
-#      （`native-certs = ["dep:rustls-native-certs"]`），自身不带 TLS 实现——
-#      早先只写了 `json/gzip/native-certs`，于是 ureq 压根发不出 HTTPS，
-#      报 `no TLS backend is configured`。真正的后端是 `tls`（rustls）。
-#      它会拖进 `webpki-roots`（MPL-2.0），已在 deny.toml 里具名论证。
-#      ⚠ 原来那句「为一份证书数据破门禁不划算」写于误判 `native-certs`
-#      自带 TLS 的时候——**那个意图没有实现成**，这里如实记下来。
-#   ③ `reason` 是核心 crate，**绝不能依赖 tauri**。reqwest 目前只在树里
-#      （由 tauri 带入，且仅限桌面目标），依赖它等于让核心依赖壳——架构倒过来。
-ureq = { version = "2", default-features = false, features = [
-  "json",
-  "gzip",
-  "native-certs",
-  "tls",
+# **泛用 LLM provider 客户端。** ADR-0003 的 crate 选型表里它是「首选」，
+# 而协议层那 ≈120 行（请求体拼装 / 响应解析 / 鉴权头 / 端点 / 错误分类）
+# **本应交给 genai**。2026-10-12 落地：hand-written 的 `transport` 协议层
+# 与 `ureq_http` 已删，现在 `genai` **就是**传输层。
+#
+# 早先不换的理由是许可证门禁，而**那条理由 ADR 自己已经推翻**：
+# `webpki-roots` 实为 `CDLA-Permissive-2.0`（不是早先误记的 MPL-2.0），
+# 已在 deny.toml 的 allow 白名单里，不需要任何豁免。
+#
+# 接缝层（`Reasoner` 三段 / 降级 / `redact`）**自己写**，不外包——
+# 那 ≈120 行是「我们怎么问」，不是「各家协议长什么样」。
+genai = { version = "0.6", default-features = false, features = ["rustls-tls"] }
+
+# **只给「测连通性」那一个 GET 用**，理由三条：
+#   ① genai 的 `WebClient` 是 `pub(crate)`，外部拿不到；`all_model_names`
+#      对非 Ollama 适配器返回的是**静态清单**，根本不联网。
+#   ② `/v1/models` 不是任何一个适配器的操作，genai 没有它的等价物。
+#   ③ 版本与 genai 内部那条**完全一致**（0.13）→ 依赖树里**不新增任何 crate**，
+#      也没有第二个 TLS 栈。genai 的 `rustls-tls` 就是转发到 `reqwest/rustls`，
+#      这里写 `rustls` 是为了**显式**而不是碰巧被 feature 合并带上。
+reqwest = { version = "0.13", default-features = false, features = [
+  "charset",
+  "rustls",
+] }
+
+# **async → sync 的桥。** genai 全是 async，而 `Reasoner` trait 必须保持同步
+# （seam 层、`xtask` 的注入探针、界面上的计数全靠它）。
+#
+# ⚠ 桥接放在 **`reason` 自己**而不是 ADR-0003 建议的 `src-tauri`：
+# `xtask` 也要用**真实传输**跑 e2e / 注入探针，而 `xtask` 依赖不到 `src-tauri`。
+# 放一处两边都能用，否则就得把协议层复制一份给 xtask —— 而复制的那份
+# 正是这次要删掉的东西。
+#
+# `net` / `time` 是**显式**写出来的：reqwest 自己会开这两个 feature，
+# 所以只写 `rt` 现在也能跑，但那是**依赖别人的 feature 选择**——
+# 上游哪天改了自己的 tokio features，我们的 `block_on` 会静默地没有
+# I/O 驱动器，症状是「单测全绿、真调用一挂就错」。
+tokio = { version = "1", default-features = false, features = [
+  "net",
+  "rt",
+  "time",
 ] }
 
 [dev-dependencies]

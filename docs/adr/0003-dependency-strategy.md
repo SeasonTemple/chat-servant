@@ -271,3 +271,65 @@ Mozilla 根证书那一支被 cfg 掉。**原意图是可以实现的**，只要
 > **「单元测试全绿」不等于「这条路走通过」。**
 > 凡是**依赖外部世界的接缝**（网络、剪贴板、窗口、文件系统），
 > 必须有一条**真的发生过**的证据，否则它只是编译过了。
+
+## 补记（2026-10-12）：协议层已经换成 `genai`，手写的那 120 行删掉了
+
+### 做了什么
+
+上面那张表里的「协议层那 ≈120 行」**已经不在本仓库里了**。
+`genai 0.6.5` 现在**就是**传输层：请求体拼装、响应解析、鉴权头、端点、
+错误分类全部由它负责。`ureq` 依赖与 `ureq_http.rs` 一并删除。
+
+接缝层（`Reasoner` 三段 / 降级路径 / `redact` / 同步 trait）**没动**——
+那是「我们怎么问」，不是「各家协议长什么样」。
+
+`trait Http` 那个测试缝**也删了**。理由不是顺手：它是裸 JSON POST/GET，
+位置比 genai 的 chat 抽象**更低**，留着它当 genai 的下一层就等于
+genai 成了摆设——想省的那 120 行一行都没省掉。
+它原来承担的性质（「传输写错了溜不过去」）现在由
+`crates/reason/src/mock_upstream.rs` 兜：**真的起一个回环端口**，
+让 genai 真的发一次 HTTP，把字节记下来再断言。
+
+### 三条与上面正文不同的结论
+
+1. **runtime 桥接放在 `crates/reason`，不在 `src-tauri`。**
+   上面写的是「在 `src-tauri` 包一层桥接」。实测：`xtask` 也要用**真实传输**
+   跑 e2e / 注入探针，而 `xtask` 依赖不到 `src-tauri`。桥放在 `reason`
+   自己里面，两边都能用；放 `src-tauri` 就得为 xtask 复制一份协议层，
+   而复制的那份正是这次要删的东西。
+
+2. **适配器必须显式钉死。** `genai` 靠模型名前缀猜适配器
+   （`gpt*` → OpenAI、`claude*` → Anthropic、**其余 → Ollama**）。
+   我们的模型叫 `abab6.5s-chat`，不带前缀，会**静默落到 Ollama**，
+   打到 `localhost:11434`——症状是「配置成功、一调用就 404」。
+   所以一律 `ModelIden::new(AdapterKind::…, name)`，并有测试钉死。
+
+3. **genai 自带的 MiniMax 适配器不能用。** 它是 **Anthropic 兼容**协议、
+   打 `https://api.minimax.io/anthropic/v1/`，**与我们实测能通的那一家不是同一家**。
+   我们显式选 `AdapterKind::OpenAI` + 端点覆盖
+   `https://api.minimaxi.com/v1/`。**内置默认值当数据用会踩坑**——
+   端点因此写成我们自己的字面量，而不是留给上游的默认值。
+
+### 一条不能直接用 genai 的地方
+
+`GET /v1/models`（测连通性用，**不调模型、不花钱**）**没有外包**：
+`/v1/models` 不是任何适配器的操作，而 genai 的 `WebClient` 是 `pub(crate)`。
+所以只有这一个 GET 用了 `reqwest 0.13` 直接发——**版本与 genai 内部那条一致**，
+依赖树里不新增任何 crate，也没有第二个 TLS 栈。
+
+### 一条不能直接 `Display` 的地方
+
+`genai::Error::ChatResponseGeneration` 的 `Display` 带**整个请求体**
+（用户的聊天原文 + 图片 base64），`Debug` 同理。所以所有 genai 错误一律
+经 `transport::brief()` 逐变体取字段，**不许整体打印**。
+这条比手写时期更紧：手写时期是我们自己决定打什么。
+
+### `cargo deny check`（2026-10-12）
+
+    advisories ok, bans ok, licenses ok, sources ok
+
+### 还没验到的
+
+**真实 provider 是否接受我们发的鉴权，本机无法验**——三个环境变量全空。
+已验到的只有：genai 真的走过一次 HTTP（对回环端口）、请求体与响应解析正确、
+`/v1/models` 探测不花钱且错误脱敏。真实端点的连通性**只能由持有 key 的人验**。
