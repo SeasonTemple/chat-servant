@@ -333,6 +333,8 @@ struct Scratch {
     peer: String,
     /// 锁定的那一个会话的头部像素指纹。**第一帧读到时建立。**
     locked_print: Option<chatservant_perceive::identity::HeaderPrint>,
+    /// 上一次给会话名做缓存键的那个指纹。见 [`refresh_peer`]。
+    last_print: Option<chatservant_perceive::identity::HeaderPrint>,
     /// **建锁那一刻**认出来的对端名。用来在界面上说「锁的是谁」。
     ///
     /// 不能拿 [`Scratch::locked_peer`]（配置里的目标名，通常是写死的小号）
@@ -388,6 +390,7 @@ impl Scratch {
             locked_peer: String::new(),
             peer: String::new(),
             locked_print: None,
+            last_print: None,
             locked_name: String::new(),
             relock: Relock::new(),
             images_out: ImagesOut::off(),
@@ -726,7 +729,64 @@ fn step(
         .crop(anchor.chat)
         .ok_or_else(|| "裁不出消息区".to_string())?;
 
-    // ② 变化门控 + 增量 ROI。**静默期在这里就返回了。**
+    // ② **会话身份闸。必须排在任何 OCR 之前。**
+    //
+    // 闸认的是**头部区域的像素指纹**，不是 OCR 读出来的名字。
+    //
+    // 为什么不比名字：实测真实帧上头部的**归类**是对的（`NoiseClass::Header`），
+    // 但 OCR 把「小号」读成了 `G8W`。按文字锁的话，闸在真实环境上**永远是关的**
+    // ——不误发，但也永远不工作。
+    //
+    // 为什么指纹可靠：文字是 OCR 的产物，那一小块像素不是。
+    // 换会话像素必然变；同一会话在帧之间基本不变（阈值吸收角标抖动）。
+    //
+    // 闸关着 = 屏幕上那块**不是我们要读的对话**，那就不该对它做任何识别。
+    //
+    // ⚠ 以前闸排在 OCR 之后，于是用户切到别的会话期间，循环**每秒跑一次
+    // 整帧 OCR + 放大 + 分类**，识别出来的消息立刻被丢掉——直到用户切回来。
+    // 识别了不用是一回事，**不该识别**是另一回事：那是在对一段我们无权
+    // 处理的对话反复读像素。闸只需要头部那块像素、不碰 OCR，
+    // 所以它可以、也必须排在前面。
+    let print = header_print(&full, &anchor);
+    refresh_peer(s, &full, &anchor, print.as_ref());
+    // ⚠ 重锁请求必须**在建锁判断之前**取走，否则这一轮的请求会被跳过，
+    // 用户点了按钮却什么也没发生——那是最难查的一种「没反应」。
+    //
+    // ⚠⚠ **必须连水位线一起退**，否则重锁等于「锁上了但永远读不到东西」。
+    // 见 [`chatservant_perceive::PaneWatcher::rewind`]：水位线不在 `Scratch`
+    // 里，所以「把这个会话的状态清干净」这件事天然会漏掉它。
+    if s.relock.take() {
+        apply_relock(s);
+        watcher.rewind();
+    }
+    let peer_ok = match (&s.locked_print, &print) {
+        // 还没锁过：拿**第一帧读到的**当基准，并把名字报给用户看。
+        // ⚠ 这意味着「启动时开着的那个会话」就是被锁的那个。
+        //   所以界面上必须显示这个名字——用户要能一眼看出锁错了没有。
+        (None, Some(p)) => {
+            s.locked_print = Some(p.clone());
+            // 建锁这一刻认出来的名字才是「锁的是谁」。
+            s.locked_name = s.peer.clone();
+            true
+        }
+        // 锁过但这帧认不出 → **关**。认不出不等于「是同一个」。
+        // `(None, None)` 也落到这里：连基准都还没有，更不能动手。
+        (_, None) => false,
+        (Some(a), Some(b)) => a.is_same(b),
+    };
+    if !peer_ok {
+        // ⚠ 连水位线一起退，否则切回锁定会话时只读得到底部那条缝。
+        //   见 `park_on_other_conversation`——面板清空和引擎退位必须同一次做。
+        let just_closed = park_on_other_conversation(s, watcher, print.as_ref());
+        return Ok(if just_closed { Some(anchor) } else { None });
+    }
+    // 闸是开的。记一笔，供下次关闸时判断「是不是刚刚才关的」。
+    s.prev_gate_open = Some(true);
+    // 推给界面的那份也一样要跟着变——否则用户切回锁定会话之后，
+    // 面板还挂着上一轮「闸关着」的横幅。
+    s.gate_open = true;
+
+    // ③ 变化门控 + 增量 ROI。**静默期在这里就返回了。**
     let Decision::Read { roi } = watcher.observe(&full) else {
         return Ok(None);
     };
@@ -793,67 +853,6 @@ fn step(
         attrs.len(),
         messages.len()
     );
-    // **会话身份闸。** 认的是**头部区域的像素指纹**，不是 OCR 读出来的名字。
-    //
-    // 为什么不比名字：实测真实帧上头部的**归类**是对的（`NoiseClass::Header`），
-    // 但 OCR 把「小号」读成了 `G8W`。按文字锁的话，闸在真实环境上**永远是关的**
-    // ——不误发，但也永远不工作。
-    //
-    // 为什么指纹可靠：文字是 OCR 的产物，那一小块像素不是。
-    // 换会话像素必然变；同一会话在帧之间基本不变（阈值吸收角标抖动）。
-    let print = header_print(&full, &anchor);
-    // ⚠ **认不到就保持原样，不要清空。**
-    //
-    // `attrs` 来自增量 ROI，标题栏常常不在里面（见 `conversation_name` 的
-    // 说明）。以前这里无条件 `s.peer = ...unwrap_or_default()`，于是标题栏
-    // 一离开 ROI，界面上的会话名就被抹成「没认出来」，而实际上它没变过。
-    // 身份是**累积确认**的事实，不该因为某一轮没看见就丢掉。
-    // 会话名**从头带单独读**（见 `peer_name_from_header`）：增量 ROI 里
-    // 常常没有标题栏，从那里找会挑中别的行（实测认成时间戳 `22 ： 22`），
-    // 加判据之后又变成永远认不出来（`peer=""`）。
-    //
-    // 认不到就保持原样——身份是**累积确认**的事实，
-    // 不该因为某一轮没看见就被抹掉。
-    if let Some(name) = peer_name_from_header(&full, &anchor) {
-        s.peer = name;
-    }
-    // ⚠ 重锁请求必须**在建锁判断之前**取走，否则这一轮的请求会被跳过，
-    // 用户点了按钮却什么也没发生——那是最难查的一种「没反应」。
-    //
-    // ⚠⚠ **必须连水位线一起退**，否则重锁等于「锁上了但永远读不到东西」。
-    // 见 [`chatservant_perceive::PaneWatcher::rewind`]：水位线不在 `Scratch`
-    // 里，所以「把这个会话的状态清干净」这件事天然会漏掉它。
-    if s.relock.take() {
-        apply_relock(s);
-        watcher.rewind();
-    }
-    let peer_ok = match (&s.locked_print, &print) {
-        // 还没锁过：拿**第一帧读到的**当基准，并把名字报给用户看。
-        // ⚠ 这意味着「启动时开着的那个会话」就是被锁的那个。
-        //   所以界面上必须显示这个名字——用户要能一眼看出锁错了没有。
-        (None, Some(p)) => {
-            s.locked_print = Some(p.clone());
-            // 建锁这一刻认出来的名字才是「锁的是谁」。
-            s.locked_name = s.peer.clone();
-            true
-        }
-        // 锁过但这帧认不出 → **关**。认不出不等于「是同一个」。
-        // `(None, None)` 也落到这里：连基准都还没有，更不能动手。
-        (_, None) => false,
-        (Some(a), Some(b)) => a.is_same(b),
-    };
-    if !peer_ok {
-        // **在这里就 return，也就不推进水位线**——这样下一帧会重试，
-        // 用户切回锁定会话后能立刻接上。
-        let just_closed = apply_gate_closed(s, print.as_ref());
-        return Ok(if just_closed { Some(anchor) } else { None });
-    }
-    // 闸是开的。记一笔，供下次关闸时判断「是不是刚刚才关的」。
-    s.prev_gate_open = Some(true);
-    // 推给界面的那份也一样要跟着变——否则用户切回锁定会话之后，
-    // 面板还挂着上一轮「闸关着」的横幅。
-    s.gate_open = true;
-
     // **累积**给界面。直接发本轮 ROI 的那几条，面板上的聊天记录会在
     // 「本轮那几条」和「空」之间来回跳——因为 ROI 被水位线从下往上裁，
     // 静默时它压根不含任何消息。累积后面板显示的是这个会话最近的一段对话。
@@ -864,8 +863,10 @@ fn step(
     // `merge_into_stream` 并进了 A 的消息流，然后闸才关——闸只挡住了推理与
     // 投递，**没挡住消息累积**。面板于是挂着「B 的会话名」显示「A 的历史
     // 夹着 B 的新消息」，正是这段注释原本要防的
-    // 「看起来在处理 A，其实已经在看 B」。切回 A 时水位线没推进过，
-    // 消息会重读一遍，所以这里不需要额外的补偿逻辑。
+    // 「看起来在处理 A，其实已经在看 B」。
+    //
+    // 现在闸整块提到了 OCR 之前，这个约束是**结构上**成立的：闸关着时
+    // 根本走不到这里，也就没什么可漏进来的。
     s.messages = chatservant_perceive::merge_into_stream(&s.messages, &messages);
 
     // 存一份给调试画布。**在整帧坐标系**——画布按帧的百分比定位，
@@ -1009,6 +1010,9 @@ const SESSION: &str = "current";
 /// 这个常量分桶，不清的话上一个会话的摘要会被当成本会话的用。
 fn apply_relock(s: &mut Scratch) {
     s.locked_print = None;
+    // ⚠ 名字的缓存键也要一起丢。重锁就是一次会话切换，新会话的会话名
+    //   必须重新读一次——留着旧键会让 `refresh_peer` 以为「没变」而跳过。
+    s.last_print = None;
     s.history.clear();
     s.context.forget(SESSION);
     s.candidates.clear();
@@ -1037,13 +1041,33 @@ fn apply_relock(s: &mut Scratch) {
 /// 标题栏被裁掉、动画没画完都会短暂认不到，此时清空面板会让消息列表**闪一下**。
 /// 所以只有**指纹确实不同**这一支才清。
 ///
-/// ⚠ 清了之后不用补偿：关闸那一支**不推进水位线**（`step` 直接 return），
-/// 用户切回锁定会话时整个消息区会重读一遍，`s.messages` 自然长回来。
+/// 闸关着的时候，**面板这边**实际做了什么。
+///
+/// ## `switched` 为什么必须单独报出来
+///
+/// 它对应的是「水位线要不要一起退」这一个决定，而水位线**不住在
+/// [`Scratch`] 里**——它住在 [`PaneWatcher`] 里。所以「把这个会话的状态
+/// 清干净」这件事天然漏掉它，调用方必须拿到这个信号才退得回去。
+///
+/// 漏掉的后果不是「多读一次」，是**永久少读**：面板被清空了，可引擎还
+/// 停在旧会话的底部，切回来时增量范围只剩贴着底部的一条缝，
+/// 8 条消息只回来 1 条，而且水位线从此不再动，**不会自愈**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GateOutcome {
+    /// 闸的状态刚变成「关」——要推一次 readout，否则界面停在旧状态。
+    just_closed: bool,
+    /// **确认换了会话**（指纹确实不同），面板上的消息已清空。
+    switched: bool,
+}
+
+/// ⚠ 清了面板**就要一起退水位线**——这件事由 [`park_on_other_conversation`]
+/// 兜住，不要在这里只清一半。
 fn apply_gate_closed(
     s: &mut Scratch,
     print: Option<&chatservant_perceive::identity::HeaderPrint>,
-) -> bool {
+) -> GateOutcome {
     s.candidates.clear();
+    let mut switched = false;
     s.reason = match (&s.locked_print, print) {
         (Some(_), None) => format!(
             "没读出当前会话的头部，无法确认还是不是「{}」——本轮不动手",
@@ -1054,6 +1078,7 @@ fn apply_gate_closed(
         _ => {
             // 确认换人了：上一个会话的消息**不该继续挂在面板上**。
             s.messages.clear();
+            switched = true;
             format!(
                 "当前会话已经不是锁定的那一个（锁定的是「{}」）——本轮不动手",
                 if s.locked_name.is_empty() {
@@ -1070,7 +1095,43 @@ fn apply_gate_closed(
     let just_closed = s.prev_gate_open != Some(false);
     s.prev_gate_open = Some(false);
     s.gate_open = false;
-    just_closed
+    GateOutcome {
+        just_closed,
+        switched,
+    }
+}
+
+/// 闸关着 = 屏幕上那块**不是我们要读的对话**。面板和引擎必须一起收拾。
+///
+/// 返回「是不是刚刚才关的」——只有刚关的那一刻才推 readout。
+///
+/// ## 为什么不能只调 [`apply_gate_closed`]
+///
+/// 2026-10-11 实机复现的真实缺陷：用户在微信里切走再切回来，面板上
+/// 8 条消息只剩 6 条，而且**不会自愈**。
+///
+/// 根因不是丢消息，是**两处状态不同步**：闸关着时面板上的累积消息被
+/// 清掉了，可水位线还停在旧会话的底部——它不在 [`Scratch`] 里，
+/// 「把会话状态清干净」这件事天然漏掉它。于是切回来时增量范围只剩
+/// 贴着底部的那条缝，只有一条消息落在里面。
+///
+/// 以前这里还留着一句注释说「清空之后不用补偿，关闸那一支不推进水位线，
+/// 用户切回时整个消息区会重读一遍」——**那句话是错的**。不推进水位线
+/// 恰恰意味着 ROI 保持 `[水位线, 底部)`，也就是那条缝。重读整段需要的是
+/// **退回顶部**，不是「不推进」。
+///
+/// 只在 `switched`（确实换了会话）时退：「认不出头部」那一支没有清面板，
+/// 引擎那边的记忆仍然对得上，跟着一块退只会白白多读一次。
+fn park_on_other_conversation(
+    s: &mut Scratch,
+    watcher: &mut PaneWatcher,
+    print: Option<&chatservant_perceive::identity::HeaderPrint>,
+) -> bool {
+    let g = apply_gate_closed(s, print);
+    if g.switched {
+        watcher.rewind();
+    }
+    g.just_closed
 }
 
 /// 把媒体区域变成要送模型的图。**总闸关着时一律返回空。**
@@ -1204,6 +1265,46 @@ fn peer_name_from_header(
         .map(str::to_string)
 }
 
+/// **头部像素没变就不重读会话名。**
+///
+/// ## 为什么能拿指纹当缓存键
+///
+/// 会话名是**头部那块像素的函数**——像素一模一样，OCR 不可能读出不同的字。
+/// 而 [`HeaderPrint::is_same`] 判定的正是「这块还是不是那块」，
+/// 阈值吸收的是角标、动画这类抖动。所以指纹没变就不必再花一次 OCR。
+///
+/// ⚠ 这条缓存让「闸关着时别干活」成为可能：换会话时头部像素确实变了，
+/// 所以**面板仍然会显示当前窗口里真正是谁**（硬约束第 1 条要求这道闸
+/// 看得见）；而停在 B 不动时，指纹不变，于是那一整段时间**一次 OCR 都不跑**。
+///
+/// ## 认不到就保持原样
+///
+/// 身份是**累积确认**的事实。早先这里无条件
+/// `s.peer = ...unwrap_or_default()`，于是标题栏一离开增量 ROI，
+/// 界面上的会话名就被抹成「没认出来」——而实际上它没变过。
+fn refresh_peer(
+    s: &mut Scratch,
+    pane: &chatservant_capture::Frame,
+    anchor: &chatservant_capture::anchor::PaneAnchor,
+    print: Option<&chatservant_perceive::identity::HeaderPrint>,
+) {
+    let changed = match (&s.last_print, print) {
+        // 还没记过：第一次总得读一次。
+        (None, _) => true,
+        // 这帧认不出头部 → 不动已认出来的名字，也不更新缓存键
+        // （否则下次认不出就会被当成「变了」，白读一次）。
+        (_, None) => false,
+        (Some(a), Some(b)) => !a.is_same(b),
+    };
+    if !changed {
+        return;
+    }
+    s.last_print = print.cloned();
+    if let Some(name) = peer_name_from_header(pane, anchor) {
+        s.peer = name;
+    }
+}
+
 /// 头带高度 40 px。实测标题行只有 11 px 高，多留一点是为了
 /// 框住整条标题栏（含右侧图标），而不是只框那行字。
 const HEAD_BAND_H: i32 = 40;
@@ -1253,8 +1354,9 @@ mod tests {
     use super::{
         BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message, RecentN, Relock, SESSION,
         Scratch, Speaker, TierCell, TokenBudget, apply_gate_closed, apply_relock, collect_images,
-        header_print,
+        header_print, park_on_other_conversation,
     };
+    use chatservant_perceive::{Decision, PaneWatcher};
     use chatservant_reason::context;
 
     /// **clone 出来的句柄和本体读的是同一个格子。**
@@ -1351,6 +1453,28 @@ mod tests {
         chatservant_capture::Frame::from_rgb(w, h, px).expect("尺寸一致")
     }
 
+    /// 造一块**消息区**画面：深底 + 若干条文字行（`(y0, y1)`）。
+    ///
+    /// 气泡色 225/225/229 配底色 30/30/31，与实测一致。
+    /// ⚠ 造「另一个会话」时**不许只改亮度**——见 [`header_frame`] 那条，
+    /// 会话闸就是这么失效过一整轮的。
+    fn pane_frame(rows: &[(u32, u32)]) -> chatservant_capture::Frame {
+        const W: u32 = 400;
+        const H: u32 = 700;
+        let mut px = vec![30u8; (W * H * 3) as usize];
+        for &(y0, y1) in rows {
+            for y in y0..y1 {
+                for x in 40..(W - 40) {
+                    let i = ((y * W + x) * 3) as usize;
+                    px[i] = 225;
+                    px[i + 1] = 225;
+                    px[i + 2] = 229;
+                }
+            }
+        }
+        chatservant_capture::Frame::from_rgb(W, H, px).expect("尺寸一致")
+    }
+
     /// 取一块「标题栏」的头部指纹。
     fn print_of(name: u32) -> chatservant_perceive::identity::HeaderPrint {
         use chatservant_core::frame::Rect;
@@ -1393,9 +1517,16 @@ mod tests {
             probability: 0.5,
         });
 
-        let just_closed = apply_gate_closed(&mut s, Some(&b));
+        let g = apply_gate_closed(&mut s, Some(&b));
 
-        assert!(just_closed, "刚关闸要推一次 readout，否则界面还停在旧状态");
+        assert!(
+            g.just_closed,
+            "刚关闸要推一次 readout，否则界面还停在旧状态"
+        );
+        assert!(
+            g.switched,
+            "指纹确实不同，必须报「换了会话」——水位线要跟着一起退"
+        );
         assert!(
             s.messages.is_empty(),
             "换了会话还挂着锁定会话的消息：{:?}",
@@ -1425,9 +1556,12 @@ mod tests {
         let mut s = Scratch::new(RecentN::new(12));
         s.locked_print = Some(a);
 
-        assert!(apply_gate_closed(&mut s, Some(&b)), "第一次关闸要推");
         assert!(
-            !apply_gate_closed(&mut s, Some(&b)),
+            apply_gate_closed(&mut s, Some(&b)).just_closed,
+            "第一次关闸要推"
+        );
+        assert!(
+            !apply_gate_closed(&mut s, Some(&b)).just_closed,
             "闸一直关着时不该每圈都推一次"
         );
     }
@@ -1455,6 +1589,68 @@ mod tests {
             s.reason.contains("无法确认"),
             "要说清是「认不出」而不是「换了会话」，实际：{}",
             s.reason
+        );
+    }
+
+    /// **切走再切回锁定会话，消息必须全部回来。**
+    ///
+    /// 2026-10-11 实机复现的缺陷：微信里切到别的会话再切回来，面板上
+    /// 8 条消息只剩 6 条，而且**不会自愈**。
+    ///
+    /// 根因不是丢消息，是**两处状态不同步**：闸关着时面板上的累积消息被
+    /// 清掉了，可水位线还停在旧会话的底部——它不在 `Scratch` 里，
+    /// 「把会话状态清干净」这件事天然漏掉它。于是切回来时增量范围只剩
+    /// 贴着底部的那条缝，只有一条消息落在里面。
+    ///
+    /// 这条按真实路径走：`park_on_other_conversation`（**生产用的那个函数**，
+    /// 不是手工再调一次 `rewind`——那样测的是测试自己）。
+    #[test]
+    fn switching_back_to_the_locked_conversation_restores_every_message() {
+        // A 会话：8 条消息铺满 700 高的消息区。
+        let rows: [(u32, u32); 8] = [
+            (60, 80),
+            (140, 160),
+            (220, 240),
+            (300, 320),
+            (380, 400),
+            (460, 480),
+            (540, 560),
+            (620, 640),
+        ];
+        let a = pane_frame(&rows);
+        let mut w = PaneWatcher::new(0);
+        let mut s = Scratch::new(RecentN::new(12));
+        s.locked_print = Some(print_of(0));
+
+        // 在 A 里读到全部 8 条，水位线推到最下面一条的下沿。
+        let Decision::Read { .. } = w.observe(&a) else {
+            panic!("首次观察必须读整段消息区")
+        };
+        s.messages = (0..8).map(|i| a_msg(&format!("A 的第 {i} 条"))).collect();
+        w.commit(660);
+
+        // 切到 B：闸关，面板被清空。**水位线必须同时退掉。**
+        park_on_other_conversation(&mut s, &mut w, Some(&print_of(1)));
+        assert!(s.messages.is_empty(), "前提：面板上的消息确实被清了");
+        assert_eq!(
+            w.watermark(),
+            0,
+            "闸关着就等于这块画面不是我们的——水位线必须退回顶部，\
+             否则切回来只会读到贴着底部的那条缝"
+        );
+
+        // 切回 A：闸重新开。整段消息区必须重读。
+        assert!(
+            print_of(0).is_same(s.locked_print.as_ref().expect("锁还在")),
+            "前提：切回来之后指纹要判成同一个会话"
+        );
+        let Decision::Read { roi } = w.observe(&a) else {
+            panic!("切回锁定会话必须重新读整段消息区")
+        };
+        assert!(
+            roi.y0 <= 1,
+            "增量范围从 y={} 起，8 条消息里只有最下面一条落在里面：{roi:?}",
+            roi.y0
         );
     }
 

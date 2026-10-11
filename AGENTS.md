@@ -101,7 +101,7 @@ cd ui && pnpm check && pnpm lint
 # 启动与探针
 cd ui && pnpm tauri dev           # 前端 dev server 在 http://localhost:1420
 cargo xtask probe frame           # 抓一帧聊天窗口到 target/probe/，人工看像素
-cargo xtask probe layout          # 打印消息区像素锚点结果
+cargo xtask layout                # 打印消息区像素锚点结果（⚠ 顶层命令，不是 probe layout）
 pwsh -NoProfile -File scripts\fgwin.ps1      # 前台窗口
 pwsh -NoProfile -File scripts\winscan.ps1    # 只报可见窗口
 pwsh -NoProfile -File scripts\shotwin.ps1 <hwnd> <out.png>   # 截窗口
