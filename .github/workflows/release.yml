@@ -50,8 +50,15 @@ jobs:
     name: Build installers
     runs-on: windows-latest
     needs: verify
+    # ⚠ `concurrency.group` **不能用 env 上下文**——GitHub 只允许
+    #   github / inputs / vars / needs / strategy / matrix。
+    #   写成 `${{ env.RELEASE_TAG }}` 会让整个工作流校验失败，症状很隐蔽：
+    #   Actions 里它仍显示 state=active，但**名字退化成文件路径**，
+    #   而且每次 push 都会产生一个「零 job、conclusion=failure」的运行，
+    #   连 `on: push: tags` 这类过滤都不再生效。
+    #   症状与根因隔了三层，所以这里把表达式直接展开写，不复用 env。
     concurrency:
-      group: ${{ github.workflow }}-${{ env.RELEASE_TAG }}
+      group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       cancel-in-progress: false
     permissions:
       contents: write
