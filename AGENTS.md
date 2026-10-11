@@ -98,6 +98,12 @@ cargo test --workspace --lib --bins --tests
 cargo deny check                 # 许可证/advisory/来源合规，见 ADR-0003
 cd ui && pnpm check && pnpm lint
 
+# ⚠ `cargo deny` 要联网拉 advisory-db，而 github.com 直连不通（实测 2026-10-12：
+#   `unable to access ... SSL_ERROR_SYSCALL`）。跑完整门禁前先把代理挂上，
+#   环境变量会被 `gate.ps1` 继承：
+$env:HTTPS_PROXY='http://127.0.0.1:7897'; $env:HTTP_PROXY='http://127.0.0.1:7897'
+pwsh -NoProfile -File scripts\gate.ps1
+
 # 启动与探针
 cd ui && pnpm tauri dev           # 前端 dev server 在 http://localhost:1420
 cargo xtask probe frame           # 抓一帧聊天窗口到 target/probe/，人工看像素

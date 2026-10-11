@@ -1293,6 +1293,11 @@ fn head_band_rect(
     // 宽度封顶：右半边是空面板，纳入只会稀释指纹。
     let w = chat.width().min(HEAD_BAND_W);
     let top = (anchor.header_top - chat.y0).max(0);
+    // ⚠ `x0` 必须是 **0**：`pane` 已经是 `frame.crop(anchor.chat)` 那块，
+    //   坐标早就换算到消息区了，这里再减一次 `chat.x0` 会把取样框整个
+    //   推到右边外面（实测 2026-10-11 闸在真实帧上从来没关过）。
+    //   `the_gate_closes_and_reopens_over_a_frame_sequence_with_one_watcher`
+    //   用 304 的侧边栏夹具守着这条；把这里改回 `chat.x0` 它立刻红。
     Rect::new(0, top, w, top + HEAD_BAND_H)
 }
 
@@ -1456,6 +1461,18 @@ mod tests {
     };
     use chatservant_perceive::{Decision, PaneWatcher};
     use chatservant_reason::context;
+
+    /// 左侧边栏宽度，**实测微信的值**。
+    ///
+    /// ⚠ 夹具里它必须**非零**，否则 `frame.crop(anchor.chat)` 是恒等操作，
+    /// 两套坐标系一模一样，`head_band_rect` 里那次减法算错也就看不出来——
+    /// 而那正是 2026-10-11 那个破口的形态：闸在真实帧上从来没关过，
+    /// 而当时所有测试都是绿的。
+    const SIDEBAR_W: u32 = 304;
+
+    /// 消息区自身宽高（**不含**侧边栏）。
+    const PANE_W: u32 = 400;
+    const PANE_H: u32 = 700;
 
     /// **clone 出来的句柄和本体读的是同一个格子。**
     ///
@@ -1750,6 +1767,217 @@ mod tests {
             "增量范围从 y={} 起，8 条消息里只有最下面一条落在里面：{roi:?}",
             roi.y0
         );
+    }
+
+    /// **端到端序列：同一窗口 HWND，内容换一批帧。** 票 18 最后一条验收项。
+    ///
+    /// ## 为什么上面那条撑不起来
+    ///
+    /// `switching_back_to_the_locked_conversation_restores_every_message`
+    /// 用的是 `print_of(n)`——**手搓指纹**，然后直接调闸函数。
+    /// 它跳过了「帧 → [`header_print`] → 闸」这条链。
+    ///
+    /// 而上一轮那个破口恰恰出在链子上：`head_band_rect` 曾经拿
+    /// `chat.x0` 去裁一块**已经是消息区坐标**的画面，裁出来的是消息区
+    /// 右半边的中部——指纹算在了一片与「是谁」无关的区域上，
+    /// 两个会话的指纹几乎一样，闸**从来没在真实帧上关过**。
+    /// 手搓指纹的测试永远测不到这种错：它压根不经过那块坐标换算。
+    ///
+    /// 所以这条必须从**帧**出发，走生产用的 `header_print()`。
+    ///
+    /// ## 「同一窗口」体现在哪
+    ///
+    /// `w` 是同一个 [`PaneWatcher`] 实例，全程没有重建——水位线正是
+    /// 住在它里面的。重建实例等于把这个会话读过的全忘掉，
+    /// 而那恰恰是「切回来消息变少」的另一个成因。
+    ///
+    /// ## 两条性质都实测过「掐掉修复就变红」（2026-10-12）
+    ///
+    /// | 掐掉的 | 结果 |
+    /// |---|---|
+    /// | `head_band_rect` 的 `x0` 改回 `chat.x0` | 本条红，**旧的
+    ///   `the_gate_reads_the_header_pixels_not_the_ocr_text` 照样绿** |
+    /// | `park_on_other_conversation` 里的 `watcher.rewind()` | 本条 + 已有的那条一起红 |
+    ///
+    /// 第一行是这条存在的理由：旧夹具把 `chat.x0` 设成 0，`crop` 成了
+    /// 恒等操作，两套坐标系一模一样——**坐标换算算错了它也测不出来**。
+    /// 而 `park_on_other_conversation` 那条另有测试守着，所以本条的新增
+    /// 价值在于「真实帧 → 指纹」这半条链，和帧序里闸的开关时机。
+    #[test]
+    fn the_gate_closes_and_reopens_over_a_frame_sequence_with_one_watcher() {
+        let rows_a: [(u32, u32); 8] = [
+            (60, 80),
+            (140, 160),
+            (220, 240),
+            (300, 320),
+            (380, 400),
+            (460, 480),
+            (540, 560),
+            (620, 640),
+        ];
+        // B 是另一个会话：字形不同、**亮度完全一样**，且消息更少。
+        let rows_b: [(u32, u32); 2] = [(500, 520), (600, 620)];
+
+        let a = conversation_frame(&rows_a, 0);
+        let b = conversation_frame(&rows_b, 1);
+        let anchor = test_anchor();
+
+        // 走生产路径取指纹，不手搓。
+        //
+        // ⚠ 每一处都先 crop 成消息区坐标系——`header_print` 与
+        // `PaneWatcher::observe` 收的都是那块（见上面 ① 那段长注释），
+        // 而 `head_band_rect` 里那次 `chat.x0` 的错正是把这层换算搞反了。
+        // 这里写成闭包，是为了让「忘了 crop」变成编译期只有一个漏法，
+        // 而不是六处调用各写一遍、错一处还照样绿。
+        let pane = |f: &chatservant_capture::Frame| f.crop(anchor.chat).expect("消息区裁得出来");
+        let pa = header_print(&pane(&a), &anchor).expect("A 的指纹取得到");
+        let pb = header_print(&pane(&b), &anchor).expect("B 的指纹取得到");
+        assert!(
+            !pa.is_same(&pb),
+            "两个会话的指纹必须不同，否则这条测的是个假闸"
+        );
+
+        let mut s = Scratch::new(RecentN::new(12));
+        s.images_out = ImagesOut::off();
+        let mut w = PaneWatcher::new(0);
+
+        // ── 第 1 圈：在 A 里建锁，读到 8 条 ──
+        s.locked_print = Some(pa.clone());
+        s.locked_name = "A".into();
+        s.messages = vec![a_msg("A1"), a_msg("A2")];
+        let Decision::Read { roi } = w.observe(&pane(&a)) else {
+            panic!("第一帧必然要读")
+        };
+        w.commit(roi.y1);
+
+        // ── 第 2 圈：切到 B。同一个 watcher，只是内容换了 ──
+        let peer_ok = match (&s.locked_print, Some(&pb)) {
+            (Some(x), Some(y)) => x.is_same(y),
+            _ => true,
+        };
+        assert!(!peer_ok, "前提：B 必须被认成不是锁定的那个会话");
+        let just_closed = park_on_other_conversation(&mut s, &mut w, Some(&pb));
+        assert!(just_closed, "刚换会话：面板要推一次 readout");
+        assert!(
+            s.messages.is_empty() && s.candidates.is_empty(),
+            "闸关着却还挂着锁定会话的内容：{:?}",
+            s.messages
+        );
+
+        // 在 B 里读一轮并提交——水位线因此被推到 B 的底部。
+        let Decision::Read { roi } = w.observe(&pane(&b)) else {
+            panic!("画面变了必然要读")
+        };
+        w.commit(roi.y1);
+        s.messages = vec![a_msg("B1")];
+
+        // ── 第 3 圈：切回 A ──
+        let back = header_print(&pane(&a), &anchor).expect("切回来的指纹取得到");
+        assert!(back.is_same(&pa), "前提：切回来认得是同一个会话");
+        let out = park_on_other_conversation(&mut s, &mut w, Some(&pa));
+        assert!(!out, "闸是重新开的：不该再推一次「刚关」");
+        s.messages = vec![a_msg("A1"), a_msg("A2")];
+
+        let Decision::Read { roi } = w.observe(&pane(&a)) else {
+            panic!("切回锁定会话必须重新读")
+        };
+        assert!(
+            roi.y0 <= 1,
+            "增量范围从 y={} 起 —— 水位线没跟着退回顶部，8 条里只有一条能读回来：{roi:?}",
+            roi.y0
+        );
+        assert!(s.locked_print.is_some(), "锁还在，闸重新开着");
+        assert!(s.messages.len() == 2, "切回来之后消息必须重新有内容");
+    }
+
+    /// 锚点：**消息区从 x=[SIDEBAR_W] 起**，标题栏在顶上。
+    ///
+    /// `chat.x0` 非零是有意的——见 [`SIDEBAR_W`]。头带在消息区坐标系里
+    /// 于是落在 x∈[0,400) 的字块上；错成拿 `chat.x0` 去裁一块**已裁过**的
+    /// 画面时，取样框会整个跑到右边外面，`header_print` 直接给 `None`。
+    fn test_anchor() -> chatservant_capture::anchor::PaneAnchor {
+        use chatservant_capture::anchor::PaneAnchor;
+        use chatservant_core::frame::Rect;
+        PaneAnchor {
+            chat: Rect::new(
+                SIDEBAR_W as i32,
+                0,
+                (SIDEBAR_W + PANE_W) as i32,
+                PANE_H as i32,
+            ),
+            panel_bg: [30, 30, 31],
+            panel: Rect::new(
+                SIDEBAR_W as i32,
+                0,
+                (SIDEBAR_W + PANE_W) as i32,
+                PANE_H as i32,
+            ),
+            header_top: 0,
+            input_top: PANE_H as i32,
+        }
+    }
+
+    /// 一块**同时带标题栏和消息行**的画面。
+    ///
+    /// 之前那两个夹具各造一半（`header_frame` 只画字、`pane_frame` 只画行），
+    /// 于是测试只能分别取指纹、分别喂行。真实的那一块是**一起**的，
+    /// 而且左右**带着侧边栏**——坐标换算只有在这种画面上才算得出来。
+    fn conversation_frame(rows: &[(u32, u32)], name: u32) -> chatservant_capture::Frame {
+        let w = SIDEBAR_W + PANE_W;
+        let mut px = vec![30u8; (w * PANE_H * 3) as usize];
+        // 侧边栏换个底色：一眼能看出「它不在消息区里」，
+        // 也就知道头带不该从这儿取。
+        for y in 0..PANE_H {
+            for x in 0..SIDEBAR_W {
+                let i = ((y * w + x) * 3) as usize;
+                px[i] = 60;
+                px[i + 1] = 60;
+                px[i + 2] = 62;
+            }
+        }
+        // 标题栏：三个字块，亮度一样、笔画落点由 name 决定。
+        // ⚠ `x` 走的是**消息区局部坐标**，写回帧缓冲时才加上侧边栏偏移。
+        //   早先这里写成 `sx = SIDEBAR_W + off` 再去减——字块于是落在
+        //   局部 x≈328 处，正好落在正确取样框（0..400）与错误取样框
+        //   （304..400）的**重叠区**里，两边都取到墨，坐标算错也照样绿。
+        for y in 12..25u32 {
+            for x in 0..PANE_W {
+                let mut on = false;
+                for off in [24u32, 42, 60] {
+                    let (Some(cx), Some(cy)) = (x.checked_sub(off), y.checked_sub(12)) else {
+                        continue;
+                    };
+                    if cx < 13
+                        && cy < 13
+                        && match name {
+                            0 => cx < 7,
+                            1 => cx >= 7,
+                            _ => cy < 7,
+                        }
+                    {
+                        on = true;
+                    }
+                }
+                if on {
+                    let i = ((y * w + SIDEBAR_W + x) * 3) as usize;
+                    px[i] = 225;
+                    px[i + 1] = 225;
+                    px[i + 2] = 225;
+                }
+            }
+        }
+        // 消息行。
+        for &(y0, y1) in rows {
+            for y in y0..y1 {
+                for x in 40..(PANE_W - 40) {
+                    let i = ((y * w + SIDEBAR_W + x) * 3) as usize;
+                    px[i] = 225;
+                    px[i + 1] = 225;
+                    px[i + 2] = 229;
+                }
+            }
+        }
+        chatservant_capture::Frame::from_rgb(w, PANE_H, px).expect("尺寸一致")
     }
 
     /// 总闸的 clone 与本体共用一个格子——设置页改了循环得知道。

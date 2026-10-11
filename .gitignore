@@ -17,6 +17,13 @@
 # 抓帧调试产物。截图不落盘是硬约束，这里只允许 xtask probe 写。
 /probe-out
 
+# 门禁日志。`pwsh -File scripts\gate.ps1 *> gateNN.log` 每轮都在变，
+# 入库只会让 diff 永远脏，而且历史里那些副本对谁都没用。
+/gate*.log
+
+# 临时探针。`.scratch/<feature>/` 才是票据，这里放的是一次性脚本。
+/.scratch/tmp-probe/
+
 # 本地配置与凭据。任何文件里都不该出现 key。
 config.json
 *.key
