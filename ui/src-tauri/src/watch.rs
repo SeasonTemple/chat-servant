@@ -53,6 +53,51 @@ pub fn debug_pane() -> Option<crate::debug::DebugPane> {
     LAST_BOXES.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// 一个矩形的面积。**饱和减法**由 [`Rect::width`] / [`Rect::height`] 保证，
+/// 所以负尺寸（锚点没找准时）读成 0 而不是绕回一大片。
+fn pane_area(r: chatservant_core::frame::Rect) -> u64 {
+    u64::from(r.width().max(0) as u32) * u64::from(r.height().max(0) as u32)
+}
+
+/// **每圈都记一次账**，静默期也记（全 0）。
+///
+/// ## 为什么不省掉静默期那一次
+///
+/// 只在跑过 OCR 的圈子里记账的话，界面挂着的永远是**上一次读**的数字。
+/// 于是用户看到「读了 12% 的消息区」，而程序此刻**什么都没读**——
+/// 两者在界面上长得一模一样，于是「变化门控有没有在起作用」这个问题
+/// **看不出来**。而那恰恰是这张账唯一要回答的事。
+fn record_cost(
+    boxes: &std::sync::Mutex<Option<crate::debug::DebugPane>>,
+    ocr_pixels: u64,
+    roi_pixels: Option<u64>,
+    pane_pixels: u64,
+    ocr_calls: u32,
+) {
+    let mut g = boxes.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(p) = g.as_mut() else {
+        // 还没跑出过第一帧的框。**不凭空造一个画布**——
+        // 空框 + 真数字，比没有更容易让人以为「什么都没识别出来」。
+        return;
+    };
+    p.cost = crate::debug::FrameCost {
+        ocr_pixels,
+        roi_pixels,
+        pane_pixels,
+        ocr_calls,
+        vision_tokens: 0, // 图片预算那一步在更后面，见 record_vision_tokens
+    };
+}
+
+/// 补记视觉 token。**必须独立于 [`record_cost`]**——
+/// 图片是在推理构造 `TurnContext` 时才收的，那时账已经记过一次了。
+fn record_vision_tokens(boxes: &std::sync::Mutex<Option<crate::debug::DebugPane>>, tokens: u64) {
+    let mut g = boxes.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = g.as_mut() {
+        p.cost.vision_tokens = tokens;
+    }
+}
+
 /// 一次观察里各段各调了几次模型。**四个都要报，包括 0。**
 ///
 /// 界面上要能看出「判断 2 · 起草 1 · 排序 1 · 视觉 0」——
@@ -794,6 +839,9 @@ fn step(
         // ⚠ 连水位线一起退，否则切回锁定会话时只读得到底部那条缝。
         //   见 `park_on_other_conversation`——面板清空和引擎退位必须同一次做。
         let just_closed = park_on_other_conversation(s, watcher, print.as_ref());
+        // 闸关着 = 这一帧没读任何像素。**照样记账**，
+        // 否则界面挂着上一帧的数字，用户以为程序还在给那个新会话干活。
+        record_cost(last_boxes, 0, None, pane_area(anchor.chat), 0);
         return Ok(if just_closed { Some(anchor) } else { None });
     }
     // 闸是开的。记一笔，供下次关闸时判断「是不是刚刚才关的」。
@@ -804,6 +852,9 @@ fn step(
 
     // ③ 变化门控 + 增量 ROI。**静默期在这里就返回了。**
     let Decision::Read { roi } = watcher.observe(&full) else {
+        // 没变：一行都没读。**这是硬约束第 6 条的落点**，
+        // 而「这一帧 0 像素 / 0 次 OCR」正是它唯一可信的证据。
+        record_cost(last_boxes, 0, None, pane_area(anchor.chat), 0);
         return Ok(None);
     };
 
@@ -894,6 +945,17 @@ fn step(
         attrs.as_slice(),
     ));
 
+    // 开销账。⚠ `ocr_pixels` 是**放大后的整帧**，不是 ROI——
+    // 见下面 ③ 那段实测记录：裁 ROI 去 OCR 会漏行，所以送进去的确实是整帧。
+    // 报成 ROI 面积的话，用户会以为「调小 ROI 就能省 OCR」，而那调了没用。
+    record_cost(
+        last_boxes,
+        u64::from(frame.width()) * u64::from(frame.height()) * u64::from(sc),
+        Some(pane_area(roi)),
+        pane_area(anchor.chat),
+        1,
+    );
+
     // 只有真的有**对方说的话**才推进水位线。
     // 推进了却没东西可读 = 那段永远不会被再读一遍 = 漏消息。
     let newest = messages
@@ -942,12 +1004,17 @@ fn step(
             }
         };
 
+        let images = collect_images(&frame, &anchor, s);
+        // 视觉 token 记在**收完图之后**——收图之前谁也不知道这一帧花了多少。
+        // 默认配置（多模态 B）这里是 0，而 0 是有意义的数，必须照报。
+        record_vision_tokens(last_boxes, images.iter().map(|i| u64::from(i.tokens)).sum());
+
         let ctx = TurnContext {
             messages: rendered.lines().map(str::to_string).collect(),
             // 过了闸才填对端名。**这里不是空串了**——早先一直留空占位，
             // 判据是「还没接识别会话名」，现在接上了。
             peer: s.peer.clone(),
-            images: collect_images(&frame, &anchor, s),
+            images,
             // 「我平时的说话风格」。空的时候是空 Vec，渲染那一步会整节省掉，
             // 不往提示里塞空标题。
             voice: chatservant_reason::voice::voice_samples(&s.mine),
