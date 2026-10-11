@@ -517,7 +517,7 @@ mod tests {
         let me = by_text("我方那条");
         assert!(!me.on_panel, "我方在气泡里");
         assert!(me.chroma >= 30, "我方气泡彩度 {}", me.chroma);
-        assert!(me.contrast > 140.0, "我方正��对比 {}", me.contrast);
+        assert!(me.contrast > 140.0, "我方正块对比 {}", me.contrast);
 
         let them = by_text("对方那条");
         assert!(!them.on_panel, "对方在气泡里");
