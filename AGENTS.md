@@ -60,6 +60,8 @@ Rust 核心 + Tauri 2 外壳 + Svelte 5 前端，先打通微信单聊。
 - `ui/src-tauri/` — Tauri 2 外壳：命令层、托盘、观察循环
 - `ui/static/demo/*.json` — 八态演示夹具，`?demo=1&state=<名字>`
 - `.agents/skills/` — **设计/前端/Rust/ComputerUse 技能库**（见下）
+- `.github/` — CI（九步，与 `gate.ps1` 对齐）、release（tag 驱动，出 msi+nsis）
+- `.githooks/` — commit-msg 校验 Conventional Commits、pre-commit 凭据闸
 
 真实 `unsafe` 分布（`rg -c 'unsafe \{|unsafe fn '`，2026-10-11 实测）：
 
@@ -172,7 +174,9 @@ before writing code that uses domain terms. See `docs/agents/domain.md`.
 | `.agents/skills/openspec-*/` | 需求较大、要走规格变更流程时 |
 
 `skills-lock.json` 记录装了哪些版本。`.claude/` / `.minimax/` / `.zcode/` 是 CLI
-为别的运行时做的 symlink，**不要手改它们的内容**。
+为别的运行时做的 symlink，**不要手改它们的内容**。⚠ **仓库只跟踪 `.agents/`
+一份**（2026-10-12 起）——那三个副本已 gitignore，入库的是四份逐字相同的
+第三方文件，约 2400 个，纯冗余。
 
 `examples/jev-chat-windows/` 是被替代的参考实现（Python）。可以读它的
 `docs/KICKOFF.md`、`app/ocr.py`、`app/capture.py` 了解已实测的结论，
@@ -267,3 +271,16 @@ cargo clean --profile release   # 重新打包前再编回来
 - `ui/static/demo/*.json` 不含真实聊天内容——演示页可能被部署到公开 URL。
 - 截图不落盘（硬约束 3）。`target/probe/` 里的证据图是**显式调试命令**的产物，
   里面可能有真实聊天内容，**不要提交进 git**。
+- ⚠ **`crates/capture/fixtures/` 已 gitignore（2026-10-12）。** 那里是
+  `crates/perceive/tests/golden.rs` 与 `media.rs` 用的像素级黄金基线，
+  **从实机真实聊天脱敏而来**——即使只剩布局几何与配色，来源仍指向用户会话，
+  所以不入公开仓库。代价：依赖它们的用例**缺件即跳过**而不是失败。
+  本机恢复：`cargo xtask fixture --name <n> --source target\probe\<帧>.png`。
+  **别把「CI 全绿」读成「黄金基线验过了」。**
+- 本仓库公开在 GitHub（`SeasonTemple/chat-servant`），许可为
+  **BSL 1.1**（2029-10-12 转 Apache-2.0，见 `LICENSE`）。
+  ⚠ 这与「依赖只允许 permissive」**不矛盾**：那条策略管的是**别人的 crate**
+  （`deny.toml` 的 `allow` 白名单 + 逐包名的 `exceptions`），本项目自己的
+  发布物不在其管辖内。别为了图省事把 `BUSL-1.1` 塞进 `deny.toml` 的 `allow`——
+  那等于给 BUSL 依赖开了口子。
+

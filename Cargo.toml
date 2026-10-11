@@ -72,7 +72,7 @@ similar_names = "allow"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-license = "MIT OR Apache-2.0"
+license = "BUSL-1.1"
 
 # 版本在这里锁死一次，各 crate 只写 workspace = true。
 # windows 必须与 windows-capture 2.0 的内部依赖对齐（它要 ^0.62.2），

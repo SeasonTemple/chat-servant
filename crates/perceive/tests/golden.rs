@@ -21,9 +21,22 @@
 //!
 //! 更新基线：删掉对应 png 重新 `cargo xtask fixture`，然后把这里的期望值
 //! 改成新值并**在提交信息里说清为什么**。
+//!
+//! ## 公开仓库里没有这些夹具
+//!
+//! 夹具是从**实机抓帧**脱敏而来的，而实机抓帧对应的是**用户自己的真实聊天**。
+//! 即使脱敏后只剩布局几何与配色，来源仍然指向真实会话，因此**不入公开仓库**
+//! （`.gitignore` 里 `crates/capture/fixtures/`）。代价是这些黄金测试在
+//! 没有夹具的机器上**不跑**——所以它们一律「缺件即跳过」而不是失败：
+//! 跳过要说清缺的是哪几个，别让 CI 的绿灯被读成「黄金基线验过了」。
+//!
+//! 本机要恢复它们：重跑
+//! `cargo xtask fixture --name wechat-dark-2side --source target\probe\<你的帧>.png`
+//! （脱敏与拒收校验都在那一步里，见 `.toml` 头部的说明）。
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
 
 use chatservant_capture::Frame;
 use chatservant_capture::anchor;
@@ -91,13 +104,25 @@ const MY_SIDE: Golden = Golden {
     pane_them: 5_509,
 };
 
-fn load(name: &str) -> Frame {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../capture/fixtures");
+fn fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../capture/fixtures")
+}
+
+/// 夹具在**公开仓库里不存在**（见模块文档），所以「没有」是一种正常状态，
+/// 不是错误。缺件时返回 `None` 让调用方跳过，而不是 panic。
+///
+/// 先判 png 在不在，**再**去读 `.toml` manifest —— 两者同属被 gitignore 的目录，
+/// 顺序反了会卡在「读 manifest 失败」上，丢掉跳过这条路径。
+fn load(name: &str) -> Option<Frame> {
+    let dir = fixture_dir();
     let path = dir.join(format!("{name}.png"));
+    if !path.exists() {
+        return None;
+    }
     verify_digest(&dir, name, &path);
     let img = image::open(&path).unwrap_or_else(|e| panic!("读夹具 {} 失败：{e}", path.display()));
     let (w, h) = img.dimensions();
-    Frame::from_rgb(w, h, img.to_rgb8().into_raw()).expect("尺寸与缓冲区一致")
+    Some(Frame::from_rgb(w, h, img.to_rgb8().into_raw()).expect("尺寸与缓冲区一致"))
 }
 
 /// 夹具的字节必须与 manifest 里记的 sha256 相符。
@@ -149,7 +174,15 @@ fn histogram(frame: &Frame, r: Rect) -> Vec<(Rgb, usize)> {
 }
 
 fn check(g: &Golden) {
-    let frame = load(g.name);
+    // 夹具不在公开仓库里。缺件要说清是缺哪个，别让「跳过」在 CI 日志里
+    // 只留下一行 test result: ok，被读成「黄金基线验过了」。
+    let Some(frame) = load(g.name) else {
+        eprintln!(
+            "跳过 {}：夹具不在本机（公开仓库不含真实会话的脱敏帧）",
+            g.name
+        );
+        return;
+    };
     assert_eq!(
         (frame.width(), frame.height()),
         (g.width, g.height),
@@ -217,7 +250,10 @@ fn my_sided_conversation_matches_golden() {
 #[test]
 fn fixture_pane_contains_no_pixel_outside_the_layout_palette() {
     for g in [&TWO_SIDE, &MY_SIDE] {
-        let frame = load(g.name);
+        let Some(frame) = load(g.name) else {
+            eprintln!("跳过 {}：夹具不在本机", g.name);
+            continue;
+        };
         for (r, n) in histogram(&frame, g.chat) {
             assert!(
                 LAYOUT_PALETTE

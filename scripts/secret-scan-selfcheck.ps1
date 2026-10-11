@@ -3,10 +3,20 @@
 # 这不是"跑一下看看能不能过"——扫描器没抓到东西时，
 # 「没有输出」和「扫描器坏了」在屏幕上长得一模一样。
 # 必须先证明它**抓得到**，再信它的「没抓到」。
+#
+# ⚠ 下面 $Fake 是**故意的假 key**，用于验证扫描器会拒绝它。
+#   .githooks/pre-commit 会拦下这一行，豁免靠本行的标记。
+# secret-scan: allow
 param([string]$Fake = 'sk-xtaskscan0000probe000000000')
 
 $ErrorActionPreference = 'Stop'
-$pwsh = 'C:\Users\SeasonTemple\AppData\Local\Microsoft\WindowsApps\pwsh.exe'
+# 找 pwsh 而不是写死绝对路径：写死的路径带本机用户名（会跟着进公开仓库），
+# 在别的机器和 CI 上也必然不存在。
+$pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
+if (-not $pwshCmd) {
+  throw '找不到 pwsh（PowerShell 7+）。本脚本依赖它。'
+}
+$pwsh = $pwshCmd.Source
 $canary = Join-Path $PSScriptRoot '..\target\probe\canary-secret.txt'
 
 Write-Output "① 埋一个假 key 到 $canary"

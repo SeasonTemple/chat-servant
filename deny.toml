@@ -85,6 +85,27 @@ allow = [
 #   这里把它们列进来**不是**"它们安全"，而是要让读的人知道：
 #   选 Tauri 2 就等于接受这几个 MPL-2.0 crate 进分发包。
 #   换个 Tauri 版本或换框架时，**必须重新跑 cargo deny**，不要假设还是这几个。
+#
+# ## 最后一条例外为什么是 `private = true`
+#
+# 本项目**自己**以 **BSL 1.1** 发布（2029-10-12 转 Apache-2.0，见 `LICENSE`）。
+# 上面那张白名单只管**依赖**：任何**别人写的** crate 进来，商业使用都不得有麻烦，
+# 所以 BUSL / SSPL / Elastic 一律默认拒绝（ADR-0003）。
+#
+# 「自己用 BUSL」与「依赖一个 BUSL crate」是两件事。把 BUSL-1.1 写进上面的
+# `allow`，等于给依赖悄悄开了口子——那才是真正的策略漏洞。
+#
+# `private = true` 这条路走不通：cargo-deny 0.20.2 的 exceptions 不认 `private`
+# 键（实测报 unexpected keys, expected: ["allow"]），所以只能按 **crate 名**点名。
+# 这依然安全——`chatservant-*` / `xtask` / `chat-servant-app` 全是 `publish = false`
+# 的本仓包名，外部依赖占用不了；就算真有人发布了同名 crate，那也是我们自己的包。
+#
+# ⚠ 另外两条 cargo-deny 0.20 实测限制，写下来免得下一个人重试：
+#   ① `[licenses.private]` 表**没有** `allow` 键（只认 ignore / ignore-sources /
+#      registries），所以只能走 exceptions；
+#   ② exceptions 的每一项**必须**带 `crate`（想写"所有私有 crate"也不行）。
+#   于是这里只能逐个点名——**新增工作区成员时记得补一行**，否则 cargo deny 会以
+#   "license is not explicitly allowed" 失败。补的时候让 `cargo metadata` 当裁判。
 exceptions = [
   { allow = ["MPL-2.0"], crate = "cssparser" },
   { allow = ["MPL-2.0"], crate = "cssparser-macros" },
@@ -92,6 +113,12 @@ exceptions = [
   { allow = ["MPL-2.0"], crate = "selectors-macros" },
   { allow = ["MPL-2.0"], crate = "dtoa-short" },
   { allow = ["MPL-2.0"], crate = "option-ext" },
+  { allow = ["BUSL-1.1"], crate = "chatservant-core" },
+  { allow = ["BUSL-1.1"], crate = "chatservant-capture" },
+  { allow = ["BUSL-1.1"], crate = "chatservant-perceive" },
+  { allow = ["BUSL-1.1"], crate = "chatservant-reason" },
+  { allow = ["BUSL-1.1"], crate = "xtask" },
+  { allow = ["BUSL-1.1"], crate = "chat-servant-app" },
 ]
 
 [licenses.private]
