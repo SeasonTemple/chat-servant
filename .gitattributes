@@ -1,0 +1,30 @@
+# 行尾统一为 LF，由**仓库**定义而不是每台机器的 git 配置。
+#
+# ## 为什么必须显式写死
+#
+# prettier 3 的 `endOfLine` 默认是 `"lf"`，而 `.prettierrc` 里没覆盖它。
+# GitHub 的 `windows-latest` runner 全局 git 配置是 `core.autocrlf=true`，
+# 于是 `actions/checkout` 会把仓库里的 LF **转成 CRLF** 再落盘，
+# prettier 立刻判它们不符合格式。
+#
+# 实测 2026-10-12（chat-servant 首次公开推 GitHub）：同一个 prettier 版本
+# （3.9.9）、同一个 `pnpm-lock.yaml`、同一批源码——本地 `pnpm lint` 全绿，
+# CI 上 **35 个文件**报 "Code style issues found"。
+# 差异只有一处：本机 `core.autocrlf=false`，runner 是 `true`。
+#
+# 这类「同一个命令在两台机器上结论相反」的失败极难定位，因为日志里没有任何
+# 一行提到行尾。把行尾钉进仓库，机器差异就被消掉了。
+* text=auto eol=lf
+
+# 二进制资源：显式声明，免得哪天有人把上面的规则改窄/删掉时
+# git 开始尝试对图片做行尾转换或文本 diff。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
