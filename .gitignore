@@ -25,3 +25,10 @@ config.json
 
 # 第三方参考项目（自带 LICENSE，MIT/GPL 混合）。只读，不入库。
 examples/
+
+# Python 字节码。`.agents/skills/` 下的 skill 带 Python 脚本，
+# 跑过一次就留下 `__pycache__`，那是本机产物，**换台机器重建也一样**，
+# 入库只会让 diff 永远脏。
+__pycache__/
+*.pyc
+*.pyo

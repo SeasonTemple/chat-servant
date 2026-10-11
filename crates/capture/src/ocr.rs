@@ -74,7 +74,66 @@ pub enum OcrError {
 }
 
 /// 识别一帧里的文字。纯本地，不出网。
+///
+/// ## 两条路，默认走 WinRT
+///
+/// | 引擎 | 何时用 | 代价 |
+/// |---|---|---|
+/// | `Windows.Media.Ocr` | **默认**。没装权重时唯一能跑的路 | 系统自带，零模型体积 |
+/// | PP-OCRv4（[`crate::ocr_pp_pipeline`]） | `%APPDATA%\dev.chatservant.app\models\` 下有权重时 | 15MB 权重，纯 Rust 跑 ONNX |
+///
+/// ⚠ **PP-OCRv4 是增强不是必需**：没装权重、或它跑挂了，**都必须继续用 WinRT**，
+/// 而不是在界面上报错。一台没下模型的机器照样要能聊天。
+///
+/// 想强制走某一条：`CHATSERVANT_OCR=ppocr` 走 PP-OCRv4（没权重会回落并记一条
+/// warning），`CHATSERVANT_OCR=winrt` 强制 WinRT。默认 `auto` = 有权重就用 PP。
 pub fn recognize(frame: &Frame) -> Result<OcrText, OcrError> {
+    match engine_choice() {
+        Engine::Ppocr => {
+            let out = crate::ocr_pp_pipeline::recognize(frame);
+            match out {
+                Some(t) => return Ok(t),
+                None => {
+                    tracing::info!("PP-OCRv4 不可用（无权重或推理失败），本轮回落 WinRT");
+                }
+            }
+        }
+        Engine::Winrt => return recognize_winrt(frame),
+    }
+    recognize_winrt(frame)
+}
+
+/// 走哪条 OCR 路。
+///
+/// ⚠ **没有 `Auto` 变体**：`engine_choice()` 必须在**内部**就把 auto 解析成
+/// 具体某条。早先留了个 `Auto` 分支，于是 `recognize` 的 match 不穷尽、
+/// 编译器把「以后再加变体忘了处理」这件事留到了运行期——而 OCR 选错路的后果
+/// 是**静默读到别的文字**，不是报错。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Engine {
+    Ppocr,
+    Winrt,
+}
+
+fn engine_choice() -> Engine {
+    match std::env::var("CHATSERVANT_OCR").as_deref() {
+        Ok("ppocr") => Engine::Ppocr,
+        Ok("winrt") => Engine::Winrt,
+        _ => {
+            // auto：有权重才走 PP-OCRv4。**先问文件在不在**，
+            // 别直接调 `recognize()` 让它返回 None 再回落——那样每次静默期
+            // 都会多一次文件系统探测和一个 None 分支。
+            if crate::ocr_pp_pipeline::det_file_present(&crate::ocr_pp::models_dir()) {
+                Engine::Ppocr
+            } else {
+                Engine::Winrt
+            }
+        }
+    }
+}
+
+/// [`Windows.Media.Ocr`] 那条路。**默认。**
+pub fn recognize_winrt(frame: &Frame) -> Result<OcrText, OcrError> {
     use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
     use windows::Media::Ocr::OcrEngine;
     use windows::Storage::Streams::DataWriter;
@@ -327,5 +386,33 @@ mod tests {
     fn a_single_word_is_returned_verbatim() {
         assert_eq!(join_words(&[word("G8W", 10, 30, 10)]), "G8W");
         assert_eq!(join_words(&[]), "");
+    }
+
+    /// **没设 `CHATSERVANT_OCR` 时必须落在某条真路上**，不能是「三不管」。
+    ///
+    /// 判据是「有没有权重」——这台机器上大概率没有，于是走 WinRT。
+    #[test]
+    fn the_default_engine_is_one_of_the_two_real_ones() {
+        let e = engine_choice();
+        assert!(
+            matches!(e, Engine::Ppocr | Engine::Winrt),
+            "默认引擎不该是别的变体：{e:?}"
+        );
+        if !crate::ocr_pp_pipeline::det_file_present(&crate::ocr_pp::models_dir()) {
+            assert_eq!(e, Engine::Winrt, "本机没有 PP-OCRv4 权重，默认就该是 WinRT");
+        }
+    }
+
+    /// **不存在目录必须判定为「没权重」。**
+    ///
+    /// 这条判据是 Auto 模式的开关：它要是误报 true，一台没下模型的机器
+    /// 每轮都会走进 PP-OCRv4 的分支、白跑一次探测再回落。
+    #[test]
+    fn an_absent_directory_reports_no_weights() {
+        let absent = std::env::temp_dir().join("chatservant-definitely-absent-dir");
+        assert!(
+            !crate::ocr_pp_pipeline::det_file_present(&absent),
+            "不存在的目录被判成有权重"
+        );
     }
 }
