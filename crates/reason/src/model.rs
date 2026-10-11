@@ -179,6 +179,19 @@ pub struct TurnContext {
     /// 绝大多数轮次对方发的是文字，这时候这里是空的，一条视觉请求都不该发。
     /// 「默认多模态配置下永远是 2 + 1 + 0」那条断言就是对这个字段的。
     pub images: Vec<crate::vision::ImagePayload>,
+    /// 我自己的说话风格样本。**单独一路**，见 [`crate::voice`]。
+    ///
+    /// ## 为什么不并进 `messages`
+    ///
+    /// `messages` 里的每行渲染出来时**不带说话人标签**，模型无从区分
+    /// 「这是上下文」和「这是风格参考」。混在一起它就会当成对方说过的话，
+    /// 或者当成待回复的内容。
+    ///
+    /// ## 默认必须是空的
+    ///
+    /// 和 `images` 同理：短对话里用户可能一句自己的话都没说过，
+    /// 那时候一节空的「我的风格」标题比没有更糟——模型会去凭空编一个。
+    pub voice: Vec<String>,
 }
 
 impl TurnContext {
@@ -188,7 +201,14 @@ impl TurnContext {
             messages,
             peer,
             images: Vec::new(),
+            voice: Vec::new(),
         }
+    }
+
+    /// 带口吻样本的上下文。**由观察循环在真读到「我」说过的话时**用。
+    pub fn with_voice(mut self, voice: Vec<String>) -> Self {
+        self.voice = voice;
+        self
     }
 }
 

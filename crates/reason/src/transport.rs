@@ -422,6 +422,12 @@ impl HttpReasoner {
         })
     }
 
+    /// 判断那一段用的上下文。**刻意不含口吻样本。**
+    ///
+    /// 口吻是「怎么写」，判断问的是「对方想干什么」——这两件事没有因果。
+    /// 塞进去有两个坏处：一是每条新消息都要为判断这一段**白付一次**
+    /// 样本的 token（一条消息触发 3 次调用，见 `StageCalls`），
+    /// 二是模型可能把样本当成「用户之前怎么回的」，拿它去推断意图。
     fn render_ctx(ctx: &TurnContext) -> String {
         let mut s = String::new();
         if !ctx.peer.is_empty() {
@@ -431,6 +437,22 @@ impl HttpReasoner {
             s.push_str(m);
             s.push('\n');
         }
+        s
+    }
+
+    /// 起草那一段用的上下文 = 口吻样本 + [`HttpReasoner::render_ctx`]。
+    ///
+    /// 样本**排在对话之前**。顺序是有讲究的：起草读的是「先建立语气，
+    /// 再看内容」。放最后的话，刚读完对方的话就去看样本，最后一行
+    /// （语气最重）反而是风格参考，对话内容会被冲淡。
+    fn render_draft_ctx(ctx: &TurnContext) -> String {
+        let voice = crate::voice::render(&ctx.voice);
+        if voice.is_empty() {
+            return Self::render_ctx(ctx);
+        }
+        let mut s = voice;
+        s.push('\n');
+        s.push_str(&Self::render_ctx(ctx));
         s
     }
 }
@@ -470,7 +492,7 @@ impl Reasoner for HttpReasoner {
     fn draft(&mut self, ctx: &TurnContext, intent: &Intent) -> Result<DraftSet, ReasonError> {
         let user = format!(
             "{}\n\n判断（供参考，可不认同）：{}\n",
-            Self::render_ctx(ctx),
+            Self::render_draft_ctx(ctx),
             intent.summary()
         );
         let v = self
@@ -764,6 +786,44 @@ mod tests {
         assert!(
             draft_body.contains("今晚有空吗"),
             "起草请求没带对话：{draft_body}"
+        );
+    }
+
+    /// **口吻样本只进起草那一段，判断那一段不许收到。**
+    ///
+    /// 两个理由，少一条都不够：
+    /// ① **成本**。一条新消息触发 3 次调用（判断 1 · 起草 1 · 排序 1），
+    ///    判断是**最快最便宜**的那一档，却要为一份它用不上的样本付一次钱。
+    /// ② **污染**。判断问的是「对方想干什么」，模型看到样本就可能理解成
+    ///    「用户之前是怎么回的」，拿它去反推意图——那是凭空多的一条推理路径。
+    #[test]
+    fn voice_samples_reach_the_draft_but_not_the_judge() {
+        let http = std::sync::Arc::new(FakeHttp::new(vec![
+            judge_json().into(),
+            draft_json().into(),
+            r#"{"order":["今晚八点可以","我看看时间"]}"#.into(),
+        ]));
+        let mut r = HttpReasoner::new(http.clone(), Provider::OpenAi, KEY.into());
+
+        let ctx = TurnContext::text(vec!["今晚有空吗".into()], "小号".into())
+            .with_voice(vec!["嗯我看看时间".into(), "行".into()]);
+        crate::turn(&mut r, &ctx).expect("推理成功");
+
+        let seen = http.seen.lock().expect("锁");
+        let judge_body = seen[0].body.to_string();
+        let draft_body = seen[1].body.to_string();
+
+        assert!(
+            !judge_body.contains("嗯我看看时间"),
+            "判断请求不该带口吻样本：{judge_body}"
+        );
+        assert!(
+            draft_body.contains("嗯我看看时间"),
+            "起草请求必须带口吻样本：{draft_body}"
+        );
+        assert!(
+            draft_body.contains("[我自己平时的说话风格"),
+            "样本要有自己的标题，否则模型会当成对方说的话：{draft_body}"
         );
     }
 
