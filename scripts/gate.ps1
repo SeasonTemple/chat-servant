@@ -58,3 +58,14 @@ Write-Output ""
 Write-Output "=========================="
 if ($fail -eq 0) { Write-Output "GATE: ALL GREEN" } else { Write-Output "GATE: FAILED" }
 Write-Output "GATE_EXIT=$fail"
+
+# ⚠ **必须真的 exit，而不是只把 GATE_EXIT 打印出来。**
+#
+# 2026-10-11 实测踩到：脚本原来只 `Write-Output "GATE_EXIT=$fail"` 而不 exit，
+# 于是 `pwsh -File gate.ps1` 永远返回 0 —— clippy 红了、门禁打了
+# `GATE: FAILED`，而外层看到的 `$LASTEXITCODE` 是 0。
+# 结果是一个**带红门禁的 commit 被提交了**，还差点当成全绿汇报出去。
+#
+# 判断门禁成不成功**只能看它打印的那两行**，退出码是给自动化用的；
+# 两者现在终于说同一件事了。
+exit $fail

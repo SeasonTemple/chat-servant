@@ -20,6 +20,18 @@
     width: number;
     height: number;
     boxes: Attribution[];
+    /**
+     * 这一帧的开销账。**全部由 Rust 算好**，前端只显示——
+     * 那个 `roiPct` 尤其不能自己除：它是「增量门控有没有在起作用」的判据。
+     */
+    cost: {
+      ocrPixels: number;
+      roiPixels: number | null;
+      panePixels: number;
+      ocrCalls: number;
+      visionTokens: number;
+      roiPct: number | null;
+    };
   }
 
   let pane = $state<Pane | null>(null);
@@ -70,6 +82,11 @@
     };
   });
 
+  /** 万 → 「123.4 万」。像素数到百万级以后，裸数字没人读得出来。 */
+  function wan(n: number): string {
+    return n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : String(n);
+  }
+
   const shown = $derived((pane?.boxes ?? []).filter((b) => !onlyDropped || !b.is_text));
   const counts = $derived(
     (pane?.boxes ?? []).reduce<Record<string, { n: number; css: string }>>((acc, b) => {
@@ -97,6 +114,38 @@
   {#if !pane}
     <p class="cs-empty">等观察循环跑出第一帧…</p>
   {:else}
+    <!--
+      ① 这一帧的开销账（user story 13）。
+         ⚠ 三个像素数**不是一回事**，标题上写死了，别让人把它们当同一个数：
+           · 「送进 OCR」= 放大后的**整帧**。恒是整帧，因为 WinRT OCR
+             需要行周围有内容才收，裁 ROI 反而漏行（2026-10-07 实测）。
+             所以**调滑块省不了 OCR**，省 OCR 只能靠「这一帧什么都没做」。
+           · 「增量带」= 水位线以下那一段，也就是「哪些行算数」。
+         把它们分开写，用户才知道自己该动哪一个。
+    -->
+    <section class="cs-cost" aria-label="这一帧的开销">
+      <div class="cs-cost-row">
+        <span class="cs-cost-k">这一帧</span>
+        {#if pane.cost.ocrCalls === 0}
+          <!--
+            静默期。**单独一种说法**——它不是「读了 0 行」，
+            是「这一帧一行都没读」。这是硬约束第 6 条唯一可信的证据。
+          -->
+          <strong class="cs-cost-quiet">什么都没读</strong>
+          <span class="cs-cost-note">画面没变，0 次 OCR、0 token</span>
+        {:else}
+          <strong>{pane.cost.ocrCalls} 次 OCR</strong>
+          <span class="cs-cost-note">
+            送进 OCR {wan(pane.cost.ocrPixels)} 像素（放大后的整帧）
+            {#if pane.cost.roiPct !== null}
+              · 增量带占消息区 {pane.cost.roiPct.toFixed(0)}%
+            {/if}
+            · 视觉 {pane.cost.visionTokens} token
+          </span>
+        {/if}
+      </div>
+    </section>
+
     <div class="cs-legend">
       {#each Object.entries(counts) as [label, v] (label)}
         <span class="cs-chip" style:--c={v.css}>
@@ -169,6 +218,36 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.3rem;
+  }
+
+  /* 开销账。等宽——这是机器读出来的数，字体分工和面板那边一致。 */
+  .cs-cost {
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--cs-border);
+    border-radius: var(--cs-radius-sm);
+    background: var(--cs-surface-raised);
+  }
+
+  .cs-cost-row {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    font-size: 0.68rem;
+  }
+
+  .cs-cost-k {
+    color: var(--cs-ink-3);
+  }
+
+  .cs-cost-quiet {
+    /* 静默期用铅笔色，不用绿。绿留给「有东西出去了」那一类信号。 */
+    color: var(--cs-ink-2);
+  }
+
+  .cs-cost-note {
+    color: var(--cs-ink-3);
   }
 
   .cs-chip {
