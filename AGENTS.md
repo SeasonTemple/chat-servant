@@ -88,8 +88,8 @@ Rust 核心 + Tauri 2 外壳 + Svelte 5 前端，先打通微信单聊。
 ## 常用命令
 
 ```bash
-# 本机一次跑完全部门禁
-pwsh -NoProfile -File scripts/gate.ps1
+# 本机一次跑完全部门禁（九步）
+pwsh -NoProfile -File scripts/gate.ps1; echo "exit=$LASTEXITCODE"
 
 # 或者分开跑
 cargo fmt --all --check
@@ -174,6 +174,12 @@ before writing code that uses domain terms. See `docs/agents/domain.md`.
 
 ## 容易踩的坑
 
+- ⚠ **别只信门禁的退出码，要看它打印的那两行**（`GATE: ALL GREEN` / `GATE: FAILED`）。
+  2026-10-11 实测：`gate.ps1` 原来只 `Write-Output "GATE_EXIT=$fail"` 而**没有 `exit`**，
+  于是 `pwsh -File gate.ps1` 永远返回 0 —— clippy 红了、日志打了 `GATE: FAILED`，
+  而外层 `$LASTEXITCODE` 是 0。后果是**一个带红门禁的 commit 被提交了**。
+  现在补了 `exit $fail`，两者一致；但判断时仍以打印的那两行为准。
+  **每次给 `gate.ps1` 加新步骤，都顺手确认它红了之后 `exit` 确实非 0。**
 - **Tauri 2 ≠ Tauri 1。** `PredefinedMenuItem::separator`（小写，2.x）；
   `MenuItemBuilder::build(&manager)` 要传 manager。凭 Tauri 1 记忆写的代码编译不过。
 - **`tauri.conf.json` 里定义的窗口在 `.setup()` 之前就创建并开始加载**（实测 2026-10-10）。
