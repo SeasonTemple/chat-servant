@@ -4,7 +4,13 @@
 # 漏掉的那个就是下次 review 时才发现告警的文件。
 # 用 glob 收集，漏不掉。
 $ErrorActionPreference = 'Stop'
-$pwsh = 'C:\Users\SeasonTemple\AppData\Local\Microsoft\WindowsApps\pwsh.exe'
+# 找 pwsh 而不是写死绝对路径：写死的路径既是本机用户名（会跟着进公开仓库），
+# 在别的机器和 CI 上也必然不存在。Get-Command 认的就是本机 PATH。
+$pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
+if (-not $pwshCmd) {
+  throw '找不到 pwsh（PowerShell 7+）。本脚本与 gate.ps1 都依赖它。'
+}
+$pwsh = $pwshCmd.Source
 Set-Location $PSScriptRoot\..
 
 $files = Get-ChildItem -Path src -Recurse -Filter *.svelte | Sort-Object FullName

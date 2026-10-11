@@ -17,6 +17,13 @@
 # 抓帧调试产物。截图不落盘是硬约束，这里只允许 xtask probe 写。
 /probe-out
 
+# 黄金测试夹具。它们由**实机真实聊天**脱敏而来——即使只剩布局几何与配色，
+# 来源仍指向用户自己的会话，所以不入公开仓库。
+# 代价：`crates/perceive/tests/golden.rs` 与 `media.rs` 里依赖夹具的用例
+# 在没有夹具的机器上**跳过**（已按缺件即跳过处理，不会红）。
+# 本机恢复：`cargo xtask fixture --name <n> --source target\probe\<帧>.png`
+/crates/capture/fixtures/
+
 # 门禁日志。`pwsh -File scripts\gate.ps1 *> gateNN.log` 每轮都在变，
 # 入库只会让 diff 永远脏，而且历史里那些副本对谁都没用。
 /gate*.log
@@ -32,6 +39,14 @@ config.json
 
 # 第三方参考项目（自带 LICENSE，MIT/GPL 混合）。只读，不入库。
 examples/
+
+# 技能库只入库 .agents/ 这一份。.claude/ .minimax/ .zcode/ 是同一个技能库在
+# 各 CLI 运行时下的副本（AGENTS.md 里它们本应是 symlink，本机落成了实体目录），
+# 四份内容逐字相同，重复入库只会让公开仓库凭空多出约 2400 个第三方文件。
+# 换机器后由 skills-lock.json 重建副本即可。
+/.claude/
+/.minimax/
+/.zcode/
 
 # Python 字节码。`.agents/skills/` 下的 skill 带 Python 脚本，
 # 跑过一次就留下 `__pycache__`，那是本机产物，**换台机器重建也一样**，

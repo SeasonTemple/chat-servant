@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+# 这个项目**只能**在 Windows 上构建与验证：
+# `crates/capture` 走 Windows Graphics Capture + Windows.Media.Ocr，
+# `ui/src-tauri` 的 bundle target 只有 msi / nsis。
+# 所以 runner 不是 ubuntu——换 Linux 只会得到一个必然红、且红了也不能信的 CI。
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: Gate
+    runs-on: windows-latest
+    steps:
+      - name: Setup | Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup | Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup | Node + pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Setup | Install frontend deps
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      # 下面九步与 `scripts/gate.ps1` 一一对应。
+      # 改本地门禁时**同步改这里**，否则两套门禁会各说各话。
+
+      # ① 编码损坏（U+FFFD）。它排在最前面，因为它最便宜——
+      #    受损的全是注释与文档，fmt / clippy / test / svelte-check 一律照绿。
+      - name: "Gate 1/9 | mojibake scan"
+        shell: pwsh
+        run: ./scripts/scan-mojibake.ps1
+
+      - name: "Gate 2/9 | cargo fmt --check"
+        run: cargo fmt --all --check
+
+      - name: "Gate 3/9 | cargo clippy -D warnings"
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: "Gate 4/9 | cargo test"
+        run: cargo test --workspace
+
+      # ⑤ secret-scan 需要一把**假的** key 当探针（见 xtask/src/secret_probe.rs），
+      #    真 key 绝不能出现在 CI 的环境变量里。这里给的是 canary，
+      #    下面那串长得像真 key 的东西**是故意的**，别改小。
+      # secret-scan: allow
+      - name: "Gate 5/9 | secret scan"
+        env:
+          CHATSERVANT_PROBE_KEY: sk-ci-canary-not-a-real-key-0000
+        run: cargo run -q -p xtask -- secret-scan
+
+      # ⑥ 许可证 / advisory / 来源合规，策略见 docs/adr/0003-dependency-strategy.md
+      - name: "Gate 6/9 | cargo deny check"
+        run: cargo install cargo-deny --locked && cargo deny check
+
+      - name: "Gate 7/9 | svelte-check"
+        working-directory: ui
+        run: pnpm check
+
+      - name: "Gate 8/9 | prettier + eslint"
+        working-directory: ui
+        run: pnpm lint
+
+      - name: "Gate 8/9 | svelte-autofixer"
+        shell: pwsh
+        run: ./ui/scripts/autofixer.ps1
+
+      - name: "Gate 9/9 | vite build"
+        working-directory: ui
+        run: pnpm build
+
+      # 黄金测试的夹具来自真实会话，不入公开仓库，没有夹具时它们**跳过**。
+      # 这里显式记一句，免得 CI 绿灯被读成「像素级基线验过了」。
+      - name: Note | golden fixtures are absent by design
+        run: |
+          Write-Output "::notice::crates/capture/fixtures 不在仓库里（真实会话脱敏帧）。"
+          Write-Output "::notice::依赖它的 golden 测试在本次 CI 里是【跳过】，不是通过。"

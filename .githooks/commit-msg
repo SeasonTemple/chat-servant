@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+# Conventional Commits 校验 — 零依赖，纯 POSIX sh。
+#
+# 启用：git config core.hooksPath .githooks
+#
+# ⚠ 本项目的 scope 是**中文**的（`feat(推理):`、`fix(感知):`），
+#   所以 scope 的字符类不能照抄英文字母那一版。下面的 pattern 显式放了
+#   CJK 与全角范围。照抄别人的 ASCII-only 校验器会把本项目几乎所有提交拒掉。
+msg_file="$1"
+header="$(head -n1 "$msg_file")"
+
+# 放行自动前缀（merge/revert/fixup/squash）
+case "$header" in
+  "Merge "*|'Revert "'*|"fixup! "*|"squash! "*) exit 0 ;;
+esac
+
+# <type>(<scope>)?: <summary>
+# type 白名单同 Conventional Commits；scope 可选，允许中文。
+pattern='^(feat|fix|docs|test|refactor|perf|build|ci|chore|style|revert)(\([^)[:space:]]+\))?(!)?: [^ ].*'
+
+if ! printf '%s' "$header" | grep -Eq "$pattern"; then
+  echo "✗ commit message 不符合 Conventional Commits 规范。" >&2
+  echo "  实际: $header" >&2
+  echo "  期望: <type>(<scope>): <summary>" >&2
+  echo "  type: feat|fix|docs|test|refactor|perf|build|ci|chore|style|revert" >&2
+  echo "  例如: feat(推理): 补上意图识别的兜底分支" >&2
+  exit 1
+fi
+
+exit 0

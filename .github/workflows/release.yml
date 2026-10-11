@@ -1,0 +1,110 @@
+name: Release
+
+# 由 tag 触发，不自动发版。版本号是**人打的 tag**，不是从 commit 算出来的——
+# 这个项目 0.x 且还在改硬约束，「这一版该叫什么」不是机器能替人做的决定。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # 门：发布前再跑一遍完整门禁，红则不发。
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Install frontend deps
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      - name: mojibake scan
+        shell: pwsh
+        run: ./scripts/scan-mojibake.ps1
+      - name: fmt + clippy + test
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+  build:
+    name: Build installers
+    runs-on: windows-latest
+    needs: verify
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install frontend deps
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      # 这个项目**只发 Windows 安装包**：捕获链路走 WGC + Windows.Media.Ocr，
+      # 没有等价实现，所以不做跨平台矩阵。
+      - name: Build msi + nsis
+        working-directory: ui
+        run: pnpm tauri build --bundles msi,nsis
+
+      # 发布说明是**人工策展**的，不是自动生成的：每个 tag 都要有一份
+      # docs/release-notes/vX.Y.Z.md，里面同时有 `## 中文` 和 `## English`。
+      # 有就用它覆盖自动生成的 notes；没有就保留自动生成的，并**明确告诉人**——
+      # 静默留下自动 notes 会让人以为策展已经做过了。
+      - name: Publish | GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $note = "docs/release-notes/$env:TAG.md"
+          $assets = Get-ChildItem -Path 'ui/src-tauri/target/release/bundle' -Recurse -Include *.msi,*.exe -File
+
+          if (-not $assets) {
+            throw "没有找到安装包产物，bundle 目录可能是空的"
+          }
+
+          if (Test-Path $note) {
+            $body = Get-Content $note -Raw
+            if ($body -notmatch '(?m)^##\s*中文' -or $body -notmatch '(?m)^##\s*English') {
+              throw "$note 缺少 '## 中文' 或 '## English' 段 —— 双语发布说明是门禁，不是建议"
+            }
+          }
+          else {
+            Write-Warning "没有 $note，沿用 GitHub 自动生成的 release notes"
+            $body = ""
+          }
+
+          # ⚠ 不能用 $args —— 它是 PowerShell 的自动变量，赋值会与脚本参数
+          #   语义打架（PowerShell 7 起会直接报错）。随便起个名字即可。
+          $ghArgs = @('release', 'create', $env:TAG, '--title', $env:TAG, '--verify-tag', '--notes', $body)
+          foreach ($a in $assets) { $ghArgs += @($a.FullName) }
+          & gh @ghArgs
+          if ($LASTEXITCODE -ne 0) { throw "gh release create 失败 (exit=$LASTEXITCODE)" }
+
+          Write-Output "已发布 $($env:TAG)，资产 $($assets.Count) 个"

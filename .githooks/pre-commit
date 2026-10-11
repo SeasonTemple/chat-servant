@@ -1,0 +1,56 @@
+#!/usr/bin/env sh
+# pre-commit 凭据闸 — 在凭据进 git 历史**之前**拦住它。
+#
+# 这是 .gitignore 之外的第二道防线。.gitignore 会漏（规则写错、路径写深了、
+# `git add -f`），而凭据一旦进了历史就等于公开了：rewriting 掉历史不能撤回
+# 已经被人 clone 过的那个事实。跳过：git commit --no-verify
+#
+# ⚠ 扫描的是**暂存区内容**（git show ":$f"），不是工作区文件。
+#   扫工作区会漏掉「暂存的是旧版本」这种情况，而那正是会被提交进去的字节。
+set -e
+
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && exit 0
+
+# 针对 provider 前缀与 PEM 私钥，刻意收窄以压低误报。
+# 本项目真实该拦的是 OpenAI/Anthropic 形态的 key 与 GitHub token。
+pattern='sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+
+# 显式豁免标记。**故意**持有假 key 的文件（CI 探针、扫描器自检、测试夹具）
+# 必须在文件里写一行 `secret-scan: allow` 才会被跳过。
+#
+# 为什么要留这条路：没有它就只能 `--no-verify`，而那个习惯一旦养成，
+# 真 key 也一起过去了——一个总被人绕过的钩子等于没有钩子。
+# 标记是逐文件的、出现在 diff 里、可被 review 看见的，比整目录跳过安全。
+marker='secret-scan: allow'
+
+hits=""
+for f in $staged; do
+  # 夹具与测试里放的是**故意的假 key**（secret-scan 的 canary），
+  # 拦下来只会让人养成 --no-verify 的习惯。
+  case "$f" in
+    *.example|*.example.*|*.sample|.env.example) continue ;;
+    crates/capture/fixtures/*) continue ;;
+    tests/*|*/tests/*|test_*|*_test.*|*/conftest.py) continue ;;
+  esac
+  [ -f "$f" ] || continue
+  # 文件自己声明了豁免就跳过。判的是暂存内容，与下面扫的是同一份字节。
+  if git show ":$f" 2>/dev/null | grep -qF "$marker"; then
+    echo "  (豁免) $f —— 文件内含 '$marker'"
+    continue
+  fi
+  if git show ":$f" 2>/dev/null | grep -nE "$pattern" >/dev/null 2>&1; then
+    hits="$hits $f"
+  fi
+done
+
+if [ -n "$hits" ]; then
+  echo "✗ pre-commit: 暂存内容里疑似有凭据：" >&2
+  for f in $hits; do echo "    $f" >&2; done
+  echo "  如果那是真凭据，**不要提交**——它只该待在 Windows 凭据管理器" >&2
+  echo "  或环境变量里（见硬约束第 7 条）。已经提交过就要当泄露处理：先轮换。" >&2
+  echo "  误报？重跑：git commit --no-verify" >&2
+  exit 1
+fi
+
+exit 0

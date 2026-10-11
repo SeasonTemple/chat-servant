@@ -395,10 +395,17 @@ mod tests {
     }
 
     /// 端到端防线：真实脱敏夹具是**纯文字聊天、没有图**，检出数必须是 0。
+    ///
+    /// 夹具来自实机真实聊天，不入公开仓库（见 `tests/golden.rs` 的模块文档），
+    /// 所以缺件时**跳过**而不是失败——这条防线要在本机补回夹具后才真的跑。
     #[test]
     fn a_real_text_only_frame_finds_nothing() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../capture/fixtures/wechat-dark-2side.png");
+        if !path.exists() {
+            eprintln!("跳过 wechat-dark-2side：夹具不在本机（公开仓库不含真实会话的脱敏帧）");
+            return;
+        }
         let img = image::open(&path).unwrap_or_else(|e| panic!("读夹具失败：{e}"));
         let (w, h) = img.dimensions();
         let frame = Frame::from_rgb(w, h, img.into_rgb8().into_raw()).expect("尺寸一致");
