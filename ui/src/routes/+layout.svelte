@@ -61,7 +61,26 @@
   });
 </script>
 
-{@render children?.()}
+{#if DEMO}
+  <!--
+    ⚠ **演示模式必须按真实面板宽度渲染，否则它验不出任何东西。**
+
+    真实面板是 **380px**（`tauri.conf.json`），还能缩到 340px。早先演示页
+    直接铺满浏览器，于是：
+      · 头部那一排在 770px 下看着松松垮垮，一到 380px 就挤成一团——
+        而**没人发现**，因为评审时看的就是那个宽版本；
+      · 「紧凑模式」那套判据（档位名隐藏、衬线降 17px）触发不了，
+        ResizeObserver 量到的永远是「宽」，验证等于没做。
+
+    也就是说：一个用来验收窄面板的工具，本身跑在宽面板上。
+    这里把它钉到 380px 并居中，让演示页第一次真的能当尺子用。
+  -->
+  <div class="cs-demo-frame">
+    {@render children?.()}
+  </div>
+{:else}
+  {@render children?.()}
+{/if}
 
 {#if offline}
   <div class="cs-error" role="alert">
@@ -80,6 +99,17 @@
 -->
 
 <style>
+  /* 演示模式的取景框。尺寸 = `tauri.conf.json` 里的 380 × 560。
+   * 外圈那一圈不是装饰：它标出**这就是面板的边界**，
+   * 免得看的人把外面的浏览器留白也算进布局里。 */
+  .cs-demo-frame {
+    width: 380px;
+    height: 560px;
+    max-height: 100%;
+    margin: 0 auto;
+    outline: 1px solid rgb(20 26 31 / 12%);
+  }
+
   .cs-error {
     position: fixed;
     inset: auto 0 0 0;

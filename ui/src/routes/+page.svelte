@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
-  import { ArrowLeft, Settings } from '@lucide/svelte/icons';
+  import { ArrowLeft, Settings, ChevronDown, ChevronUp } from '@lucide/svelte/icons';
   import WinCtl from '$lib/WinCtl.svelte';
   import MessageStream from '$lib/MessageStream.svelte';
   import PanelSettings from '$lib/PanelSettings.svelte';
@@ -792,23 +792,56 @@
     -->
     <PanelSettings bind:tier bind:closeBehavior />
   {:else}
-    <!-- 证据条：**它回答「读到哪了、轮到谁了」**，
-       不让用户为了确认状态去展开。展开完整消息列表在同一行最右。 -->
+    <!--
+      ⚠ **状态是状态，按钮是按钮 —— 两者不能焊在一起。**
+
+      早先这里是一个 `<button>` 把整条包住：状态文字「对方 2 · 我 1」和展开
+      控件一起塞进可点击元素里，而那颗 button **没有任何按钮形态**——无边框、
+      无底色、无 hover 态，`font-size` 还是 11px。三个后果叠在一起：
+
+        · 这一行看起来就是一行字，用户不知道哪里能点；
+        · 点下去下方长出消息列表，可那颗「按钮」自己什么都没变，
+          于是下次还是不确定它到底管不管用；
+        · 更要命的是**状态被迫伪装成可点的东西**。「对方 2 · 我 1」是
+          **信息**，用户读到它只想知道读到哪了，不想点它。
+
+      这与 `docs/面板设计.md` 结构性决定 ① 是同一条思路：动作和它回答的
+      问题必须分得清，不能靠「把两者涂成同一个颜色」蒙混过关。
+
+      所以现在左边那份是纯 `<span>`，不可点、不可聚焦；右边那颗独立按钮
+      **只**回答「展开 / 收起」，形态和 `WinCtl` 三颗完全一致
+      （同样的 `ICON_SIZE` / `ICON_SW`、同样的 hover 7% / active 12%）。
+      可发现性靠**按钮自己的形态**，不靠把整行都涂成可点的。
+    -->
     <div class="cs-strip">
-      <button
-        class="cs-strip-btn"
-        type="button"
-        onclick={() => (showMessages = !showMessages)}
-        aria-expanded={showMessages}
-      >
+      <span class="cs-strip-lead">
         {#if drafting}
-          <span class="cs-strip-lead">正在起草</span>
+          正在起草
         {:else if !peer}
-          <span class="cs-strip-lead">还没认出会话</span>
+          还没认出会话
         {:else}
-          <span class="cs-strip-lead">对方 {themCount} · 我 {mineCount}</span>
+          对方 {themCount} · 我 {mineCount}
         {/if}
-        <span class="cs-strip-caret" class:up={showMessages}>▴</span>
+      </span>
+
+      <button
+        class="cs-strip-toggle"
+        type="button"
+        title={showMessages ? '收起完整消息列表' : '展开完整消息列表'}
+        aria-label={showMessages ? '收起完整消息列表' : '展开完整消息列表'}
+        aria-expanded={showMessages}
+        onclick={() => (showMessages = !showMessages)}
+      >
+        <!--
+          换掉手搓的 `▴` 字符 + `rotate(180deg)`：那是个**字体**，
+          不同机器上形状和位置都不一样（`▴` 在很多等宽字体里根本不是三角形）。
+          lucide 的 chevron 在同一个 viewBox 里，三颗记号天然对齐。
+        -->
+        {#if showMessages}
+          <ChevronUp {ICON_SIZE} {ICON_SW} strokeWidth={ICON_SW} />
+        {:else}
+          <ChevronDown {ICON_SIZE} {ICON_SW} strokeWidth={ICON_SW} />
+        {/if}
       </button>
     </div>
 
@@ -1207,12 +1240,26 @@
   }
 
   /* 当前档位名。**用文字再说一遍顶边的长度**，因为 3px 在
-   * 窄面板上很难读 —— 冗余编码是故意的，不是浪费。 */
+   * 窄面板上很难读 —— 冗余编码是故意的，不是浪费。
+
+   ⚠ `docs/面板设计.md` 的字体分工把「档位名」和「证据条 / 把握 /
+   * 备选%」并列在同一行，注明「这是机器读出来的」，对应**等宽**。
+   * 这里原来没声明字体族，全局雅黑把它带过去了 —— 于是那条设计
+   * 决定在这一行**静默失效**：`app.css` 明说字体分工是给色盲兜底的
+   * 第二条通道，缺了它，这个产品对色盲用户就只剩颜色一条路了。 */
   .cs-tier-name {
-    font-size: 10.5px;
+    font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    font-size: 11px;
     color: var(--cs-mark);
     letter-spacing: 0.2px;
     white-space: nowrap;
+    /* 档位名是**状态**，右边三颗是**控制**。这一行原来是统一 6px，
+     * 于是「只填入」和齿轮挤成一团、还和后两颗同色（都走
+     * `--cs-mark`），看上去像一个四元素按钮组。
+     * 加 6px 把两组拉开：组间 12px，组内仍是 6px。
+     * **不加竖线** —— 400px 宽的面板上，竖线是最贵的一种分隔，
+     * 而这里的间距差已经够读出分组。 */
+    margin-right: 6px;
   }
 
   .cs-panel[data-tier='Auto'] .cs-tier-name {
@@ -1221,33 +1268,55 @@
   }
 
   /* ── 证据条 ───────────────────────────────────────────── */
+  /* 一行两件事，各占一头：左边是**信息**，右边是**动作**。
+   * 早先是「信息裹在动作里」，于是那一行既像字又像按钮。 */
   .cs-strip {
     flex: none;
-    padding: 0 14px 6px;
-  }
-
-  .cs-strip-btn {
     display: flex;
     align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    color: var(--cs-pencil);
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 14px 6px;
     /* 机器认出来的字 → 等宽。这和 .cs-line 的衬线是同一件事的
      * 两面：一个说「这是机器读的」，一个说「这是替你写的」。 */
     font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    font-size: 11px;
   }
 
+  /* 状态本身**不可点**：不加 `cursor: pointer`，也不进 Tab 序。
+   * 它只回答「读到哪了、轮到谁了」，用户读到就走。 */
   .cs-strip-lead {
     color: var(--cs-pencil);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .cs-strip-caret {
+  /* 展开控件是一颗**真按钮**：有盘子、有 hover、有 active。
+   * 尺寸 / 描边 / 配色与 `WinCtl` 三颗一致，面板里于是只有一套记号的形态。 */
+  .cs-strip-toggle {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 24px;
+    margin: -4px -6px -4px 0;
+    border-radius: var(--cs-radius-sm);
     color: var(--cs-mark);
-    transition: transform var(--cs-dur-fast) var(--cs-ease);
+    transition:
+      background var(--cs-dur-fast) var(--cs-ease),
+      color var(--cs-dur-fast) var(--cs-ease);
   }
 
-  .cs-strip-caret.up {
-    transform: rotate(180deg);
+  /* 墨的 7% —— 是「这一格亮了」，不是「这是一颗按钮」。与 WinCtl 同值。 */
+  .cs-strip-toggle:hover {
+    background: rgb(20 26 31 / 7%);
+    color: var(--cs-ink);
+  }
+
+  .cs-strip-toggle:active {
+    background: rgb(20 26 31 / 12%);
   }
 
   /* ── 「更多」浮层 ─────────────────────────────────────── */
