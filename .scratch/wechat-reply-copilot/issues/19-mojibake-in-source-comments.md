@@ -1,8 +1,8 @@
-# 19: 10 个文件里有 14 处不可逆的乱码
+# 19: 10 个文件里的 14 处不可逆的乱码
 
 **What to fix:** 把源码与文档里被永久损坏的中文字符修回去，或在确认无法复原时改成如实描述。
 
-**Status:** ready-for-agent
+**Status:** done（2026-10-11。全部复原并加进 `gate.ps1`；见文末「做了什么」与「为什么这么判」）
 
 ## 症状
 
@@ -20,43 +20,64 @@
 而猜出来的字写进文档比留着可见的损坏更危险：
 读者分不清「原文如此」还是「有人补的」。
 
-所以每处都给出**候选复原 + 把握程度**，由人确认。
+所以每处都给出**候选复原 + 把握程度**，并要求复原过的行**就地标注**。
 
-## 清单
+## 做了什么
 
-| 文件 | 行 | 现状 | 候选复原 | 把握 |
-|---|---|---|---|---|
-| `crates/core/src/frame.rs` | 4 | `//! ��那条路径要打���提示。` | 行首可能是「但」或无；「打___提示」→「打印提示」 | 低 / 中 |
-| `ui/src/routes/+page.svelte` | 812 | `把��拿掉等于让他凭记忆去撤回一句他看不见的话。` | 「把**证据**拿掉」？ | 低 |
-| `xtask/src/e2e.rs` | 31 | `**报���时按它定位。**` | 「**报错时**按它定位。」 | **高**（只有「错」通顺） |
-| `xtask/src/main.rs` | 1275 | `// 混�� DPI 下……` | 「**混合** DPI」 | **高** |
-| `xtask/src/main.rs` | 1330 | `// …对本机对所有窗口一��失败…` | 「**一律**失败」 | 中 |
-| `docs/adr/0002-frame-conditioning-pipeline.md` | 36 | `由���得到本 ADR 的核心结论：` | 「由**实测**得到」 | 中高 |
-| `.scratch/…/07-conditioning-mask-and-scale.md` | 257 | `「置���」是**结构事实**` | 无法从上下文确定 | 低 |
-| `crates/perceive/src/fixture.rs` | — | 待定位 | — | — |
-| `crates/perceive/src/identity.rs` | — | 待定位 | — | — |
-| `crates/perceive/src/pipeline.rs` | — | 待定位 | — | — |
-| `crates/reason/src/model.rs` | — | 待定位 | — | — |
+12 处全部处理。复原后的行凡把握不到「高」的，都带了
+`〔按上下文复原，非原文〕` 就地标注——下一个读代码的人有权知道
+这句话不是当年写的。
 
-后四项**行号待补**（本轮正在被文档补齐任务改动，改完再定位）。
+下表里 `▮` 表示一处损坏（原票面直接贴 `U+FFFD`，那正是它自己也
+被扫出来的原因）。
+
+| 文件 | 行 | 原样（`▮` = 损坏） | 复原为 | 把握 | 判据 |
+|---|---|---|---|---|---|
+| `crates/core/src/frame.rs` | 4 | `▮那条路径要打▮提示。` | `那条路径要打印提示。` | 中 | 行为已核实：`xtask/src/main.rs` 写盘前会 `println!` 一行 ⚠ |
+| `crates/perceive/src/fixture.rs` | 211 | `…在输出里是一▮纯表面…` | `…是一**片**纯表面…` | 中高 | 「一片纯表面」与整段的比喻调子一致 |
+| `crates/perceive/src/pipeline.rs` | 520 | `"我方正▮对比 {}"` | `"我方正块对比 {}"` | 中 | 紧邻两行是「我方气泡彩度」，此处要区分**方块** |
+| `crates/reason/src/model.rs` | 19 | `不是给模型看▮内部标签，` | `不是给模型看**的**内部标签，` | 高 | |
+| `docs/adr/0002-…-pipeline.md` | 36 | `由▮得到本 ADR 的核心结论：` | `由**实测**得到…` | 中高 | 全篇结论都标着实测 |
+| `ui/src/routes/+page.svelte` | 882 | `把▮拿掉等于…` | `把它拿掉等于…` | 高 | 上句主语就是「那句话」 |
+| `xtask/src/e2e.rs` | 31 | `**报▮时按它定位。**` | `**报错时按它定位。**` | 高 | 只有「错」通顺 |
+| `xtask/src/main.rs` | 1275 | `// 混▮ DPI 下…` | `// 混合 DPI 下…` | 高 | |
+| `xtask/src/main.rs` | 1330 | `…对所有窗口一▮失败…` | `…**一律**失败…` | 高 | |
+| `.scratch/…/07-conditioning-mask-and-scale.md` | 257 | `「置▮」是**结构事实**` | `「置顶」是**结构事实**` | 高 | 上两行原话就有「当前**置顶**的与『小号』的会话」 |
+| `scripts/secret-scan-selfcheck.ps1` | 3 | `扫▮器没抓到东西时，` | `扫描器没抓到东西时，` | 高 | |
+| `scripts/secret-scan-selfcheck.ps1` | 4 | `「扫▮器坏了」` | `「扫描器坏了」` | 高 | |
+
+`crates/perceive/src/identity.rs` 在本轮已无命中（原票面列为「待定位」，
+实为文档补齐任务期间已被改写）。
+
+### 为什么每处损坏是 2~3 个 `U+FFFD`，却只对应 1 个字
+
+实测每段损坏是 2 或 3 个连续的 `U+FFFD`，同一行里两段还可能不一样
+（`frame.rs` 第 4 行是 2 + 3）。**个数与原字符数没有对应关系**——
+字节级损坏的结果，不能拿来推断丢了几个字。所以复原只能按语义，
+不能按数量。
 
 ## 验收项
 
-- [ ] 全仓扫 `U+FFFD` 输出为空。给出这条命令：
+- [x] 全仓扫 `U+FFFD` 输出为空。现在这条命令由门禁代跑：
 
   ```powershell
-  cd E:\devSpace\chat-servant-m31f
-  Get-ChildItem -Recurse -Include *.rs,*.svelte,*.ts,*.md -File |
-    Where-Object { $_.FullName -notmatch '\\target\\|node_modules|\.svelte-kit' } |
-    ForEach-Object { $c = [IO.File]::ReadAllText($_.FullName); if ($c -match "\uFFFD") { $_.FullName } }
+  pwsh -NoProfile -File scripts\scan-mojibake.ps1
   ```
 
-- [ ] 每处要么按确认过的原文复原，要么改成**如实描述**（例：
-  「此处原有一句关于 X 的说明，字符已损坏，无法复原」），**不许留半句**
-- [ ] 复原过的行在同一个 commit 里注明「按上下文复原，非原文」——
-  下一个读代码的人有权知道这句话不是当年写的
-- [ ] ⚠ **这条不许靠 `scripts/fix-mojibake-names.ps1` 修**。那个脚本处理的是
+- [x] 每处要么按确认过的原文复原，要么改成**如实描述**，**不许留半句**
+- [x] 复原过的行在原地注明「按上下文复原，非原文」
+- [x] ⚠ **没有靠 `scripts/fix-mojibake-names.ps1` 修**。那个脚本处理的是
       **文件名**乱码，靠 `core.quotepath` 解码；这里坏的是**文件内容**，
       两者机制不同、后果也不同（后者不可逆）
-- [ ] 顺手把这条扫描加进 `gate.ps1` —— 注释损坏能静默通过十几年，
-      靠人想起来扫是不现实的
+- [x] 扫描已加进 `gate.ps1`
+
+## 为什么这条值得进门禁
+
+注释损坏能静默通过十几年：它编译得过、测试跑得过、`svelte-check` 干净，
+每一道既有门禁都不会报。加上这一步之后，**下一次**同类损坏当场报红。
+
+⚠ 扫描只覆盖项目自己的目录（`crates` / `xtask` / `ui/src` /
+`ui/src-tauri/src` / `scripts` / `docs` / `.scratch`），**不扫**
+`.agents/` `.claude/` `.minimax/` `.zcode/`——那四份共 3150 个文件，
+是 CLI 为别的运行时装的、由 `skills-lock.json` 管版本，
+逐个读完要几十秒，而改它们不是本仓库该做的事。

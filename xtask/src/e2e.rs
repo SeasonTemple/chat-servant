@@ -28,7 +28,7 @@ use chatservant_capture::window::find_chat_window;
 use chatservant_perceive::{Attribution, Message, NoiseClass, Speaker, classify_all, group};
 use chatservant_reason::{Candidate, Intent, ReasonError, Reasoner, TurnContext, turn};
 
-/// 每一段的编号与名字。**报���时按它定位。**
+/// 每一段的编号与名字。**报错时按它定位。**〔按上下文复原，非原文〕
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Locate = 1,

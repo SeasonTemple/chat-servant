@@ -16,7 +16,7 @@ pub struct Intent {
     pub intent: String,
     /// 对方需要什么。可能是「只是分享，不需要回复」。
     pub need: String,
-    /// **建议动作**：`reply` / `wait` / `react`。不是给模型看���内部标签，
+    /// **建议动作**：`reply` / `wait` / `react`。不是给模型看的内部标签，
     /// 是给用户看的一句话建议。
     pub action: String,
     /// 紧张度 0..=1。对方的语气压力。

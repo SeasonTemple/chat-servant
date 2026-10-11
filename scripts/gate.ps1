@@ -15,6 +15,11 @@ function Step($name, $scriptblock) {
   else { Write-Output ">>> $name OK" }
 }
 
+# 编码损坏（U+FFFD）。这道排在最前面，因为它最便宜——
+# 受损的全是注释与文档，fmt / clippy / test / svelte-check 一律照绿，
+# 不专门扫就永远没人发现。ticket 19。
+Step "mojibake scan" { & pwsh -NoProfile -File "$PSScriptRoot\scan-mojibake.ps1" 2>&1 | Select-Object -Last 30 }
+
 Step "cargo fmt --all --check" { cargo fmt --all --check 2>&1 | Select-Object -Last 40 }
 Step "cargo clippy -D warnings" { cargo clippy --workspace --all-targets -- -D warnings 2>&1 | Select-Object -Last 60 }
 Step "cargo test --workspace"  { cargo test --workspace 2>&1 | Select-Object -Last 60 }

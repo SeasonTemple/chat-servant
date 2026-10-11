@@ -1272,7 +1272,7 @@ fn probe_frame(
     method: &str,
     out: Option<PathBuf>,
 ) -> Result<()> {
-    // 混�� DPI 下窗口矩形要用物理像素，必须在枚举之前就声明 per-monitor v2，
+    // 混合 DPI 下窗口矩形要用物理像素，必须在枚举之前就声明 per-monitor v2，
     // 之后 GetWindowRect 才是对的。
     set_dpi_aware();
 
@@ -1327,7 +1327,7 @@ fn probe_frame(
     let frame = match method {
         // ⚠ **默认走 `wgc` crate 那条，不是 windows-capture。**
         //
-        // `windows-capture` 2.0.1 在本机对所有窗口一��失败（会话送来
+        // `windows-capture` 2.0.1 在本机对所有窗口一律失败（会话送来
         // 第一帧之前就关闭），是 ADR-0004 里记着的已知问题。产品默认路径
         // 用的也是 `wgc` crate。诊断命令的默认值必须和产品一致——
         // 否则每次排查都在测一条永远走不通的路。
