@@ -49,10 +49,28 @@
     from_env: boolean;
     masked: string;
     hint: string;
+    /** 这家实测能通的模型清单。**Rust 是唯一出处**，前端不自己列。 */
+    models: string[];
+    /** 当前选中的那一个（Rust 回的真实生效值）。 */
+    model: string;
   }
 
   interface SettingsView {
     providers: ProviderView[];
+  }
+
+  /**
+   * 「用哪个模型」那一栏。
+   *
+   * ⚠ `models` 是一份**只填实测能通的**清单，由 `Provider::models()` 给。
+   * 它现在很短（一家一个），**这不是没做完**——填一个没验过的名字，
+   * 症状是「设置成功、一调用就 404」，比明确不支持更难查。
+   * 清单该变长的条件是「实测通了」，不是「文档上写了」。
+   */
+  interface ModelView {
+    provider: string;
+    models: string[];
+    model: string;
   }
 
   /** 「参考上下文」设置。上下限也由 Rust 下发。 */
@@ -104,6 +122,29 @@
   let imagesNote = $state<string | null>(null);
   let view = $state<SettingsView | null>(null);
   let closeNote = $state('');
+  /** 「用哪个模型」。读不到时整块不显示——别摆一个选了也不生效的控件。 */
+  let model = $state<ModelView | null>(null);
+  let modelNote = $state<string | null>(null);
+
+  /**
+   * 换模型。
+   *
+   * ⚠ **用回包覆盖**：Rust 会拒收不在实测清单里的名字，而界面必须显示
+   * 拒收之后的真实状态。只显示用户点的那一格，就成了一个说谎的控件。
+   */
+  async function pickModel(m: string) {
+    modelNote = null;
+    try {
+      model = await invoke<ModelView>('set_model', { model: m });
+    } catch (e) {
+      // 写失败就**读回真实值**，别让控件停在一个程序并不认同的状态上。
+      model = await invoke<ModelView>('get_model').catch(() => null);
+      modelNote = String(e);
+    }
+  }
+
+  /** 分段控件的选项。Rust 给什么就是什么，前端不排序也不改名。 */
+  const modelOptions = $derived((model?.models ?? []).map((id) => ({ id, label: id })));
 
   /**
    * 「展开输入框」的哨兵值。
@@ -326,6 +367,14 @@
       } catch {
         closeBehavior = 'exit';
       }
+      try {
+        // 模型要**读回来**：界面显示的必须是程序认定的那个。
+        // 没接上真实传输时 Rust 会返回错误——那时候整块不显示，
+        // 不用一个假的默认模型把这一节撑起来。
+        model = await invoke<ModelView>('get_model');
+      } catch {
+        model = null;
+      }
       await refresh();
     })();
   });
@@ -470,6 +519,40 @@
     {/if}
     {#if budgetNote}
       <p class="cs-note" role="status">{budgetNote}</p>
+    {/if}
+  {/if}
+
+  <!-- ══ 模型 ══ -->
+  <!--
+    ⚠ **这一节只在真的接上了传输时才出现。**
+    没 key 时 Rust 不会造一个模型格子出来，前端也就读不到——
+    摆一个「可选模型」但选了不生效，比不摆更糟：那正是这个项目
+    一直在删的「调了没反应的控制项」。
+
+    ⚠ **清单只有一条时不给分段控件。** 一颗滑块的控件只有一个选项，
+    它回答不了任何问题，看着却像个选择器。此时只把当前值显示出来。
+  -->
+  {#if model}
+    <h2 class="cs-h2">模型</h2>
+    <p class="cs-label">{model.provider} 当前用的模型</p>
+    {#if modelOptions.length > 1}
+      <SegSlider
+        value={model.model}
+        options={modelOptions}
+        label="模型"
+        onchange={(v) => pickModel(v)}
+      />
+    {:else}
+      <p class="cs-note">{model.model}</p>
+    {/if}
+    <p class="cs-note">判断和起草用同一个模型——判断那段的输出只有几十个字。</p>
+    {#if modelOptions.length < 2}
+      <p class="cs-note">
+        这里只列实测能通的模型。填一个没验过的名字，表现会是「设置成功、一调用就 404」。
+      </p>
+    {/if}
+    {#if modelNote}
+      <p class="cs-fail" role="alert">{modelNote}</p>
     {/if}
   {/if}
 
