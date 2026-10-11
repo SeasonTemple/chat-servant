@@ -181,6 +181,19 @@ button {
     --cs-mark: GrayText;
     --cs-rule: GrayText;
     --cs-live: LinkText;
+    /* ⚠ `--cs-live-dim` **必须**和 `--cs-live` 一起接管。
+     *
+     * 它有两处用：「发送」悬停和 `×` 悬停（WinCtl），语义是「红一档」，
+     * 静息 `rgb(200 50 42)` → 悬停 `rgb(178 44 37)`。
+     *
+     * 早先这里只覆盖了 `--cs-live`。于是在高对比度下静息已经是系统
+     * `LinkText`，而悬停却退回一个字面量裸红 —— 一个**系统从没选过的颜色**。
+     * 而 HC 模式下 `background-color` 本来就会被系统接管，所以那点差异
+     * 结果是既没生效、又留了个「以为暗了一档」的错觉。
+     *
+     * 正确的做法就是给它同一个系统色：HC 的词汇表只有系统色，
+     * **「暗一档」在那里不存在**，把这条意图老实丢掉。 */
+    --cs-live-dim: LinkText;
     --cs-live-wash: Canvas;
   }
 }
