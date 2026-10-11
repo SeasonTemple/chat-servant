@@ -56,11 +56,73 @@ fix(感知): 切回会话后消息变少 —— 水位线住在引擎里
 | 2 | `cargo fmt --all --check` |
 | 3 | `cargo clippy --workspace --all-targets -- -D warnings` |
 | 4 | `cargo test --workspace` |
-| 5 | `cargo xtask secret-scan`（仓库里不许残留 key） |
+| 5 | `cargo xtask secret-scan`（仓库里不许残留 key；**没设 `CHATSERVANT_PROBE_KEY` 时会跳过**，见下方陷阱 3） |
 | 6 | `cargo deny check`（许可证 / advisory / 来源，见 ADR-0003） |
 | 7 | `pnpm check`（svelte-check） |
 | 8 | `pnpm lint` + `svelte-autofixer` |
 | 9 | `pnpm build` |
+
+> ⚠ **判断门禁成不成功看它打印的那两行**（`GATE: ALL GREEN` / `GATE: FAILED`），
+> 不要只看退出码。2026-10-11 实测踩过：脚本只打印 `GATE_EXIT` 而不 `exit`，
+> 于是 `pwsh -File` 永远返回 0，一个带红门禁的提交就提交上去了。
+
+## 维护陷阱
+
+这几条每一条都真的让门禁红过，且症状都**不在日志里**。它们写在对应文件的行内
+注释里，但那份文件你未必会打开，所以这里再列一遍。
+
+### 1. 新增工作区成员 = `deny.toml` 必须补一行
+
+本项目自己的 crate 用 **BSL-1.1**，而依赖白名单里**禁止** BUSL。这不矛盾：白名单
+管的是**别人的 crate**，本项目的发布物不在其管辖内。但 cargo-deny 0.20 有两条限制，
+导致这个口子只能**按包名逐个点名**开：
+
+- `[licenses.private]` 表**没有** `allow` 键（只认 `ignore` / `ignore-sources` / `registries`）；
+- `exceptions` 每项**必须**带 `crate`，`private = true` 这个键它不认。
+
+所以**往工作区加一个新 crate** 时，`cargo deny check` 会以
+`license is not explicitly allowed` 失败，必须去 `deny.toml` 的 `exceptions` 加一行
+`{ allow = ["BUSL-1.1"], crate = "<新包名>" }`。
+
+**判据**：只有本项目自己的包能这么开。**绝不要**把 `BUSL-1.1` 塞进 `allow`——
+那等于给 BUSL 依赖也开了口子，直接违反 ADR-0003。
+
+### 2. 本机 `core.autocrlf=true` 会被 `.gitattributes` 覆盖
+
+仓库用 `.gitattributes` 的 `* text=auto eol=lf` 把行尾钉死成 LF，**覆盖**每台机器
+自己的 git 配置。这不是多余的：GitHub 的 `windows-latest` runner 全局配置是
+`core.autocrlf=true`，checkout 会把仓库里的 LF 转成 CRLF 落盘，而 prettier 3 默认
+`endOfLine: "lf"`——于是同一个 prettier 版本、同一个 lockfile、同一批源码，
+**本地全绿、CI 报 35 个文件**。
+
+若哪天看到「同一条命令两台机器结论相反」，**先查行尾**，再看代码。
+另外：别删 `.gitattributes` 里的 binary 规则（`*.png` 等），否则 git 可能开始
+尝试对图片做行尾转换。
+
+### 3. CI 的 secret-scan 证明不了「仓库里没有真 key」
+
+CI 上**没有真 key 可查**，它只做两件事：确认扫描器跑得起来，以及
+**先埋探针要求它报警、再撤掉要求它闭嘴**。
+
+最后一条更重要：只跑一遍「没报警」证明不了任何事——**扫描器坏了和仓库干净，
+屏幕上长得一模一样**。
+
+真要查「这台机器的 key 有没有泄进仓库」，得在本机设了
+`CHATSERVANT_PROBE_KEY` 再跑 `cargo xtask secret-scan`（不设就跳过）。
+
+给 `.githooks/pre-commit` 加豁免用文件内标记 `secret-scan: allow`，**不要**习惯
+`--no-verify`：一个总被绕过的钩子等于没有钩子。
+
+### 4. GitHub 上许可显示为 `Other`
+
+BSL 1.1 不在 GitHub 的许可列表里，所以仓库页面会显示 `Other`。这是正常的，
+以 [`LICENSE`](LICENSE) 文件为准——别为了让它显示成某个已知许可而去改许可。
+
+### 5. `.githooks/` 只在本机生效
+
+`git config core.hooksPath .githooks` 是**每个 clone 各配一次**的本地设置，
+`.githooks/` 目录本身入库，但它不会自动被启用。克隆后记得跑上面那条命令，
+否则 pre-commit 凭据闸和 commit-msg 校验对你不存在。
 
 > ⚠ **判断门禁成不成功看它打印的那两行**（`GATE: ALL GREEN` / `GATE: FAILED`），
 > 不要只看退出码。2026-10-11 实测踩过：脚本只打印 `GATE_EXIT` 而没 `exit`，
