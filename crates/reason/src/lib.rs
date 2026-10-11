@@ -14,6 +14,7 @@ pub mod seam;
 pub mod transport;
 pub mod ureq_http;
 pub mod vision;
+pub mod voice;
 
 #[cfg(test)]
 mod gate;
@@ -27,3 +28,4 @@ pub use seam::{Turn, turn};
 pub use transport::{Http, HttpReasoner, Provider, probe_connectivity, redact};
 pub use ureq_http::UreqHttp;
 pub use vision::{Describer, ImagePayload, VisionBridge, VisionMode};
+pub use voice::{VOICE_MAX_CHARS, VOICE_MAX_SAMPLES, voice_samples};

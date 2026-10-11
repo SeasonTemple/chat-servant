@@ -321,6 +321,21 @@ struct Scratch {
     context: chatservant_reason::Context,
     /// 本会话的完整历史，喂给推理。**只在有新消息时追加**。
     history: Vec<String>,
+    /// **我说过的话**，按时间正序累积。只收 [`Speaker::Me`]。
+    ///
+    /// ## 为什么和 `history` 分开存
+    ///
+    /// `history` 是「整段对话」：对方说的、我说过的、系统提示都在里面；
+    /// 这一路是「我自己的话」，给 [`chatservant_reason::voice`] 挑口吻样本用。
+    /// 合成一份再按说话人过滤也行，但那样每次要**回扫全history**才能挑出
+    /// 我的那几条，而它是每轮都要挑的。
+    ///
+    /// ## 为什么要单独一路，而不是混进 `history`
+    ///
+    /// 「说话风格」和「对话内容」回答的是两个问题：前者是「我平时怎么说话」，
+    /// 后者是「现在该回什么」。混在一起模型无从区分——`history` 渲染出来
+    /// 时**不带说话人标签**（见 `Trimmed::render`），它会把样本当成对方说过的话。
+    mine: Vec<String>,
     /// 最近一次识别出的消息流。**发给界面渲染用。**
     ///
     /// ⚠ 它以前**根本不存在**：`step` 里算出 `messages` 只在这一轮里用，
@@ -384,6 +399,7 @@ impl Scratch {
             ocr_calls: 0,
             context: chatservant_reason::Context::new(),
             history: Vec::new(),
+            mine: Vec::new(),
             messages: Vec::new(),
             recent,
             vision: chatservant_reason::VisionBridge::off(),
@@ -899,6 +915,14 @@ fn step(
         // 时间戳、系统提示当成对话塞进上下文。
         s.history.extend(messages.iter().map(|m| m.text.clone()));
 
+        // 口吻样本走**另一路**（`FEATURE.md` 的「单独一路」）。
+        //
+        // ⚠ 它和 `history` 是两份**平行**的累积，不是同一份的视图：
+        // `history` 要全部消息（对方说的也在里面），这里**只要我说过的**。
+        // 早先这里只推 `.text`，`speaker` 整个被丢掉——于是上层根本没有
+        // 任何办法知道哪句是我说的，这条路在实现层面就不存在。
+        s.mine.extend(chatservant_reason::voice::my_side(&messages));
+
         // 裁剪。**摘要只在这里发生，且按块**（见 RESUMMARIZE_CHUNK）——
         // 这就是「惰性」的落点：不是每次都算，是攒够一块才算。
         let rendered = match s
@@ -924,6 +948,9 @@ fn step(
             // 判据是「还没接识别会话名」，现在接上了。
             peer: s.peer.clone(),
             images: collect_images(&frame, &anchor, s),
+            // 「我平时的说话风格」。空的时候是空 Vec，渲染那一步会整节省掉，
+            // 不往提示里塞空标题。
+            voice: chatservant_reason::voice::voice_samples(&s.mine),
         };
         match chatservant_reason::turn(reasoner.as_mut(), &ctx) {
             Ok(t) => {
@@ -1014,6 +1041,10 @@ fn apply_relock(s: &mut Scratch) {
     //   必须重新读一次——留着旧键会让 `refresh_peer` 以为「没变」而跳过。
     s.last_print = None;
     s.history.clear();
+    // ⚠ 口吻样本同样要清。它是**从对方私聊里学来的东西**——带着上一个会话的
+    // 口吻去给新会话起草，等于把 A 的说话风格套在 B 身上，而且这份「风格」
+    // 本身是从 A 的私聊内容里长出来的。跟 `history` 是同一类事故。
+    s.mine.clear();
     s.context.forget(SESSION);
     s.candidates.clear();
     // ⚠ 面板上累积的消息**也要清**。不清的话重锁之后，标题写着新会话名，
@@ -1700,6 +1731,30 @@ mod tests {
             s.history.is_empty(),
             "重锁后还留着上一个会话的历史：{:?}",
             s.history
+        );
+    }
+
+    /// **重锁必须清掉口吻样本**——与上一条同一类事故。
+    ///
+    /// 口吻样本是**从对方私聊里长出来的东西**：用户怎么打字，是他在
+    /// 那些对话里留下的痕迹。带着 A 的口吻给 B 起草，套的不只是语气，
+    /// 那份「风格」本身就是 A 的私聊内容。
+    #[test]
+    fn relocking_drops_the_previous_conversation_voice() {
+        let mut s = Scratch::new(RecentN::new(12));
+        s.images_out = ImagesOut::off();
+
+        s.mine.push("A 里的口吻样本".into());
+        s.mine.push("只发给 A 的说法".into());
+
+        s.relock.request();
+        let _ = s.relock.take();
+        apply_relock(&mut s);
+
+        assert!(
+            s.mine.is_empty(),
+            "重锁后还留着上一个会话的口吻样本：{:?}",
+            s.mine
         );
     }
 

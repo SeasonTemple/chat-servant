@@ -358,6 +358,7 @@ mod tests {
             messages,
             peer: String::new(),
             images: Vec::new(),
+            voice: Vec::new(),
         };
         let t = crate::turn(&mut r, &ctx).expect("降级不该让整轮失败");
         assert!(!t.draft.candidates.is_empty(), "仍然要有候选");
@@ -378,6 +379,7 @@ mod tests {
             messages: lines,
             peer: String::new(),
             images: Vec::new(),
+            voice: Vec::new(),
         };
         assert!(
             ctx.messages.iter().any(|m| m == PLACEHOLDER),
