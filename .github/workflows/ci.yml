@@ -66,14 +66,47 @@ jobs:
       - name: "Gate 4/9 | cargo test"
         run: cargo test --workspace
 
-      # ⑤ secret-scan 需要一把**假的** key 当探针（见 xtask/src/secret_probe.rs），
-      #    真 key 绝不能出现在 CI 的环境变量里。这里给的是 canary，
-      #    下面那串长得像真 key 的东西**是故意的**，别改小。
-      # secret-scan: allow
+      # ⑤ 凭据扫描。
+      #
+      # ## 这里能证明什么、不能证明什么
+      #
+      # CI 上**没有真 key 可查**，所以这一步证明的是两件事：
+      #   · 扫描器在 CI 环境里确实跑得起来（不是"没输出 = 干净"）；
+      #   · 扫描器**抓得到**——先埋探针要求它报警，撤掉后要求它闭嘴。
+      # 只跑一遍"没报警"是不够的：扫描器坏了和仓库干净，在屏幕上长得一模一样。
+      #
+      # 真正有意义的 key 排查在本机跑（`gate.ps1` 里用真实机器 key 那次）。
+      #
+      # ## 探针 key 必须运行时生成
+      #
+      # 曾经这里写的是字面量 `CHATSERVANT_PROBE_KEY: sk-...`，于是那串字面量
+      # **本身就在 ci.yml 里**，扫描器如实报出了 ci.yml——扫描器没坏，是探针自指了。
+      # 探针串一旦入库，它要找的东西就住在他自己家里。
       - name: "Gate 5/9 | secret scan"
-        env:
-          CHATSERVANT_PROBE_KEY: sk-ci-canary-not-a-real-key-0000
-        run: cargo run -q -p xtask -- secret-scan
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bytes = [Security.Cryptography.RandomNumberGenerator]::GetBytes(24)
+          $env:CHATSERVANT_PROBE_KEY = 'sk-' + [Convert]::ToHexString($bytes).ToLower()
+
+          $canary = 'target/probe/canary-secret.txt'
+          New-Item -ItemType Directory -Force -Path (Split-Path $canary) | Out-Null
+
+          Write-Output '① 埋探针，扫描器**应当**报警'
+          Set-Content -LiteralPath $canary -Value $env:CHATSERVANT_PROBE_KEY
+          cargo run -q -p xtask -- secret-scan
+          if ($LASTEXITCODE -eq 0) {
+            throw '扫描器没抓到刚埋进去的探针 —— 它的"没抓到"不可信'
+          }
+
+          Write-Output '② 撤掉探针，扫描器**应当**干净'
+          Remove-Item -LiteralPath $canary -Force
+          cargo run -q -p xtask -- secret-scan
+          if ($LASTEXITCODE -ne 0) {
+            throw "撤掉探针后仍然报警（exit=$LASTEXITCODE）"
+          }
+
+          Write-Output 'SECRET_SCAN_OK —— 抓得到探针，也放得过干净仓库'
 
       # ⑥ 许可证 / advisory / 来源合规，策略见 docs/adr/0003-dependency-strategy.md
       - name: "Gate 6/9 | cargo deny check"
