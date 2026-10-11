@@ -139,6 +139,13 @@ UI 在 `ui/`，Svelte 5 + Vite + Tauri 2。
 元数据确认，不要从项目主页推测。策略由根目录 `deny.toml` 机器执行，
 `cargo deny check` 是门禁之一。理由与选型记录见 `docs/adr/0003-dependency-strategy.md`。
 
+⚠ **新增工作区成员时必须去 `deny.toml` 补一行。** 本仓自己的 crate 是
+BUSL-1.1（见 `LICENSE`），而依赖白名单禁 BUSL——不矛盾，那条管的是别人的 crate。
+但 cargo-deny 0.20 的 `exceptions` **必须**带 `crate`、`private = true` 不认，
+所以只能逐个点名：`{ allow = ["BUSL-1.1"], crate = "<新包名>" }`。忘了补，
+`cargo deny check` 就以 `license is not explicitly allowed` 失败。
+完整陷阱清单见 [`CONTRIBUTING.md`](CONTRIBUTING.md) 的「维护陷阱」。
+
 读取参考项目时遵守净室：**只读实测结论，不复制任何代码**
 （它的发布包受 GPLv3 污染，见 ADR-0003）。
 
