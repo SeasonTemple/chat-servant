@@ -89,6 +89,11 @@ Rust 核心 + Tauri 2 外壳 + Svelte 5 前端，先打通微信单聊。
 
 ## 常用命令
 
+> ⚠ 下面这六条与 `scripts/gate.ps1`、`CONTRIBUTING.md`、以及 CI 的
+> `ci.yml` / `release.yml` **逐字一致**。要改就四处一起改——本仓踩过
+> 「两套门禁各说各话」，所以这里曾经写成 `cargo test --workspace
+> --lib --bins --tests`，而门禁与 CI 跑的是不带过滤器的版本。
+
 ```bash
 # 本机一次跑完全部门禁（九步）
 pwsh -NoProfile -File scripts/gate.ps1; echo "exit=$LASTEXITCODE"
@@ -96,7 +101,7 @@ pwsh -NoProfile -File scripts/gate.ps1; echo "exit=$LASTEXITCODE"
 # 或者分开跑
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --lib --bins --tests
+cargo test --workspace
 cargo deny check                 # 许可证/advisory/来源合规，见 ADR-0003
 cd ui && pnpm check && pnpm lint
 
