@@ -315,12 +315,15 @@
    */
   let closeBehavior = $state<'exit' | 'tray'>('exit');
 
-  /** 档位的中文名。顶边那条 3px 太细，这里用文字补一次。 */
+  /** 档位的中文名。顶边那道手画勾太短，这里用文字补一次。 */
   const TIER_NAME: Record<Tier, string> = {
     Manual: '只填入',
     Confirm: '确认后发',
     Auto: '自动发送',
   };
+
+  /** 档位从低到高。顶边三道短记号按这个顺序排，勾落在当前那一道上。 */
+  const TIERS: Tier[] = ['Manual', 'Confirm', 'Auto'];
 
   /** 概率转整数百分数。Rust 给的是 0..1，界面不自己换算成别的口径。 */
   function pctOf(c: Candidate): number {
@@ -653,11 +656,40 @@
   data-compact={compact ? 'y' : 'n'}
 >
   <!--
-    顶边 = 档位。**填充长度编码**递进关系：Manual 不亮、Confirm 1/3、
-    Auto 满 + 红。另外 armed 时整条变红 —— 那是状态，不是档位。
+    顶边 = 档位。**三道中性短记号 + 一支红铅笔画的勾**。
+
+    为什么不是横条（2026-10-12 实测）：`--cs-rule` 在纸底
+    rgb(243 230 192) 上只有 **1.05 : 1**，是**冷色相**——亮度不跳、
+    色相跳，屏上读作一道**划痕**。而且只要它还是一条贯穿 316px 的
+    连续直线，它就在跟撕边抢轮廓：撕边之所以成立，靠的正是轮廓被打断。
+
+    为什么是「勾」而不是「圈」（4× 真实像素比对）：
+      · 圈是**容器**，勾是**标记**。纸面上最强的形状语言已经是撕口，
+        再加一条闭合轮廓 = 两个边界打架。
+      · 圈要 28px 高才像个圈，勾只要 14px。560px 的面板上这是两倍的
+        纵向代价，换来同样的信息量。
+      · 圈的收笔在左下，那一小段过头的墨会跟记号叠在一起，1× 下视线
+        先落在那个角上，而不是落在标记本身。勾没有这个瑕疵。
+
+    颜色：这一支是**红铅笔**，不是 `--cs-live`。两者对比度几乎相同
+    （5.90 : 1 vs 5.95 : 1）——所以「红 = 警告」这件事**不是对比度能
+    定输赢的**，只能靠形（手画勾 vs 实心条）和质感来分。用实心红条
+    画档位，它就变成警报；用蜡质红笔画一个勾，它是校样批注。
+    armed 那一下才是真警报，那时才换成 `--cs-live`。
+
+    编码：**位置** = 档位集合，**勾落在哪** = 当前档。
   -->
   <div class="cs-tier-edge" aria-hidden="true">
-    <span class="cs-tier-fill"></span>
+    {#each TIERS as t, i (t)}
+      <span class="cs-tier-slot" data-tier-idx={i}>
+        <svg class="cs-tier-anchor" viewBox="0 0 100 5" preserveAspectRatio="none" height="5">
+          <path d="M35 2.8 C44 1.9 56 3.6 65 2.5 L65 3.9 C56 4.3 44 3.3 35 3.9 Z" />
+        </svg>
+        <svg class="cs-tier-check" viewBox="0 0 100 20" height="20">
+          <path d="M39 10.5 C42 12.8 43.6 14.6 46 16 C50.5 12.8 55.5 8 61.5 4" />
+        </svg>
+      </span>
+    {/each}
   </div>
 
   <!--
@@ -1089,47 +1121,90 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    background: var(--cs-paper);
+    /* PROBE-SHEET 临时：纸由 SVG 自己画，边缘交给合成器抗锯齿 */
+    background: url(/probe-sheet.svg?v=21) center / 100% 100% no-repeat;
+    padding: 40px 32px 30px; /* PROBE-SHEET: 无顶部装饰，纸的撕口就是顶边（17.5px）+ 留白 */
     color: var(--cs-ink);
     overflow: hidden;
   }
 
-  /* ── 顶边：档位 ─────────────────────────────────────── */
+  /* ── 顶边：档位 ───────────────────────────────────────────
+   *
+   * 三道短记号是**中性**的，不编码档位；档位由那支红铅笔的**勾**
+   * 落在哪一道决定。理由记在 markup 注释里。
+   *
+   * ⚠ 勾是 SVG path，交给合成器抗锯齿。之前那道二值的 CSS 横条
+   * 读作划痕，一半原因就是它没有中间灰阶。 */
   .cs-tier-edge {
     flex: none;
-    height: 3px;
-    background: var(--cs-rule);
+    display: flex;
+    height: 20px;
   }
 
-  .cs-tier-fill {
-    display: block;
-    height: 100%;
-    width: 0;
-    background: var(--cs-ink);
-    transition:
-      width var(--cs-dur) var(--cs-ease),
-      background var(--cs-dur) var(--cs-ease);
+  .cs-tier-slot {
+    position: relative;
+    flex: 1;
   }
 
-  .cs-panel[data-tier='Confirm'] .cs-tier-fill {
-    width: 33.33%;
-  }
-
-  .cs-panel[data-tier='Auto'] .cs-tier-fill {
+  /*  记号：短且居中。**长横线套一个勾会读成「0」**，
+   *  而长横线配档位又会退回到那根贯穿纸面的机械条。 */
+  .cs-tier-anchor {
+    position: absolute;
+    left: 0;
+    top: 9px;
     width: 100%;
-    background: var(--cs-live);
+    height: 5px;
   }
 
-  /* armed：整条变红。这是**状态**，不是档位 ——
+  .cs-tier-anchor path {
+    fill: var(--cs-tier-ink);
+    opacity: 0.26;
+  }
+
+  .cs-tier-check {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 20px;
+    overflow: visible;
+    opacity: 0;
+    transition: opacity var(--cs-dur) var(--cs-ease);
+  }
+
+  .cs-tier-check path {
+    fill: none;
+    stroke: var(--cs-pencil-red);
+    stroke-width: 2.1;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.88;
+  }
+
+  /*  勾只落在当前档那一道上。位置**不是**唯一线索——三道记号
+   *  一模一样，所以「哪一道」只由勾的位置决定；好在勾本身是
+   *  位置无关的形状，不依赖颜色分辨（WCAG 1.4.1）。 */
+  .cs-panel[data-tier='Manual'] .cs-tier-slot[data-tier-idx='0'] .cs-tier-check,
+  .cs-panel[data-tier='Confirm'] .cs-tier-slot[data-tier-idx='1'] .cs-tier-check,
+  .cs-panel[data-tier='Auto'] .cs-tier-slot[data-tier-idx='2'] .cs-tier-check {
+    opacity: 1;
+  }
+
+  /*  Auto：不可逆，勾从红铅笔换成**警报红**。
+   *  这一步是红铅笔唯一让位给 `--cs-live` 的地方。 */
+  .cs-panel[data-tier='Auto'] .cs-tier-slot[data-tier-idx='2'] .cs-tier-check path {
+    stroke: var(--cs-live);
+    opacity: 1;
+  }
+
+  /*  armed：这是**状态**，不是档位 ——
    *
-   * ⚠ 必须连 `.cs-tier-fill` 一起盖掉。只改 `background` 的话，
-   * Confirm 档那条 1/3 的墨色填充会露在红条左边，读起来像
-   * 「档位还在、只是变红了」—— 而实际上此刻面板根本不在读档位，
-   * 它在等一个不可逆的确认。**档位在 armed 期间没有意义。** */
-  .cs-panel[data-armed='y'] .cs-tier-edge,
-  .cs-panel[data-armed='y'] .cs-tier-fill {
-    background: var(--cs-live);
-    width: 100%;
+   *  ⚠ 此刻面板在等一个不可逆的确认，勾必须盖住「红铅笔批注」
+   *  那层日常语气，直接升成警报红。反过来只改 Auto 那一档是不够的：
+   *  armed 可以发生在任何档位上。 */
+  .cs-panel[data-armed='y'] .cs-tier-check path {
+    stroke: var(--cs-live);
+    opacity: 1;
     transition: none;
   }
 
@@ -1589,7 +1664,7 @@
    * 不转圈 —— 转圈说的是「多久」，这里该说的是「正在成形」。
    *
    * ⚠ 但**灰只能是铅笔灰**（6.22 : 1），不是刻线色。
-   * 原来用的是 `--cs-rule-strong`，实测 **1.57 : 1** —— 纸上几乎看不见，
+   * 原来用的是 `--cs-rule-strong`，实测 **1.20 : 1** —— 纸上几乎看不见，
    * 「正在成形…」变成一片空白。设计意图对，执行过头了：
    * 「未完成」不等于「看不清」。 */
   .cs-idle-busy {
@@ -1599,7 +1674,8 @@
   .cs-idle-sub {
     margin: 0;
     font-size: 11px;
-    /* 同上：11px 是正文，不是标注。3.81 : 1 不够。 */
+    /* 11px 是正文、不是标注，所以走 `--cs-pencil`（5.10 : 1）而不是
+     * `--cs-mark`（3.00 : 1，达不到 AA 正文）。 */
     color: var(--cs-pencil);
   }
 
