@@ -5,3 +5,11 @@ src-tauri/target
 src-tauri/gen
 package-lock.json
 pnpm-lock.yaml
+
+# 红铅笔笔迹几何：**生成物**，来源 `.scratch/tmp-probe/pencilgen.py`。
+#
+# ⚠ 为什么必须忽略：prettier 会重排它内部的 JSDoc，而重排结果和生成器
+#   的输出不一致。于是「跑一次生成器 → 门禁红」，而修法只能是 --write，
+#   那等于让格式化器改写生成器的事实来源——下次再生成又红一次。
+#   生成器是唯一事实来源，格式化器不许碰它。
+src/lib/marks.js
