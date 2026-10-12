@@ -889,6 +889,12 @@ mod tests {
     use super::*;
     use crate::mock_upstream::{MockUpstream, Reply};
 
+    // secret-scan: allow —— 本模块里那两串 `sk-…` 是**故意的假 key**：
+    // 一处是 `KEY` 这个测试常量，一处是喂给 `redact()` 的样本。
+    // pre-commit 的钩子只放行 `tests/` **目录**，放行不了 `src/` 里的
+    // `#[cfg(test)] mod tests`，所以任何一次碰这个文件的提交都会被拦。
+    // 按钩子自己写的规矩（见 .githooks/pre-commit）走**文件内豁免标记**，
+    // 而不是让人养成 `--no-verify`——那个习惯一旦成形，真 key 也一起过去了。
     const KEY: &str = "sk-testkey-should-never-appear";
 
     fn judge_json() -> &'static str {
@@ -990,6 +996,18 @@ mod tests {
         crate::turn(&mut r, &ctx).expect("推理成功");
 
         let seen = up.seen();
+        // ⚠ **先断条数，再断内容。**
+        //
+        // 少了这两行，一次「少记了一个请求」会以最误导人的形式冒出来：
+        // `seen[0]` 变成起草那一次，于是下面那条断言报「判断请求带了口吻样本」——
+        // 读起来像是判断把口吻样本泄给了上游，真凶其实在测试夹具的读失败上
+        // （见 `mock_upstream`）。断条数会让它当场报「少了一条」，那才是真的。
+        assert_eq!(seen.len(), 3, "一轮 = 判断 + 起草 + 排序，各一次请求");
+        assert!(
+            seen[0].body.contains("\"system\""),
+            "第一条应当是判断请求，它带 system 提示：{}",
+            seen[0].body
+        );
         let judge_body = &seen[0].body;
         let draft_body = &seen[1].body;
 
