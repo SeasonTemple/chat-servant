@@ -139,6 +139,8 @@ try {
 } finally { $bmp.Dispose() }
 
 Write-Output ''
-Write-Output '⚠ 本脚本只做「测量与校验」，**不能重新生成这张纸**。'
-Write-Output '  原始素材（app.css 提到的 paper-fixed.png）在本机与 git 中均已不存在。'
-Write-Output '  所以这张图目前**不可复现** —— 详见 docs/设计规范.md §2.4。'
+Write-Output '⚠ 本脚本只做「测量与校验」，不生成纸。'
+Write-Output '  源图 ui\static\probe-sheet.png 现在在库里；把 PNG 重新打包进 SVG 用'
+Write-Output '  ui\scripts\sheetpack.ps1（-Check 可校验两者是否同步）。'
+Write-Output '  但**重画**仍然做不到：原始素材 paper-fixed.png 已不可考，详见'
+Write-Output '  docs/设计规范.md §2.4。'

@@ -20,6 +20,11 @@ function Step($name, $scriptblock) {
 # 不专门扫就永远没人发现。ticket 19。
 Step "mojibake scan" { & pwsh -NoProfile -File "$PSScriptRoot\scan-mojibake.ps1" 2>&1 | Select-Object -Last 30 }
 
+# 纸的源（probe-sheet.png）与生成物（probe-sheet.svg）必须同步。
+# SVG-as-image 不能外链资源，所以 PNG 只能靠打包脚本内嵌进去；
+# 两者一旦漂移，纸就会静默地变成「旧的那张」，而所有截图都照样出得来。
+Step "sheet pack in sync" { & pwsh -NoProfile -File ui\scripts\sheetpack.ps1 -Check 2>&1 | Select-Object -Last 10 }
+
 Step "cargo fmt --all --check" { cargo fmt --all --check 2>&1 | Select-Object -Last 40 }
 Step "cargo clippy -D warnings" { cargo clippy --workspace --all-targets -- -D warnings 2>&1 | Select-Object -Last 60 }
 Step "cargo test --workspace"  { cargo test --workspace 2>&1 | Select-Object -Last 60 }

@@ -1121,9 +1121,12 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    /* PROBE-SHEET 临时：纸由 SVG 自己画，边缘交给合成器抗锯齿 */
-    background: url(/probe-sheet.svg?v=21) center / 100% 100% no-repeat;
-    padding: 40px 32px 30px; /* PROBE-SHEET: 无顶部装饰，纸的撕口就是顶边（实测 7~11px，见 ui/scripts/sheetprobe.ps1）+ 留白 */
+    /* 纸由 SVG 自己画，边缘交给合成器抗锯齿。不用 SetWindowRgn：它是二值
+     * 掩码，撕口会变成硬阶梯。`?v=21` 是当初在两个面板之间来回切时加的
+     * 缓存破坏参数，见 docs/HANDOFF.md §18。 */
+    background: url(/probe-sheet.svg) center / 100% 100% no-repeat;
+    /* 无顶部装饰，纸的撕口就是顶边（实测 7~11px，见 ui/scripts/sheetprobe.ps1）+ 留白 */
+    padding: 40px 32px 30px;
     color: var(--cs-ink);
     overflow: hidden;
   }
