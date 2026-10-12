@@ -1571,33 +1571,48 @@ Tauri 2 处理 `data-tauri-drag-region` 走的是前端调 `plugin:window|start_
 等于**产物入库、来源没入库**，`marks.js` 从此不可复现。现在在
 `ui/scripts/pencilgen.py`，重跑逐字节一致（除头部注释里的路径）。
 
-### 18.7 ⚠ 门禁现状（含一条**红**）
+### 18.7 门禁现状（**已全绿**）
 
 | 门禁 | 结果 |
 |---|---|
-| mojibake 扫描 | 干净（193 文件） |
-| `cargo fmt --all --check` | EXIT=0 |
-| `cargo clippy -D warnings` | EXIT=0 |
-| `cargo test` | **304 passed / 0 failed** |
-| `cargo deny check` | EXIT=0（只有 duplicate 警告） |
-| `pnpm check` / `lint` / autofixer | 0 error；13 文件全清 |
-| `pnpm build` | ✅ |
+| mojibake 扫描 | 干净（192 文件） |
+| \cargo fmt --all --check\ | EXIT=0 |
+| \cargo clippy -D warnings\ | EXIT=0 |
+| \cargo test --workspace\ | **EXIT=0**，含 doctest 段 |
+| \cargo deny check\ | EXIT=0（只有 duplicate 警告） |
+| \pnpm check\ / \lint\ / autofixer | 0 error；13 文件全清 |
+| \pnpm build\ | 通过 |
 
-**唯一红项与当天改动无关**：本机没装 `rustdoc`，`cargo test --workspace`
-的 doctest 段起不来：
+#### ⚠ 顺带修好的：本机 rustdoc 缺失（**不是装不上，是装错了 toolchain**）
 
-```
+当时的现象是每条 \cargo test\ 命令都收一句：
+
+`
 error: the 'rustdoc.exe' binary, normally provided by the 'rustc' component,
 is not applicable to the 'stable-x86_64-pc-windows-msvc' toolchain
-```
+`
 
-`rustup component list --installed` 只有 `rust-std` 与 `rustc`。
-一条命令可解：`rustup component add rustdoc`。
+查下来的**真因**（前两次都猜错了，记下来免得再查一遍）：
 
-> ⚠ **注意 `scripts/gate.ps1` 第 25 行跑的是 `cargo test --workspace`（不带
-> `--lib --bins --tests`），所以门禁在本机必然红。** `AGENTS.md` 的「常用命令」
-> 写的是带过滤器的版本。CI 上有 rustdoc 所以不红。**这个不一致还没裁决**：
-> 是把 gate 改成带过滤器（本机绿、与 CI 有差），还是装 rustdoc（两边一致）。
+1. \RUSTUP_HOME\ 是 **\E:\\DevCache\\rustup\**，不是 \C:\\Users\\…\\.rustup\。
+   后者里确实躺着一个 2026-09-03 的 ustdoc.exe\，**但那不是当前 toolchain**——
+   照着它查会得出「文件明明在啊」的矛盾结论。**先确认 RUSTUP_HOME。**
+2. 当前默认 toolchain \stable-x86_64-pc-windows-msvc\ 是 **rustc 1.98.0**，
+   它的 \in\\ 里**根本没有 ustdoc.exe\**——这个 toolchain 装得不全。
+   并排放着的 .98.1-x86_64-pc-windows-msvc\ 是 **1.98.1**，**自带 rustdoc**。
+3. ustup component add rustdoc\ **装不了**：rustdoc 不是独立组件，
+   它属于 ustc\；而且当时 7897 代理已下线，ustup update\ 直接连不上。
+4. 试过 \$env:RUSTDOC\ 指向 1.98.1 的 rustdoc —— **❌ 行不通**。
+   \error[E0514]: found crate X compiled by an incompatible version of rustc\：
+   rustdoc 读不了另一个补丁版本 rustc 编出来的 rlib。**补丁版本之间是硬隔离的。**
+
+**最终解法**：ustup default 1.98.1-x86_64-pc-windows-msvc\。它是 1.98.0 的
+**补丁升级**、本地已装、不需要下载。代价是**全量重编**，且 \	arget/\ 会长大
+（当天实测 7.09 GB，E 盘余量 74.9 GB，撑得住）。
+
+> ⚠ 切 toolchain 前要先跑一遍 clippy：补丁版本可能带进新的 lint，
+>   而门禁是 \-D warnings\，那会直接红。**红了就 ustup default\ 切回去。**
+> 当天实测没红。
 
 ### 18.8 ❌ 还没定的事（**下一刀看这里**）
 
