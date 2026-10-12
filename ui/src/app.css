@@ -159,11 +159,22 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
-  /* 窗口不透明（tauri.conf 的 `transparent: false`）。
-   * 开着透明窗口时 WebView2 的分层合成会**整层丢掉面板底色**——
-   * 文字照常渲染，底下桌面直接透进来。反复撞过同一个问题，
-   * 这里一次性去掉：**一张纸不需要是块玻璃。** */
-  background: transparent; /* PROBE-TRANSP 临时：验证透明窗口内是否透桌面，验完即回退 */
+  /* ⚠ 这里的 `transparent` 是**设计**，不是探针残留（2026-10-12 订正）。
+   *
+   * 早先这段写的是「窗口不透明（tauri.conf 的 `transparent: false`）」，
+   * 而 `tauri.conf.json` 现在是 `"transparent": true`。`70fd0be` 为了
+   * 「撕边纸靠窗口透明四角」把 JSON 翻了回来，忘了改这段话——注释与
+   * 代码相反的根源就在那一次提交。
+   *
+   * 为什么必须是 transparent：面板把 `probe-sheet.svg` 当 background
+   * 铺满，而 **SVG 自身透明**，纸只占其中一块，四周留的余量是给
+   * feDropShadow 的落影。那圈余量要透出桌面，落影才成立。填上
+   * `--cs-paper` 会在纸四周多出一圈冷灰直角 —— 正是「两个边界打架」。
+   *
+   * ⚠ 真正要避开的不是 transparent，是**半透明底色**：
+   * WebView2 分层合成会把 `rgb(... / 88%)` 这类整层不绘制
+   * （见 `--cs-paper` 的注释，2026-10-07 实测）。这两件事别混。 */
+  background: transparent;
   color: var(--cs-ink);
   /* 面板不是文档，不该能被选中。 */
   user-select: none;
