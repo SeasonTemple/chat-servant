@@ -1571,17 +1571,34 @@ Tauri 2 处理 `data-tauri-drag-region` 走的是前端调 `plugin:window|start_
 等于**产物入库、来源没入库**，`marks.js` 从此不可复现。现在在
 `ui/scripts/pencilgen.py`，重跑逐字节一致（除头部注释里的路径）。
 
-### 18.7 门禁现状（**已全绿**）
+### 18.7 门禁现状（**有一处偶发红，先看 18.7.1**）
 
 | 门禁 | 结果 |
 |---|---|
 | mojibake 扫描 | 干净（192 文件） |
-| \cargo fmt --all --check\ | EXIT=0 |
-| \cargo clippy -D warnings\ | EXIT=0 |
-| \cargo test --workspace\ | **EXIT=0**，含 doctest 段 |
-| \cargo deny check\ | EXIT=0（只有 duplicate 警告） |
-| \pnpm check\ / \lint\ / autofixer | 0 error；13 文件全清 |
-| \pnpm build\ | 通过 |
+| `cargo fmt --all --check` | EXIT=0 |
+| `cargo clippy -D warnings` | EXIT=0 |
+| `cargo test --workspace` | **偶发红**，不是稳定绿。见 18.7.1 |
+| `cargo deny check` | EXIT=0（只有 duplicate 警告） |
+| `pnpm check` / `lint` / autofixer | 0 error；13 文件全清 |
+| `pnpm build` | 通过 |
+
+#### 18.7.1 🐛 偶发红：`voice_samples_reach_the_draft_but_not_the_judge`
+
+**别把这一行读成「门禁全绿」。** 当天连跑 8 次 `cargo test -p chatservant-reason`，红 1 次。
+
+失败断言在 `crates/reason/src/transport.rs:996`，报的是「判断请求不该带口吻样本」。但打印出来的请求体里带着「判断服务没响应，这次是盲拟」这句——**那是起草请求**，不是判断请求。也就是说 `seen[0]` 拿到了起草那一次。
+
+而 `seam.rs:88` 的 `turn()` 是**严格顺序**的：判断 → 起草 → 排序。两次请求不可能并发，所以「记录顺序翻转」按理不该发生。
+
+已排除的：
+
+- **跨测试并行污染**：该测试单独连跑 12 次**全绿**，所以不是别的测试抢了它。
+- **产品把口吻样本泄给判断**：失败体明确是起草请求，形状对不上。
+
+**未定位。** 下一步该看的是 `mock_upstream.rs` 记录 `seen` 的时机（收到请求时 push，还是回完响应才 push），而不是去改这条断言——**断言写的是对的**，它守的是「口吻样本不进判断」这条成本 + 污染的边界。
+
+> 顺带：这是把默认 toolchain 切到 1.98.1 之后**首次**观察到的。1.98.0 上跑过很多次没触发过，所以「补丁升级引入」既不能排除也不能确认——需要在 1.98.0 上同样连跑一组来对照。
 
 #### ⚠ 顺带修好的：本机 rustdoc 缺失（**不是装不上，是装错了 toolchain**）
 
