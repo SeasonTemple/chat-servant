@@ -25,7 +25,7 @@
    *  语言已经是撕口，再加一条闭合轮廓等于两个边界打架。这条要拿生成版
    *  的圈（0.94 : 1、三道叠画）重验，不能拿坏样本定案。
    *
-   *  笔迹几何来自 `$lib/marks`（由 `.scratch/tmp-probe/pencilgen.py`
+   *  笔迹几何来自 `$lib/marks`（由 `ui/scripts/pencilgen.py`
    *  按「中心线 + 宽度剖面」生成），不是手写 path——手写过一次收放
    *  方向反了。理由与量测都记在那边。
    */
@@ -166,7 +166,9 @@
     /* 纸由 SVG 自己画，边缘交给合成器抗锯齿。
      * 不用 SetWindowRgn：它是二值掩码，撕口会变成硬阶梯。 */
     background: url('/probe-sheet.svg') center / 100% 100% no-repeat;
-    /* 撕口 17.5px 已含在 SVG 里，padding 只负责把内容推离撕口 */
+    /* 撕口已含在 SVG 里，padding 只负责把内容推离撕口。
+       撕口实测 7~11 CSS px（随 x 变，对 alpha 阈值不敏感），
+       量法见 ui/scripts/sheetprobe.ps1。原注释写「17.5px」，对不上。 */
     padding: 40px 32px 30px;
     color: var(--cs-ink);
     overflow: hidden;

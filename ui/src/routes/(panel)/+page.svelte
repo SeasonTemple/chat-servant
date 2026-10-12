@@ -1123,7 +1123,7 @@
     height: 100%;
     /* PROBE-SHEET 临时：纸由 SVG 自己画，边缘交给合成器抗锯齿 */
     background: url(/probe-sheet.svg?v=21) center / 100% 100% no-repeat;
-    padding: 40px 32px 30px; /* PROBE-SHEET: 无顶部装饰，纸的撕口就是顶边（17.5px）+ 留白 */
+    padding: 40px 32px 30px; /* PROBE-SHEET: 无顶部装饰，纸的撕口就是顶边（实测 7~11px，见 ui/scripts/sheetprobe.ps1）+ 留白 */
     color: var(--cs-ink);
     overflow: hidden;
   }
