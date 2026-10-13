@@ -492,15 +492,16 @@
     被笔画压成一团。
 
     那是把**低频设置放进了黄金位**——档位一年未必改一次，却让纸的上半部分
-    一直在喊「看这里」。现在它缩到两枚小记号，槽高 53 → 16px，
-    标记取景框 60×40 → 24×16（所以默认幅面回到 `base`：`big` 那套偏移是按
-    60×40 算的，塞进 24px 的框里只会糊成一团）。
+    一直在喊「看这里」。现在它挪到正文下方，槽高 53 → 24px，
+    标记取景框 60×40 → 34×22（所以默认幅面回到 `base`：`big` 那套偏移是按
+    60×40 算的，塞进小框里只会糊成一团）。位置的来龙去脉见档位行上那段注释。
   -->
 
   <!--
-    正文区。四行固定骨架（§4.2b）：档位 → 归属 → 正文 → 动作。
-    动作行**故意还没有**——它要碰发送路径（硬约束第 5 条），不能跟排版
-    一起顺手做掉。宁可少一行，不要一个没验过的发送控件。
+    正文区。四行固定骨架（§4.2b）：归属 → 正文 → 档位 → 动作。
+    ⚠ 骨架原本第一行是档位，现已按实测挪到最后一段；动作行**故意还没有**
+    ——它要碰发送路径（硬约束第 5 条），不能跟排版一起顺手做掉。
+    宁可少一行，不要一个没验过的发送控件。
   -->
   <!--
     ⚠ **设置是一块互斥的主区，不是叠在主区上面的一层。**
@@ -527,55 +528,24 @@
     <PanelSettings bind:tier bind:closeBehavior />
   {:else}
     <div class="cs-body-col">
-      <!-- 归属行。左边回答「这句话是替谁写的」，右边是档位。
-           ⚠ 证据**必须显示**：这是机器认出来的对话，不是用户自己翻的。
-           认错了还照发，比不写更糟。 -->
-      <div class="cs-where-row">
-        <p class="cs-where">
-          <span class="cs-peer">{peer || '—'}</span>
-          {#if lastFromThem}
-            <span class="cs-where-quote">{lastFromThem.text}</span>
-          {/if}
-        </p>
+      <!--
+        归属行。**只回答一件事**：这句话是替谁写的。
 
-        <div class="cs-pick" data-no-drag role="radiogroup" aria-label="发送档位">
-          {#each TIERS as t, i (t.key)}
-            <button
-              type="button"
-              class="cs-pick-slot"
-              data-idx={i}
-              aria-checked={tier === t.key}
-              role="radio"
-              tabindex={tier === t.key ? 0 : -1}
-              onclick={() => void chooseTier(t.key)}
-            >
-              <span class="cs-markbox">
-                <svg
-                  class="cs-tick"
-                  data-shape={markShape.current}
-                  data-ring={markSize}
-                  viewBox="0 0 {ACTIVE_VIEW.w} {ACTIVE_VIEW.h}"
-                  width={ACTIVE_VIEW.w}
-                  height={ACTIVE_VIEW.h}
-                  aria-hidden="true"
-                  filter="url(#pencil)"
-                >
-                  <!--
-                    五层嵌套，不是单层平涂。单层不管给多少 opacity，边缘都是
-                    一刀切的硬边，所以它读成矢量而不是红铅笔——材质台 P1 与 P5
-                    同框实测：落在中间密度带的像素 23.0% → 70.5%，总墨量反而少
-                    17%。密度从芯往外逐级下降，才有「芯重边虚」。
-                  -->
-                  {#each MARK_LAYERS as layer (layer.d)}
-                    <path d={layer.d} fill-opacity={layer.o} />
-                  {/each}
-                </svg>
-              </span>
-              <span class="cs-pick-name">{t.label}</span>
-            </button>
-          {/each}
-        </div>
-      </div>
+        ⚠ 这里原先在右边塞了档位。2026-10-13 实测截图自查发现那样做会
+        把归属文字挤成两行（「示例联系人」被折断）——316px 的内容栏里，
+        两枚记号加两个标签要占掉 134px，剩下 170px 装不下「名字 + 引文」。
+        **挤断别人的行来给自己腾位置是净负收益**，所以档位移出去了，
+        这一行拿回全部宽度。
+
+        ⚠ 证据**必须显示**：这是机器认出来的对话，不是用户自己翻的。
+           认错了还照发，比不写更糟。
+      -->
+      <p class="cs-where">
+        <span class="cs-peer">{peer || '—'}</span>
+        {#if lastFromThem}
+          <span class="cs-where-quote">{lastFromThem.text}</span>
+        {/if}
+      </p>
 
       <!--
       正文行。**只有墨色**：`--cs-mark` 在真实纸底上只有 3.00 : 1，掉出 AA，
@@ -599,6 +569,58 @@
         {:else}
           <p class="cs-draft-text cs-draft-idle">对方说完话，这里才落笔。</p>
         {/if}
+      </div>
+
+      <!--
+        档位行 —— **纸的底部**，紧贴将来的动作行。
+
+        位置的三次变化，每一步都是被顶出来的，不是设计出来的：
+          ① 原来独占顶部一整行（撕口 40 + 槽 53 + 下边距 28 ≈ 121px，
+             占面板 21%），且红铅笔勾**盖在标签上**——把低频设置放进了
+             黄金位，纸的上半部分一直在喊「看这里」。
+          ② 改到归属行右侧（2026-10-13 用户否决顶部后的第一反应），
+             结果挤断了归属文字。位置对了、行是错的。
+          ③ 落到正文下方。档位是**动作参数**，不是身份信息，语义上就属于
+             动作那一侧；纸底那一片空白也是它本来该待的地方。
+        底部的坏处要认：面板高的时候它离正文远，扫视要往下走一趟。
+        这与「它一年未必改一次」是一回事——远处的低频项可以接受。
+      -->
+      <div class="cs-pick" data-no-drag role="radiogroup" aria-label="发送档位">
+        {#each TIERS as t, i (t.key)}
+          <button
+            type="button"
+            class="cs-pick-slot"
+            data-idx={i}
+            aria-checked={tier === t.key}
+            role="radio"
+            tabindex={tier === t.key ? 0 : -1}
+            onclick={() => void chooseTier(t.key)}
+          >
+            <span class="cs-markbox">
+              <svg
+                class="cs-tick"
+                data-shape={markShape.current}
+                data-ring={markSize}
+                viewBox="0 0 {ACTIVE_VIEW.w} {ACTIVE_VIEW.h}"
+                width={ACTIVE_VIEW.w}
+                height={ACTIVE_VIEW.h}
+                aria-hidden="true"
+                filter="url(#pencil)"
+              >
+                <!--
+                  五层嵌套，不是单层平涂。单层不管给多少 opacity，边缘都是
+                  一刀切的硬边，所以它读成矢量而不是红铅笔——材质台 P1 与 P5
+                  同框实测：落在中间密度带的像素 23.0% → 70.5%，总墨量反而少
+                  17%。密度从芯往外逐级下降，才有「芯重边虚」。
+                -->
+                {#each MARK_LAYERS as layer (layer.d)}
+                  <path d={layer.d} fill-opacity={layer.o} />
+                {/each}
+              </svg>
+            </span>
+            <span class="cs-pick-name">{t.label}</span>
+          </button>
+        {/each}
       </div>
     </div>
   {/if}
@@ -723,7 +745,11 @@
     width: 28px;
     height: 32px;
     border-radius: var(--cs-radius-sm);
-    color: var(--cs-mark);
+    /* ⚠ 2026-10-13 从 `--cs-mark` 换成 `--cs-pencil`。出图自查时这三颗
+     *    在撕口上读不出来：`--cs-mark` 在纸底只有 3.00 : 1（正文用它不合规
+     *    的那条理由，这里同样成立），而窗口控制是**界面骨架**，不是弱化的
+     *    装饰。5.10 : 1 之后齿轮的齿和 × 的两笔都读得出来。 */
+    color: var(--cs-pencil);
     transition:
       background var(--cs-dur-fast) var(--cs-ease),
       color var(--cs-dur-fast) var(--cs-ease);
@@ -755,26 +781,28 @@
 
   /* ── 档位（不在顶部：与归属行同行的两枚小记号）─────────────
    *
-   *  槽高 53 → 16px，取景框 60×40 → 24×16。
+   *  槽高 53 → 24px，取景框 60×40 → 34×22。
    *  ⚠ 下面那套「按笔心反算 top / margin-left」的公式**整条作废**了：
-   *    它的前提是标记**盖在字上**，而现在标记在字的**左边**。
+   *    它的前提是标记**盖在字上**，而现在标记在标签**左边**、独占一行。
    *    公式里那行「字心y = markbox 40 + 标签 2 + 字号 11 ÷ 2」在
    *    新布局里根本不存在——留着它就是在给一个没有对象的问题写答案。
    *    摆放方式改成：标记自带取景框，直接顶格对齐。
    */
-  .cs-where-row {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 10px;
-  }
-
+  /*  档位自己就是正文列的最后一个 flex 项——归属行那套
+   *  `space-between` 已经连同它的容器一起去掉了（挤断归属文字）。 */
   .cs-pick {
     flex: none;
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding-top: 1px;
+    gap: 16px;
+    /* 推到纸底。依赖 `.cs-body-col { flex: 1 }` 把这列撑满，
+       否则 `auto` 无处可推，档位会贴回正文下方。
+       ⚠ `padding-bottom` 不是装饰：出图实测发现档位被 `auto` 推到
+         **纸的撕口下沿上**，文字骑在破口里读不全。撕边纸上控件
+         必须离破口有一段距离，这一段得显式留出来，不能指望 sheet 的
+         padding 会自动让开。 */
+    margin-top: auto;
+    padding-bottom: 18px;
   }
 
   .cs-pick-slot {
@@ -794,13 +822,18 @@
   }
 
   /*  取景框只负责给标记一个固定高度，好让两行字对齐。它**不画任何东西**。
-   *  ⚠ 24×16 装不下 `big` 幅面（取景框 72×58），会被裁成「放大了但没变大」，
-   *    所以 `markSize` 的默认值在这一版回到了 `base`。 */
+   *  ⚠ 34×22 是量出来的，不是拍的：24×16 那版出图自查发现红铅笔勾在纸底
+   *    几乎读不出来——不是颜色不对（`--cs-pencil-red` 没变），是**墨太少**。
+   *    取景框从 60×40 缩到 24 宽是 0.40 倍，五层嵌套的笔尖全被压没了；
+   *    34 宽是 0.57 倍，笔尖还在。**放大标记只能靠放大框，调 opacity 是反的**
+   *    ——那会把五级密度拉平，重新塌成单层平涂。
+   *  ⚠ 34×22 仍装不下 `big` 幅面（取景框 72×58），所以 `markSize` 的默认值
+   *    在这一版是 `base`。 */
   .cs-markbox {
     position: relative;
     display: block;
-    width: 24px;
-    height: 16px;
+    width: 34px;
+    height: 22px;
   }
 
   /*  标记。红铅笔，蜡质，每层的透明度是**笔迹数据的一部分**，
@@ -818,7 +851,7 @@
     top: 0;
     /* ⚠ 必须由 CSS 定尺寸，不能用 SVG 的 `width`/`height` 属性。
      *  那两个属性写的是 `$lib/marks` 的取景框尺寸（base 档 60×40），
-     *  放进 24×16 的框里会**整块溢出**——表现是标记跑到框的左下角、
+     *  放进 34×22 的框里会**整块溢出**——表现是标记跑到框的左下角、
      *  压住相邻文字，而画布上看不出任何东西被裁掉。
      *  `preserveAspectRatio` 默认 `xMidYMid meet`，交给它等比缩放。 */
     width: 100%;
@@ -853,6 +886,10 @@
    */
   .cs-body-col {
     max-width: 316px;
+    /* 撑满纸张的可用高度，档位那一行才能被 `margin-top: auto` 推到底。
+       没有它，整列只有内容那么高，档位会紧贴正文、而下面留一大片空白
+       ——那既没占住「纸底」，又让版面看着像没排完。 */
+    flex: 1;
     margin: 0 auto;
     padding: 0 0 24px;
     display: flex;
