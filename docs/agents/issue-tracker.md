@@ -4,9 +4,21 @@
 
 ## Why
 
-This repo is a solo, greenfield project with no git remote. `gh` is not installed.
 Hosting the tracker in-repo keeps issues versionable, reviewable in diffs, and
 readable by every skill without extra tooling.
+
+⚠ **2026-10-13 更正。** 本节原文写的是「no git remote, `gh` is not installed」，
+写于项目还没上 GitHub 的时候。现在仓库**在 GitHub 上**
+（`SeasonTemple/chat-servant`，有 `.github/workflows/` 与 PR 模板），
+`gh` 也可用了。
+
+但票据**仍然留在仓库里**，理由变了——不是「没有托管方案」，
+而是这三个：
+
+1. 票据与代码在同一个 diff 里，review 时看得见「这张票为什么改这些行」；
+2. `.scratch/` 里有本仓库专用的字段（`Blocked by` 的阻塞边、`Status` 的分诊标签），
+   比 GitHub Issue 表单能表达的更结构化；
+3. agent 与人读的是同一份文件，不需要在两套工具之间同步。
 
 ## How issues are stored
 
@@ -51,8 +63,10 @@ immediately)".
 - **Never edit another agent's in-flight issue file.** Append a `## Update <date>`
   section instead, so attribution stays visible.
 
-## Migrating later
+## If GitHub Issues is ever used
 
-If a GitHub remote is added later, `to-tickets` and `triage` will create real issues
-instead. The `.scratch/` files remain as history; move them under
-`.scratch/archive/<date>/` once the migration is complete.
+`.scratch/` is the tracker of record. If GitHub Issues is ever adopted for
+public-facing bugs, keep `.scratch/` for design tickets: it carries
+`Blocked by` edges and triage labels that the Issue form does not model.
+The `.scratch/` files stay as history either way; move them under
+`.scratch/archive/<date>/` only at a real migration.
