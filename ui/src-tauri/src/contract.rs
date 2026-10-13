@@ -63,18 +63,15 @@ pub mod events {
 ///
 /// 命名与前端 `types.ts` 的 `Action` 严格对应，**改一边就要改另一边**。
 ///
-/// ⚠ **2026-10-13：这一整块尚未接线**（票 26）。
+/// ⚠ **2026-10-13 已接线**（票 26）：`commands::dispatch` 第一件事就是
+///   `Action::parse`，解析不出来直接回 `Failed` + 这句人话，
+///   进不了业务逻辑。
 ///
 /// `main.rs` 里补上 `mod contract;` 之前，这个文件**从来没进过编译**，
 /// 于是「它还没接线」这件事没有任何门禁能发现。本文件活到 2026-10-13
 /// 才第一次被编译，`dead_code` 一次性报了出来。
-///
-/// 接线要动的是 `commands::dispatch` 的动作判定，而那是**安全关键路径**
-/// （硬约束第 5 条），且票 20（三档砍两档）也要动同一处。
-/// 两件事一起做会互相掩盖，所以这里先如实标出来，不顺手改。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code, reason = "契约定义，前端镜像在 types.ts；接线见票 26")]
 pub enum Action {
     /// 填入输入框，停在光标处。**不发送。** Manual 档唯一允许的动作。
     Fill,
@@ -97,7 +94,6 @@ impl Action {
     /// 为什么不用 `serde` 自动做：Tauri 的 `#[tauri::command]` 参数是逐个反序列化的，
     /// 单独一个 `String` 参数拿到手时已经晚了。这里显式解析，
     /// 好处是**错误信息能直接显示给人看**（界面会把它写进 `reason`）。
-    #[allow(dead_code, reason = "随 Action 一起待接线，见票 26")]
     pub fn parse(raw: &str) -> Result<Self, String> {
         match raw.trim() {
             "fill" => Ok(Self::Fill),
@@ -203,10 +199,8 @@ impl Phase {
     /// ⚠️ **判据 12：空状态必须给一个明确的下一步动作。**
     /// `Drafting` 这一档如果只显示「加载中」，用户就不知道该等还是该干别的。
     ///
-    /// ⚠ 2026-10-13：**界面还没用它**（票 26）。`(panel)/+page.svelte` 的
-    /// S3 那一格把「正在成形…」「通常几秒」写死成了两个 `<p>`，
-    /// 所以 Rust 这边的口径改了不会跟着变——同一句话有两份。
-    #[allow(dead_code, reason = "界面尚未消费，见票 26")]
+    /// ⚠ 2026-10-13：**已接线**（票 26）。它由 `Readout` 的 `status_hint`
+    /// 字段带到界面上，界面不再自己写死这句——同一句话只有一份。
     pub fn status_hint(&self) -> Option<&'static str> {
         match self {
             Self::Drafting { .. } => Some("正在起草，通常几秒"),
@@ -305,6 +299,53 @@ mod tests {
                 assert!(i == j || a != b, "{a} 与 {b} 同名，去重会漏推");
             }
         }
+    }
+
+    /// **守住「src/ 下的每个文件都得被 `mod` 声明」这条纪律。**
+    ///
+    /// Rust 自己不会报这件事：`contract.rs` 躺在 `src/` 里，
+    /// **一次都没被编译过**，而 `cargo clippy` / `cargo test` 全绿——
+    /// 整整一个文件（连同它的 6 条测试）白躺了很久。`dead_code` 只是
+    /// 间接暴露它，因为那次是别的原因顺手补了 `mod contract;`。
+    ///
+    /// 判据：一个 `.rs` 文件的名字必须在别的文件里以 `mod <名>;`
+    /// 出现过。例外是 **crate 的两个根**——`main.rs` 与 `lib.rs`
+    /// （Tauri 2 要求 crate 有 `[lib]`，所以这两个都是 Cargo 自己声明的，
+    /// 不需要谁去 `mod` 它们）。
+    #[test]
+    fn no_orphan_module_file_in_src() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let Ok(rd) = std::fs::read_dir(&src) else {
+            return;
+        };
+        let mut names: Vec<String> = Vec::new();
+        let mut bodies: Vec<String> = Vec::new();
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("rs") {
+                continue;
+            }
+            let Some(stem) = p.file_stem().and_then(|x| x.to_str()) else {
+                continue;
+            };
+            names.push(stem.to_string());
+            bodies.push(std::fs::read_to_string(&p).unwrap_or_default());
+        }
+        let mut orphans: Vec<&str> = Vec::new();
+        for name in &names {
+            if name == "main" || name == "lib" {
+                continue;
+            }
+            let declared = bodies.iter().any(|b| b.contains(&format!("mod {name};")));
+            if !declared {
+                orphans.push(name);
+            }
+        }
+        assert!(
+            orphans.is_empty(),
+            "src/ 下这些文件从来没被 `mod` 声明过，也就是**从来没进过编译**：\n  {}",
+            orphans.join("\n  ")
+        );
     }
 
     /// 事件名清单是**测试用的**——见下面的 `no_event_literal_outside_this_file`。

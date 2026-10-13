@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
+use crate::contract::Action;
 use crate::secret::{self, KeyStatus};
 use crate::watch::{DraftCandidate, LoopConfig, Readout, RecentN, TokenBudget, Watcher};
 use chatservant_reason::TurnContext;
@@ -212,6 +213,24 @@ pub struct DispatchReply {
 
 #[tauri::command]
 pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> DispatchReply {
+    // ⚠ **动作先解析，再谈别的。**（票 26）
+    //
+    // `action` 从 IPC 过来是 `String`，任何字符串都能到这一行。以前这里是
+    // `action == "confirm"` 的字符串比较——拼错、传空、传中文，全都悄悄
+    // 落进最底下那条「只填入」的分支：**界面上写着一个看不懂的动作，
+    // 程序却替你按了最温和的那一下。** 现在它在进业务逻辑之前就失败，
+    // 而且失败的话是能直接给人看的。
+    let act = match Action::parse(&action) {
+        Ok(a) => a,
+        Err(why) => {
+            return DispatchReply {
+                outcome: "Failed",
+                detail: why,
+                next_hint: None,
+            };
+        }
+    };
+
     // ⚠ **夹具模式下绝不投递。**
     //
     // 夹具模式是给「没有微信可用时改界面」用的，可它拿到的是**真微信的帧**。
@@ -251,7 +270,7 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
     let ticks = with_state(|s| s.watcher.latest())
         .flatten()
         .map(|o| o.ticks);
-    if tier == Dispatch::Confirm && action == "confirm" {
+    if tier == Dispatch::Confirm && act == Action::Confirm {
         let already = {
             let Ok(mut g) = STATE.lock() else {
                 return DispatchReply {
@@ -292,6 +311,14 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
         // ⚠ 两次都填会发出去两份拼接——`fill_input_box` 的语义是
         // 「在光标处追加」，它不动用户已经打了一半的字。
         // 实测（2026-10-09）：发出去的是同一句话连着两遍。
+        // ⚠⚠ **这是整个代码库里唯一按下回车的地方**，而它前面那道不变量
+        //   是硬约束第 5 条的落点：`sends_for_real` 把三个条件穷举成
+        //   一句话。`debug_assert` 是为了让「哪天有人改了上面的分支条件」
+        //   当场炸，而不是等发错一条消息才发现。
+        debug_assert!(
+            sends_for_real(tier, act, already),
+            "走到二次确认分支却不是「Confirm 档 + confirm 动作 + 已装填」"
+        );
         let Some(hwnd) = find_wechat() else {
             return DispatchReply {
                 outcome: "Failed",
@@ -391,6 +418,20 @@ fn parse_tier(raw: &str) -> Dispatch {
         //   绝不因为「不认识」就升上去。
         _ => Dispatch::Manual,
     }
+}
+
+/// **三个条件同时成立**才允许按下回车。
+///
+/// 抽成纯函数是为了让测试能**穷举全部 8 种组合**——写在 `dispatch` 里的话，
+/// 「能不能发出去」只能靠人读分支顺序，读错一次就是发错一条真消息。
+///
+/// 判据与硬约束第 5 条逐字对应：两档、默认最低、装填之后才发。
+/// 任何新增的档位或动作都会让这个穷举测试变红，那正是它该做的。
+fn sends_for_real(tier: Dispatch, act: Action, armed: bool) -> bool {
+    matches!(
+        (tier, act, armed),
+        (Dispatch::Confirm, Action::Confirm, true)
+    )
 }
 
 /// 档位 → IPC 契约里的枚举 id。见 `get_tier` 的说明：这是**给前端拿去索引
@@ -1665,6 +1706,49 @@ mod budget_ceiling_tests {
         assert!(!a.arm("c0", 10));
         assert!(!a.arm("c1", 10), "换了一条候选就必须重新装填");
         assert!(a.arm("c1", 10), "c1 自己装填后再点一次才放行");
+    }
+
+    /// **穷举：除了「Confirm 档 + confirm 动作 + 已装填」，没有第二条能发出去的路。**
+    ///
+    /// ⚠ 硬约束第 5 条的守门测试。2026-10-13 之前这个判断写死在 `dispatch`
+    ///   的分支里，靠人读顺序保证；早先它就错过一次——`action` 是 `String`，
+    ///   拼错的动作会静悄悄落进「只填入」那条路。
+    #[test]
+    fn only_armed_confirm_clicks_send() {
+        let tiers = [Dispatch::Manual, Dispatch::Confirm];
+        let acts = [Action::Fill, Action::Confirm];
+        for tier in tiers {
+            for act in acts {
+                for armed in [false, true] {
+                    let expected = matches!(
+                        (tier, act, armed),
+                        (Dispatch::Confirm, Action::Confirm, true)
+                    );
+                    assert_eq!(
+                        sends_for_real(tier, act, armed),
+                        expected,
+                        "{tier:?} + {act:?} + armed={armed}"
+                    );
+                    // 「不该发」的那些组合，一个都不许为真
+                    if !(tier == Dispatch::Confirm && act == Action::Confirm && armed) {
+                        assert!(
+                            !sends_for_real(tier, act, armed),
+                            "{tier:?} + {act:?} + armed={armed} 不该发得出去"
+                        );
+                    }
+                }
+            }
+        }
+        // 钉死基线：两档之下，装填过之后还能发出去的组合恰好一个
+        let mut sending = 0;
+        for tier in tiers {
+            for act in acts {
+                if sends_for_real(tier, act, true) {
+                    sending += 1;
+                }
+            }
+        }
+        assert_eq!(sending, 1, "能发出去的组合必须恰好一个");
     }
 
     /// **候选换过之后，上一次的装填立刻作废。**

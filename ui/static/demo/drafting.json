@@ -122,6 +122,7 @@
   "ticks": 42,
   "ocr_calls": 7,
   "error": null,
+  "status_hint": "正在起草，通常几秒",
   "phase": "drafting",
   "tier": "Manual"
 }

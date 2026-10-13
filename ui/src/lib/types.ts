@@ -87,5 +87,17 @@ export type Phase =
   | { phase: 'drafted'; messages: Message[]; candidates: Candidate[] }
   | { phase: 'failed'; messages: Message[]; error: string };
 
-/** 推送载荷。阶段走 {@link Phase}。 */
-export type ReadoutPayload = Phase;
+/**
+ * 推送载荷。阶段走 {@link Phase}，另带面板顶部那一句「正在干什么」。
+ *
+ * ⚠ 字段名是 **snake_case**：`Readout` 那个结构体上没有 `rename_all`，
+ *   所以 JSON 里就是 `status_hint`。这跟 `Action`（有 `camelCase`）不一样，
+ *   两处都是刻意选的，改一处记得看另一处。
+ *
+ * `status_hint` 是 Rust `Phase::status_hint()` 的快照。**界面不许自己写死
+ * 这句**——早先 `(panel)/+page.svelte` 把「正在成形…」「通常几秒」硬编码成
+ * 标签，Rust 侧改了口径它也不会跟着变，同一句话有两份。
+ */
+export type ReadoutPayload = Phase & {
+  status_hint?: string | null;
+};

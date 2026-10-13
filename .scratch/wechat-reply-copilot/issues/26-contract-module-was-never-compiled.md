@@ -6,7 +6,7 @@
 **Blocked by:** None（但接线 `Action` 会碰 dispatch 的安全关键路径，
 建议与 **20** 一起排期，别单独动）
 
-**Status:** ready-for-agent · **2026-10-13 做票 21 时连根拔出来的**
+**Status:** done（2026-10-13。四项全部处理，见下「做了什么」）
 
 ## 事实
 
@@ -71,15 +71,78 @@ clippy 的 `dead_code` 报的。前两项的接线要动 `commands::dispatch` �
 （**硬约束第 5 条那条路径**）；`status_hint` 的消费者在
 `(panel)/+page.svelte` 的 S3 那一格，那句「正在成形…／通常几秒」是写死的。
 
+## 做了什么（2026-10-13）
+
+### 1 + 4. `Action` 接进 `dispatch`
+
+`dispatch` 的第一件事改成 `Action::parse(&action)`，解析不出来立刻回
+`Failed` + 那句能直接给人看的解释，进不了业务逻辑。
+
+⚠ 旧代码是 `action == "confirm"` 的字符串比较：**拼错的动作会静悄悄落进
+最底下那条「只填入」的分支**——界面上写着一个看不懂的动作，程序却替你按了
+最温和的那一下。不是「发出去」的风险，是**行为与界面说的不一致**。
+
+两条 `#[allow(dead_code)]` 都删了（枚举与 `parse`），clippy 绿**不是**靠它们。
+
+另加一条纯函数 `sends_for_real(tier, act, armed)`，把「什么时候能按下回车」
+从分支顺序里拿出来，于是能**穷举全部 8 种组合**：
+`only_armed_confirm_clicks_send` 断言能发出去的组合恰好一个。
+`dispatch` 的二次确认分支上有一道 `debug_assert` 调它——
+哪天有人改了上面的分支条件，当场炸，而不是等发错一条真消息才发现。
+
+### 2. `Phase::status_hint` 被界面消费
+
+`Readout` 多了 `status_hint` 字段，由 `snapshot()` 从 `phase.status_hint()` 取。
+新面板 `panel/+page.svelte` 的起草态渲染它，**不再写死「正在写……」**，
+并保留一句短句只作夹具缺字段时的退路。
+
+📐 证据 `target/probe/panel-drafting-zoom.png`：显示的是 Rust 那句
+「正在起草，通常几秒」。
+
+⚠ 字段名是 **snake_case**：`Readout` 结构体上没有 `rename_all`，
+  而 `Action` 有 `camelCase`。两处都是刻意的，改一边要看另一边。
+
+⚠ **旧面板 `(panel)/+page.svelte` 那一格还留着硬编码的「正在成形…」/
+  「通常几秒」**——它已被冻结，等票 25 选 C 时随旧面板一起删。
+  在那之前仓库里确实有两份文案，这一点**如实记着**，不装作已经只有一份。
+
+### 3. `debug_pane` 的结论：**是死监听，而且不止它一个**
+
+`rg -n "TELEMETRY|DEBUG_PANE"` 全仓的结果（2026-10-13 实测）：
+
+| 事件名 | Rust 侧 emit | 前端 listen | 结论 |
+|---|---|---|---|
+| `readout` | ✅ `commands.rs` 循环里 | ✅ | 活的 |
+| `armed` | ✅ `dispatch` 里 | ✅ | 活的 |
+| `menu:settings` / `menu:relock` | ✅ | ✅ | 活的 |
+| **`debug_pane`** | ❌ **一处都没有** | `routes/debug/+page.svelte:67` | **死监听** |
+| **`telemetry`** | ❌ **一处都没有** | `(panel)/+layout.svelte` 与 `routes/debug/` | **死监听** |
+
+所以调试画布**只在挂载时拉一次**（`debug/+page.svelte` 没有定时器、没有刷新按钮），
+`telemetry` 那条「为了让 emit 有接收方」的注释是**假的**。
+
+**本轮不动它们**：补 emit 是行为改动（每轮多推一帧数据），该单独一票——
+已开 **28**。这里只把结论钉死，不靠「看起来像」判。
+
+### 4. 孤儿模块守门测试
+
+`no_orphan_module_file_in_src`：遍历 `src/*.rs`，每个文件名必须在别的文件里
+以 `mod <名>;` 出现过。例外是 crate 的两个根 `main.rs` 与 `lib.rs`
+（Tauri 2 要求有 `[lib]`，两个都由 Cargo 声明）。
+
+Rust 自己不报这件事——`contract.rs` 躺在 `src/` 里一次都没被编译过，
+而 `clippy` 与 `cargo test` 全绿。加这条之后，下一个同类的文件落盘即报红。
+
 ## 验收项
 
-- [ ] `Action::parse` 在 `dispatch` 的入口处真的被调用，
+- [x] `Action::parse` 在 `dispatch` 的入口处真的被调用，
       `action: "删库"` 进不了业务逻辑（有测试）
-- [ ] `Phase::status_hint` 被界面消费，
+- [x] `Phase::status_hint` 被界面消费，
       S3 的文案只有一处来源（Rust 或前端，二选一，另一处删掉）
-- [ ] `debug_pane` 到底是死监听还是我漏搜了——**给出结论**，
-      不要靠「看起来像」判
-- [ ] 加一条测试守住「孤儿模块」这类问题：列出的模块文件若没被 `mod` 声明，
+      —— ⚠ **新面板已达成；旧面板那份等票 25 选 C 时随文件删除**
+- [x] `debug_pane` 到底是死监听还是我漏搜了——**给出结论**，
+      不要靠「看起来像」判（结论：死监听，且 `telemetry` 同样是，另开票 28）
+- [x] 加一条测试守住「孤儿模块」这类问题：列出的模块文件若没被 `mod` 声明，
       就红（Rust 本身不会报，只有 `dead_code` 会间接暴露）
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` 绿，
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` 绿，
       且**不是靠给整块加 `#[allow(dead_code)]` 变绿的**
