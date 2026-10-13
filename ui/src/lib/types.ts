@@ -100,4 +100,20 @@ export type Phase =
  */
 export type ReadoutPayload = Phase & {
   status_hint?: string | null;
+  /**
+   * 当前窗口里的会话名。**空串 = 没认出来**（`watch::Readout::peer`）。
+   *
+   * ⚠ 必须显示，理由不是「好看」：会话名闸是「只对锁定会话动手」那道闸，
+   *   而闸的判据看不见的话，用户只知道程序不动，不知道为什么。
+   *   2026-10-13 补：纸面板的归属行要它，之前 `types.ts` 漏了这个字段，
+   *   于是那一行在真机上只能显示占位符 `—`。
+   */
+  peer?: string;
+  /** 会话名闸开没开。关着时不该有任何候选，界面也不该假装在写。 */
+  gate_open?: boolean;
+  /**
+   * 这一轮为什么这么判。带来源戳（`source.stamp`），误判要看得见。
+   * 与每条 `Message.evidence` 同一条纪律：判据不可见 = 缺陷不可查。
+   */
+  reason?: string;
 };
