@@ -190,23 +190,44 @@
     song: "SimSun, '宋体', NSimSun, serif",
     yahei: "'Microsoft YaHei', '微软雅黑', sans-serif",
     hei: "SimHei, '黑体', sans-serif",
+    lxgw: "'LXGW WenKai', KaiTi, STKaiti, '楷体', serif",
   } as const;
   type DraftFontKey = keyof typeof DRAFT_FONTS;
   let draftFont = $state<DraftFontKey | null>(null);
 
   /** 归属行字号探针（`?peersz=`），数字直接是 CSS px。 */
-  let peerPx = $state<number | null>(null);
+  let peerPx = $state<number>(15);
 
   /**
-   *  档位整格放大探针（`?tiersz=`）。**一个数控制一整格**，不是分别调
-   *  取景框 / 标签 / 摆放偏移——分开调就会出现「框大了笔没动」这种
-   *  「放大了但没变大」的假象（规范 §10 第 4 条记过一次）。
+   *  归属行**名字**的呈现探针（`?peer=`）。
    *
-   *  判据：标一个东西要连带把它下面的字和它自己的摆放一起放大，
-   *  而摆放偏移是**按笔心反算**的，笔心随取景框等比缩放 ⇒ 偏移同样
-   *  按同一系数缩放即可，公式结构不变。
+   *  ⚠ 起因：15px 一放开，原来的「黑体 600 加粗」立刻变成一块黑。
+   *    粗细是这个层级唯一的手段时，字号一大它就崩——所以要给别的手段。
+   *  候选（都保持 15px 与同样的灰阶）：
+   *    w500 / w400  降粗细，用字号与灰阶扛层级
+   *    ink         降到 400，靠**颜色**（--cs-ink）扛层级，不用粗细
+   *    tracked     400 + 拉开字距，靠**疏排**扛层级
+   *    kai / fang  换成楷体/仿宋，名字与正文同一族
+   *  ⚠ 默认仍是 `bold`（= 原来的 600），探针口不替默认改口径。
    */
-  let tierK = $state<number>(1);
+  type PeerLook = 'bold' | 'w500' | 'w400' | 'ink' | 'tracked' | 'kai' | 'fang';
+  /** 默认 `tracked`：用户判「黑体 600 加粗在 15px 上是一块黑」。五种里
+   *  只有它既保住「铅笔灰＝机器认出来的」这层语义，又用**疏排**而不是
+   *  粗细扛住了层级。`ink` 是第二选择（更平，但名字变墨色＝分不清
+   *  「机器认的」和「你写的」）。要改就改这一个默认值。 */
+  let peerLook = $state<PeerLook>('tracked');
+
+  /**
+   *  档位整格放大系数。**1.35 是量出来的**：用户判「1.0 不够、1.5 太抢」，
+   *  落在两者之间。1.35 下取景框 81×54、档位名 14.85px、整格 71.6px，
+   *  红勾与正文(21px)的比回到 1.41 —— 正文仍然明显主导，但档位不再
+   *  像「补了个控件」。
+   *
+   *  ⚠ 1.35 仍**不是**最终形态。真正要对齐的是生成器的幅面档
+   *    （`pencilgen.py` 出 base/mid/big 三档），CSS 系数只是把已有的
+   *    `big` 整体拉大；再往上就该加第四档几何，而不是继续乘系数。
+   */
+  let tierK = $state<number>(1.35);
 
   onMount(() => {
     /*
@@ -235,6 +256,11 @@
       const k = Number(tierProbe);
       // 只认 1.0~2.0：再大就该改生成器的幅面档，而不是拿 CSS 硬拉。
       if (k >= 1 && k <= 2) tierK = k;
+    }
+    const peerLookProbe = q.get('peer');
+    const looks: PeerLook[] = ['bold', 'w500', 'w400', 'ink', 'tracked', 'kai', 'fang'];
+    if (peerLookProbe !== null && looks.includes(peerLookProbe as PeerLook)) {
+      peerLook = peerLookProbe as PeerLook;
     }
 
     if (sizeProbe !== null && sizes.includes(sizeProbe as MarkSize)) {
@@ -432,6 +458,7 @@
   data-tiersz={String(tierK)}
   style:--tk={tierK}
   style:--peer-probe={peerPx ?? ''}
+  data-peer-look={peerLook}
 >
   <!--
     ⚠ **撕口那条上沿是拖拽带**（`data-tauri-drag-region`）。
@@ -1101,6 +1128,46 @@
   }
   .cs-sheet[data-draft-font='hei'] .cs-draft-text {
     font-family: SimHei, '黑体', sans-serif;
+  }
+
+  /* ── 归属行「名字」的呈现（`?peer=`）───────────────────────────
+   *
+   *  ⚠ 原来只有一种做法：**黑体 600 加粗**。它能扛住 12px，但字号一放开
+   *    到 15px 就塌了——粗细是这一层**唯一**的层级手段时，字号一大，
+   *    600 的黑体在 21px 正文旁边读成「一块黑」，不是标题。
+   *
+   *  ⇒ 层级要另找手段。下面五种各有各的代价，别默认「降粗细」就对了：
+   *    w500     粗细降一档。最省事，但 15px 下与 400 差别很小。
+   *    w400     不加粗。层级全交给字号与灰阶，最平。
+   *    ink      400 + 换成 `--cs-ink`。用**颜色**扛层级而不是粗细——
+   *             代价是「机器认出来的」这层语义被削弱（见 `.cs-peer` 注释）。
+   *    tracked  400 + 拉开字距。用**疏排**扛层级，像手写标题那样
+   *             一个字一个字排开，最贴纸；代价是西文混排会散。
+   *    kai/fang 换楷体/仿宋，名字与正文同族。层级交给字体族，
+   *             但那样整屏就只剩一支笔，「UI 是 UI、正文是正文」
+   *             这条分工也没了。
+   */
+  .cs-sheet[data-peer-look='w500'] .cs-peer {
+    font-weight: 500;
+  }
+  .cs-sheet[data-peer-look='w400'] .cs-peer {
+    font-weight: 400;
+  }
+  .cs-sheet[data-peer-look='ink'] .cs-peer {
+    font-weight: 400;
+    color: var(--cs-ink);
+  }
+  .cs-sheet[data-peer-look='tracked'] .cs-peer {
+    font-weight: 400;
+    letter-spacing: 0.18em;
+  }
+  .cs-sheet[data-peer-look='kai'] .cs-peer {
+    font-weight: 400;
+    font-family: KaiTi, STKaiti, '楷体', serif;
+  }
+  .cs-sheet[data-peer-look='fang'] .cs-peer {
+    font-weight: 400;
+    font-family: FangSong, STFangsong, '仿宋', serif;
   }
 
   /*  归属行字号探针（`?peersz=`）。同理，默认不上规则。 */
