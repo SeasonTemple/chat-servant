@@ -319,11 +319,10 @@
   const TIER_NAME: Record<Tier, string> = {
     Manual: '只填入',
     Confirm: '确认后发',
-    Auto: '自动发送',
   };
 
   /** 档位从低到高。顶边三道短记号按这个顺序排，勾落在当前那一道上。 */
-  const TIERS: Tier[] = ['Manual', 'Confirm', 'Auto'];
+  const TIERS: Tier[] = ['Manual', 'Confirm'];
 
   /** 概率转整数百分数。Rust 给的是 0..1，界面不自己换算成别的口径。 */
   function pctOf(c: Candidate): number {
@@ -498,9 +497,13 @@
    */
   async function pullDemo() {
     try {
-      // ⚠ `?state=` 选哪一态。**八个态各有自己的数据文件** ——
+      // ⚠ `?state=` 选哪一态。**每个态各有自己的数据文件** ——
       // 以前只有一份默认数据，于是 `drafting` / `failed` / `armed`
       // 这些状态在演示模式里根本渲染不出来，而它们恰恰最需要被评审。
+      //
+      // ⚠ 2026-10-13：这里从八态变成**七态**——`auto.json` 随 `Auto` 档
+      // 取消一并删除（它与 `confirm.json` 只差档位名，是纯重复）。
+      // `?state=auto` 会落到下面的 fallback，仍能渲染，但不是独立的一态。
       const state = new URLSearchParams(location.search).get('state') ?? 'drafted';
       const r = await fetch(`/demo/${state}.json`)
         .then((x) => x.json())
@@ -1123,7 +1126,7 @@
     height: 100%;
     /* 纸由 SVG 自己画，边缘交给合成器抗锯齿。不用 SetWindowRgn：它是二值
      * 掩码，撕口会变成硬阶梯。`?v=21` 是当初在两个面板之间来回切时加的
-     * 缓存破坏参数，见 docs/HANDOFF.md §18。 */
+     * 缓存破坏参数。 */
     background: url(/probe-sheet.svg) center / 100% 100% no-repeat;
     /* 无顶部装饰，纸的撕口就是顶边（实测 7~11px，见 ui/scripts/sheetprobe.ps1）+ 留白 */
     padding: 40px 32px 30px;
@@ -1188,14 +1191,14 @@
    *  一模一样，所以「哪一道」只由勾的位置决定；好在勾本身是
    *  位置无关的形状，不依赖颜色分辨（WCAG 1.4.1）。 */
   .cs-panel[data-tier='Manual'] .cs-tier-slot[data-tier-idx='0'] .cs-tier-check,
-  .cs-panel[data-tier='Confirm'] .cs-tier-slot[data-tier-idx='1'] .cs-tier-check,
-  .cs-panel[data-tier='Auto'] .cs-tier-slot[data-tier-idx='2'] .cs-tier-check {
+  .cs-panel[data-tier='Confirm'] .cs-tier-slot[data-tier-idx='1'] .cs-tier-check {
     opacity: 1;
   }
 
-  /*  Auto：不可逆，勾从红铅笔换成**警报红**。
-   *  这一步是红铅笔唯一让位给 `--cs-live` 的地方。 */
-  .cs-panel[data-tier='Auto'] .cs-tier-slot[data-tier-idx='2'] .cs-tier-check path {
+  /*  Confirm：不可逆，勾从红铅笔换成**警报红**。
+   *  这一步是红铅笔唯一让位给 `--cs-live` 的地方。
+   *  ⚠ 2026-10-13：`Auto` 取消后它接过了「不可逆」这个位置。 */
+  .cs-panel[data-tier='Confirm'] .cs-tier-slot[data-tier-idx='1'] .cs-tier-check path {
     stroke: var(--cs-live);
     opacity: 1;
   }
@@ -1340,7 +1343,7 @@
     margin-right: 6px;
   }
 
-  .cs-panel[data-tier='Auto'] .cs-tier-name {
+  .cs-panel[data-tier='Confirm'] .cs-tier-name {
     color: var(--cs-live);
     font-weight: 600;
   }

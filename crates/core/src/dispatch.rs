@@ -17,6 +17,34 @@
 //! 程序的任何内部状态变化——失败、超时、回读对不上——**都不能**把档位
 //! 升上去或降下去。档位只被两个东西改：人的显式操作，和会话结束。
 //! 会话结束一律回落到 [`Dispatch::Manual`]，不管之前在哪一档。
+//!
+//! ## 为什么只剩两档（2026-10-13）
+//!
+//! 早先有三档：`Manual` → `Confirm` → `Auto`（填入即发、不打断）。
+//! **`Auto` 整档取消**，依据是 `docs/设计规范.md` §10 第 3b 条。
+//!
+//! 取消它顺带删掉了一段**真实行为**，记在这里，否则下一个读代码的人
+//! 会以为「Auto 只是一档更快的 Confirm」：
+//!
+//! ```text
+//! if self.tier == Dispatch::Auto {
+//!     return Next::NeedsConfirmation { proposed: Dispatch::Confirm, … }
+//! }
+//! ```
+//!
+//! 这段的语义是「**Auto 是『不打断』的承诺，失败的兑现方式是停下来问人，
+//! 而不是自己降档重试又发一次**」。用户以为在自动模式，结果程序偷偷降了档
+//! 又发一条，那比直接失败更糟。
+//!
+//! 两档之下这个场景**不是变简单了，是不存在了**：最高的 `Confirm` 本来
+//! 就必须问人，根本没有「降档」这个动作可做。于是
+//! `Next::NeedsConfirmation` 与 `Dispatcher::confirm_downgrade`
+//! 一并删掉——留着就是一个永远构造不出来的死变体。
+//!
+//! ⚠ 删掉**不等于**失败不再问人。[`Next::Halt`] 仍然是「停下等人工」，
+//! 触发条件从「Auto 档失败」换成了**投递结果本身不可信**
+//! （[`DeliveryReceipt::PossiblySent`] / [`DeliveryReceipt::TimedOut`]）。
+//! 那是更要紧的一条：它挡的是**重发一条已经发出去的消息**。
 
 use std::fmt;
 
@@ -65,31 +93,40 @@ impl DeliveryReceipt {
 
 /// 发送档位。**默认且终态最低是 `Manual`。**
 ///
+/// **只有两档。** 早先的第三档 `Auto`（填入即发、不打断）于 2026-10-13
+/// 整档取消——见模块文档与 `docs/设计规范.md` §10 第 3b 条。
+/// 硬约束第 5 条也随之改写，见根 `AGENTS.md`。
+///
 /// 变体顺序即档位高低：靠前的更低。`Default` 落在 `Manual` 上，
-/// `#[derive(Default)]` 只能在末位变体上生效，所以手写。
+/// `#[derive(Default)]` 只能在末位变体上生效（现在是 `Confirm`），
+/// 所以必须手写。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Dispatch {
     /// 只填入输入框，停在光标处。默认值，会话结束回落到此档。
     Manual,
     /// 填入后二次确认才发送。
     Confirm,
-    /// 填入并发送，不打断。
-    Auto,
 }
 
 impl Default for Dispatch {
-    /// `Manual`——**最低档**。派生实现会默认到末位（`Auto`），
-    /// 正好是这里最不能默认的那一档，所以必须手写。
+    /// `Manual`——**最低档**。派生实现会默认到末位（`Confirm`），
+    /// 而这里宁可手写也不要那个默认值：万一将来再加一档，
+    /// 派生实现会**静默地把默认档升上去**，而默认档必须是最低的那档。
     fn default() -> Self {
         Self::Manual
     }
 }
 
 impl Dispatch {
-    /// 这个档位会不会自己发出去。
-    pub fn sends_without_asking(&self) -> bool {
-        matches!(self, Self::Auto)
-    }
+    /// 全部档位。**测试与界面用它枚举，不用手写 `match`。**
+    ///
+    /// 为什么留着这个而不是只删枚举变体：档位集合是**硬约束**的一部分，
+    /// 「一共有几档、分别是谁」必须有单一出处，前端、托盘、
+    /// IPC 校验都从这里取，而不是各自写一份 `match`。
+    ///
+    /// ⚠ 加一档的话**这个数组必须同步改**——
+    /// `the_tier_set_is_exactly_two_and_named` 会在你忘了改的时候红。
+    pub const ALL: [Dispatch; 2] = [Dispatch::Manual, Dispatch::Confirm];
 }
 
 impl fmt::Display for Dispatch {
@@ -97,7 +134,6 @@ impl fmt::Display for Dispatch {
         f.write_str(match self {
             Self::Manual => "Manual（只填入）",
             Self::Confirm => "Confirm（确认后发送）",
-            Self::Auto => "Auto（直接发送）",
         })
     }
 }
@@ -121,6 +157,10 @@ pub fn backoff_ms(attempt: u32) -> Option<u64> {
 }
 
 /// 当前档位 + 上一次结果 → 下一步该做什么。
+///
+/// ⚠ **这里没有「发送」这一项**，这是有意为之：`Next` 只回答
+/// 「投递失败或成功之后，程序还能自己做什么」，**发不发由人**。
+/// 想加一个「直接发出去」的变体之前，先去读根 `AGENTS.md` 硬约束第 5 条。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Next {
     /// 到点了，可以再投一次。
@@ -135,13 +175,12 @@ pub enum Next {
         /// 为什么停下来。**必须是人能读懂的一句话**，不是错误码。
         reason: String,
     },
-    /// 投递失败，但要降档重试——必须由**人**确认后才继续。
-    NeedsConfirmation {
-        /// 建议切到哪一档。**只是建议**，程序不会自己切。
-        proposed: Dispatch,
-        /// 为什么需要人确认。
-        reason: String,
-    },
+    // ⚠ `NeedsConfirmation` 于 2026-10-13 删除。
+    //
+    // 它表达的是「程序提议降档，等人点头再降」，而两档之下**没有降档**可做
+    // （最低就是 `Manual`）。留着就是一个永远构造不出来的死变体，
+    // 而死变体比缺功能更糟——它让人以为这条路径是通的。
+    // 当时的判断逻辑原文见本文件顶部的模块文档。
 }
 
 impl Next {
@@ -152,9 +191,6 @@ impl Next {
                 format!("第 {attempt} 次重试，等 {after_ms} ms")
             }
             Self::Halt { reason } => format!("停下等人工：{reason}"),
-            Self::NeedsConfirmation { proposed, reason } => {
-                format!("需要人工确认后继续（拟切到 {proposed}）：{reason}")
-            }
         }
     }
 }
@@ -189,9 +225,16 @@ impl Dispatcher {
     }
 
     /// 上一次投递结果是 `receipt`、已经重试了 `attempt` 次 → 下一步。
+    ///
+    /// ⚠ **这个函数与档位无关。** 早先它在末尾有一支 `Auto` 专用分支
+    /// （失败 ⇒ 停下问人，见文件顶部模块文档），随 `Auto` 取消一并删掉。
+    /// 剩下的判定全部只看 [`DeliveryReceipt`]：能不能重试、该不该停，
+    /// 取决于「发出去没有」，不取决于「人在哪一档」。
     pub fn next(&self, receipt: DeliveryReceipt, attempt: u32) -> Next {
-        // 可能已经发出去了 —— 无论什么档位，都不许自动重放。
-        // 这条检查必须在最前面：Auto 档也不许。
+        // 可能已经发出去了 —— **任何档位**都不许自动重放。
+        //
+        // 这条检查必须在最前面：它是「重发一条已经发出去的消息」的
+        // 最后一道拦，而发出去的东西撤不回来。
         if receipt.blocks_automatic_retry() {
             return Next::Halt {
                 reason: receipt.explain().to_string(),
@@ -211,27 +254,9 @@ impl Dispatcher {
             };
         };
 
-        // Auto 档下投递失败：不能自动降级重试再发，必须人要确认。
-        //
-        // 理由：Auto 是「不打断」的承诺。承诺的兑现方式是失败后**停下来问**，
-        // 而不是自己改主意。用户以为在 Auto 模式，结果程序偷偷降了档又发一次，
-        // 那比直接失败更糟。
-        if self.tier == Dispatch::Auto {
-            return Next::NeedsConfirmation {
-                proposed: Dispatch::Confirm,
-                reason: format!(
-                    "Auto 档投递失败（{}），降档重试需要人工确认",
-                    receipt.explain()
-                ),
-            };
-        }
-
+        // ⚠ 走到这里说明**确定没发出去**（`replay_safe()` 为真），
+        // 所以重试是安全的。发不发由档位与人决定，不由这里决定。
         Next::Retry { after_ms, attempt }
-    }
-
-    /// 人在 `NeedsConfirmation` 上点了「继续」。**只有人能走到这里。**
-    pub fn confirm_downgrade(&mut self, proposed: Dispatch) {
-        self.tier = proposed;
     }
 }
 
@@ -250,7 +275,7 @@ mod tests {
     #[test]
     fn possibly_sent_is_never_replayed() {
         let d = Dispatcher::new();
-        for tier in [Dispatch::Manual, Dispatch::Confirm, Dispatch::Auto] {
+        for tier in Dispatch::ALL {
             let mut d = d;
             d.set_tier(tier);
             let n = d.next(DeliveryReceipt::PossiblySent, 0);
@@ -268,7 +293,7 @@ mod tests {
     #[test]
     fn timed_out_is_treated_exactly_like_possibly_sent() {
         let mut d = Dispatcher::new();
-        d.set_tier(Dispatch::Auto);
+        d.set_tier(Dispatch::Confirm);
         let a = d.next(DeliveryReceipt::PossiblySent, 0);
         let b = d.next(DeliveryReceipt::TimedOut, 0);
         let kind = |n: &Next| matches!(n, Next::Halt { .. });
@@ -289,7 +314,7 @@ mod tests {
     /// 会话结束一定回落到 Manual，不管之前在哪一档。
     #[test]
     fn ending_a_session_always_falls_back_to_manual() {
-        for tier in [Dispatch::Auto, Dispatch::Confirm, Dispatch::Manual] {
+        for tier in Dispatch::ALL {
             let mut d = Dispatcher::new();
             d.set_tier(tier);
             d.end_session();
@@ -297,41 +322,128 @@ mod tests {
         }
     }
 
-    /// 默认档就是最低档。没有「默认 Auto」这种东西。
+    /// 默认档就是最低档。没有「默认高档」这种东西。
     #[test]
     fn the_default_tier_is_the_lowest_one() {
         assert_eq!(Dispatcher::new().tier(), Dispatch::Manual);
         assert_eq!(Dispatch::default(), Dispatch::Manual);
-        assert!(!Dispatcher::new().tier().sends_without_asking());
     }
 
-    /// Auto 档下投递失败不自动降级重试，必须人工确认。
+    /// ⚠ **档位集合是硬约束，不是实现细节。**
+    ///
+    /// 2026-10-13 取消 `Auto` 档（`docs/设计规范.md` §10 第 3b 条）之后，
+    /// 这条测试就是「档位没有悄悄长回来」的唯一守卫。
+    ///
+    /// 为什么单列一条：加一档是一个**看起来很小**的改动——
+    /// 枚举加一个变体、`Display` 加一支、前端 `TIERS` 加一项，
+    /// 每一处都编译得过、每处都合理。而「不该有第三档」这件事
+    /// **没有任何编译器会提醒**，它散在规范里、散在 `AGENTS.md` 里。
     #[test]
-    fn auto_failure_needs_human_confirmation_instead_of_downgrading() {
-        let mut d = Dispatcher::new();
-        d.set_tier(Dispatch::Auto);
-        let n = d.next(DeliveryReceipt::Failed("焦点被拒".into()), 0);
-        let Next::NeedsConfirmation { proposed, .. } = &n else {
-            panic!("Auto 档失败必须停下问人，实际 {n:?}")
-        };
-        assert_eq!(*proposed, Dispatch::Confirm);
-        assert_eq!(d.tier(), Dispatch::Auto, "问人不等于自己降档——档位没变");
+    fn the_tier_set_is_exactly_two_and_named() {
+        let ids: Vec<String> = Dispatch::ALL.iter().map(|d| d.to_string()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "Manual（只填入）".to_string(),
+                "Confirm（确认后发送）".to_string()
+            ],
+            "档位集合变了。取消 Auto 是 2026-10-13 的决定；\
+             要加回来先去改 docs/设计规范.md §10 第 3b 条与根 AGENTS.md 硬约束第 5 条"
+        );
+        assert_eq!(Dispatch::ALL.len(), 2);
+        // 最低档必须排在最前 —— `Ord` 派生的比较方向依赖这一点。
+        assert!(Dispatch::Manual < Dispatch::Confirm);
+    }
 
-        // 人点了确认才降
-        d.confirm_downgrade(*proposed);
-        assert_eq!(d.tier(), Dispatch::Confirm);
+    /// **没有任何一档会不问就发出去。**
+    ///
+    /// 这条在两档之下必然成立（因为只有两档，而最高的那档要人确认），
+    /// 它是一条**回归锁**：将来若有人加了第三档，这条会提醒他去想清楚
+    /// 「它到底发不发」。它替代了被删掉的 `Dispatch::sends_without_asking`
+    /// ——那个函数恒为 `false`，留着只是骗人。
+    #[test]
+    fn no_tier_sends_without_asking() {
+        // 枚举里没有「不问就发」这个概念：`Next` 只有 Retry 与 Halt，
+        // 没有任何一项表示「直接发出去」。
+        for tier in Dispatch::ALL {
+            for attempt in 0..MAX_RETRIES + 2 {
+                for receipt in [
+                    DeliveryReceipt::Sent,
+                    DeliveryReceipt::NotSent,
+                    DeliveryReceipt::Failed("x".into()),
+                    DeliveryReceipt::TimedOut,
+                    DeliveryReceipt::PossiblySent,
+                ] {
+                    let mut d = Dispatcher::new();
+                    d.set_tier(tier);
+                    let n = d.next(receipt.clone(), attempt);
+                    assert!(
+                        matches!(n, Next::Retry { .. } | Next::Halt { .. }),
+                        "{tier} 档 / {receipt:?} / 第 {attempt} 次返回了非预期变体：{n:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 投递失败可以退避重试——**前提是确定没发出去**。
+    ///
+    /// ⚠ 这条取代了已删除的
+    /// `auto_failure_needs_human_confirmation_instead_of_downgrading`。
+    /// 那条守的是「`Auto` 档失败不许自己降档重试又发一次」，
+    /// 而 `Auto` 取消后**没有降档可做**，这条边界随之消失。
+    ///
+    /// 现在的边界是另一条，而且更要紧：确定没发出去 ⇒ 重试安全；
+    /// 不确定 ⇒ 一律停下问人。判据是 [`DeliveryReceipt::replay_safe`]，
+    /// **与档位无关**。
+    #[test]
+    fn retry_is_allowed_exactly_when_nothing_was_sent() {
+        for tier in Dispatch::ALL {
+            let mut d = Dispatcher::new();
+            d.set_tier(tier);
+
+            // 确定没发出去的 ⇒ 按退避重试
+            for receipt in [
+                DeliveryReceipt::NotSent,
+                DeliveryReceipt::Failed("x".into()),
+            ] {
+                let n = d.next(receipt.clone(), 0);
+                assert!(
+                    matches!(n, Next::Retry { after_ms, attempt: 0 } if after_ms == BASE_BACKOFF_MS),
+                    "{tier} 档 / {receipt:?} 应可重试，实际 {n:?}"
+                );
+            }
+
+            // 不确定发没发出去的 ⇒ 一次都不许重试，**任何档位都一样**
+            for receipt in [
+                DeliveryReceipt::Sent,
+                DeliveryReceipt::TimedOut,
+                DeliveryReceipt::PossiblySent,
+            ] {
+                let n = d.next(receipt.clone(), 0);
+                assert!(
+                    matches!(n, Next::Halt { .. }),
+                    "{tier} 档 / {receipt:?} 必须停下问人，实际 {n:?}"
+                );
+            }
+        }
     }
 
     /// 人工确认之前，重试一次都不许发生。
+    ///
+    /// ⚠ 「人工确认」在两档之下的具体形态是**停下等 `Halt`**，
+    /// 而不是原来的 `NeedsConfirmation` 提议降档。
     #[test]
-    fn no_retry_happens_before_human_confirmation() {
+    fn no_retry_happens_after_a_halt() {
         let mut d = Dispatcher::new();
-        d.set_tier(Dispatch::Auto);
-        for attempt in 0..MAX_RETRIES {
-            let n = d.next(DeliveryReceipt::Failed("x".into()), attempt);
+        d.set_tier(Dispatch::Confirm);
+        // 停过一次之后，同一个回执在任意重试次数下都还是停——
+        // 「停下」不是「第 N 次可以再试」。
+        for attempt in 0..MAX_RETRIES + 2 {
+            let n = d.next(DeliveryReceipt::PossiblySent, attempt);
             assert!(
-                matches!(n, Next::NeedsConfirmation { .. }),
-                "确认前不该出现 {n:?}"
+                matches!(n, Next::Halt { .. }),
+                "第 {attempt} 次不该出现 {n:?}"
             );
         }
     }
@@ -365,12 +477,12 @@ mod tests {
     }
 
     /// 升档只能由人触发。程序的状态变化一律不许升档。
+    ///
+    /// 顺带覆盖**降档**：`next()` 是 `&self`，它**没有任何办法**改档位——
+    /// 这一点由签名保证，而这条测试把「从两档各出发」都走一遍，
+    /// 防止将来有人给 `next` 加个 `&mut self` 就悄悄改了档。
     #[test]
     fn the_program_never_raises_its_own_tier() {
-        let mut d = Dispatcher::new();
-        d.set_tier(Dispatch::Manual);
-
-        // 各种失败、超时、可能已发送，全都不许升档
         let receipts = [
             DeliveryReceipt::Sent,
             DeliveryReceipt::NotSent,
@@ -378,21 +490,22 @@ mod tests {
             DeliveryReceipt::TimedOut,
             DeliveryReceipt::PossiblySent,
         ];
-        for r in receipts {
-            for attempt in 0..MAX_RETRIES + 2 {
-                let before = d.tier();
-                let n = d.next(r.clone(), attempt);
-                assert_eq!(d.tier(), before, "{r:?} 把档位从 {before} 改掉了");
-                match n {
-                    Next::Retry { .. } | Next::Halt { .. } => {}
-                    Next::NeedsConfirmation { .. } => {
-                        // 这只是**提议**，档位没动；确认才动
-                        assert_eq!(d.tier(), before);
-                    }
+        for start in Dispatch::ALL {
+            let mut d = Dispatcher::new();
+            d.set_tier(start);
+            for r in &receipts {
+                for attempt in 0..MAX_RETRIES + 2 {
+                    let before = d.tier();
+                    let n = d.next(r.clone(), attempt);
+                    assert_eq!(
+                        d.tier(),
+                        before,
+                        "{r:?} / 第 {attempt} 次把档位从 {before} 改掉了（{n:?}）"
+                    );
                 }
             }
+            assert_eq!(d.tier(), start);
         }
-        assert_eq!(d.tier(), Dispatch::Manual);
     }
 
     /// 每一步都要有可读的理由——界面上要能显示「为什么不重试了」。

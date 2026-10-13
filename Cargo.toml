@@ -17,8 +17,8 @@ exclude = ["ui/src-tauri/gen"]
 #    whether from changed code or from clippy being upgraded—**they will be obvious**."
 #
 # 没有 `[lints]` 段的时候，新警告淹没在 clippy 默认启用的几百条里，
-# 做不到 obvious。`HANDOFF.md` §5.4 B-2 说「没有代码风格层」——
-# 机器门禁有，**缺的是把策略写下来**。
+# 做不到 obvious。机器门禁本来就有，**缺的是把策略写下来**——
+# 那就是下面这个段本身。
 #
 # ## 判据来自哪
 #
@@ -42,7 +42,8 @@ missing_docs = "warn"
 # 又用 `[lints.rust]` 覆盖其中一项——报 "cannot override workspace.lints in lints"。
 # 也就是说「三个纯 crate forbid、capture 不 forbid」在 manifest 层面
 # 根本表达不出来，除非让那三个 crate 把工作区的每一条 lint 手工抄一遍，
-# 而抄一遍就会漂（本项目已经吃过「两处各抄一份」的亏，见 HANDOFF §3）。
+# 而抄一遍就会漂（本项目在事件名上吃过「两处各抄一份」的亏，
+# 见 `ui/src-tauri/src/contract.rs` 的 `no_event_literal_outside_this_file`）。
 #
 # `undocumented_unsafe_blocks` 达到的是**同一个审查目的**，
 # 而且对 `capture` 那 51 处 Win32 FFI 同样有效——

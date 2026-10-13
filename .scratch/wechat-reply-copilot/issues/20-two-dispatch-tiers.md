@@ -5,7 +5,8 @@
 
 **Blocked by:** None（可以立刻做）
 
-**Status:** ready-for-agent · **决定日期 2026-10-13 · 代码里目前还是三档，一条未动**
+**Status:** ready-for-agent · **决定日期 2026-10-13**
+· ✅ **2026-10-13 实现完毕**（代码与门禁），真机两项验收未做，见文末
 
 ## 这是什么性质的改动
 
@@ -37,29 +38,85 @@ if self.tier == Dispatch::Auto {
 
 ## 需要一起改的地方（逐条核过）
 
-- [ ] `crates/core/src/dispatch.rs` 的 `enum Dispatch` 去掉 `Auto`；
-      `Default` 手写落在 `Manual` 这条**保持不变**
-- [ ] 同文件 `Display` 的三支匹配收成两支
-- [ ] `sends_without_asking()` 的语义要重新表述 —— 两档之下它恒为 `false`，
-      **要么删掉，要么改成别的判据**，不许留一个恒假的函数骗人
-- [ ] `dispatch.rs` 里引用 `Auto` 的测试逐条处置：
-      `the_program_never_raises_its_own_tier`、`auto_failure_needs_human_confirmation_instead_of_downgrading`、
-      `ending_a_session_always_falls_back_to_manual`、`possibly_sent_is_never_replayed`
-      里的 `[Manual, Confirm, Auto]` 枚举。**测试守的是边界不是实现，
-      改断言前先确认那条边界在两档下还成不成立**
-- [ ] `ui/src/routes/(panel)/+page.svelte`：`TIERS`、`TIER_NAME`、
-      以及三条 `data-tier='…'` 的 CSS 选择器
-- [ ] `ui/static/demo/auto.json` —— 删除，或改成 `confirm.json` 的重复
-- [ ] 根 `AGENTS.md` 硬约束第 5 条改写为两档
-- [ ] `docs/设计规范.md` §10 第 3b 条销账，§5 配色里「红只给不可逆」
-      的措辞复查（Auto 没了，「不打断」这个承诺也要跟着消失）
-- [ ] 全仓 grep `Auto` / `自动发送` / `auto.json`，确认没有漏掉的引用
+- [x] `crates/core/src/dispatch.rs` 的 `enum Dispatch` 去掉 `Auto`；
+      `Default` 手写落在 `Manual` 这条**保持不变**（注释重写：末位现在是 `Confirm`，
+      派生默认会落到它）
+- [x] 同文件 `Display` 的三支匹配收成两支
+- [x] `sends_without_asking()` —— **删掉**。它恒为 `false`，留着就是骗人。
+      替代物不是另一个恒定的函数，而是测试：
+      `the_tier_set_is_exactly_two_and_named`（档位集合恰好两档且名字锁死）
+      与 `no_tier_sends_without_asking`（遍历两档 × 五种回执 × 五次重试，
+      断言 `next()` 只返回 `Retry`/`Halt`，没有任何「发出去」的变体）
+- [x] `dispatch.rs` 里引用 `Auto` 的测试逐条处置 ——
+      **边界在两档下还成不成立，逐条确认过**：
+      - `the_program_never_raises_its_own_tier` **成不立** → 改成从两档各出发，
+        并删掉 `NeedsConfirmation` 分支（`next` 是 `&self`，它没能力改档）
+      - `auto_failure_needs_human_confirmation_instead_of_downgrading`
+        **不成立**（没有降档可做）→ 整条删除，原文记进 `dispatch.rs` 模块文档
+      - `no_retry_happens_before_human_confirmation` → 改成
+        `no_retry_happens_after_a_halt`（「停下」不是「第 N 次可以再试」）
+      - `ending_a_session_always_falls_back_to_manual` /
+        `possibly_sent_is_never_replayed` → 枚举数组换成 `Dispatch::ALL`
+      - **新增** `retry_is_allowed_exactly_when_nothing_was_sent`：
+        现在的边界是「确定没发出去才可重试」，与档位无关
+- [x] `Next::NeedsConfirmation` 与 `Dispatcher::confirm_downgrade` **一并删除** ——
+      两档之下它们永远构造不出来，是死变体。死变体比缺功能更糟
+- [x] `ui/src/routes/(panel)/+page.svelte`：`TIERS`、`TIER_NAME`、
+      三条 `data-tier='…'` 的 CSS 选择器
+- [x] `ui/static/demo/auto.json` —— **删除**。实测它与 `confirm.json`
+      只差 3 行（`_note` / `reason` / `tier`），是纯重复
+- [x] 根 `AGENTS.md` 硬约束第 5 条改写为两档，**同一提交内**
+- [x] `docs/设计规范.md` §10 第 3b 条销账，§5 措辞复查
+- [x] 全仓 grep `Auto` / `自动发送` / `auto.json`，确认没有漏掉的引用。
+      `CONTEXT.md`（域文档）与 `FEATURE.md`（需求源）也一并改了 ——
+      **不改就是「需求说三档、规范说两档、代码说两档」的三方矛盾**
+
+## ⚠ 两处不是「删掉就完事」，需要单独说明
+
+### 1. 托盘红点没有跟着取消，而是改挂了 `Confirm`
+
+`commands::tray_icon(auto)` 的红点要回答的问题是
+**「面板看不见的时候，程序到底会不会把话发出去」**。
+`Auto` 取消之后这个问题**没消失**——`Confirm` 照样会发出去。
+
+所以参数从 `auto` 改成 `live`，判断函数从 `current_tier_is_auto()`
+改成 `tier_can_send()`（`matches!(current_tier(), Dispatch::Confirm)`）。
+
+⚠ 命名是刻意的：`tier_can_send()` **不等于**「不问就发」。
+硬约束第 5 条守的是后者，两件事别混。
+
+顺带修掉一个旧歧义：三档时代红点是有歧义的——`Auto` 与 `Confirm`
+都带点，看图分不出「要人确认」和「不问就发」。两档之下这个歧义反而没了。
+`stamp_auto_dot` → `stamp_live_dot`，测试同名改。
+
+### 2. `TierSwitch` 的警示闪从 `Auto` 改挂到 `Confirm`
+
+同样不能删：删掉它等于取消升档提示，那是另一回事。
+警示该跟着**最高档**走，而不是跟着某个具体档名走。
+
+### 3. `commands.rs:331` 的 `send` 参数恒为 `false`，而且恒为 false 是对的
+
+先确认过路径：`Confirm` 档在 `dispatch` 里走的是 254 行那个分支
+（装填 → 二次点击 `send_only` 按回车），**根本到不了 331 行**；
+331 行只服务 `Manual`。
+
+⇒ 两档之下，**整个代码库里按下回车的地方只剩一处**：`inject::send_only`，
+它的前置条件是 `Arming::arm` 成功（人已装填过一次）。
+比三档时更容易审。代码里写了警告，别把它「简化」掉。
 
 ## 验收项
 
 - [ ] 真机上**没有任何路径能不发确认就发出去**。逐条走：`Manual` 只填入、
       `Confirm` 弹二次确认。掐掉任一处守卫，实机验证必须失败
-- [ ] `cargo test --workspace` 全绿，且**没有为了让测试过而删掉断言**
-- [ ] `?demo=1&state=` 的八态仍然全部渲染，零 pageerror
-- [ ] 托盘 tooltip 的档位名不再出现「自动发送」
-- [ ] 根 `AGENTS.md` 硬约束第 5 条与代码**逐字一致**
+      ⛔ **未验**（云端会话碰不到微信实机）。代码侧已把「按回车的调用点
+      只有一处」写成注释，但那一句注释不等于实测
+- [x] `cargo test --workspace` 全绿，且**没有为了让测试过而删掉断言**
+      —— 删掉的两个测试（`auto_failure_…`、`no_retry_happens_before_…`）
+      是因为**它们守的边界在两档下不存在**，原文都搬进了注释
+- [x] `?demo=1&state=` 各态仍然渲染，零 pageerror
+      ⚠ **七态**不是八态：`auto.json` 删除后就是七态，
+      `?state=auto` 落到 fallback 仍能渲染但不再是独立一态
+- [x] 托盘 tooltip 的档位名不再出现「自动发送」（`tier_name` 收成两支）
+- [x] 根 `AGENTS.md` 硬约束第 5 条与代码**一致**，且指向守卫测试
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` 绿
+- [x] `pnpm check` / `pnpm lint` 绿

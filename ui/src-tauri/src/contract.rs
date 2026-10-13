@@ -10,12 +10,12 @@
 //! 前端 `+page.svelte` 写的是第三个字面量 `listen('armed', ...)`。
 //!
 //! 改一个事件名要同时动三个地方，漏一个就是「界面收不到、后端日志一切正常」。
-//! `docs/HANDOFF.md` §5.4 B-1 点名的就是这个。
+//! 这就是下面那条 `no_event_literal_outside_this_file` 要守的东西。
 //!
 //! ## 跨语言这件事没完全解决
 //!
 //! Rust 和 TypeScript 是两门语言，**这里仍然有两份**（`types.ts` 镜像本文件）。
-//! 彻底解掉要上类型生成链，那是独立工程（见 HANDOFF §5.4 B-1「重构方向」）。
+//! 彻底解掉要上类型生成链，那是独立工程。
 //! 现在的目标是：**每种语言内部只有一处**，且改动能被类型检查抓到一部分。
 
 use serde::{Deserialize, Serialize};
@@ -34,9 +34,26 @@ pub mod events {
     pub const DEBUG_PANE: &str = "debug_pane";
     /// 帧计数等遥测。用来证明「不是轮询」。
     pub const TELEMETRY: &str = "telemetry";
+    /// 托盘菜单点了「重新锁定当前会话」。前端监听它并调 `relock_session`，
+    /// **和面板上那颗按钮走同一条 Rust 路径** —— 两处不各写一遍。
+    pub const MENU_RELOCK: &str = "menu:relock";
+    /// 托盘/面板点了「打开设置」。
+    ///
+    /// ⚠ 2026-10-13 补录：这个事件名此前**根本没进过清单**，
+    /// 是 `no_event_literal_outside_this_file` 第一次真正运行
+    /// （`main.rs` 里补上 `mod contract;` 之后）把它抓出来的。
+    /// 在那之前它是个裸字面量——改事件名时不会被任何测试或 grep 覆盖。
+    pub const MENU_SETTINGS: &str = "menu:settings";
 
     /// 全部事件名。**测试用它断言「没有漏在外面的字面量」。**
-    pub const ALL: [&str; 4] = [READOUT, ARMED, DEBUG_PANE, TELEMETRY];
+    pub const ALL: [&str; 6] = [
+        READOUT,
+        ARMED,
+        DEBUG_PANE,
+        TELEMETRY,
+        MENU_RELOCK,
+        MENU_SETTINGS,
+    ];
 }
 
 /// 投递动作。
@@ -45,8 +62,19 @@ pub mod events {
 /// 现在它在 `serde` 反序列化阶段就失败，进不了业务逻辑。
 ///
 /// 命名与前端 `types.ts` 的 `Action` 严格对应，**改一边就要改另一边**。
+///
+/// ⚠ **2026-10-13：这一整块尚未接线**（票 26）。
+///
+/// `main.rs` 里补上 `mod contract;` 之前，这个文件**从来没进过编译**，
+/// 于是「它还没接线」这件事没有任何门禁能发现。本文件活到 2026-10-13
+/// 才第一次被编译，`dead_code` 一次性报了出来。
+///
+/// 接线要动的是 `commands::dispatch` 的动作判定，而那是**安全关键路径**
+/// （硬约束第 5 条），且票 20（三档砍两档）也要动同一处。
+/// 两件事一起做会互相掩盖，所以这里先如实标出来，不顺手改。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code, reason = "契约定义，前端镜像在 types.ts；接线见票 26")]
 pub enum Action {
     /// 填入输入框，停在光标处。**不发送。** Manual 档唯一允许的动作。
     Fill,
@@ -69,6 +97,7 @@ impl Action {
     /// 为什么不用 `serde` 自动做：Tauri 的 `#[tauri::command]` 参数是逐个反序列化的，
     /// 单独一个 `String` 参数拿到手时已经晚了。这里显式解析，
     /// 好处是**错误信息能直接显示给人看**（界面会把它写进 `reason`）。
+    #[allow(dead_code, reason = "随 Action 一起待接线，见票 26")]
     pub fn parse(raw: &str) -> Result<Self, String> {
         match raw.trim() {
             "fill" => Ok(Self::Fill),
@@ -84,8 +113,7 @@ impl Action {
 ///
 /// **原先这个判断在前端**：`+page.svelte` 靠 `candidates.length === 0`
 /// 区分「静默」「出错」「刚启动」三种完全不同的状态——这是**界面在猜 Rust 的状态**。
-/// `docs/HANDOFF.md` §5.4 B-1 说的「状态语义没有集中的定义」在此收口：
-/// **判断归 Rust，界面只渲染。**
+/// 那是本文件存在的原因：**判断归 Rust，界面只渲染。**
 ///
 /// 这个枚举同时是 §4.3 首屏提速的地基——有了 `Read`，
 /// 观察循环就能**不等模型**先推一帧，实测体感 6~9s → 1.1s。
@@ -174,6 +202,11 @@ impl Phase {
     ///
     /// ⚠️ **判据 12：空状态必须给一个明确的下一步动作。**
     /// `Drafting` 这一档如果只显示「加载中」，用户就不知道该等还是该干别的。
+    ///
+    /// ⚠ 2026-10-13：**界面还没用它**（票 26）。`(panel)/+page.svelte` 的
+    /// S3 那一格把「正在成形…」「通常几秒」写死成了两个 `<p>`，
+    /// 所以 Rust 这边的口径改了不会跟着变——同一句话有两份。
+    #[allow(dead_code, reason = "界面尚未消费，见票 26")]
     pub fn status_hint(&self) -> Option<&'static str> {
         match self {
             Self::Drafting { .. } => Some("正在起草，通常几秒"),
@@ -256,8 +289,16 @@ mod tests {
         let keys = [
             Phase::Read { messages: vec![] }.key(),
             Phase::Drafting { messages: vec![] }.key(),
-            Phase::Drafted { messages: vec![], candidates: vec![] }.key(),
-            Phase::Failed { messages: vec![], error: "x".into() }.key(),
+            Phase::Drafted {
+                messages: vec![],
+                candidates: vec![],
+            }
+            .key(),
+            Phase::Failed {
+                messages: vec![],
+                error: "x".into(),
+            }
+            .key(),
         ];
         for (i, a) in keys.iter().enumerate() {
             for (j, b) in keys.iter().enumerate() {
@@ -266,14 +307,16 @@ mod tests {
         }
     }
 
-    /// 事件名清单是**测试用的**——见下面的 `no_event_literal_in_sources`。
+    /// 事件名清单是**测试用的**——见下面的 `no_event_literal_outside_this_file`。
     #[test]
     fn event_names_are_stable() {
         assert_eq!(events::READOUT, "readout");
         assert_eq!(events::ARMED, "armed");
         assert_eq!(events::DEBUG_PANE, "debug_pane");
         assert_eq!(events::TELEMETRY, "telemetry");
-        assert_eq!(events::ALL.len(), 4);
+        assert_eq!(events::MENU_RELOCK, "menu:relock");
+        assert_eq!(events::MENU_SETTINGS, "menu:settings");
+        assert_eq!(events::ALL.len(), 6);
     }
 
     /// **守住「只有这个文件能出现事件名字面量」这条纪律。**
