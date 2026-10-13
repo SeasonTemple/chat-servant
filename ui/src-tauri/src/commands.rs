@@ -388,7 +388,7 @@ fn parse_tier(raw: &str) -> Dispatch {
         "Confirm" => Dispatch::Confirm,
         // ⚠ `"Auto"` 于 2026-10-13 取消该档之后落进这一支 ⇒ 读成 **Manual**。
         //   降档方向是对的：旧配置或旧前端传 Auto，得到的必须是最低档，
-        //   绝不���因为「不认识」就升上去。
+        //   绝不因为「不认识」就升上去。
         _ => Dispatch::Manual,
     }
 }

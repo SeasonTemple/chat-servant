@@ -1638,7 +1638,7 @@ mod tests {
     /// 只测 `Drafted` 是不够的：出错的形态恰恰是票 21 里最隐蔽的一处——
     /// 出错那一帧的 `error` 在旧结构里是个独立的 `Option<String>`，
     /// 改成 `Phase::Failed` 之后如果漏了改，界面就**静默地不显示任何错误**，
-    /// 用户看到的是一个「什么都没发生」的��板。
+    /// 用户看到的是一个「什么都没发生」的面板。
     #[test]
     fn every_phase_shape_carries_its_own_discriminant() {
         let s = scratch_with(1, 0);
