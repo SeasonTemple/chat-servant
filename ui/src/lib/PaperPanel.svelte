@@ -73,14 +73,14 @@
    */
   type MarkSize = 'base' | 'mid' | 'big';
   /**
-   *  ⚠ 默认 `base`（2026-10-13 改）。原先是 `big`，那是**顶部独占一行时**
-   *  量出来的：槽有 53px 高，取景框 72×58 放得下。
+   *  ⚠ 默认 `big`。2026-10-13 有一轮把它改成 `base`，理由是「档位收进行内后
+   *  取景框只剩 24×16，`big` 会被静默裁掉」——**那个框是同一轮自己造的**，
+   *  于是变成「用我自己制造的限制去论证推翻定案」。已恢复 `big`。
    *
-   *  档位收进归属行后取景框只有 24×16，`big` 会**被静默裁掉**——
-   *  表现是「选了大档但看起来没变大」，那是量具自己骗自己。
-   *  要用 `big` 得先把这个框重新量一遍，不是改个默认值了事。
+   *  判据：档位不再挤进别人的行，取景框按定案恢复 60×40（见 `.cs-markbox`），
+   *  `big`（`TICK_VIEW` 56×34 / `RING_VIEW` 84×52）放得下且**笔尖不裁**。
    */
-  let markSize = $state<MarkSize>('base');
+  let markSize = $state<MarkSize>('big');
 
   /** 档位从低到高。Rust 侧持有档位值，这里只按顺序摆位置。 */
   const TIERS = [
@@ -596,29 +596,36 @@
             tabindex={tier === t.key ? 0 : -1}
             onclick={() => void chooseTier(t.key)}
           >
-            <span class="cs-markbox">
-              <svg
-                class="cs-tick"
-                data-shape={markShape.current}
-                data-ring={markSize}
-                viewBox="0 0 {ACTIVE_VIEW.w} {ACTIVE_VIEW.h}"
-                width={ACTIVE_VIEW.w}
-                height={ACTIVE_VIEW.h}
-                aria-hidden="true"
-                filter="url(#pencil)"
-              >
-                <!--
+            <span class="cs-slot-mark">
+              <!--
+                参考纸上没有线：三行字，谁被勾了谁就是当前档。
+                所以这里**不画占位的短记号**——空着就是空着，
+                勾的位置本身就是编码。
+              -->
+              <span class="cs-markbox">
+                <svg
+                  class="cs-tick"
+                  data-shape={markShape.current}
+                  data-ring={markSize}
+                  viewBox="0 0 {ACTIVE_VIEW.w} {ACTIVE_VIEW.h}"
+                  width={ACTIVE_VIEW.w}
+                  height={ACTIVE_VIEW.h}
+                  aria-hidden="true"
+                  filter="url(#pencil)"
+                >
+                  <!--
                   五层嵌套，不是单层平涂。单层不管给多少 opacity，边缘都是
                   一刀切的硬边，所以它读成矢量而不是红铅笔——材质台 P1 与 P5
                   同框实测：落在中间密度带的像素 23.0% → 70.5%，总墨量反而少
                   17%。密度从芯往外逐级下降，才有「芯重边虚」。
                 -->
-                {#each MARK_LAYERS as layer (layer.d)}
-                  <path d={layer.d} fill-opacity={layer.o} />
-                {/each}
-              </svg>
+                  {#each MARK_LAYERS as layer (layer.d)}
+                    <path d={layer.d} fill-opacity={layer.o} />
+                  {/each}
+                </svg>
+              </span>
+              <span class="cs-pick-name">{t.label}</span>
             </span>
-            <span class="cs-pick-name">{t.label}</span>
           </button>
         {/each}
       </div>
@@ -793,22 +800,24 @@
   .cs-pick {
     flex: none;
     display: flex;
-    align-items: center;
-    gap: 16px;
+    /* ⚠ 必须是 0：两档各占半栏（`.cs-pick-slot { flex: 1 }`），靠槽自己分栏，
+     *  加 gap 只会让两档不再对称，而对称是「哪一档被勾了」能被一眼比出来的前提。 */
+    gap: 0;
     /* 推到纸底。依赖 `.cs-body-col { flex: 1 }` 把这列撑满，
        否则 `auto` 无处可推，档位会贴回正文下方。
-       ⚠ `padding-bottom` 不是装饰：出图实测发现档位被 `auto` 推到
-         **纸的撕口下沿上**，文字骑在破口里读不全。撕边纸上控件
-         必须离破口有一段距离，这一段得显式留出来，不能指望 sheet 的
-         padding 会自动让开。 */
+       ⚠ `padding-bottom` 不是装饰，按**标记下垂段**算不按文字算：
+         档位格高 = markbox 40 + margin 2 + 11px 字 = 53，但 `big` 档勾的
+         取景框 56×34、top 29，底边在 29 + 34 = 63——比槽底**低 10px**。
+         纸底破口实测 7~11px，所以留 26px。给文字留的那点不够：
+         实测出图里「只填入」骑在破口上。 */
     margin-top: auto;
-    padding-bottom: 18px;
+    padding-bottom: 26px;
   }
 
   .cs-pick-slot {
+    flex: 1;
     display: flex;
-    align-items: center;
-    gap: 3px;
+    justify-content: center;
     /* 按钮化之后默认的 UA 样式必须全部抹掉，否则会多出一圈边框，
        而边框在撕边纸上等于第二个边界。 */
     appearance: none;
@@ -821,46 +830,99 @@
     cursor: pointer;
   }
 
-  /*  取景框只负责给标记一个固定高度，好让两行字对齐。它**不画任何东西**。
-   *  ⚠ 34×22 是量出来的，不是拍的：24×16 那版出图自查发现红铅笔勾在纸底
-   *    几乎读不出来——不是颜色不对（`--cs-pencil-red` 没变），是**墨太少**。
-   *    取景框从 60×40 缩到 24 宽是 0.40 倍，五层嵌套的笔尖全被压没了；
-   *    34 宽是 0.57 倍，笔尖还在。**放大标记只能靠放大框，调 opacity 是反的**
-   *    ——那会把五级密度拉平，重新塌成单层平涂。
-   *  ⚠ 34×22 仍装不下 `big` 幅面（取景框 72×58），所以 `markSize` 的默认值
-   *    在这一版是 `base`。 */
+  /*  每档一格：**取景框在上、三字档位名在下**，标记从框里压到名上。
+   *  这就是「底部怎么布局」的全部——与它在顶部时的形态**一模一样**，
+   *  位置不同而已。2026-10-13 有一轮把标记改成字左边的小记号，
+   *  那是把「位置」和「形态」两件事混成了一件，已恢复。 */
+  .cs-slot-mark {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  /*  取景框只负责给标记一个固定高度，好让三行字对齐。它**不画任何东西**。
+   *  ⚠ 60×40 是定案值。2026-10-13 有一轮缩到 24×16 当「行内小记号」用，
+   *    连带动把幅面默认档从 `big` 降成 `base`——**两个定案被一个自己造的
+   *    约束串起来推翻**，而那个约束本身就是「档位不占一整行」的副产物。
+   *    档位挪到纸底之后每档有自己的高度，60×40 放得下，无需缩小。 */
   .cs-markbox {
     position: relative;
     display: block;
-    width: 34px;
-    height: 22px;
+    width: 60px;
+    height: 40px;
   }
 
   /*  标记。红铅笔，蜡质，每层的透明度是**笔迹数据的一部分**，
    *  由 `$lib/marks` 的生成器算出来。CSS 一旦兜底就会把嵌套的五级
    *  全部覆盖掉，羽化立刻塌回单层平涂——材质台 P1 与 P5 同框实测：
    *  落在中间密度带的像素 23.0% → 70.5%，总墨量反而少 17%。
-   *  密度从芯往外逐级下降，才有「芯重边虚」。 */
-  .cs-tick path {
-    fill: var(--cs-pencil-red);
-  }
-
+   *  密度从芯往外逐级下降，才有「芯重边虚」。
+   *
+   *  **盖章式：笔盖在字上，不是悬在字上方。** 用户 2026-10-13 用手绘参考
+   *  点破了这一点——标记靠**交叠**表达「这一档被批了」，躲开字反而变成
+   *  一个跟内容无关的浮标。
+   *
+   *  ⚠ 盖住字**不会**读成删除线：删除线是一条横线穿过字中部，圈是包围，
+   *    拓扑不同。2026-10-13 曾把「标记与字交叠」当成缺陷判掉，那是错判；
+   *    2026-10-13 晚些时候又把这个定案本身推翻了（改成字左小记号），已恢复。
+   *
+   *  摆放偏移**全部按笔心反算**，不靠观感试：
+   *      top         = 字心y - 1.1 - 笔心y
+   *      margin-left = -笔心x
+   *  字心y = markbox 40 + 标签 margin 2 + 字号 11 ÷ 2 = 47.5；-1.1 是现状圈
+   *  对齐字心时本来就带着的那点偏上。笔心 = `marks.js` 里 path 的 bbox 中心。
+   *
+   *  ⚠ 这套公式替换掉过一个**试出来的**值：勾原来是 `margin-left:-21px`，
+   *    注释写着「要右移 9px 才盖得住三个字」，但公式算出该是 -27——
+   *    旧值把笔心推到了槽心**右侧 6px**。标一个东西却没对准它。
+   *
+   *  ⚠ 尺寸由 SVG 的 `width`/`height` 属性给（= `ACTIVE_VIEW`），**不是** CSS。
+   *    这里若写 `width: 100%`，`big` 档会被压回 60 宽而不是被裁——
+   *    两者症状不同：裁是「放大了但没变大」，压是「选了大档但形状没变」。
+   *  交叉验证：公式代回状态圈算出 (-30.7, 30.0)，与已上线的 -30 / 30 吻合。
+   */
   .cs-tick {
     position: absolute;
-    left: 0;
-    top: 0;
-    /* ⚠ 必须由 CSS 定尺寸，不能用 SVG 的 `width`/`height` 属性。
-     *  那两个属性写的是 `$lib/marks` 的取景框尺寸（base 档 60×40），
-     *  放进 34×22 的框里会**整块溢出**——表现是标记跑到框的左下角、
-     *  压住相邻文字，而画布上看不出任何东西被裁掉。
-     *  `preserveAspectRatio` 默认 `xMidYMid meet`，交给它等比缩放。 */
-    width: 100%;
-    height: 100%;
+    left: 50%;
+    top: 26px;
+    margin-left: -27px;
     opacity: 0;
     transition: opacity var(--cs-dur) var(--cs-ease);
   }
 
+  .cs-tick[data-shape='ring'] {
+    top: 30px;
+    margin-left: -31px;
+  }
+
+  /*  放大档换了取景框，笔心坐标随之改变，偏移**重算**而不是在旧值上加减。
+   *  实测（解析 marks.js 的 path 坐标，非估算）：mid 笔心 (27.70, 17.50)、
+   *  big 笔心 (27.75, 17.50)——两档同框同高，偏移相同。代回公式
+   *  top = 46.4 - 笔心y = 29，margin-left = -笔心x = -28。 */
+  .cs-tick[data-shape='tick'][data-ring='mid'],
+  .cs-tick[data-shape='tick'][data-ring='big'] {
+    top: 29px;
+    margin-left: -28px;
+  }
+
+  .cs-tick[data-shape='ring'][data-ring='big'] {
+    top: 21px;
+    margin-left: -43px;
+  }
+
+  /*  只有 fill，不设 fill-opacity——每层的透明度是**笔迹数据的一部分**，
+   *  由生成器算出来。CSS 一旦兜底就会把嵌套的五级全覆盖掉，
+   *  羽化立刻塌回单层平涂。 */
+  .cs-tick path {
+    fill: var(--cs-pencil-red);
+  }
+
+  /*  ⚠ `margin-top: 2px` 是算式的一部分，不是间距微调：笔心反算公式里的
+   *  「字心y = markbox 40 + 标签 margin 2 + 字号 11 ÷ 2 = 47.5」这一项
+   *  就是它。改成 0 或 4，标记会整体偏上/偏下 2px ——在 1× 上看不出来，
+   *  但「标一个东西却没对准它」正是当初 `-21px` 被推翻的那类错。 */
   .cs-pick-name {
+    margin-top: 2px;
     font-size: 11px;
     line-height: 1;
     letter-spacing: 0.02em;
