@@ -223,7 +223,27 @@
    *  常态不画：平时墨底已经说清楚了，再加一道是噪声。
    */
   @media (forced-colors: active) {
+    /*  药丸**不能靠满铺底**在 HC 下表达选中。
+     *
+     *  实测（2026-10-14，高对比度 #1 深色）：
+     *    `background: var(--cs-ink)` → `CanvasText` = **白**，
+     *    于是药丸成了一块白底；而文字色也指向系统前景色，
+     *    文字与药丸底实测**对比度只有 1.67 : 1**，整个选中项读不出来。
+     *    同一屏里未选中项与标题都是 15.13 : 1，所以这不是主题的问题，
+     *    是**满铺底 + 同源前景色**这个组合撞了。
+     *
+     *  修法：底退回 `Canvas`（与页面同色，即"不强调"），
+     *  强调交给**描边**——描边是几何不是色块，系统不会把它连坐。
+     *  不需要 `forced-color-adjust: none`：这里用的已经是系统色本身，
+     *  让浏览器照常接管即可。
+     */
+    .cs-pill {
+      background: Canvas;
+      border: 1px solid CanvasText;
+    }
+
     .cs-seg-btn.on {
+      color: CanvasText;
       text-decoration: underline;
       text-decoration-thickness: 2px;
       text-underline-offset: 3px;

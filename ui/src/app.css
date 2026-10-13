@@ -273,6 +273,11 @@ button {
     --cs-ink-2: CanvasText;
     --cs-pencil: CanvasText;
     --cs-pencil-2: CanvasText;
+    /* ⚠ `--cs-pencil-red` 原先也不在接管列表里（2026-10-14 实测才补上）。
+     * 它是档位那枚红勾的颜色。HC 的词汇表里没有红，而 `LinkText` 是
+     * 「有意义的那一个」——在本机「高对比度 #1」下它是青色，
+     * 正好与 `CanvasText` 的文字区分得开，勾不会和字糊成一团。 */
+    --cs-pencil-red: LinkText;
     --cs-mark: GrayText;
     --cs-rule: GrayText;
     --cs-live: LinkText;
@@ -291,5 +296,16 @@ button {
      * **「暗一档」在那里不存在**，把这条意图老实丢掉。 */
     --cs-live-dim: LinkText;
     --cs-live-wash: Canvas;
+    /* ⚠ `--cs-surface-*` **原先不在这个列表里**（2026-10-14 实测才补上）。
+     * 它们被 `SegSlider` 用来画选中项的文字与轨道，而这段媒体查询只接管的
+     * 是 `--cs-paper*`——两套 token 名字相似、实际是两支。
+     *
+     * 不接管的后果不是「颜色没换」，是**选中项变成白底白字**：
+     * `--cs-ink` → `CanvasText`（深色对比度主题下是白）把药丸底刷成白，
+     * 而 `.cs-seg-btn.on` 的文字色 `--cs-surface-raised` 仍是纯白。
+     * 实测（2026-10-14，高对比度 #1）文字与药丸底**对比度 1.67 : 1**，
+     * 完全读不出来。 */
+    --cs-surface-raised: CanvasText;
+    --cs-surface-sunken: Canvas;
   }
 }
