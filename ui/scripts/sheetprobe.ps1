@@ -137,6 +137,49 @@ try {
   Write-Output '    alpha 门槛从 250 降到 1，五个列的读数只在 5.5~11 之间动，够不到 17.5。'
   Write-Output '  → padding-top: 40px 仍比实测撕口深，**布局是安全的**，'
   Write-Output '    但那句「17.5px 已含在 SVG 里」是不实描述，已订正为实测值。'
+
+  # ── 角部：窗口键所在的那一小块必须单独量 ──────────────────────
+  # ⚠ 为什么单独一段：上面那五个采样点在 y = 画幅的 15%~85%，
+  #   **够不到右上角**（纸高 560 CSS px 的前 7%）。而三颗窗口键恰好停在
+  #   y = 10~30 CSS px。2026-10-13 就是因为只看了那五个点，
+  #   得出「按键没出格」的结论，实际上那一段顶边内缩最深到 20 px 以上。
+  # ⚠ 门槛沿用上面 `Measure-Tear` 的 A >= 250，别换成 128。
+  #
+  # ⚠⚠ **两套坐标空间，别混**：
+  #   上面几段用的是 `$sx`（348 宽的 SVG 固有空间）；
+  #   下面这段用 `$sxP` / `$syP`（**面板 CSS 空间**，380 × 560）。
+  #   两者差 1.09 倍——因为 `.cs-sheet` 把这张 SVG 按 `100% 100%` 拉到了
+  #   380 × 560，**撕口也一起被放大了**。CSS 布局关心的是后者，
+  #   所以 PaperPanel.svelte 里引的必须是这一段的数。
+  Write-Output ''
+  Write-Output '── 右上角（窗口键所在，面板 CSS 空间 380 x 560）──────'
+  $frameW = 380.0
+  $frameH = 560.0
+  $sxP = $frameW / $bmp.Width
+  $syP = $frameH / $bmp.Height
+  Write-Output ("  面板缩放     : x {0:N4}   y {1:N4}（SVG 固有 {2} x {3} 被拉伸 {4:N2} 倍）" -f `
+    $sxP, $syP, $dispW, $dispH, ($frameW / $dispW))
+  Write-Output ''
+  Write-Output '  右边内缩逐行（按键横跨 x = 308~358 CSS px）：'
+  for ($cssY = 0; $cssY -le 44; $cssY += 4) {
+    $imgY = [int]($cssY / $syP)
+    if ($imgY -ge $bmp.Height) { break }
+    $x = $bmp.Width - 1
+    while ($x -ge 0 -and $bmp.GetPixel($x, $imgY).A -lt 250) { $x-- }
+    Write-Output ("    cssY = {0,3}  ->  右边内缩 {1,5:N1} CSS px" -f $cssY, (($bmp.Width - 1 - $x) * $sxP))
+  }
+  Write-Output ''
+  Write-Output '  顶边内缩逐列（按键带）：'
+  foreach ($cssX in @(300, 308, 316, 324, 332, 340, 348, 356, 364, 372)) {
+    $imgX = [int]($cssX / $sxP)
+    if ($imgX -ge $bmp.Width) { break }
+    $y = 0
+    while ($y -lt $bmp.Height -and $bmp.GetPixel($imgX, $y).A -lt 250) { $y++ }
+    Write-Output ("    cssX = {0,3}  ->  顶边内缩 {1,5:N1} CSS px" -f $cssX, ($y * $syP))
+  }
+  Write-Output ''
+  Write-Output '  ⚠ 右上方那一带顶边内缩最深，窗口键原先的字形顶边 y=10 骑在上面。'
+  Write-Output '    修法见 PaperPanel.svelte `.cs-topbar` 的 `align-items: flex-end`。'
 } finally { $bmp.Dispose() }
 
 Write-Output ''
