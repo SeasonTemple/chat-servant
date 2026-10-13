@@ -52,9 +52,7 @@
     TICK_VIEW,
   } from '$lib/marks';
   import { markShape } from '$lib/mark-shape.svelte';
-  import WinCtl from '$lib/WinCtl.svelte';
   import PanelSettings from '$lib/PanelSettings.svelte';
-  import { Settings } from '@lucide/svelte/icons';
   import type { ReadoutPayload, Message, Candidate } from '$lib/types';
   import { IS_DEMO, HAS_TAURI } from '$lib/runtime';
   import { invoke } from '@tauri-apps/api/core';
@@ -74,7 +72,15 @@
    * 要回退就把默认值改回 `base`。
    */
   type MarkSize = 'base' | 'mid' | 'big';
-  let markSize = $state<MarkSize>('big');
+  /**
+   *  ⚠ 默认 `base`（2026-10-13 改）。原先是 `big`，那是**顶部独占一行时**
+   *  量出来的：槽有 53px 高，取景框 72×58 放得下。
+   *
+   *  档位收进归属行后取景框只有 24×16，`big` 会**被静默裁掉**——
+   *  表现是「选了大档但看起来没变大」，那是量具自己骗自己。
+   *  要用 `big` 得先把这个框重新量一遍，不是改个默认值了事。
+   */
+  let markSize = $state<MarkSize>('base');
 
   /** 档位从低到高。Rust 侧持有档位值，这里只按顺序摆位置。 */
   const TIERS = [
@@ -183,9 +189,16 @@
     }
     if (shapeProbe === 'tick' || shapeProbe === 'ring') {
       void markShape.set(shapeProbe);
-    } else if (markSize !== 'big') {
-      // 只给了幅面没给形状时，至少保证渲染的是「圈」，否则会以为探针没生效
-      void markShape.set('ring');
+    } else if (sizeProbe !== null && sizes.includes(sizeProbe as MarkSize)) {
+      /* 只给了幅面没给形状时，至少保证渲染的是「勾」，否则会以为探针没生效。
+
+       * ⚠ 判据是「**URL 上给了 `size=`**」，**不是** `markSize !== 'big'`。
+       *   那个旧判据把「幅面当前是不是 big」当成了「用户有没有要求探针」——
+       *   而 `markSize` 的默认值一改（这一版从 big 回到 base），它就恒为真，
+       *   于是**每一次正常进入面板都会硬写一次形状**，把 Rust 里存的
+       *   用户偏好覆盖掉。症状是：明明在设置里选了圈或勾，进面板就被改回。
+       *   探针口只能由探针口触发，不能由内部默认值触发。 */
+      void markShape.set('tick');
     } else {
       void markShape.load();
     }
@@ -376,12 +389,23 @@
   <div class="cs-topbar" data-tauri-drag-region>
     <div class="cs-cpanel" data-no-drag>
       <!--
-        齿轮。**用 `Settings`（齿轮），不是 `Settings2`**——后者是两根
-        调节滑块，它紧挨着档位区，一个滑块记号会被读成「档位调节」。
-        旧面板在这里踩过一次（2026-10-11 实机截图），注释照搬过来。
+        ⚠ **记号是自己画的，不是图标库里的。**
+
+        2026-10-13 实测踩到：这一版原先直接复用旧面板的 `WinCtl` + lucide 的
+        `Settings`，理由是「零改动复用」。那是错的——旧面板的记号语言
+        （lucide Web 默认图标）正是设计规范判为废弃的那一套，搬进纸面就成了
+        「贴在手撕纸上的标签」。
+
+        **三项同时对齐**，少一项就还是不对：
+          · 外接尺寸 × 端点跨度 11.2 / 减号长 10.4 / 齿轮外径 13
+          · 描边粗细 同为 1.55px ——⚠ `stroke-width` 是 **viewBox 单位**，
+            SVG 一放大描边就同比变粗。早先按「把 × 的框调大来对齐外接尺寸」
+            修过一轮，结果 × 的描边比齿轮粗 36%：外接对齐了，描边没对齐。
+          · 笔性     全部套 `url(#pencil)`，与正文、与档位标记同一支笔
+        齿轮第一版偏散、读起来像太阳，把圆环从 r4 加到 4.6、齿尖收到 6.2 才压住。
       -->
       <button
-        class="cs-gear"
+        class="cs-glyph"
         class:on={settingsOpen}
         type="button"
         data-no-drag
@@ -389,66 +413,89 @@
         title="设置"
         aria-label="设置"
       >
-        <Settings size={15} strokeWidth={1.75} />
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 20 20"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.55"
+          stroke-linecap="round"
+          aria-hidden="true"
+          filter="url(#pencil)"
+        >
+          <circle cx="10" cy="10" r="4.6" />
+          <path d="M10 4.6V2.2" /><path d="M10 15.4v2.4" />
+          <path d="M4.6 10H2.2" /><path d="M15.4 10h2.4" />
+          <path d="m6.25 6.25-1.7-1.7" /><path d="m13.75 13.75 1.7 1.7" />
+          <path d="m13.75 6.25 1.7-1.7" /><path d="m6.25 13.75-1.7 1.7" />
+        </svg>
       </button>
-      <WinCtl
-        {closeBehavior}
-        onquit={() => void invoke('quit_app').catch(() => {})}
-        onhide={() => void invoke('hide_panel').catch(() => {})}
-      />
+
+      {#if closeBehavior === 'tray'}
+        <button
+          class="cs-glyph"
+          type="button"
+          data-no-drag
+          title="收进托盘 · 程序继续运行"
+          aria-label="收进托盘"
+          onclick={() => void invoke('hide_panel').catch(() => {})}
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 20 20"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.55"
+            stroke-linecap="round"
+            aria-hidden="true"
+            filter="url(#pencil)"
+          >
+            <path d="M4.8 10.3c3.4-.7 6.9-.8 10.4-.2" />
+          </svg>
+        </button>
+      {/if}
+
+      <button
+        class="cs-glyph cs-glyph-quit"
+        type="button"
+        data-no-drag
+        title={closeBehavior === 'tray' ? '退出 · 停了就是停了' : '退出'}
+        aria-label="退出"
+        onclick={() => void invoke('quit_app').catch(() => {})}
+      >
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 20 20"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.55"
+          stroke-linecap="round"
+          aria-hidden="true"
+          filter="url(#pencil)"
+        >
+          <path d="M4.4 4.6c3.3 3.6 8 8.2 11.2 11.1" />
+          <path d="M15.6 4.4C12.2 8.1 7.6 12.4 4.5 15.5" />
+        </svg>
+      </button>
     </div>
   </div>
 
   <!--
-    档位区。两档各占一半，勾只落在当前那一道上，
-    其余用 CSS `opacity: 0` 控显隐而不是移动元素——
-    升档/回落时勾是「淡出 + 淡入」而不是「跳过去」。
+    ⚠ **档位不在顶部**（2026-10-13 用户否决）。
+    这一行原先是档位区，现在让给正文区，档位降级到归属行右侧。
+
+    原先它独占一整行：撕口 40px + 槽 53px + 下边距 28px ≈ **121px，占面板
+    21%**，而正文只有 4 行。更糟的是红铅笔勾**盖在标签上**，「只填入」三个字
+    被笔画压成一团。
+
+    那是把**低频设置放进了黄金位**——档位一年未必改一次，却让纸的上半部分
+    一直在喊「看这里」。现在它缩到两枚小记号，槽高 53 → 16px，
+    标记取景框 60×40 → 24×16（所以默认幅面回到 `base`：`big` 那套偏移是按
+    60×40 算的，塞进 24px 的框里只会糊成一团）。
   -->
-  <div class="cs-tier" data-no-drag role="radiogroup" aria-label="发送档位">
-    {#each TIERS as t, i (t.key)}
-      <button
-        type="button"
-        class="cs-slot"
-        data-idx={i}
-        aria-checked={tier === t.key}
-        role="radio"
-        tabindex={tier === t.key ? 0 : -1}
-        onclick={() => void chooseTier(t.key)}
-      >
-        <span class="cs-slot-mark">
-          <!--
-            参考纸上没有线：三行字，谁被勾了谁就是当前档。
-            所以这里**不画占位的短记号**——空着就是空着，
-            勾的位置本身就是编码。早先加了一道中性短记号，
-            结果勾的底角垂到标签下面 11px，读着像戳进文字。
-          -->
-          <span class="cs-markbox">
-            <svg
-              class="cs-tick"
-              data-shape={markShape.current}
-              data-ring={markSize}
-              viewBox="0 0 {ACTIVE_VIEW.w} {ACTIVE_VIEW.h}"
-              width={ACTIVE_VIEW.w}
-              height={ACTIVE_VIEW.h}
-              aria-hidden="true"
-              filter="url(#pencil)"
-            >
-              <!--
-                五层嵌套，不是单层平涂。单层不管给多少 opacity，边缘都是
-                一刀切的硬边，所以它读成矢量而不是红铅笔——材质台 P1 与 P5
-                同框实测：落在中间密度带的像素 23.0% → 70.5%，总墨量反而少
-                17%。密度从芯往外逐级下降，才有「芯重边虚」。
-              -->
-              {#each MARK_LAYERS as layer (layer.d)}
-                <path d={layer.d} fill-opacity={layer.o} />
-              {/each}
-            </svg>
-          </span>
-          <span class="cs-slot-name">{t.label}</span>
-        </span>
-      </button>
-    {/each}
-  </div>
 
   <!--
     正文区。四行固定骨架（§4.2b）：档位 → 归属 → 正文 → 动作。
@@ -480,17 +527,55 @@
     <PanelSettings bind:tier bind:closeBehavior />
   {:else}
     <div class="cs-body-col">
-      <!--
-      归属行。回答「这句话是替谁写的」。
-      ⚠ 证据**必须显示**：这是机器认出来的对话，不是用户自己翻的。
-      认错了还照发，比不写更糟。
-    -->
-      <p class="cs-where">
-        <span class="cs-peer">{peer || '—'}</span>
-        {#if lastFromThem}
-          <span class="cs-where-quote">{lastFromThem.text}</span>
-        {/if}
-      </p>
+      <!-- 归属行。左边回答「这句话是替谁写的」，右边是档位。
+           ⚠ 证据**必须显示**：这是机器认出来的对话，不是用户自己翻的。
+           认错了还照发，比不写更糟。 -->
+      <div class="cs-where-row">
+        <p class="cs-where">
+          <span class="cs-peer">{peer || '—'}</span>
+          {#if lastFromThem}
+            <span class="cs-where-quote">{lastFromThem.text}</span>
+          {/if}
+        </p>
+
+        <div class="cs-pick" data-no-drag role="radiogroup" aria-label="发送档位">
+          {#each TIERS as t, i (t.key)}
+            <button
+              type="button"
+              class="cs-pick-slot"
+              data-idx={i}
+              aria-checked={tier === t.key}
+              role="radio"
+              tabindex={tier === t.key ? 0 : -1}
+              onclick={() => void chooseTier(t.key)}
+            >
+              <span class="cs-markbox">
+                <svg
+                  class="cs-tick"
+                  data-shape={markShape.current}
+                  data-ring={markSize}
+                  viewBox="0 0 {ACTIVE_VIEW.w} {ACTIVE_VIEW.h}"
+                  width={ACTIVE_VIEW.w}
+                  height={ACTIVE_VIEW.h}
+                  aria-hidden="true"
+                  filter="url(#pencil)"
+                >
+                  <!--
+                    五层嵌套，不是单层平涂。单层不管给多少 opacity，边缘都是
+                    一刀切的硬边，所以它读成矢量而不是红铅笔——材质台 P1 与 P5
+                    同框实测：落在中间密度带的像素 23.0% → 70.5%，总墨量反而少
+                    17%。密度从芯往外逐级下降，才有「芯重边虚」。
+                  -->
+                  {#each MARK_LAYERS as layer (layer.d)}
+                    <path d={layer.d} fill-opacity={layer.o} />
+                  {/each}
+                </svg>
+              </span>
+              <span class="cs-pick-name">{t.label}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
 
       <!--
       正文行。**只有墨色**：`--cs-mark` 在真实纸底上只有 3.00 : 1，掉出 AA，
@@ -627,11 +712,12 @@
     flex: none;
   }
 
-  /*  齿轮与 `WinCtl` 三颗**同形**：尺寸、圆角、悬停底色逐项照抄
-   *  `.cs-win`。面板里于是只有一套记号的形态——
-   *  这正是旧面板那条纪律（「两颗键不能管同一件事」）的另一半：
-   *  一颗键不能有两种形状。 */
-  .cs-gear {
+  /*  三颗记号（设置 / 收起 / 退出）**同形**：同样的盘子、圆角、悬停底色。
+   *  面板里于是只有一套记号的形态——旧面板那条纪律（「两颗键不能管同一件
+   *  事」）的另一半是：一颗键不能有两种形状。
+   *  ⚠ 记号本身已换成手绘 path，盘子尺寸照抄 `WinCtl` 的 28×32 是为了让
+   *    点击区与旧面板一致，不是为了「复用组件」。 */
+  .cs-glyph {
     display: grid;
     place-items: center;
     width: 28px;
@@ -643,38 +729,58 @@
       color var(--cs-dur-fast) var(--cs-ease);
   }
 
-  .cs-gear:hover {
+  .cs-glyph:hover {
     background: rgb(20 26 31 / 7%);
     color: var(--cs-ink);
   }
 
+  /*  退出的红**只在悬停时出现**。
+   *
+   *  发送是「字已经出去了」，退出是「字不会再出去了」——两件都不可逆，
+   *  同一个红。看到红就是「有东西出去过，或者要出去」。
+   *
+   *  静止时是墨色：一个替你说话的程序，它的退出键不该一直在喊。 */
+  .cs-glyph-quit:hover {
+    background: var(--cs-live);
+    color: #fff;
+  }
+
   /*  开着的时候是「关」而不是「再开一次」。
-   *  旧面板在设置态把这颗换成一颗 `←`；这里保留齿轮加高亮，
-   *  因为纸面板**没有头部可退**——退出设置靠再点一次齿轮。 */
-  .cs-gear.on {
+   *  旧面板在设置态把这颗换成一颗 `←`；这里保留记号加高亮，
+   *  因为纸面板**没有头部可退**——退出设置靠再点一次。 */
+  .cs-glyph.on {
     background: rgb(20 26 31 / 12%);
     color: var(--cs-ink);
   }
 
-  /* ── 档位区 ─────────────────────────────────────────────── */
-  .cs-tier {
-    flex: none;
+  /* ── 档位（不在顶部：与归属行同行的两枚小记号）─────────────
+   *
+   *  槽高 53 → 16px，取景框 60×40 → 24×16。
+   *  ⚠ 下面那套「按笔心反算 top / margin-left」的公式**整条作废**了：
+   *    它的前提是标记**盖在字上**，而现在标记在字的**左边**。
+   *    公式里那行「字心y = markbox 40 + 标签 2 + 字号 11 ÷ 2」在
+   *    新布局里根本不存在——留着它就是在给一个没有对象的问题写答案。
+   *    摆放方式改成：标记自带取景框，直接顶格对齐。
+   */
+  .cs-where-row {
     display: flex;
-    gap: 0;
-    /*  ⚠ 必须留：标记**盖在标签上**（§10 盖章式），所以笔的下垂段必然
-     *  伸到槽底之外。按 CSS 几何推：槽高 = markbox 40 + margin 2 + 11px 标签
-     *  = 53，而最大的标记（勾 big，取景框 72×58，top 17）底边在 17+58 = 75
-     *  ——伸到槽底**以下 22px**。早先这里没间距，归属行直接被压中，
-     *  实测截图（380×560 取景框）里红笔横穿「示例联系人」。
-     *  面板下半还有大片空白，28px 代价很低。
-     */
-    margin-bottom: 28px;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
   }
 
-  .cs-slot {
-    flex: 1;
+  .cs-pick {
+    flex: none;
     display: flex;
-    justify-content: center;
+    align-items: center;
+    gap: 12px;
+    padding-top: 1px;
+  }
+
+  .cs-pick-slot {
+    display: flex;
+    align-items: center;
+    gap: 3px;
     /* 按钮化之后默认的 UA 样式必须全部抹掉，否则会多出一圈边框，
        而边框在撕边纸上等于第二个边界。 */
     appearance: none;
@@ -687,97 +793,56 @@
     cursor: pointer;
   }
 
-  .cs-slot-mark {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-  }
-
-  /*  取景框只负责给标记一个固定高度，好让三行字对齐。它**不画任何东西**。 */
+  /*  取景框只负责给标记一个固定高度，好让两行字对齐。它**不画任何东西**。
+   *  ⚠ 24×16 装不下 `big` 幅面（取景框 72×58），会被裁成「放大了但没变大」，
+   *    所以 `markSize` 的默认值在这一版回到了 `base`。 */
   .cs-markbox {
     position: relative;
     display: block;
-    width: 60px;
-    height: 40px;
+    width: 24px;
+    height: 16px;
   }
 
-  /*  标记。红铅笔，蜡质，`fill-opacity: 0.86` 让纸的颗粒透上来。
-   *  ⚠ 实心不透明会读成印刷或马克笔，照片里没有一根是那样。
-   *
-   *  **盖章式：笔盖在字上，不是悬在字上方。** 用户 2026-10-13 用手绘参考
-   *  点破了这一点——标记靠**交叠**表达「这一档被批了」，躲开字反而变成
-   *  一个跟内容无关的浮标。旧版 `top: 2px` 是「图标式」排布。
-   *
-   *  ⚠ 盖住字**不会**读成删除线：删除线是一条横线穿过字中部，圈是包围，
-   *  拓扑不同。2026-10-13 我把「标记与字交叠」当成缺陷判掉过，那是拿形状
-   *  交叠去推语义的错判。
-   *
-   *  摆放偏移**全部按笔心反算**，不靠观感试：
-   *      top         = 字心y - 1.1 - 笔心y
-   *      margin-left = -笔心x
-   *  字心y = markbox 40 + 标签 margin 2 + 字号 11 ÷ 2 = 47.5；-1.1 是现状圈
-   *  对齐字心时本来就带着的那点偏上。笔心 = `marks.js` 里 path 的 bbox 中心。
-   *
-   *  ⚠ 这套公式替换掉过一个**试出来的**值：勾原来是 `margin-left:-21px`，
-   *    注释写着「要右移 9px 才盖得住三个字」，但公式算出该是 -27——
-   *    旧值把笔心推到了槽心**右侧 6px**。标一个东西却没对准它。
-   *    6× 真像素上看得见：右上那截挑脚伸出「入」外面。
-   *
-   *  交叉验证：公式代回状态圈算出 (-30.7, 30.0)，与已上线的 -30 / 30 吻合。
-   */
-  .cs-tick {
-    position: absolute;
-    left: 50%;
-    top: 26px;
-    margin-left: -27px;
-    opacity: 0;
-    transition: opacity var(--cs-dur) var(--cs-ease);
-  }
-
-  .cs-tick[data-shape='ring'] {
-    top: 30px;
-    margin-left: -31px;
-  }
-
-  /*  放大档换了取景框，笔心坐标随之改变，偏移**重算**而不是在旧值上加减。
-   *  实测（解析 marks.js 的 path 坐标，非估算）：mid 笔心 (27.70, 17.50)、
-   *  big 笔心 (27.75, 17.50)——两档同框同高，偏移相同。代回公式
-   *  top = 46.4 - 笔心y = 29，margin-left = -笔心x = -28。 */
-  .cs-tick[data-shape='tick'][data-ring='mid'],
-  .cs-tick[data-shape='tick'][data-ring='big'] {
-    top: 29px;
-    margin-left: -28px;
-  }
-
-  .cs-tick[data-shape='ring'][data-ring='big'] {
-    top: 21px;
-    margin-left: -43px;
-  }
-
-  /*  只有 fill，不设 fill-opacity——每层的透明度是**笔迹数据的一部分**，
-    由生成器算出来。CSS 一旦兜底就会把嵌套的五级全覆盖掉，
-    羽化立刻塌回单层平涂。 */
+  /*  标记。红铅笔，蜡质，每层的透明度是**笔迹数据的一部分**，
+   *  由 `$lib/marks` 的生成器算出来。CSS 一旦兜底就会把嵌套的五级
+   *  全部覆盖掉，羽化立刻塌回单层平涂——材质台 P1 与 P5 同框实测：
+   *  落在中间密度带的像素 23.0% → 70.5%，总墨量反而少 17%。
+   *  密度从芯往外逐级下降，才有「芯重边虚」。 */
   .cs-tick path {
     fill: var(--cs-pencil-red);
   }
 
-  .cs-slot-name {
-    margin-top: 2px;
+  .cs-tick {
+    position: absolute;
+    left: 0;
+    top: 0;
+    /* ⚠ 必须由 CSS 定尺寸，不能用 SVG 的 `width`/`height` 属性。
+     *  那两个属性写的是 `$lib/marks` 的取景框尺寸（base 档 60×40），
+     *  放进 24×16 的框里会**整块溢出**——表现是标记跑到框的左下角、
+     *  压住相邻文字，而画布上看不出任何东西被裁掉。
+     *  `preserveAspectRatio` 默认 `xMidYMid meet`，交给它等比缩放。 */
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    transition: opacity var(--cs-dur) var(--cs-ease);
+  }
+
+  .cs-pick-name {
     font-size: 11px;
     line-height: 1;
     letter-spacing: 0.02em;
     color: var(--cs-pencil);
-    /* 未选中的两档退半档，让勾是唯一的高对比处。
+    /* 未选中的那档退半档，让标记是唯一的高对比处。
      * 但 0.62 混的是透明度，落在纸上的实际对比度仍要够 ——
      * `--cs-pencil` 是 5.10 : 1，半透明后仍高于 AA 正文 4.5。 */
     opacity: 0.62;
     transition: opacity var(--cs-dur) var(--cs-ease);
   }
 
-  .cs-slot[aria-checked='true'] .cs-tick {
+  .cs-pick-slot[aria-checked='true'] .cs-tick {
     opacity: 1;
   }
-  .cs-slot[aria-checked='true'] .cs-slot-name {
+  .cs-pick-slot[aria-checked='true'] .cs-pick-name {
     opacity: 1;
   }
 
@@ -860,11 +925,11 @@
 
   /*  聚焦环。撕边纸上不能靠描边，得用一圈**纸色的负空间**把
    *  底下的笔画顶开，否则键盘用户看不到焦点在哪。 */
-  .cs-slot:focus-visible {
+  .cs-pick-slot:focus-visible {
     outline: none;
   }
-  .cs-slot:focus-visible .cs-slot-mark {
+  .cs-pick-slot:focus-visible .cs-markbox {
     outline: 2px solid var(--cs-tier-ink);
-    outline-offset: 3px;
+    outline-offset: 2px;
   }
 </style>
