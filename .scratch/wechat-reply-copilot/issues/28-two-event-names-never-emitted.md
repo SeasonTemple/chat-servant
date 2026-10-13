@@ -13,10 +13,27 @@
 | 事件名 | Rust 侧 emit | 前端 listen | 结论 |
 |---|---|---|---|
 | `readout` | ✅ `commands.rs` 观察循环 | ✅ | 活的 |
-| `armed` | ✅ `dispatch` 装填后 | ✅ | 活的 |
-| `menu:settings` / `menu:relock` | ✅ `main.rs` 托盘 | ✅ | 活的 |
+| `armed` | ✅ `dispatch` 装填后 | ❌ **没有** | **发了没人听**（见下） |
+| `menu:settings` | ✅ `main.rs` 托盘 | ✅ | 活的 |
+| `menu:relock` | ✅ `main.rs` 托盘 | ❌ **本表当时写「✅」是错的** | **发了没人听**（见下） |
 | **`debug_pane`** | ❌ **一处都没有** | `routes/debug/+page.svelte:67` | **死监听** |
 | **`telemetry`** | ❌ **一处都没有** | `(panel)/+layout.svelte`、`routes/debug/` | **死监听** |
+
+⚠ **2026-10-14 更正**：本表原先把 `menu:relock` 记成「✅ 活的」。
+**那是假的**——删旧面板（`5031ab3`）时连它的监听一起没了，
+`rg 'menu:relock|relock_session' ui/src` **零命中**：托盘那个菜单项
+点了什么都不会发生。这张表里「前端 listen」那一列当时是照着
+**应该有**填的，不是照着**实际有**填的。
+
+### 两个「发了但没人听」（2026-10-14 新发现，与上面两个方向相反）
+
+| 事件名 | 谁该听 | 为什么没有 |
+|---|---|---|
+| `armed` | 发送那一排按钮（**动作行**） | 动作行至今未做，见 `docs/前端设计进度.md` §3 |
+| `menu:relock` | 面板（收到后调 `relock_session`） | 随旧面板一起删了，一直没补 |
+
+⇒ 两者都加了 `events::KNOWN_UNLISTENED` 显式豁免，并把原因写在表旁边。
+`armed` 那一条**豁免是临时的**：动作行做完就删，删了测试立刻红。
 
 后果，两条：
 

@@ -371,6 +371,43 @@
       } catch (e) {
         console.error('连不上托盘的「打开设置」：', e);
       }
+
+      /*
+       * 托盘「重新锁定当前会话」。
+       *
+       * ⚠⚠ **这条旧面板在听，删旧面板时连它一起没了**（`5031ab3`），
+       *   而新的纸面板一直没补上——于是托盘那个菜单项点了**什么都不会发生**：
+       *   Rust 侧 `app.emit(MENU_RELOCK, ())` 发出去没人收，
+       *   `relock_session` 命令前端一次都没调用过
+       *   （`rg 'menu:relock|relock_session' ui/src` 零命中）。
+       *   票 28 的表把它记成「活的」，那条记录是**假的**。
+       *
+       *   它要紧的原因是 `commands.rs` 那句：用户在错的会话上启动之后，
+       *   「这条命令是**唯一的修正手段**」——硬约束第 1 条（只对锁定
+       *   会话动手）的补救入口，整个产品的兜底。
+       *
+       * ⚠ 与 `menu:settings` 同样的半截功能症状：**不报错、不弹窗、
+       *   菜单点得动**。所以新加的 `every_emitted_event_has_a_frontend_listener`
+       *   会盯住这一条——补上了监听就别想再悄悄删回去。
+       */
+      try {
+        const unRelock = await listen('menu:relock', () => {
+          // 失败要留痕：Rust 那句是「观察循环还没起来」，用户点了
+          // 却什么都没发生时，那是唯一能说的话。
+          invoke('relock_session').catch((e) => console.error('重新锁定失败：', e));
+        });
+        if (cancelled) {
+          unRelock();
+          return;
+        }
+        const prev = dispose;
+        dispose = () => {
+          unRelock();
+          prev?.();
+        };
+      } catch (e) {
+        console.error('连不上托盘的「重新锁定」：', e);
+      }
     })();
 
     return () => {
