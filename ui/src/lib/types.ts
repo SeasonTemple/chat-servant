@@ -3,8 +3,14 @@
 // **全部镜像 Rust 侧的 serde 类型**。Rust 是唯一事实来源，这里不允许
 // 「前端自己算一个大概」——那会让两边的判据悄悄分叉。
 
-/** 发送档位。与 `chatservant_core::dispatch::Dispatch` 一一对应。 */
-export type Tier = 'Manual' | 'Confirm' | 'Auto';
+/**
+ * 发送档位。与 `chatservant_core::dispatch::Dispatch` 一一对应。
+ *
+ * ⚠ **只有两档。** 2026-10-13 取消 `Auto`（填入即发），
+ * 见 `docs/设计规范.md` §10 第 3b 条与根 `AGENTS.md` 硬约束第 5 条。
+ * 加第三个值之前先读那两处——它动的是安全模型，不是排版。
+ */
+export type Tier = 'Manual' | 'Confirm';
 
 /** 一次投递的回执。**不是布尔值**——`PossiblySent` 禁止自动重放。 */
 export type Outcome = 'NotSent' | 'Sent' | 'PossiblySent' | 'Failed' | 'TimedOut';

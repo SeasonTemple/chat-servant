@@ -67,7 +67,14 @@ pub struct IoSpec {
 
 #[derive(Debug, thiserror::Error)]
 pub enum PpError {
-    #[error("模型目录不存在或缺文件：{0}\n     下载办法见 docs/HANDOFF.md §4.2")]
+    // ⚠ 这条消息是**用户看得见**的（会经 `reason` 显示在面板上），
+    // 所以它必须自足：给出目录与环境变量，而不是指向某篇文档的某一节——
+    // 文档会被重写，而引用会静默失效。
+    #[error(
+        "模型目录不存在或缺文件：{0}\n     \
+         把权重放到该目录，或用 CHATSERVANT_OCR_MODELS 指定它；\
+         没有权重时 OCR 会自动退回 Windows.Media.Ocr，功能不受影响"
+    )]
     MissingModels(String),
 
     #[error("加载 {name} 失败：{msg}")]

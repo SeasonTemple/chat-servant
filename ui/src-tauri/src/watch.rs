@@ -41,6 +41,8 @@ use chatservant_perceive::{Decision, Message, PaneWatcher, Speaker};
 use chatservant_reason::{Provider, Reasoner, TurnContext};
 use serde::Serialize;
 
+use crate::contract::Phase;
+
 /// 循环的节奏。**慢一点没关系**——静默期本来就不该做事，
 /// 而画面变化通常伴随人的操作，1 秒的延迟人感知不到。
 pub const TICK: Duration = Duration::from_millis(1000);
@@ -140,8 +142,30 @@ pub struct Readout {
     /// 「在等〈新会话〉的新消息」，读起来就是程序在盯着那个新会话。
     /// 那正是硬约束第 1 条要求「看得见」的东西。
     pub gate_open: bool,
-    pub messages: Vec<Message>,
-    pub candidates: Vec<DraftCandidate>,
+    /// **面板当前处于哪一阶段。**
+    ///
+    /// ## 为什么它必须是 `Readout` 的字段而不是界面的推断
+    ///
+    /// 2026-10-12 实测（`.scratch/…/21-readout-phase-never-sent.md`）：
+    /// 界面 `apply()` 写的是 `candidates = r.phase === 'drafted' ? r.candidates : []`，
+    /// 而当时的 `Readout` **根本没有 `phase` 字段**，`contract.rs` 里那个
+    /// 带 `#[serde(tag = "phase")]` 的 `Phase` 只在它自己的测试里被构造过。
+    /// 于是 `r.phase` 恒 `undefined` ⇒ `candidates` 恒空 ⇒
+    /// **起草中 / 已起草 / 出错三态在真机上永远不可达**，
+    /// 而 `?demo` 因为夹具手写了 `phase`，八态照样渲染得出来——
+    /// 演示页是绿的、真机是断的，两边看着一样。
+    ///
+    /// ## 为什么是 `flatten` 而不是各字段平铺
+    ///
+    /// 界面的类型是 `Phase & Extra`（`+page.svelte` 的 `FullReadout`），
+    /// 也就是**判别字段与消息、候选在同一层**。`flatten` 出来的 JSON 正好是
+    /// 那个形状：`{"phase":"drafted","messages":[…],"candidates":[…],…}`。
+    ///
+    /// ⚠ 顺带消掉了一类隐患：以前 `messages` / `candidates` 是 `Readout` 的
+    /// 独立字段、`phase` 是另一个来源，两份数据要靠人去保证一致。
+    /// 现在它们同属一个枚举变体，**不一致在类型上就构造不出来**。
+    #[serde(flatten)]
+    pub phase: Phase,
     /// 判断摘要 + 降级说明。
     pub reason: String,
     /// 这一轮调了几次模型。静默期必须是 0。
@@ -158,12 +182,32 @@ pub struct Readout {
     pub ticks: u64,
     /// 累计 OCR 调用次数。
     pub ocr_calls: u32,
+}
+
+impl Readout {
+    /// 已读到的消息。**四个阶段都保留**——出错时也不该把对话清空。
+    pub fn messages(&self) -> &[Message] {
+        self.phase.messages()
+    }
+
+    /// 候选。**只有 `Drafted` 非空**，判据就是判别字段本身。
+    pub fn candidates(&self) -> &[DraftCandidate] {
+        self.phase.candidates()
+    }
+
     /// 最近一次出错在哪一段。**空 = 没出错。**
-    pub error: Option<String>,
+    pub fn error(&self) -> Option<&str> {
+        self.phase.error()
+    }
 }
 
 /// 一条候选（给前端渲染用）。
-#[derive(Debug, Clone, Serialize)]
+///
+/// ⚠ 派生 `PartialEq` 是 [`crate::contract::Phase`] 需要它的连带结果：
+/// `Phase` 派生了 `PartialEq`，而 `Drafted` 变体带着这个类型。
+/// 这个孤儿模块直到 2026-10-13 才第一次进编译（`main.rs` 里补 `mod contract;`），
+/// 于是这处缺失**潜伏了整个文件的存在期**而没人看见。
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DraftCandidate {
     pub id: String,
     pub text: String,
@@ -534,8 +578,11 @@ impl TierCell {
     pub fn get(&self) -> chatservant_core::dispatch::Dispatch {
         match self.0.load(Ordering::Relaxed) {
             1 => chatservant_core::dispatch::Dispatch::Confirm,
-            2 => chatservant_core::dispatch::Dispatch::Auto,
-            // **未知一律当 Manual。** 解析失败就升档是最危险的默认值。
+            // ⚠ **未知一律当 Manual。** 解析失败就升档是最危险的默认值。
+            //
+            // ⚠ 编码 `2` 曾经是 `Auto`，2026-10-13 该档整档取消。
+            //   它落进 `_` 分支 ⇒ 旧配置里的 2 会被读成 **Manual（最低档）**，
+            //   而不是 panic 或升档——这是失败时唯一正确的方向。
             _ => chatservant_core::dispatch::Dispatch::Manual,
         }
     }
@@ -690,33 +737,42 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                     );
                 }
                 let t_round = std::time::Instant::now();
-                match step(&mut watcher, &mut reasoner, &mut s, &LAST_BOXES) {
+                // 一轮**中间**推出去的帧（`Drafting`）走这里。
+                //
+                // 它与轮末那一帧的唯一区别是 `ticks` 相同而阶段不同，
+                // 所以 `cs-pump` 的去重指纹必须带 `phase.key()`——
+                // 只看 `ticks` 会把这一帧吃掉，首屏就还是 6~9s
+                // （见 [`crate::contract::Phase::key`] 的注释）。
+                let mut interim = |out: Readout| {
+                    if let Ok(mut g) = latest_bg.lock() {
+                        *g = Some(out);
+                    }
+                };
+                match step(
+                    &mut watcher,
+                    &mut reasoner,
+                    &mut s,
+                    &LAST_BOXES,
+                    ticks,
+                    last_calls,
+                    &mut interim,
+                ) {
                     Ok(Some(a)) => {
                         anchor = Some(a);
                         last_calls = reasoner.calls();
                         let st = reasoner.stage_calls();
-                        let out = Readout {
-                            anchor,
-                            peer: s.peer.clone(),
-                            gate_open: s.gate_open,
-                            messages: s.messages.clone(),
-                            candidates: s.candidates.clone(),
-                            reason: s.source.stamp(&s.reason),
-                            model_calls: last_calls,
-                            relock_pending: s.relock.pending(),
-                            counts: CallCounts {
-                                judge: st.judge,
-                                draft: st.draft,
-                                rank: st.rank,
-                                // 视觉桥**默认关闭**（ticket 15 第 1 条），
-                                // 循环里没接桥之前这里恒为 0——这是正确值，
-                                // 不是占位符。
-                                vision: s.vision.calls(),
-                            },
-                            ticks,
-                            ocr_calls: s.ocr_calls,
-                            error: None,
+                        // 阶段由 Rust 判，不让界面去猜 `candidates` 空不空。
+                        let phase = if s.candidates.is_empty() {
+                            Phase::Read {
+                                messages: s.messages.clone(),
+                            }
+                        } else {
+                            Phase::Drafted {
+                                messages: s.messages.clone(),
+                                candidates: s.candidates.clone(),
+                            }
                         };
+                        let out = snapshot(&s, anchor, phase, ticks, last_calls, st, &s.reason);
                         if let Ok(mut g) = latest_bg.lock() {
                             *g = Some(out);
                         }
@@ -727,25 +783,14 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                     Err(e) => {
                         // 失败这一轮也要报分段计数——**出错的段就在数字里**。
                         let st = reasoner.stage_calls();
-                        let out = Readout {
-                            anchor,
-                            peer: s.peer.clone(),
-                            gate_open: s.gate_open,
+                        // ⚠ 出错时**保留已读到的消息**：一个 OCR 抖动不该把
+                        // 整段对话清空，用户会以为程序把会话弄丢了。
+                        let phase = Phase::Failed {
                             messages: s.messages.clone(),
-                            candidates: s.candidates.clone(),
-                            reason: s.source.stamp("这一轮没跑通"),
-                            model_calls: last_calls,
-                            relock_pending: s.relock.pending(),
-                            counts: CallCounts {
-                                judge: st.judge,
-                                draft: st.draft,
-                                rank: st.rank,
-                                vision: s.vision.calls(),
-                            },
-                            ticks,
-                            ocr_calls: s.ocr_calls,
-                            error: Some(e),
+                            error: e,
                         };
+                        let out =
+                            snapshot(&s, anchor, phase, ticks, last_calls, st, "这一轮没跑通");
                         if let Ok(mut g) = latest_bg.lock() {
                             *g = Some(out);
                         }
@@ -766,12 +811,64 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
     Watcher { stop, latest }
 }
 
+/// 拼一份往 UI 推的快照。**`Readout` 在整个 crate 里只有这一个构造点。**
+///
+/// ## 为什么收敛成一处
+///
+/// 票 21 的验收项写着「`Readout` 的每个构造点都赋了值，漏一个就红」。
+/// 靠 review 盯不住——`Readout { … }` 在哪个 `match` 分支里看着都正常，
+/// 而漏掉的那个后果是**某个态在真机上永远发不出去**，
+/// 门禁（`cargo test` 测 Rust、`svelte-check` 只管类型、`?demo` 夹具手写了
+/// `phase`）三者一起看不见。唯一的可靠办法是让机器去数，见
+/// `every_readout_goes_through_the_snapshot_constructor`。
+///
+/// ## `phase` 为什么由调用方给而不是这里算
+///
+/// 因为「这一轮处于哪个阶段」只有产生它的那段代码知道：
+/// 轮末可能是 `Drafted`（起草出东西了）或 `Read`（这轮没对方说话），
+/// 轮中那一帧恒为 `Drafting`，出错恒为 `Failed`。
+/// 在这里用 `candidates.is_empty()` 反推，等于把
+/// 「刚读出消息、模型还没回来」和「这轮没有对方说话」混成同一个态——
+/// 那正是前端一直在猜、猜错的那件事。
+fn snapshot(
+    s: &Scratch,
+    anchor: Option<PaneAnchor>,
+    phase: Phase,
+    ticks: u64,
+    model_calls: u32,
+    st: chatservant_reason::StageCalls,
+    reason: &str,
+) -> Readout {
+    Readout {
+        anchor,
+        peer: s.peer.clone(),
+        gate_open: s.gate_open,
+        phase,
+        reason: s.source.stamp(reason),
+        model_calls,
+        relock_pending: s.relock.pending(),
+        counts: CallCounts {
+            judge: st.judge,
+            draft: st.draft,
+            rank: st.rank,
+            // 视觉桥**默认关闭**（ticket 15 第 1 条），循环里没接桥之前
+            // 这里恒为 0——这是**正确值**，不是占位符。
+            vision: s.vision.calls(),
+        },
+        ticks,
+        ocr_calls: s.ocr_calls,
+    }
+}
+
 /// 跑一轮。`Ok(Some(anchor))` = 有新内容；`Ok(None)` = 静默期。
 fn step(
     watcher: &mut PaneWatcher,
     reasoner: &mut Box<dyn Reasoner + Send>,
     s: &mut Scratch,
     last_boxes: &std::sync::Mutex<Option<crate::debug::DebugPane>>,
+    ticks: u64,
+    model_calls: u32,
+    interim: &mut dyn FnMut(Readout),
 ) -> Result<Option<PaneAnchor>, String> {
     // ① 找窗口 + 抓帧（或读夹具）
     let frame = load_frame(&s.source, &mut s.last_hwnd)?;
@@ -967,6 +1064,29 @@ fn step(
     // ⑤ 有对方说话才推理。**没读到就不推理**——省的不只是钱，
     // 还有一次可能失败的外部调用。
     if newest.is_some() {
+        // ⚠ **先把「读到消息了、模型还没回来」这件事推出去**，再去做耗时的事。
+        //
+        // 这是 S3（起草中）唯一的来源。少了这一帧，起草中这一态在真机上
+        // 根本不存在——而模型这一段要 6~9s，用户面对的是一个**不动的面板**，
+        // 分不清是在跑还是卡死了（票 21 的根因之一）。
+        //
+        // 代价是**一轮里推两帧**，所以 `cs-pump` 的去重指纹必须带 `phase.key()`。
+        // 只看 `ticks` 会把这一帧当重复吃掉，首屏就白做了。
+        {
+            let st = reasoner.stage_calls();
+            interim(snapshot(
+                s,
+                Some(anchor),
+                Phase::Drafting {
+                    messages: s.messages.clone(),
+                },
+                ticks,
+                model_calls,
+                st,
+                "正在起草",
+            ));
+        }
+
         // **每圈读一次**活值，读完存成本地变量给整轮用。
         // 分两次读的话，用户恰好在中间拖了滑块，同一轮里
         // 裁剪用 N=12、兜底用 N=11——半套生效比不生效更难查。
@@ -1455,12 +1575,171 @@ impl chatservant_reason::Summarizer for NoSummary {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message, RecentN, Relock, SESSION,
-        Scratch, Speaker, TierCell, TokenBudget, apply_gate_closed, apply_relock, collect_images,
-        header_print, park_on_other_conversation,
+        BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message, Phase, Readout, RecentN,
+        Relock, SESSION, Scratch, Speaker, TierCell, TokenBudget, apply_gate_closed, apply_relock,
+        collect_images, header_print, park_on_other_conversation, snapshot,
     };
     use chatservant_perceive::{Decision, PaneWatcher};
     use chatservant_reason::context;
+
+    /// 造一份最小的 `Scratch`，只为了喂 `snapshot`。
+    fn scratch_with(messages: usize, candidates: usize) -> Scratch {
+        let mut s = Scratch::new(RecentN::new(12));
+        s.messages = (0..messages)
+            .map(|i| a_msg(&format!("对方说了 {i}")))
+            .collect();
+        s.candidates = (0..candidates)
+            .map(|i| DraftCandidate {
+                id: format!("c{i}"),
+                text: format!("候选 {i}"),
+                probability: 0.5,
+            })
+            .collect();
+        s
+    }
+
+    /// `Readout` 摊平之后，**判别字段与消息、候选在同一层**。
+    ///
+    /// 这是票 21 的核心断言。界面的类型是 `Phase & Extra`
+    /// （`ui/src/routes/(panel)/+page.svelte` 的 `FullReadout`），
+    /// 它按 `r.phase === 'drafted'` 走判别分支、再读**同一层**的 `r.candidates`。
+    /// 而票 21 之前 Rust 侧**根本没发 `phase`** ⇒ `r.phase` 恒 `undefined`
+    /// ⇒ `candidates` 恒空 ⇒ 起草中 / 已起草 / 出错三态在真机上永远不可达，
+    /// 而 `?demo` 因为夹具手写了 `phase` 照样八态全渲染——
+    /// **演示页是绿的、真机是断的，两边看着一样**。
+    #[test]
+    fn readout_carries_the_phase_discriminant_at_the_top_level() {
+        let s = scratch_with(2, 2);
+        let st = chatservant_reason::StageCalls::default();
+        let out: Readout = snapshot(
+            &s,
+            None,
+            Phase::Drafted {
+                messages: s.messages.clone(),
+                candidates: s.candidates.clone(),
+            },
+            7,
+            3,
+            st,
+            "起草好了",
+        );
+        let v = serde_json::to_value(&out).unwrap();
+
+        assert_eq!(v.get("phase").and_then(|x| x.as_str()), Some("drafted"));
+        // 关键：`messages` / `candidates` 与 `phase` **平级**，
+        // 不是嵌在 `phase` 里面。
+        assert!(v.get("messages").and_then(|x| x.as_array()).is_some());
+        assert_eq!(v["candidates"].as_array().map(Vec::len), Some(2));
+        assert!(v.get("phase").unwrap().get("messages").is_none());
+    }
+
+    /// 三个阶段**各自**都得带上判别字段。
+    ///
+    /// 只测 `Drafted` 是不够的：出错的形态恰恰是票 21 里最隐蔽的一处——
+    /// 出错那一帧的 `error` 在旧结构里是个独立的 `Option<String>`，
+    /// 改成 `Phase::Failed` 之后如果漏了改，界面就**静默地不显示任何错误**，
+    /// 用户看到的是一个「什么都没发生」的��板。
+    #[test]
+    fn every_phase_shape_carries_its_own_discriminant() {
+        let s = scratch_with(1, 0);
+        let st = chatservant_reason::StageCalls::default();
+        let cases = [
+            (
+                Phase::Read {
+                    messages: s.messages.clone(),
+                },
+                "read",
+            ),
+            (
+                Phase::Drafting {
+                    messages: s.messages.clone(),
+                },
+                "drafting",
+            ),
+            (
+                Phase::Drafted {
+                    messages: s.messages.clone(),
+                    candidates: s.candidates.clone(),
+                },
+                "drafted",
+            ),
+            (
+                Phase::Failed {
+                    messages: s.messages.clone(),
+                    error: "OCR 失败".into(),
+                },
+                "failed",
+            ),
+        ];
+        for (phase, key) in cases {
+            let out = snapshot(&s, None, phase, 1, 0, st, "r");
+            let v = serde_json::to_value(&out).unwrap();
+            assert_eq!(v["phase"].as_str(), Some(key), "{key} 的判别字段不对");
+            // ⚠ **出错时消息不能丢**：一个 OCR 抖动不该把整段对话清空。
+            assert_eq!(
+                v["messages"].as_array().map(Vec::len),
+                Some(1),
+                "{key} 丢了消息"
+            );
+            if key == "drafted" {
+                assert!(v.get("candidates").is_some(), "drafted 必须带候选");
+            } else {
+                assert!(v.get("candidates").is_none(), "{key} 不该带候选");
+            }
+        }
+    }
+
+    /// **`Readout` 全仓只有一个构造点。**
+    ///
+    /// 票 21 的验收项原文：「`Readout` 的每个构造点都赋了值，漏一个就红」。
+    /// 靠 code review 盯不住——`Readout { … }` 出现在哪个 `match` 分支里
+    /// 看着都正常，而漏掉的后果是**某个态在真机上永远发不出去**，
+    /// 且 `cargo test` / `svelte-check` / `?demo` 夹具**三个一起看不见**
+    /// （夹具里 `phase` 是手写的）。
+    ///
+    /// 所以让机器去数：构造点只允许是 [`snapshot`] 那一处。
+    /// 新增构造点必须先问「为什么不走 `snapshot`」。
+    #[test]
+    fn every_readout_goes_through_the_snapshot_constructor() {
+        let me = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut hits: Vec<String> = Vec::new();
+        let mut files = Vec::new();
+        walk_rs(&me, &mut files);
+        for p in &files {
+            let Ok(text) = std::fs::read_to_string(p) else {
+                continue;
+            };
+            // 形如 `Readout {` 的字面构造（排除类型定义那一行）。
+            for (n, line) in text.lines().enumerate() {
+                let t = line.trim();
+                if t.starts_with("Readout {") || t == "Readout {" {
+                    hits.push(format!("{}:{}", p.display(), n + 1));
+                }
+            }
+        }
+        // 本文件里那一处就是 `snapshot` 里的 `Readout { … }`（缩进后以
+        // `Readout {` 开头）。允许恰好 1 处，多一处少一处都要人来解释。
+        assert_eq!(
+            hits.len(),
+            1,
+            "Readout 的字面构造点必须只有 snapshot() 那一处，现在有：\n{}",
+            hits.join("\n")
+        );
+    }
+
+    fn walk_rs(dir: &std::path::Path, acc: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk_rs(&p, acc);
+            } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                acc.push(p);
+            }
+        }
+    }
 
     /// 左侧边栏宽度，**实测微信的值**。
     ///
@@ -2084,15 +2363,15 @@ mod tests {
 
     /// 设置页与主面板**共用同一个档位**。
     ///
-    /// 早先 `tier` 是前端 `$state`、两个页面各一份：用户在设置里选 Auto，
+    /// 早先 `tier` 是前端 `$state`、两个页面各一份：用户在设置里选高档，
     /// 主面板还是 Manual。那个开关是个**完全不起作用的死控件**。
     #[test]
     fn the_tier_is_shared_across_windows() {
         use chatservant_core::dispatch::Dispatch;
         let cell = TierCell::default_manual();
         let settings = cell.clone();
-        settings.set(Dispatch::Auto);
-        assert_eq!(cell.get(), Dispatch::Auto, "设置页升档，主面板必须看到");
+        settings.set(Dispatch::Confirm);
+        assert_eq!(cell.get(), Dispatch::Confirm, "设置页升档，主面板必须看到");
     }
 
     /// **总闸关着时，一张图都不产出。**

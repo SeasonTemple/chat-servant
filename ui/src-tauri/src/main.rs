@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod contract;
 mod debug;
 mod secret;
 mod watch;
@@ -74,6 +75,8 @@ fn main() {
             // 早先这个程序**没有任何办法停掉**。
             commands::get_close_behavior,
             commands::set_close_behavior,
+            commands::get_mark_shape,
+            commands::set_mark_shape,
             commands::hide_panel,
             commands::show_panel,
             commands::quit_app,
@@ -102,9 +105,9 @@ fn build_tray(app: &tauri::AppHandle) {
     // 这比「图标没出来」更难查，因为它看起来像图标加载慢。
     // 所以图直接编译进二进制（`include_bytes!`），不依赖运行期资源路径。
     //
-    // 解码与「Auto 档盖红点」都在 `commands::tray_icon` 里——**只有那一份**，
+    // 解码与「会发出去的档盖红点」都在 `commands::tray_icon` 里——**只有那一份**，
     // 这样 `refresh_tray` 换档时不会做出一个跟初始图标不一致的版本。
-    let icon = match commands::tray_icon(commands::current_tier_is_auto()) {
+    let icon = match commands::tray_icon(commands::tier_can_send()) {
         Ok(i) => i,
         Err(e) => {
             tracing::error!("托盘图标读不出来（程序仍可运行，但没有可见的托盘入口）：{e}");
@@ -213,11 +216,11 @@ fn init_tracing() {
         .try_init();
 }
 
-/// 事件名。前端只认这两个，**不轮询**。
-pub mod events {
-    pub const READOUT: &str = "readout";
-    pub const TELEMETRY: &str = "telemetry";
-    /// 托盘菜单点了「锁定当前会话」。前端监听它并调 `relock_session`，
-    /// **和面板上那颗按钮走同一条 Rust 路径** —— 两处不各写一遍。
-    pub const MENU_RELOCK: &str = "menu:relock";
-}
+/// 事件名清单。**这里只是转出，定义在 [`crate::contract::events`]。**
+///
+/// ⚠ 2026-10-13：本文件原先自己有一份 `pub mod events`（只有 3 个常量），
+/// 而 `contract.rs` 里另有一份（4 个）。两份都是「事件名的集中处」，
+/// 等于集中了两次——而 `contract.rs` 那份连编译都没进过，
+/// 于是守住这件事的 `no_event_literal_outside_this_file` 从未运行过。
+/// 现在单一出处是 `contract.rs`。
+pub use crate::contract::events;

@@ -76,9 +76,9 @@ struct AppState {
 ///
 /// 早先的实现是：
 ///
-/// ```rust
+/// ```text
 /// if tier == Dispatch::Confirm && action == "confirm" {
-///     let _ = app.emit("armed", &candidate_id);
+///     let _ = app.emit(ARMED, &candidate_id);
 ///     return DispatchReply { outcome: "NotSent", detail: "已准备好。再点一次…" };
 /// }
 /// ```
@@ -159,11 +159,11 @@ pub fn probe_anchor() -> AnchorProbe {
             detail: "观察循环还没跑出第一帧".into(),
         };
     };
-    if let Some(e) = &out.error {
+    if let Some(e) = out.error() {
         return AnchorProbe {
             ok: false,
             anchor: String::new(),
-            detail: e.clone(),
+            detail: e.to_string(),
         };
     }
     match out.anchor {
@@ -274,7 +274,7 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
             // 装填是**状态变化**，要告诉界面：按钮文案从「填入并确认发送」
             // 变成「确认发送」，样式也换掉。早先这个 emit 发出去之后
             // **没有任何前端监听者**，状态就丢了——于是装填既不生效也不可见。
-            let _ = app.emit("armed", &candidate_id);
+            let _ = app.emit(crate::contract::events::ARMED, &candidate_id);
             // 第一次点击：**只填入，不发**。这一步同时是让人读、让人改的窗口。
             let filled = deliver(&candidate_id, false);
             let next = d.next(filled.clone(), 0);
@@ -328,7 +328,17 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
         s.armed.disarm();
     }
 
-    let receipt = deliver(&candidate_id, matches!(tier, Dispatch::Auto));
+    // ⚠ 走到这里只有一种可能：**tier == Manual**。
+    //
+    // `Confirm` 在上面那个分支里已经 return 了（装填 / 二次确认发送）。
+    // 所以这一行的 `send` 恒为 `false`，而且**恒为 false 是对的**。
+    //
+    // ⚠⚠ 别把它「简化」成 `deliver(&candidate_id)` 或加个可变参数——
+    // 这个 `false` 是硬约束第 5 条的落点之一。两档之下，
+    // **整个代码库里按下回车的地方只剩一处**：`inject::send_only`，
+    // 它的前置条件是 `Arming::arm` 成功（人已经装填过一次）。
+    // 少一个条件就多一条「不问就发出去」的路。
+    let receipt = deliver(&candidate_id, false);
 
     // 让档位守则跑一遍，把下一步该做什么告诉前端。
     let next = d.next(receipt.clone(), 0);
@@ -375,8 +385,10 @@ pub fn set_tier(tier: String) -> String {
 /// 不升档、不报错——面板刚起来时还没有状态可读，报错只会让用户看见一句红字。
 fn parse_tier(raw: &str) -> Dispatch {
     match raw {
-        "Auto" => Dispatch::Auto,
         "Confirm" => Dispatch::Confirm,
+        // ⚠ `"Auto"` 于 2026-10-13 取消该档之后落进这一支 ⇒ 读成 **Manual**。
+        //   降档方向是对的：旧配置或旧前端传 Auto，得到的必须是最低档，
+        //   绝不���因为「不认识」就升上去。
         _ => Dispatch::Manual,
     }
 }
@@ -387,7 +399,6 @@ fn tier_id(d: Dispatch) -> String {
     match d {
         Dispatch::Manual => "Manual",
         Dispatch::Confirm => "Confirm",
-        Dispatch::Auto => "Auto",
     }
     .to_string()
 }
@@ -398,7 +409,6 @@ fn tier_name(d: Dispatch) -> String {
     match d {
         Dispatch::Manual => "只填入",
         Dispatch::Confirm => "确认后发",
-        Dispatch::Auto => "自动发送",
     }
     .to_string()
 }
@@ -516,7 +526,8 @@ fn show_window(app: &AppHandle, label: &str) -> Result<(), String> {
 #[tauri::command]
 pub fn open_settings(app: AppHandle) -> Result<(), String> {
     show_panel(app.clone())?;
-    app.emit("menu:settings", ()).map_err(|e| e.to_string())
+    app.emit(crate::contract::events::MENU_SETTINGS, ())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -571,7 +582,7 @@ pub fn set_close_behavior(app: AppHandle, behavior: CloseBehavior) -> Result<(),
     if behavior == CloseBehavior::Tray && !tray_usable() {
         return Err("托盘不可用，不能设成「收进托盘」—— 那样关掉面板它就藏起来了。".into());
     }
-    let path = prefs_path(&app);
+    let path = prefs_dir(&app).join("close_behavior.txt");
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败：{e}"))?;
     }
@@ -588,16 +599,23 @@ fn behavior_str(b: CloseBehavior) -> &'static str {
     }
 }
 
-/// 设置文件放哪。与 `appDirectoriesOverride` 一起，落在应用自己的目录下。
-fn prefs_path(app: &AppHandle) -> std::path::PathBuf {
+/// **设置文件放在哪个目录**，不是哪个文件。
+///
+/// 早先这个函数的名字说的是「prefs（设置）」，实现给的却是某一个设置的
+/// 那一个文件——`close_behavior.txt` 已经拼在函数体里了。加第二个设置时
+/// 照抄它，唯一的改法就是改那个文件名：那是把特例伪装成通用入口，
+/// 迟早会有人把两个设置写进同一个文件。现在返回目录，
+/// 各设置自己 `join(自己的文件名)`。
+///
+/// 取不到 `app_config_dir()` 时回落当前目录，这个行为保持不变。
+fn prefs_dir(app: &AppHandle) -> std::path::PathBuf {
     app.path()
         .app_config_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .join("close_behavior.txt")
 }
 
 fn read_close_behavior(app: &AppHandle) -> CloseBehavior {
-    let Ok(s) = std::fs::read_to_string(prefs_path(app)) else {
+    let Ok(s) = std::fs::read_to_string(prefs_dir(app).join("close_behavior.txt")) else {
         return CloseBehavior::default();
     };
     match s.trim() {
@@ -605,6 +623,87 @@ fn read_close_behavior(app: &AppHandle) -> CloseBehavior {
         // 「tray」但托盘没了 → 退回 Exit。**一个失效的设置比没有设置更危险**：
         // 用户以为它还在后台跑，其实它可能已经退出了。
         _ => CloseBehavior::Exit,
+    }
+}
+
+/// 档位标记的形状。与前端 `types.ts` 的 `MarkShape` 镜像。
+///
+/// serde 的写法照抄同文件里的 `CloseBehavior`——它是 `#[tauri::command]` 的
+/// **入参**，Tauri 要求命令参数类型实现 `CommandArg`，只 derive `Serialize`
+/// 编译不过（2026-10-10 本机实测，见文件头那段注释）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MarkShape {
+    /// 勾。**默认值**。
+    Tick,
+    /// 圈。
+    Ring,
+}
+
+impl Default for MarkShape {
+    /// **默认 `Tick`。**
+    ///
+    /// 这是个纯外观偏好，没有安全含义，所以「哪个都不报错」这一条不构成
+    /// 理由；理由是勾是这两者里**信息量更大**的那个：它指着一个具体的
+    /// 档位，而圈只标着「这里有个档」。将来真要显示档位差别时，
+    /// 默认落点得是能分辨出区别的那个。
+    fn default() -> Self {
+        MarkShape::Tick
+    }
+}
+
+/// 读「档位标记形状」。
+///
+/// ⚠ **这一条走落盘，绝不走 `watch.rs` 的 `TierCell`。**
+/// 档位不落盘是产品硬约束（发送档默认最低、会话结束自动回落到 `Manual`）；
+/// 标记形状是外观偏好，用户重启后期望它还在。两者性质不同，混在一起就
+/// 会出现「档位的生命周期污染外观偏好」或者反过来。
+#[tauri::command]
+pub fn get_mark_shape(app: AppHandle) -> MarkShape {
+    read_mark_shape(&app)
+}
+
+/// 写「档位标记形状」。
+#[tauri::command]
+pub fn set_mark_shape(app: AppHandle, shape: MarkShape) -> Result<(), String> {
+    let dir = prefs_dir(&app);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建目录失败：{e}"))?;
+    std::fs::write(dir.join("mark_shape.txt"), mark_shape_str(shape))
+        .map_err(|e| format!("写设置失败：{e}"))?;
+    Ok(())
+}
+
+/// 落盘的那一行。小写，与 `close_behavior` 的 `"exit"` / `"tray"` 同风格。
+fn mark_shape_str(s: MarkShape) -> &'static str {
+    match s {
+        MarkShape::Tick => "tick",
+        MarkShape::Ring => "ring",
+    }
+}
+
+fn read_mark_shape(app: &AppHandle) -> MarkShape {
+    read_mark_shape_at(&prefs_dir(app).join("mark_shape.txt"))
+}
+
+/// **按路径读的内部入口。**
+///
+/// 拆出来是为了能单测：`AppHandle` 在测试里根本造不出来，而这里最要紧的
+/// 恰恰是容错策略（读不到 / 认不出就回落默认值）——那部分必须能验。
+fn read_mark_shape_at(path: &std::path::Path) -> MarkShape {
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return MarkShape::default();
+    };
+    parse_mark_shape(&s)
+}
+
+fn parse_mark_shape(raw: &str) -> MarkShape {
+    match raw.trim() {
+        "ring" => MarkShape::Ring,
+        // 认不出来的写法（空串、半截 JSON、被别的工具改坏了）一律落回
+        // 默认值，**不报错也不崩**。与 `read_close_behavior` 同一条策略：
+        // 一个失效的外观设置比没有设置更麻烦——面板会在每次读设置时
+        // 拿到一个错误值，而用户根本没打算改它。
+        _ => MarkShape::Tick,
     }
 }
 
@@ -711,7 +810,7 @@ pub fn refresh_tray() {
     };
     // 菜单里**没有文字行**了（见 `build_tray_menu`），档位信号走图标 +
     // tooltip。这两处都不影响菜单尺寸。
-    if let Ok(icon) = tray_icon(current_tier() == Dispatch::Auto) {
+    if let Ok(icon) = tray_icon(tier_can_send()) {
         let _ = tray.set_icon(Some(icon));
     }
     let tip = tray_tooltip();
@@ -732,13 +831,25 @@ pub fn tray_tooltip() -> String {
 /// 应用名。tooltip 与窗口标题共用。
 const APP_NAME: &str = "副驾 · chat-servant";
 
-/// 托盘图标。`auto` 为真时右下角盖一颗红点。
+/// 托盘图标。`live` 为真时右下角盖一颗红点。
 ///
 /// ⚠ **图标必须显式给**（实测 2026-10-10）：`TrayIconBuilder::with_id(...)`
 /// 不像 `new(app)` 那样自动取应用图标，`bundle.icon` 只喂安装包不喂窗口，
 /// 两头都没有 → 条目在、图标空，而日志照样打「托盘图标已就绪」。
 /// 图编进二进制（`include_bytes!`），不依赖运行期资源路径。
-pub fn tray_icon(auto: bool) -> tauri::Result<tauri::image::Image<'static>> {
+///
+/// ## `live` 的含义在 2026-10-13 变过
+///
+/// 早先是 `auto`，红点表示「现在是自动发送档」。
+/// `Auto` 档取消之后红点**没有跟着取消**，而是改挂到 `Confirm` 上——
+/// 因为它要回答的问题没变：**面板看不见的时候，程序到底会不会把话发出去。**
+///
+/// - `Manual` → 无点。程序只填入，不会自己发。
+/// - `Confirm` → 红点。程序**会**发出去，只是要你先确认一次。
+///
+/// ⚠ 三档时代红点是有歧义的：`Auto` 与 `Confirm` 都带点，
+/// 看图分不出「要人确认」和「不问就发」。两档之下这个歧义反而没了。
+pub fn tray_icon(live: bool) -> tauri::Result<tauri::image::Image<'static>> {
     use std::sync::OnceLock;
     // 底图只解一次。`refresh_tray` 在每次档位/会话变化时都会跑，
     // 每回重解一张 PNG 是白烧。
@@ -754,8 +865,8 @@ pub fn tray_icon(auto: bool) -> tauri::Result<tauri::image::Image<'static>> {
         Err(e) => return Err(tauri::Error::Anyhow(e.into())),
     };
     let mut px = src.clone();
-    if auto {
-        stamp_auto_dot(&mut px, w, h);
+    if live {
+        stamp_live_dot(&mut px, w, h);
     }
     Ok(tauri::image::Image::new_owned(px, w, h))
 }
@@ -764,7 +875,7 @@ pub fn tray_icon(auto: bool) -> tauri::Result<tauri::image::Image<'static>> {
 ///
 /// ⚠ 就地改，**不改尺寸**——托盘那边按图标原始尺寸建资源，
 /// 尺寸一变就要重建整个托盘图标。
-fn stamp_auto_dot(px: &mut [u8], w: u32, h: u32) {
+fn stamp_live_dot(px: &mut [u8], w: u32, h: u32) {
     // ⚠ 半径与圆心是**量出来的，不是随手取的**（2026-10-10 实测）。
     //
     // `icons/32x32.png` 里的绿色对话气泡占 x 9..22 / y 8..23。原先半径
@@ -893,9 +1004,16 @@ fn current_tier() -> Dispatch {
     with_state(|s| s.tier.get()).unwrap_or(Dispatch::Manual)
 }
 
-/// 当前是不是 Auto 档。`main.rs` 建托盘时要问这个，别自己再读一遍 `STATE`。
-pub fn current_tier_is_auto() -> bool {
-    current_tier() == Dispatch::Auto
+/// 当前这一档**会不会真的把消息发出去**（要人确认也算）。
+///
+/// ⚠ 名字里没有「自动」二字是有意的：两档之下**不存在不问就发的档**，
+/// 写一个 `current_tier_is_auto()` 只会让人以为还有那种东西。
+///
+/// ⚠ 它**不等于**「不问就发」。`Confirm` 也会发出去，只是必须先过一次
+/// 人的确认。托盘红点问的是前者（会不会发），不是后者（会不会自己发）。
+/// 硬约束第 5 条守的是后者，两件事别混。
+pub fn tier_can_send() -> bool {
+    matches!(current_tier(), Dispatch::Confirm)
 }
 
 /// 当前支持的模型供应商。
@@ -1277,12 +1395,22 @@ pub fn start(app: &AppHandle) {
     std::thread::Builder::new()
         .name("cs-pump".into())
         .spawn(move || {
-            let mut last = 0u64;
+            // 去重指纹是 **(ticks, 阶段)**，不是单独的 ticks。
+            //
+            // ⚠ 少一半会出事：观察循环一轮里会推**两帧**——先「读到消息、
+            // 正在起草」，再「起草完成」。这两帧的 `ticks` 相同，
+            // 只比 `ticks` 的话第二帧（真正有候选的那帧）会被当成重复吃掉，
+            // 界面永远停在「正在起草」。
+            //
+            // 两半缺一不可：`ticks` 覆盖「同一阶段内容变了」，
+            // `phase` 覆盖「同一 ticks 里阶段变了」。
+            let mut last: Option<(u64, &'static str)> = None;
             loop {
                 if let Some(out) = with_state(|s| s.watcher.latest()).flatten()
-                    && out.ticks != last
+                    && last != Some((out.ticks, out.phase.key()))
                 {
-                    last = out.ticks;
+                    last = Some((out.ticks, out.phase.key()));
+
                     // ⭐ **先把锁释放，再刷托盘。**
                     // `refresh_tray` 要读 `STATE` 拿档位和会话名，
                     // 在锁里调它就是自己等自己 —— 直接死锁。
@@ -1290,7 +1418,7 @@ pub fn start(app: &AppHandle) {
                     if let Ok(mut g) = STATE.lock()
                         && let Some(s) = g.as_mut()
                     {
-                        s.candidates = out.candidates.clone();
+                        s.candidates = out.candidates().to_vec();
                         if s.peer != out.peer {
                             s.peer = out.peer.clone();
                             peer_changed = true;
@@ -1311,7 +1439,7 @@ pub fn start(app: &AppHandle) {
                     // `latest_readout` 也走同一条序列化路径所以同样失败——
                     // 表现就是「后端认出会话了，界面永远停在空白」，
                     // 而日志里看不出任何异常。这正是**恒哑的错误处理**。
-                    if let Err(e) = app2.emit("readout", &out) {
+                    if let Err(e) = app2.emit(crate::contract::events::READOUT, &out) {
                         tracing::error!(
                             target: "chat_servant::pump",
                             "readout 推不到界面：{e}（tick={}）",
@@ -1320,11 +1448,12 @@ pub fn start(app: &AppHandle) {
                     }
                     tracing::info!(
                         target: "chat_servant::pump",
-                        "emit readout tick={} peer={:?} messages={} candidates={}",
+                        "emit readout tick={} phase={} peer={:?} messages={} candidates={}",
                         out.ticks,
+                        out.phase.key(),
                         out.peer,
-                        out.messages.len(),
-                        out.candidates.len()
+                        out.messages().len(),
+                        out.candidates().len()
                     );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(300));
@@ -1585,23 +1714,33 @@ mod budget_ceiling_tests {
     /// **`get_tier` / `set_tier` 必须回枚举 id，不能回中文名。**
     ///
     /// 这是 2026-10-10 实机验出来的缺陷：后端回「只填入」，前端按
-    /// `type Tier = 'Manual' | 'Confirm' | 'Auto'` 去索引 → `undefined`，
+    /// `type Tier = 'Manual' | 'Confirm'` 去索引 → `undefined`，
     /// 面板头部档位名整格空白，`SegSlider` 也定位不到滑块。
     ///
-    /// 判据写死成**前端契约里的三个字面量**，不是「不是中文就行」——
+    /// 判据写死成**前端契约里的字面量**，不是「不是中文就行」——
     /// 前端要改 `Tier` 的话，这个测试就该红，那正是它该红的时候。
     #[test]
     fn the_ipc_tier_is_the_frontend_enum_id_not_a_display_name() {
-        for (d, id) in [
-            (Dispatch::Manual, "Manual"),
-            (Dispatch::Confirm, "Confirm"),
-            (Dispatch::Auto, "Auto"),
-        ] {
+        for (d, id) in [(Dispatch::Manual, "Manual"), (Dispatch::Confirm, "Confirm")] {
             assert_eq!(tier_id(d), id, "{d:?} 的 IPC id 与前端 Tier 契约不符");
             assert_eq!(parse_tier(id), d, "{id:?} 解析回来不是同一个档");
             // 显示名是另一条路。它一进来，滑块就又不动了。
             assert_ne!(tier_id(d), tier_name(d), "{d:?} 的 id 和显示名撞了");
         }
+    }
+
+    /// ⚠ **已取消的 `Auto` 必须解析成最低档，而不是崩、也不是升档。**
+    ///
+    /// 2026-10-13 `Auto` 整档取消，但**旧配置与旧前端还会发 `"Auto"` 过来**
+    /// （升级途中前端与后端版本不一致是常态）。这时候正确的回应是
+    /// **落到 `Manual`**：用户原本处在「不问就发」那一档，
+    /// 程序一升级就变成「只填入」，这是**降权**，方向是对的；
+    /// 反过来（落到 `Confirm`）就是升级即升档，最危险的形态。
+    #[test]
+    fn a_retired_auto_id_lands_on_the_lowest_tier() {
+        assert_eq!(parse_tier("Auto"), Dispatch::Manual);
+        // 中文名同样不许蒙混过关
+        assert_eq!(parse_tier("自动发送"), Dispatch::Manual);
     }
 
     /// **认不出来的档位一律落到最低档，不许升档。**
@@ -1640,18 +1779,22 @@ mod budget_ceiling_tests {
         );
     }
 
-    /// **Auto 红点必须落在角落，且绝不压到图标本体上。**
+    /// **托盘红点必须落在角落，且绝不压到图标本体上。**
+    ///
+    /// ⚠ 红点现在表示「**这一档会发出去**」（`Confirm`）而不是旧的
+    /// `Auto`。它要回答的问题是「面板看不见时程序会不会把话发出去」，
+    /// 而这个问题在两档之下依然成立。
     ///
     /// 用**真实的底图**跑，不是造一张全零缓冲——气泡在哪只有真图说了算。
     /// 判据是「红色像素集合」与「底图里非暗像素集合」不相交，
     /// 不是钉死某个坐标（圆心/半径是实现细节）。
     #[test]
-    fn the_auto_dot_never_covers_the_logo() {
+    fn the_live_dot_never_covers_the_logo() {
         let base = tray_icon(false).expect("底图解不出来");
         let (w, h) = (base.width(), base.height());
         let src = base.rgba().to_vec();
         let mut dotted = src.clone();
-        stamp_auto_dot(&mut dotted, w, h);
+        stamp_live_dot(&mut dotted, w, h);
 
         assert_eq!(src.len(), dotted.len(), "红点改了缓冲长度");
 
@@ -1692,5 +1835,121 @@ mod budget_ceiling_tests {
             assert!(!covers_ink, "红点 ({x},{y}) 盖住了图标的 {before:?}");
             assert!(*x > w / 2 && *y > h / 2, "红点 ({x},{y}) 不在右下角");
         }
+    }
+}
+
+/// 「档位标记形状」这个落盘设置自己的测试。
+#[cfg(test)]
+mod mark_shape_tests {
+    use super::*;
+
+    /// 一个测试独占的临时目录。
+    ///
+    /// 用 `std::env::temp_dir()` 而不是引 `tempfile`：落盘设置本来就要写
+    /// 文件，为这几个测试加一个 dev-dependency 不值。名字里带进程号，
+    /// 这样并发跑 `cargo test` 时不会互相踩。
+    fn test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "chat-servant-mark-shape-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时目录失败");
+        dir
+    }
+
+    /// **文件不存在时必须读回默认值，而不是报错。**
+    ///
+    /// 首次启动就是这条路径：设置文件根本还没有。面板在设置页打开之前
+    /// 就会问一次标记形状，那里不能抛。
+    #[test]
+    fn a_missing_mark_shape_file_reads_back_the_default() {
+        let dir = test_dir("missing");
+        let path = dir.join("mark_shape.txt");
+        assert_eq!(read_mark_shape_at(&path), MarkShape::default());
+        // 判据写死成 `Tick`，别拿 `default()` 绕回来——那会让默认值和
+        // 测试一起被改掉而仍然全绿。
+        assert_eq!(read_mark_shape_at(&path), MarkShape::Tick);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **往返：写进去什么就读回什么。**
+    ///
+    /// 走的是「落盘那一行」那条真实路径（`mark_shape_str` + 文件），
+    /// 因为这个设置的全部意义就是「重启后还在」——只在内存里往返等于没验。
+    #[test]
+    fn a_written_mark_shape_comes_back_as_itself() {
+        let dir = test_dir("roundtrip");
+        let path = dir.join("mark_shape.txt");
+        std::fs::write(&path, mark_shape_str(MarkShape::Ring)).expect("写失败");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("回读失败"),
+            "ring",
+            "落盘的不是那两个小写字面量之一"
+        );
+        assert_eq!(read_mark_shape_at(&path), MarkShape::Ring);
+
+        std::fs::write(&path, mark_shape_str(MarkShape::Tick)).expect("写失败");
+        assert_eq!(read_mark_shape_at(&path), MarkShape::Tick);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **认不出来的内容一律落回 `Tick`，不 panic、不报错。**
+    ///
+    /// 与 `read_close_behavior` 同一条策略。这里没有托盘那样的「落点失效」
+    /// 风险，所以判据是更朴素的一条：面板每次读设置都不该被脏数据卡住。
+    #[test]
+    fn an_unparsable_mark_shape_falls_back_to_tick() {
+        let dir = test_dir("garbage");
+        let path = dir.join("mark_shape.txt");
+        for raw in [
+            "",
+            "   ",
+            "TICK",
+            "Tick",
+            "勾",
+            "r ing",
+            "{\"shape\":\"ring\"}",
+            "\u{0}\u{1}",
+        ] {
+            std::fs::write(&path, raw).expect("写失败");
+            assert_eq!(
+                read_mark_shape_at(&path),
+                MarkShape::Tick,
+                "{raw:?} 不该被当成一个形状"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **serde 的名字必须是 `"tick"` / `"ring"` 这两个字面量。**
+    ///
+    /// 判据钉死在字面量上，与落盘那一份是同一个约定——前端按这两个字符串
+    /// 收发（`#[serde(rename_all = "lowercase")]`），改名会让两边同时失配，
+    /// 而那种失配在界面上表现为「标记形状永远是默认值」。
+    #[test]
+    fn the_mark_shape_serde_names_are_lowercase_words() {
+        assert_eq!(serde_json::to_string(&MarkShape::Tick).unwrap(), "\"tick\"");
+        assert_eq!(serde_json::to_string(&MarkShape::Ring).unwrap(), "\"ring\"");
+        // 命令入参走 `Deserialize`，所以反序列化方向也要验。
+        assert_eq!(
+            serde_json::from_str::<MarkShape>("\"ring\"").unwrap(),
+            MarkShape::Ring
+        );
+        assert_eq!(
+            serde_json::from_str::<MarkShape>("\"tick\"").unwrap(),
+            MarkShape::Tick
+        );
+    }
+
+    /// **默认值必须是 `Tick`。**
+    ///
+    /// 纯外观偏好，改默认值不涉及安全——但它会悄悄改变所有人第一眼看到的
+    /// 面板。所以这一条写死，不许靠「重新选一个默认值」顺手改掉。
+    #[test]
+    fn the_mark_shape_default_is_tick() {
+        assert_eq!(MarkShape::default(), MarkShape::Tick);
+        // 连落盘那一行一起钉住，避免默认值与 `mark_shape_str` 同侧漂移。
+        assert_eq!(mark_shape_str(MarkShape::default()), "tick");
     }
 }

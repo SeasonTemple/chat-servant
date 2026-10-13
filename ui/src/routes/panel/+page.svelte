@@ -35,7 +35,6 @@
   const TIERS = [
     { key: 'Manual', label: '只填入' },
     { key: 'Confirm', label: '确认后发' },
-    { key: 'Auto', label: '自动发送' },
   ] as const;
 
   type TierKey = (typeof TIERS)[number]['key'];
@@ -251,14 +250,17 @@
     opacity: 1;
   }
 
-  /*  Auto：不可逆。笔从红铅笔换成**警报红**——这是红铅笔唯一让位
-   *  给 `--cs-live` 的地方。
+  /*  Confirm：会把话发出去。笔从红铅笔换成**警报红**——这是红铅笔
+   *  唯一让位给 `--cs-live` 的地方。
+   *
+   *  ⚠ 2026-10-13：`Auto` 取消后，`Confirm` 成为唯一不可逆的档，
+   *  「红＝不可逆」这条规则从它身上继续成立。
    *
    *  ⚠ 这里**只能改 fill，不能写 fill-opacity**。CSS 声明会盖掉
    *  每层 path 上的 `fill-opacity` 属性，五层嵌套立刻塌成单层平涂，
-   *  Auto 档就成了唯一一支不像铅笔的。要改浓度就改生成器里的
+   *  不可逆的档就成了唯一一支不像铅笔的。要改浓度就改生成器里的
    *  `NEST` 剖面，让五级一起动。 */
-  .cs-sheet[data-tier='Auto'] .cs-tick path {
+  .cs-sheet[data-tier='Confirm'] .cs-tick path {
     fill: var(--cs-live);
   }
 
