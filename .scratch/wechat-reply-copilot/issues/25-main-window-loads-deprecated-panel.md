@@ -63,7 +63,8 @@
 - [x] `?demo=1&state=` 八态在新面板上仍然全部渲染
       实测七态（`ui/static/demo/` 下就七个：`auto.json` 随第三档取消一起删了，
       所以是**七态不是八态**，原验收项的措辞已过期）。
-      逐态出图 + 正文区墨量抽样（`target/shots/measure.ps1`，非肉眼比对）：
+      逐态出图 + **正文区墨量抽样**（`ui/scripts/stateink.ps1`，非肉眼比对）——
+      量具已入库，不是留在 `target/` 里那种别人拿不到的脚本：
         drafted / armed / confirm 5.02% · failed 1.71% · noprep / silent 0.81%
         · drafting 0.67%
       ⚠ `armed` 与 `drafted` 像素完全一致是**已知缺口不是 bug**：夹具里

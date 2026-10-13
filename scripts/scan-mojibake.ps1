@@ -15,8 +15,15 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
-$ext = '\.(rs|svelte|ts|js|md|json|toml|ps1|css|html|yml|yaml)$'
-$roots = @('crates', 'xtask', 'ui\src', 'ui\src-tauri\src', 'scripts', 'docs', '.scratch')
+$ext = '\.(rs|svelte|ts|js|md|json|toml|ps1|py|css|html|yml|yaml)$'
+# ⚠ `ui\scripts` 必须在这里（2026-10-13 补）。原先只有 `ui\src`，
+#   而 `ui/scripts/` 恰好是**中文注释最密的地方**——量具脚本
+#   （`sheetprobe.ps1` / `pencilgen.py` / `icongen.py`）每一条都在解释
+#   「为什么这么量」，全是长句中文，最经不起编码往返。
+#   漏掉它的实测证据：那天 `stateink.ps1` 里一个 U+FFFD 就摆在注释里，
+#   而这一步扫了 179 个文件报「干净」。
+#   同理补了 `py` 扩展——`pencilgen.py` / `icongen.py` 也在这个目录里。
+$roots = @('crates', 'xtask', 'ui\src', 'ui\src-tauri\src', 'ui\scripts', 'scripts', 'docs', '.scratch')
 $files = @()
 foreach ($r in $roots) {
   if (Test-Path $r) {
