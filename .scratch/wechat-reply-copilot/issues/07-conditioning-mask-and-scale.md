@@ -33,9 +33,24 @@
 > 不得提交、不得上传、不得贴进任何对话。
 > 同理，下面提到的 `panel-*.png` / `ring-size-compare.png` 也都是取证图，
 > 一律只在 `target/probe/` 里，不进仓库。
-已确认同批的 `panel-tick-big.png` / `panel-tick-big-zoom.png` /
-`ring-size-compare.png` / `panel-drafting-zoom.png` / `panel-drafting.png`
-**都还在**——那几张是真的丢了。
+>
+> 🔴 **2026-10-13 21:4x 复核：上一版记的「都还在」是错的，这里更正。**
+> 上一版声称「`panel-tick-big.png` / `panel-tick-big-zoom.png` /
+> `ring-size-compare.png` 经核实都还在，那几张是真的丢了」。
+> 重新全仓按文件名搜了一遍（`text-chat` / `panel-tick-big` /
+> `panel-tick-big-zoom` / `ring-size-compare`），**四张全部无记录**，
+> `target/probe/` 下一个都没有。
+>
+> ⇒ 正确结论是：**本票与 `docs/设计规范.md` 引用过的取证帧，全批丢失**，
+> 不存在「一部分还在」。上一版那条「经核实」本身没经核实——
+> 大概是看着目录里还有别的 png 就顺手写了「都还在」。
+>
+> 同一轮里 `target/probe/` 剩下的 228 个文件（86 张图，含真实微信窗口
+> 截图）已作为**过期中间态产物**整体清理，没有一张是本票引用的证据，
+> 所以这次清理**没有再丢任何东西**。
+>
+> ⚠ 这条本身就是这批数据的教训：**「核实过」三个字要有命令作证**。
+> `Get-ChildItem -Filter <名>` 跑一次才叫核实，扫一眼目录不算。
 
 ## 语义遮罩：验收标准是准确率，不是成本
 
