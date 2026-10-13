@@ -66,6 +66,20 @@ pub mod events {
     /// 链路是通的。`debug_pane` 的数据走的是同名**命令**
     /// （`invoke('debug_pane')`），不是事件，别再把两者混记。
     pub const ALL: [&str; 4] = [READOUT, ARMED, MENU_RELOCK, MENU_SETTINGS];
+
+    /// **明知道「发了但没人听」的事件名。**
+    ///
+    /// ⚠ 这不是免罪，是**把欠账挂在门上**。每一条都要写清为什么现在
+    /// 没人听、什么时候会有人听；动作行做完就把 `ARMED` 删掉，
+    /// 删掉之后 `every_emitted_event_has_a_frontend_listener` 立刻会红。
+    ///
+    ///   `armed` —— 装填事件的接收端是**发送那一排按钮**（动作行），
+    ///   而动作行至今未做，见 `docs/前端设计进度.md` §3
+    ///   「宁可少一行，不要一个没验过的发送控件」。
+    ///
+    /// ⚠ 豁免必须**显式、逐条可见**。给测试留一个通用的跳过开关，
+    ///   等于让人养成习惯——而被习惯绕过的检查等于没有检查。
+    pub const KNOWN_UNLISTENED: [&str; 1] = [ARMED];
 }
 
 /// 投递动作。
@@ -454,17 +468,97 @@ mod tests {
         assert!(bad.is_empty(), "事件名又散出去了：\n{}", bad.join("\n"));
     }
 
-    fn walk_rs(dir: &std::path::Path, acc: &mut Vec<std::path::PathBuf>) {
+    /// **守住清单的另一半：发出去的必须真有人听。**
+    ///
+    /// 上一条测试查的是「清单里的名字真被 emit 过」，它查不出另一半：
+    /// 事件发得很勤、前端一个监听者都没有，于是那条链路从头到尾
+    /// 没有过，而两边各自都看着正常。
+    ///
+    /// ⚠ 前端那边是 `.svelte` / `.ts` 的裸字面量（`listen('readout', …)`），
+    ///   本仓库**没有**跨语言的契约测试，所以这里退化成扫源码。
+    ///   扫不到就是扫不到——扫到「没监听」只说明源码里没有那个字面量，
+    ///   动态拼出来的事件名会误报。因此方向只能是「清单里 emit 过、
+    ///   又不在豁免表里、而源码里找不到 `listen('<名字>'`」→ 失败。
+    #[test]
+    fn every_emitted_event_has_a_frontend_listener() {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = here.parent().and_then(|p| p.parent()).unwrap_or(here);
+        // `me` 不需要排除：本文件是 .rs，walk_ext 只收 .svelte/.ts。
+
+        // 前端源码全量读一遍。文件少、体积小，扫源码比引入跨语言链便宜得多。
+        let mut frontend = String::new();
+        let mut visited: Vec<std::path::PathBuf> = Vec::new();
+        walk_ext(
+            &root.join("ui").join("src"),
+            &["svelte", "ts"],
+            &mut visited,
+        );
+        for p in &visited {
+            if let Ok(t) = std::fs::read_to_string(p) {
+                frontend.push_str(&t);
+            }
+        }
+        assert!(
+            !frontend.is_empty(),
+            "读不到任何前端源码 —— 本测试会**假装一切正常**，先查路径。"
+        );
+
+        let mut silent = Vec::new();
+        for ev in events::ALL {
+            if events::KNOWN_UNLISTENED.contains(&ev) {
+                continue;
+            }
+            // ⚠ 判据是**引号里的事件名**，不是 `listen` 紧邻着的那一段。
+            //   第一版找的是 `listen<readout`，而真实写法是
+            //   `listen<ReadoutPayload>('readout', …)` —— 泛型参数是**类型名**，
+            //   于是 `readout` 被误报成「没人听」。
+            //   ⇒ 那条测试第一版会把 `readout` 与 `menu:relock` 一起报上来，
+            //   而 `readout` 明明有监听者——**误报和真缺一个样**。
+            //
+            //   事件名必须以字符串字面量的形式传进 `listen`，所以找 `'名字'`
+            //   就够，而且不依赖 `listen` 与字面量之间的写法。
+            //   代价是注释里提到这个名字也算数——这个方向的偏差是
+            //   **漏报**（假装有人听），不会造成假的失败，可以接受。
+            if frontend.contains(&format!("'{ev}'")) {
+                continue;
+            }
+            silent.push(ev);
+        }
+        assert!(
+            silent.is_empty(),
+            "这些事件名 Rust 侧在发，前端**没有监听者**，链路是空的：\n  {}\n\
+             （真要还没接，请加进 `events::KNOWN_UNLISTENED` 并写清为什么；\
+             注意 `no_event_literal_outside_this_file` 只管 Rust 侧，拦不住这里。）",
+            silent.join("\n  ")
+        );
+        // 豁免表不许悄悄变长。
+        assert_eq!(
+            events::KNOWN_UNLISTENED.len(),
+            1,
+            "known-unlistened 表变长了，确认是故意加的吗"
+        );
+    }
+
+    /// 按扩展名递归收文件。前端那边是 `.svelte` / `.ts`，Rust 这边是 `.rs`。
+    fn walk_ext(dir: &std::path::Path, exts: &[&str], acc: &mut Vec<std::path::PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else {
             return;
         };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
-                walk_rs(&p, acc);
-            } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                walk_ext(&p, exts, acc);
+            } else if p
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| exts.contains(&x))
+            {
                 acc.push(p);
             }
         }
+    }
+
+    fn walk_rs(dir: &std::path::Path, acc: &mut Vec<std::path::PathBuf>) {
+        walk_ext(dir, &["rs"], acc);
     }
 }
