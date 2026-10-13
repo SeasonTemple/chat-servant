@@ -3,7 +3,7 @@
   //  重复引入会把 token 定义算两遍，而 `/studio` 那张设计画布要的是
   //  干净的一遍。
   import { onMount } from 'svelte';
-  import { listen } from '@tauri-apps/api/event';
+  import { invoke } from '@tauri-apps/api/core';
   import { HAS_TAURI, IS_DEMO as DEMO } from '$lib/runtime';
 
   let { children } = $props();
@@ -18,48 +18,30 @@
   let offline = $state(false);
 
   onMount(() => {
-    // 只监听，不轮询。Rust 那边什么时候 emit，前端就什么时候更新。
-    let dispose: (() => void) | null = null;
-    let cancelled = false;
+    // ⚠ **这里不订阅任何事件，也不轮询。**
+    //
+    // 原来这里 `listen('telemetry', () => {})`，注释写着「为了让遥测通道
+    // 有订阅者，Rust 侧的 emit 有接收方，才算一条真的链路」（票 28）。
+    // **那个 emit 从来不存在** —— 这条链路从头到尾没有过，而注释把它
+    // 说成是「补完最后一块」，读的人只会以为差一步。
+    //
+    // 它唯一真实的作用是：`listen` 在没有 IPC 时会抛，用那个抛错点亮
+    // 下面的离线横幅。**功能要留，理由要换掉**：横幅该由一次真实的
+    // IPC 调用来证明，而不是由「成功订阅了一条没人发的事件」来证明。
+    // 后者证明的是「订阅成功了」，不是「连得上 Rust」。
+    if (DEMO) return;
+    if (!HAS_TAURI) {
+      // 正式部署的静态页面：既没 IPC 也没演示数据。**说清楚。**
+      offline = true;
+      return;
+    }
 
-    void (async () => {
-      // ⚠ **整个链路包在 try 里。**
-      //
-      // 演示模式里没有 `window.__TAURI_INTERNALS__`，`listen` 读它的
-      // `.transformCallback` 会拿到 undefined，于是**每次打开演示页都产生
-      // 一个 unhandledrejection**：
-      //   TypeError: Cannot read properties of undefined (reading 'transformCallback')
-      //
-      // 判据走 `$lib/runtime` 的 `IS_DEMO`，**不是**在这里再判一次
-      // `typeof window.__TAURI_INTERNALS__`——那个表达式在打包产物里会被
-      // 静态消除，换个构建模式就失效，而 URL 参数是显式的、不会自己变。
-      if (DEMO) return;
-      if (!HAS_TAURI) {
-        // 正式部署的静态页面：既没 IPC 也没演示数据。**说清楚。**
-        offline = true;
-        return;
-      }
-
-      try {
-        // 「静默期零调用」不在主面板上证明，它在调试窗口里。
-        // 这里保留 `telemetry` 的接收，是为了让遥测通道有订阅者——
-        // Rust 侧的 emit 有接收方，才算一条真的链路。
-        const un = await listen<{ frames: number }>('telemetry', () => {});
-        if (cancelled) {
-          un();
-          return;
-        }
-        dispose = un;
-      } catch (e) {
-        offline = true;
-        console.error('连不上 Rust 的推送：', e);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      dispose?.();
-    };
+    // `latest_readout` 只读缓存里最近一轮快照，命令自身的注释就写着
+    // 「不轮询——用户手动触发」。这里调一次纯粹是当探针用，载荷丢掉。
+    void invoke('latest_readout').catch((e) => {
+      offline = true;
+      console.error('连不上 Rust：', e);
+    });
   });
 </script>
 
@@ -71,8 +53,13 @@
     直接铺满浏览器，于是：
       · 头部那一排在 770px 下看着松松垮垮，一到 380px 就挤成一团——
         而**没人发现**，因为评审时看的就是那个宽版本；
-      · 「紧凑模式」那套判据（档位名隐藏、衬线降 17px）触发不了，
-        ResizeObserver 量到的永远是「宽」，验证等于没做。
+      · 「紧凑模式」那套判据触发不了，验证等于没做。
+
+    ⚠ 那句括号里的原文是「档位名隐藏、衬线降 17px」，**已于 2026-10-14
+    作废**：那块代码随旧面板一起删了（`5031ab3`），紧凑分支全仓无引用
+    （票 27）。留着会让下一个人去找一套**已经不存在**的判据。
+    这里保留「窄面板要有窄面板的验收」这半句——它现在指向的是
+    纸面板在 `minWidth` 340 下会不会挤，而不是某个已被删掉的开关。
 
     也就是说：一个用来验收窄面板的工具，本身跑在宽面板上。
     这里把它钉到 380px 并居中，让演示页第一次真的能当尺子用。

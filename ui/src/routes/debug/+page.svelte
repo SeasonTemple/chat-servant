@@ -2,10 +2,15 @@
   // 调试画布：把每个识别框按**归类结果**上色。
   //
   // 这不是美陈。它回答的是「为什么这条没进消息流」——
-  // 六种颜色各代表一种归类结果，认错了看一眼就知道是哪一步丢的。
+  // **七种**颜色各代表一种归类结果，认错了看一眼就知道是哪一步丢的。
   // 只给「归类/丢弃」两种颜色是不够的：看到框消失还是变色，
   // 判断不出是「太小」还是「当成图片」。
+  //
+  // ⚠ 这里原先写「六种」——**数错了**。`Header` 与 `Gray` 必须分开
+  // （标题行与灰色时间戳是两个归类），少算一个正是「把时间戳认成
+  // 会话名」那次事故的同一片区域。测试抓到的就是 `6 == 7`。
   import { onMount } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
 
   interface Attribution {
     rect: { x0: number; y0: number; x1: number; y1: number };
@@ -39,47 +44,37 @@
   /** 只看被丢弃的。**默认开着**——调试时最常问的就是「这条去哪了」。 */
   let onlyDropped = $state(true);
   let picked = $state<Attribution | null>(null);
+  let refreshing = $state(false);
+
+  /**
+   * 拉一次当前画布。
+   *
+   * ⚠ **这里没有推送通道**（票 28）：`debug_pane` 从来没有被 emit 过，
+   *   而这里原先 `listen('debug_pane', …)` 看着像有——那个监听永远不会
+   *   触发，出图的人却会以为「再等一会儿就刷新了」。
+   *   Rust 侧同一份数据是一个**命令** `debug_pane`，前端按需 `invoke`，
+   *   与 `commands.rs` 那句「不轮询——用户手动触发」一致。
+   */
+  async function pull() {
+    refreshing = true;
+    try {
+      pane = await invoke<Pane>('debug_pane');
+      err = null;
+    } catch (e) {
+      err = String(e);
+    } finally {
+      refreshing = false;
+    }
+  }
 
   onMount(() => {
-    let stop: (() => void) | null = null;
-    let dead = false;
     void (async () => {
-      const { invoke } = await import('@tauri-apps/api/core');
-      const { listen } = await import('@tauri-apps/api/event');
-      const pull = async () => {
-        try {
-          pane = await invoke<Pane>('debug_pane');
-        } catch (e) {
-          err = String(e);
-        }
-      };
-      await pull();
-      // ⚠ **整个链路包在 try 里。**
-      //
-      // `listen` 在没有 Tauri IPC 的环境里（浏览器预览、静态部署）
-      // 读 `window.__TAURI_INTERNALS__.transformCallback` 会拿到 undefined，
-      // 于是抛出一个**没人接的 Promise 拒绝**——组件卸载了、日志里也
-      // 没有，看起来就像「这个窗口没反应」。
-      //
-      // `pull` 自己的 catch 救不了它：崩在后面这一步。
-      let un: (() => void) | null = null;
       try {
-        un = await listen('debug_pane', () => {
-          void pull();
-        });
+        await pull();
       } catch (e) {
         err = String(e);
       }
-      if (dead) {
-        un?.();
-        return;
-      }
-      stop = un;
     })();
-    return () => {
-      dead = true;
-      stop?.();
-    };
   });
 
   /** 万 → 「123.4 万」。像素数到百万级以后，裸数字没人读得出来。 */
@@ -101,10 +96,23 @@
 <main class="cs-dbg">
   <header class="cs-head">
     <h1>识别画布</h1>
-    <label class="cs-toggle">
-      <input type="checkbox" bind:checked={onlyDropped} />
-      只看被丢弃的
-    </label>
+    <div class="cs-head-right">
+      <label class="cs-toggle">
+        <input type="checkbox" bind:checked={onlyDropped} />
+        只看被丢弃的
+      </label>
+      <!--
+        ⚠ 这个按钮**是票 28 补的**：原先这里有一个 `listen('debug_pane')`，
+        而 Rust 侧从来没 emit 过它——那个监听让人以为「等一会儿会刷新」，
+        实际只能重开窗口。现在把刷新变成一个明摆着的动作。
+        ⚠ 刻意**不做自动轮询**：Rust 侧 `latest_readout` 的注释写着
+        「不轮询——用户手动触发」，而且每隔几百毫秒序列化一次整份画布
+        （每个识别框一条）代价不小，而这里本来是个人工排障工具。
+      -->
+      <button class="cs-refresh" type="button" onclick={() => void pull()} disabled={refreshing}>
+        {refreshing ? '拉取中…' : '重新拉取'}
+      </button>
+    </div>
   </header>
 
   {#if err}
@@ -212,6 +220,43 @@
     gap: 0.3rem;
     font-size: 0.7rem;
     color: var(--cs-ink-2);
+  }
+
+  /* 标题在左，开关与按钮成组在右。三样直接摆进 `space-between` 的话，
+   * 开关会被甩到正中间，看起来像第三栏。 */
+  .cs-head-right {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .cs-refresh {
+    /* 跟面板上的次要按钮同一套语气：细边、灰字，不抢画布的注意力。 */
+    border: 1px solid var(--cs-border);
+    border-radius: 4px;
+    background: var(--cs-surface-raised);
+    color: var(--cs-ink-2);
+    font: inherit;
+    font-size: 0.7rem;
+    padding: 0.15rem 0.5rem;
+    cursor: pointer;
+  }
+
+  .cs-refresh:hover:not(:disabled) {
+    color: var(--cs-ink);
+    border-color: var(--cs-border-strong);
+  }
+
+  /* ⚠ **禁用态不许只降透明度。**`opacity: .34` 会把边框一起变淡，
+   *   对比度掉到 1.5:1 上下，而「禁用」恰恰是最需要一眼看出来的状态。
+   *   ⚠ 也不许拿 `--cs-ink-3` 顶——那支是 3.00:1 且 token 自己标着
+   *   「大字/非文本 only」，拿它写按钮文字会造出一个新的 AA 失败。
+   *   这里改成**换边框**表达，文字色保持可读。 */
+  .cs-refresh:disabled {
+    cursor: progress;
+    border-style: dashed;
+    border-color: var(--cs-border);
+    background: var(--cs-surface-sunken);
   }
 
   .cs-legend {

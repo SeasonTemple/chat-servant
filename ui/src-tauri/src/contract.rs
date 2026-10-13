@@ -22,7 +22,16 @@ use serde::{Deserialize, Serialize};
 
 /// Tauri 事件名。**前端只认这几个，不轮询。**
 ///
-/// ⚠️ 改这里等于改契约。前端镜像在 `ui/src/lib/types.ts` 的 `EVENTS`。
+/// ⚠️ 改这里等于改契约。
+///
+/// ⚠️⚠️ **这里曾经写着「前端镜像在 `ui/src/lib/types.ts` 的 `EVENTS`」——
+///   那句话是假的，`types.ts` 里从来没有过 `EVENTS`**，只有 serde 类型的
+///   镜像（`Tier` / `Phase` / `ReadoutPayload` …）。
+///   事件名在前端是**裸字面量**（`listen('readout', …)`），
+///   两边靠本文件 + `no_event_literal_outside_this_file` 约束，
+///   靠的类型检查是**没有**的。
+///   ⚠ 想补上类型安全，先把前端事件名也收进一个 `const` 清单再从
+///   契约生成——那是一件独立的事，别假装它已经做了。
 pub mod events {
     /// 每轮观察的结果。面板的全部内容都从这里来。
     pub const READOUT: &str = "readout";
@@ -30,10 +39,6 @@ pub mod events {
     ///
     /// **不可见的状态等于没有状态**：用户得知道现在按下去会不会真发出去。
     pub const ARMED: &str = "armed";
-    /// 调试画布数据。**只在 debug 窗口订阅**，主面板不收。
-    pub const DEBUG_PANE: &str = "debug_pane";
-    /// 帧计数等遥测。用来证明「不是轮询」。
-    pub const TELEMETRY: &str = "telemetry";
     /// 托盘菜单点了「重新锁定当前会话」。前端监听它并调 `relock_session`，
     /// **和面板上那颗按钮走同一条 Rust 路径** —— 两处不各写一遍。
     pub const MENU_RELOCK: &str = "menu:relock";
@@ -46,14 +51,13 @@ pub mod events {
     pub const MENU_SETTINGS: &str = "menu:settings";
 
     /// 全部事件名。**测试用它断言「没有漏在外面的字面量」。**
-    pub const ALL: [&str; 6] = [
-        READOUT,
-        ARMED,
-        DEBUG_PANE,
-        TELEMETRY,
-        MENU_RELOCK,
-        MENU_SETTINGS,
-    ];
+    ///
+    /// ⚠ 2026-10-14（票 28）从 6 个减到 4 个：删掉 `debug_pane` 与
+    /// `telemetry` —— 这两个**从来没有 emit 过**，前端却在 `listen`。
+    /// 一个**声明了却永远不触发**的事件名比没有更坏：它让人以为那条
+    /// 链路是通的。`debug_pane` 的数据走的是同名**命令**
+    /// （`invoke('debug_pane')`），不是事件，别再把两者混记。
+    pub const ALL: [&str; 4] = [READOUT, ARMED, MENU_RELOCK, MENU_SETTINGS];
 }
 
 /// 投递动作。
@@ -353,11 +357,54 @@ mod tests {
     fn event_names_are_stable() {
         assert_eq!(events::READOUT, "readout");
         assert_eq!(events::ARMED, "armed");
-        assert_eq!(events::DEBUG_PANE, "debug_pane");
-        assert_eq!(events::TELEMETRY, "telemetry");
         assert_eq!(events::MENU_RELOCK, "menu:relock");
         assert_eq!(events::MENU_SETTINGS, "menu:settings");
-        assert_eq!(events::ALL.len(), 6);
+        assert_eq!(events::ALL.len(), 4);
+    }
+
+    /// **守住「清单里不许躺着永远不会触发的事件名」这条纪律。**
+    ///
+    /// 这条是 2026-10-14（票 28）补的，代价是发现上一版把这个测试做反了：
+    /// `debug_pane` / `telemetry` 躺在 `ALL` 里、被 `event_names_are_stable`
+    /// 断言「必须等于这两个字面量」，于是**声明一个死事件名反而让测试更绿**。
+    /// 清单的职责是「前端只认这几个」，一个不 emit 的名字进了清单，
+    /// 它就是在替一条不存在的链路背书。
+    ///
+    /// ⚠ 匹配的是**常量名**，不是事件名字面量（`"armed"`）——后者被
+    ///   `no_event_literal_outside_this_file` 禁止出现在本文件之外，
+    ///   两条测试会互相打脸。
+    /// ⚠ 常量名**不是** `to_uppercase()`：事件名 `menu:relock` 的常量是
+    ///   `MENU_RELOCK`（冒号换成下划线）。第一版这里直接 `to_uppercase()`，
+    ///   测试立刻报「菜单两条没 emit」——**那正是测试自己写错**，
+    ///   而它报出来的样子和真缺 emit 一模一样。
+    #[test]
+    fn every_listed_event_is_actually_emitted() {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let me = here.join("src").join("contract.rs");
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        walk_rs(&here.join("src"), &mut files);
+
+        let mut never = Vec::new();
+        for ev in events::ALL {
+            let konst = ev.to_uppercase().replace(':', "_");
+            let emitted = files.iter().any(|p| {
+                if *p == me {
+                    return false;
+                }
+                std::fs::read_to_string(p).is_ok_and(|t| {
+                    t.lines()
+                        .any(|l| l.contains("emit(") && l.contains(konst.as_str()))
+                })
+            });
+            if !emitted {
+                never.push(ev);
+            }
+        }
+        assert!(
+            never.is_empty(),
+            "清单里有**从来没有 emit 过**的事件名，它们让「前端只认这几个」变成空话：\n  {}",
+            never.join("\n  ")
+        );
     }
 
     /// **守住「只有这个文件能出现事件名字面量」这条纪律。**
