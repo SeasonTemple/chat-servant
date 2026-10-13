@@ -170,6 +170,44 @@
   );
   const drafted = $derived(readout?.phase === 'drafted' ? (readout.candidates[0] ?? null) : null);
 
+  /**
+   *  正文**字体**探针（`?draft=`）。与 `?tier=` / `?shape=` / `?size=` 同一性质，
+   *  **只改这一次的渲染，不落盘**。
+   *
+   *  ⚠ 为什么要有这个口：2026-10-13 出五张字体对照图时，用的是另写的一页
+   *  mock。**那页排版坏了**——纸只画了元素中间一小块，正文与按键都跑到纸外，
+   *  图是假的。教训：凡是「要判断纸面上的东西」，量具必须跑在真面板上，
+   *  mock 一旦排版出错，量具就在骗自己，而且骗得毫无征兆。
+   *
+   *  ⚠ 本机**没有任何手写字体**（实测 `InstalledFontCollection`：楷体 / 仿宋 /
+   *  宋体 / 黑体 / 微软雅黑 / 等线 / 新宋体；华文行楷、华文新魏、隶书、
+   *  霞鹜文楷都没有装）。所以「手写」在本项目里只能是**别的手段**，
+   *  见 `ui/scripts` 与规范 §4.2。
+   */
+  const DRAFT_FONTS = {
+    kai: "KaiTi, STKaiti, '楷体', serif",
+    fang: "FangSong, STFangsong, '仿宋', serif",
+    song: "SimSun, '宋体', NSimSun, serif",
+    yahei: "'Microsoft YaHei', '微软雅黑', sans-serif",
+    hei: "SimHei, '黑体', sans-serif",
+  } as const;
+  type DraftFontKey = keyof typeof DRAFT_FONTS;
+  let draftFont = $state<DraftFontKey | null>(null);
+
+  /** 归属行字号探针（`?peersz=`），数字直接是 CSS px。 */
+  let peerPx = $state<number | null>(null);
+
+  /**
+   *  档位整格放大探针（`?tiersz=`）。**一个数控制一整格**，不是分别调
+   *  取景框 / 标签 / 摆放偏移——分开调就会出现「框大了笔没动」这种
+   *  「放大了但没变大」的假象（规范 §10 第 4 条记过一次）。
+   *
+   *  判据：标一个东西要连带把它下面的字和它自己的摆放一起放大，
+   *  而摆放偏移是**按笔心反算**的，笔心随取景框等比缩放 ⇒ 偏移同样
+   *  按同一系数缩放即可，公式结构不变。
+   */
+  let tierK = $state<number>(1);
+
   onMount(() => {
     /*
      * 标记形状落在 Rust 侧的 prefs，这里只读镜像。
@@ -182,7 +220,22 @@
     const q = new URLSearchParams(location.search);
     const shapeProbe = q.get('shape');
     const sizeProbe = q.get('size');
+    const draftProbe = q.get('draft');
+    const peerProbe = q.get('peersz');
     const sizes: MarkSize[] = ['base', 'mid', 'big'];
+
+    if (draftProbe !== null && draftProbe in DRAFT_FONTS) {
+      draftFont = draftProbe as DraftFontKey;
+    }
+    if (peerProbe !== null && /^\d{1,2}$/.test(peerProbe)) {
+      peerPx = Number(peerProbe);
+    }
+    const tierProbe = q.get('tiersz');
+    if (tierProbe !== null && /^\d(\.\d+)?$/.test(tierProbe)) {
+      const k = Number(tierProbe);
+      // 只认 1.0~2.0：再大就该改生成器的幅面档，而不是拿 CSS 硬拉。
+      if (k >= 1 && k <= 2) tierK = k;
+    }
 
     if (sizeProbe !== null && sizes.includes(sizeProbe as MarkSize)) {
       markSize = sizeProbe as MarkSize;
@@ -370,7 +423,16 @@
   <title>纸面板</title>
 </svelte:head>
 
-<main class="cs-sheet" data-tier={tier} data-settings={settingsOpen}>
+<main
+  class="cs-sheet"
+  data-tier={tier}
+  data-settings={settingsOpen}
+  data-draft-font={draftFont ?? ''}
+  data-peer-px={peerPx ?? ''}
+  data-tiersz={String(tierK)}
+  style:--tk={tierK}
+  style:--peer-probe={peerPx ?? ''}
+>
   <!--
     ⚠ **撕口那条上沿是拖拽带**（`data-tauri-drag-region`）。
 
@@ -867,8 +929,8 @@
   .cs-markbox {
     position: relative;
     display: block;
-    width: 60px;
-    height: 40px;
+    width: calc(60px * var(--tk, 1));
+    height: calc(40px * var(--tk, 1));
   }
 
   /*  标记。红铅笔，蜡质，每层的透明度是**笔迹数据的一部分**，
@@ -903,15 +965,21 @@
   .cs-tick {
     position: absolute;
     left: 50%;
-    top: 26px;
-    margin-left: -27px;
+    top: calc(26px * var(--tk, 1));
+    margin-left: calc(-27px * var(--tk, 1));
+    /* ⚠ 这里用 CSS 定尺寸是**有意的**：整格放大时笔必须跟着放大，
+     *   而 SVG 的 `width`/`height` 属性写死成 `ACTIVE_VIEW` 的取景框。
+     *   早先踩过的那个坑是 `width: 100%`——那会把笔**压回**框宽，
+     *   症状是「选了大档但形状没变」。这里给的是显式的等比 px，不是百分比。 */
+    width: calc(var(--tick-w, 60px) * var(--tk, 1));
+    height: calc(var(--tick-h, 40px) * var(--tk, 1));
     opacity: 0;
     transition: opacity var(--cs-dur) var(--cs-ease);
   }
 
   .cs-tick[data-shape='ring'] {
-    top: 30px;
-    margin-left: -31px;
+    top: calc(30px * var(--tk, 1));
+    margin-left: calc(-31px * var(--tk, 1));
   }
 
   /*  放大档换了取景框，笔心坐标随之改变，偏移**重算**而不是在旧值上加减。
@@ -920,13 +988,15 @@
    *  top = 46.4 - 笔心y = 29，margin-left = -笔心x = -28。 */
   .cs-tick[data-shape='tick'][data-ring='mid'],
   .cs-tick[data-shape='tick'][data-ring='big'] {
-    top: 29px;
-    margin-left: -28px;
+    --tick-w: 56px;
+    --tick-h: 34px;
+    top: calc(29px * var(--tk, 1));
+    margin-left: calc(-28px * var(--tk, 1));
   }
 
   .cs-tick[data-shape='ring'][data-ring='big'] {
-    top: 21px;
-    margin-left: -43px;
+    top: calc(21px * var(--tk, 1));
+    margin-left: calc(-43px * var(--tk, 1));
   }
 
   /*  只有 fill，不设 fill-opacity——每层的透明度是**笔迹数据的一部分**，
@@ -941,8 +1011,8 @@
    *  就是它。改成 0 或 4，标记会整体偏上/偏下 2px ——在 1× 上看不出来，
    *  但「标一个东西却没对准它」正是当初 `-21px` 被推翻的那类错。 */
   .cs-pick-name {
-    margin-top: 2px;
-    font-size: 11px;
+    margin-top: calc(2px * var(--tk, 1));
+    font-size: calc(11px * var(--tk, 1));
     line-height: 1;
     letter-spacing: 0.02em;
     color: var(--cs-pencil);
@@ -1012,6 +1082,31 @@
     /* 正文是**要选中复制**的（用户可能想改），与面板整体 user-select:none
        不同——那是给档位控件设的。 */
     user-select: text;
+  }
+
+  /*  正文字体探针（`?draft=`）。默认（`data-draft-font` 为空）**不上任何
+   *  规则**，也就是说默认走下面 `.cs-draft-text` 里那一条定案值——
+   *  探针口只能由探针口触发，不能让默认路径自己漂走。 */
+  .cs-sheet[data-draft-font='kai'] .cs-draft-text {
+    font-family: KaiTi, STKaiti, '楷体', serif;
+  }
+  .cs-sheet[data-draft-font='fang'] .cs-draft-text {
+    font-family: FangSong, STFangsong, '仿宋', serif;
+  }
+  .cs-sheet[data-draft-font='song'] .cs-draft-text {
+    font-family: SimSun, '宋体', NSimSun, serif;
+  }
+  .cs-sheet[data-draft-font='yahei'] .cs-draft-text {
+    font-family: 'Microsoft YaHei', '微软雅黑', sans-serif;
+  }
+  .cs-sheet[data-draft-font='hei'] .cs-draft-text {
+    font-family: SimHei, '黑体', sans-serif;
+  }
+
+  /*  归属行字号探针（`?peersz=`）。同理，默认不上规则。 */
+  .cs-sheet[data-peer-px]:not([data-peer-px='']) .cs-where,
+  .cs-sheet[data-peer-px]:not([data-peer-px='']) .cs-peer {
+    font-size: calc(var(--peer-probe, 12) * 1px);
   }
 
   .cs-draft-pending,
