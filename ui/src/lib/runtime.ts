@@ -13,8 +13,8 @@
  * TypeError: Cannot read properties of undefined (reading 'transformCallback')
  * ```
  *
- * 这就是 `docs/HANDOFF.md` §5.4 B-1 说的「状态语义没有集中的定义」——
- * 「是不是演示模式」这件事只存在于 `+page.svelte` 的一个局部常量里，
+ * 这就是「状态语义没有集中的定义」——「是不是演示模式」这件事
+ * 只存在于 `+page.svelte` 的一个局部常量里，
  * 别的组件够不着，于是各写各的。**把它提出来，问题就不存在了。**
  */
 
