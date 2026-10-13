@@ -331,6 +331,12 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
   或用 UIA 的 `BoundingRectangle`。
 - **要抓窗口真实画面用屏幕 DC `BitBlt`，不要用 `PrintWindow`**——后者截 XAML island
   （托盘溢出面板就是）会把所有图标压成竖条。`BitBlt` 在 `gdi32.dll`，不在 user32。
+- **出图时，设计画布的尺寸必须等于浏览器的窗口尺寸。** 把 512 的画布放进
+  1024×1024 的视口，master 的 alpha bbox 实测是 `(83,85,512,424)`——图标只占
+  左上角一格；再拿它缩到 16px，图标就只剩 **8×8 像素**，而 **PNG 尺寸照样是
+  标称的 16×16**。实测代价：据此得出的「纸在 16px 上会消失」是**假结论**，
+  把图标设计带偏了一整轮。`ui/scripts/icongen.py` 的 `assert_fills_canvas`
+  就是为这条加的自检（占画布不足 25% 直接 abort）。
 - **`gate.ps1` 里的 `pnpm build` 会触发 Vite HMR，把前端状态重置回主区**——
   「设置屏莫名退回主区」不是产品缺陷，是 dev HMR。
 - **造「另一个会话」的夹具，差别必须在字形/位置上，不许在亮度上。** 四个用亮度差
