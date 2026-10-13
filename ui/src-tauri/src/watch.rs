@@ -166,6 +166,13 @@ pub struct Readout {
     /// 现在它们同属一个枚举变体，**不一致在类型上就构造不出来**。
     #[serde(flatten)]
     pub phase: Phase,
+    /// 界面该显示哪句「正在干什么」。**只有起草中非空。**
+    ///
+    /// ⚠ 它是 [`Phase::status_hint`] 的快照，**不是界面的第二份口径**。
+    ///   早先 `(panel)/+page.svelte` 把「正在成形…」「通常几秒」写死成两个
+    ///   `<p>`，Rust 这边改了口径也不会跟着变——同一句话有两份，
+    ///   而面板是唯一会显示它的地方。
+    pub status_hint: Option<String>,
     /// 判断摘要 + 降级说明。
     pub reason: String,
     /// 这一轮调了几次模型。静默期必须是 0。
@@ -839,11 +846,15 @@ fn snapshot(
     st: chatservant_reason::StageCalls,
     reason: &str,
 ) -> Readout {
+    // ⚠ 必须在 `phase` 被移进结构体**之前**取：它的口径来自
+    //   `Phase::status_hint`，而结构体字面量是按书写顺序求值的。
+    let status_hint = phase.status_hint().map(str::to_owned);
     Readout {
         anchor,
         peer: s.peer.clone(),
         gate_open: s.gate_open,
         phase,
+        status_hint,
         reason: s.source.stamp(reason),
         model_calls,
         relock_pending: s.relock.pending(),

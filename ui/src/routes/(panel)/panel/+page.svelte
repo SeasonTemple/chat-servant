@@ -39,7 +39,7 @@
     TICK_VIEW,
   } from '$lib/marks';
   import { markShape } from '$lib/mark-shape.svelte';
-  import type { Phase, Message, Candidate } from '$lib/types';
+  import type { ReadoutPayload, Message, Candidate } from '$lib/types';
   import { IS_DEMO } from '$lib/runtime';
   import { onMount } from 'svelte';
 
@@ -85,7 +85,7 @@
    *  `?demo=1&state=<名字>` 读 `ui/static/demo/<名字>.json`，让正文排版
    *  能在浏览器里全速迭代，不必每次都去点微信。演示数据不含真实聊天内容。
    */
-  let readout = $state<Phase | null>(null);
+  let readout = $state<ReadoutPayload | null>(null);
   let peer = $state('');
 
   const lastFromThem = $derived(
@@ -142,12 +142,14 @@
       messages?: Message[];
       candidates?: Candidate[];
       error?: string | null;
+      status_hint?: string | null;
     };
     const msgs = r.messages ?? [];
     const cands = r.candidates ?? [];
+    const hint = r.status_hint ?? null;
     readout =
       r.phase === 'drafting'
-        ? { phase: 'drafting', messages: msgs }
+        ? { phase: 'drafting', messages: msgs, status_hint: hint }
         : r.phase === 'failed'
           ? { phase: 'failed', messages: msgs, error: r.error ?? '未知原因' }
           : r.phase === 'drafted'
@@ -278,7 +280,15 @@
       {#if drafted}
         <p class="cs-draft-text">{drafted.text}</p>
       {:else if readout?.phase === 'drafting'}
-        <p class="cs-draft-text cs-draft-pending">正在写……</p>
+        <!--
+          这句是 Rust 的 `Phase::status_hint()`，**不在这里写死**。
+          判据 12：空状态必须给明确的下一步——「正在写……」只说了现状，
+          Rust 那句连着说了「通常几秒」，用户才知道该等。夹具没带这个字段时
+          才退回短句，那只是演示数据的缺口，不是口径。
+        -->
+        <p class="cs-draft-text cs-draft-pending">
+          {readout.status_hint ?? '正在写……'}
+        </p>
       {:else if readout?.phase === 'failed'}
         <p class="cs-draft-text cs-draft-failed">没写成：{readout.error}</p>
       {:else}
