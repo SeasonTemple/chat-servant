@@ -208,4 +208,25 @@
     color: var(--cs-surface-raised);
     font-weight: 600;
   }
+
+  /* ── forced-colors：给选中态补一条**颜色管不着**的通道 ──────────
+   *
+   *  ⚠ 为什么需要（2026-10-14 读代码 + 探针实测）：
+   *    「选中」这一状态现在只由两样东西表达——药丸的满铺墨底
+   *    （`background: var(--cs-ink)`）和 `font-weight: 600`。
+   *    而在 Windows 高对比度下，浏览器**接管作者的 background-color**，
+   *    墨底那条通道会整个失效；12.5px 的 400 / 600 在中文里差得很轻。
+   *    ⇒ 只剩字重扛「我被选中了」。
+   *
+   *  `text-decoration` 的**存在与粗细不是颜色属性**，系统不会抹掉它。
+   *  所以下划线是这里唯一能确定穿过接管的那条通道。
+   *  常态不画：平时墨底已经说清楚了，再加一道是噪声。
+   */
+  @media (forced-colors: active) {
+    .cs-seg-btn.on {
+      text-decoration: underline;
+      text-decoration-thickness: 2px;
+      text-underline-offset: 3px;
+    }
+  }
 </style>
