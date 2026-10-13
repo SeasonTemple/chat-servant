@@ -73,9 +73,23 @@ def measure(path, size):
         for x in range(size)
         if px[x, y][3] >= 128  # 半透明边缘不参与：抗锯齿本身没有确定颜色
     ]
+    # 量具自检：**双侧区间**，不是单侧阈值。
+    #
+    # 下界防「量的是空气」——内容整体塌掉、或压根没渲染出来。
+    # 上界防的正是票 29 记的那次翻车：把缩在角落的图再缩小，
+    # 截图尺寸照样是标称值，肉眼完全看不出来。
+    #
+    # ⚠ 只写下界等于没校准：实测填充是 25%，单侧阈值哪怕写 0.20，
+    #   也只是「恰好没炸」。纸边长 286/512 ⇒ 面积占比 0.3125，
+    #   勾探出纸外再收一点，16px 上阈值化到 25% 合理；
+    #   于是区间取 0.18..0.42，两侧都留得下余量。
     fill = len(opaque) / (size * size)
-    if fill < 0.20:
-        raise SystemExit(f"ABORT: {size}px 上不透明像素只占 {fill:.0%}，量具量的是空气")
+    if not (0.18 <= fill <= 0.42):
+        raise SystemExit(
+            f"ABORT: opaque fill {fill:.0%} at {size}px is outside the plausible band "
+            f"18%-42%. Too low = measuring air (render collapsed). Too high = content "
+            f"over-fills the canvas, which is the icongen bbox trap from ticket 29."
+        )
 
     paper = tuple(sorted(c[i] for c in opaque)[len(opaque) // 2] for i in range(3))
     print(f"  canvas={size}px  opaque={len(opaque)}/{size * size} ({fill:.0%})")
