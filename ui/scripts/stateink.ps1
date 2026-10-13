@@ -4,66 +4,117 @@ param([string]$Dir = 'E:\devSpace\chat-servant-m31f\target\shots')
 #
 # ## 为什么需要它
 #
-# 逐张截图用眼睛比对有个具体的失效方式：八态如果全渲成同一张图，
+# 逐张截图用眼睛比对有个具体的失效方式：状态如果全渲成同一张图，
 # 「看起来都渲染了」和「全都渲染成一样」在截图上是同一件事。
 # 而 PNG 的字节数也不够——纸面背景占满画面，改几个字可能一个字节都不差。
 #
-# 所以量一个**有区分度**的量：正文区（楷体那几行）的墨色像素占比。
-# 实测同一批夹具：
-#     drafted / armed / confirm  5.02%   ← 整段正文
-#     failed                     1.71%   ← 一行「没写成：…」
-#     noprep / silent            0.81%   ← 空态一行
-#     drafting                   0.67%   ← 一行「正在写…」
+# 所以量一个**有区分度**的量：正文区（仿宋那几行）的墨色像素占比。
 #
-# ⚠ **采样区不含归属行**（2× 下 y 258~310，在本脚本的 340 之下）。
-#   所以 `noprep` 与 `silent` 的数字相同是**对的**：两者 phase 都是 `read`，
-#   差别在归属行的 `peer`（空 vs 示例联系人），那一段的差异由出图的
-#   字节数佐证（578093 / 581311），不在这张表里。
-#   把采样区往上扩就能把它也量进来，但那会把「正文」和「归属」混成一个数。
+# ## ⚠ 2026-10-14：这套几何错过一次，而且**旧的量具自检没能发现**
 #
-# ## 取景框几何
+# 旧采样窗是 2× 的 y 340..640（css 170..320）。票 25 把面板从
+# `(panel)/panel/` 上移、归属行与正文行重排之后，正文实际落在
+# 2× 的 y **224..444**（css 112..222），旧窗只吃到 5 行里的**最后 2 行**。
 #
-# 演示取景框 380×560 居中于 520×760 视口（`+layout.svelte` 的 `.cs-demo-frame`），
-# 出图 2× ⇒ 面板 CSS x 70..450。正文区取 CSS y 170..320 ⇒ 2× 的 340..640。
-# ⚠ **换任何一处尺寸都得同步改这三个数**：Chrome 会把窗口宽度钳到 500px
-#   最小值，而「截图尺寸对」不证明「布局宽度对」（`scripts/shoturl.ps1` 有同一条）。
-#   自检手段：跑一次，`采样` 列必须恒等于 57000，对不上就是几何写错了。
+# 症状：`drafted` 从记录在案的 5.02% 掉到 2.03%，而
+# `drafting`/`failed`/`noprep`/`silent` 全部变成 **0.00%**——
+# 整张表看起来仍然「跑通了」，有格式、有采样数、没有一个错字。
+#
+# ⚠ 而旧自检（`采样` 必须等于硬编码的 57000）**照样通过**：
+# 它只数「迭代了多少像素」，不看这些像素落在什么上。
+# 一个整体偏掉的窗口，与一个正确的窗口，采样数完全一样。
+# ⇒ 自检必须改成**能因为「偏了」而失败**的那种，见下面第 3 条。
+#
+# ## ⚠ 七个夹具 ≠ 七张不同的图（2026-10-14 实测）
+#
+# 实测七张的字节数：`drafted` 621224 / `confirm` 621514 / `armed` **621514**
+# / `drafting` 582074 / `failed` 595125 / `noprep` 580643 / `silent` 585051。
+#
+# `confirm` 与 `armed` **逐字节相同**，这是对的而不是缺陷：
+# 两者都写 `tier: Confirm`，而 `armed` 想表达的那个界面**根本不存在**
+# （`docs/前端设计进度.md` §3：动作行未做，碰发送路径）。
+# ⇒ **七个夹具给出六张不同的图**，差额那一张等动作行做完才补得上。
+#
+# ⚠ `noprep` 与 `silent` 在这张表里占比相同（0.81%），**也是对的**：
+#   两者 phase 都是 `read`，差别在**归属行**的 peer（空 vs 示例联系人），
+#   而取景窗按设计不包含归属行。两者的整图字节数是不同的（580643 / 585051）。
+#
+# ## 取景框几何（⚠ 换任何一处尺寸都得同步改这三个数）
+#
+# 演示取景框 380×560 居中于 520×760 视口（`(panel)/+layout.svelte` 的
+# `.cs-demo-frame`），出图 2× ⇒ 图像 1040×1520。
+# 归属行在 css 44..82，正文行在 css **112..222**，档位行在 css 466..478。
+# 取景窗选正文那一段：2× 的 224..450，**不碰归属行**——
+# 归属行与正文是两回事，混成一个数就量不出「正文变没变」。
+#
+# ⚠ Chrome 会把窗口宽度钳到 500px 最小值，而「截图尺寸对」**不**证明
+#   「布局宽度对」（`scripts/shoturl.ps1` 有同一条）。
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
 $Scale = 2
 $X0 = 140
 $X1 = 900
-$Y0 = 340
-$Y1 = 640
+$Y0 = 224
+$Y1 = 450
+
+# 采样数由这三个数**算出来**，不再硬编码。
+# 硬编码过一次（57000），结果几何一改它就成了摆设——
+# 而它偏偏是那个本该拦住这次错位的检查。
+$ExpectW = 520 * $Scale
+$ExpectH = 760 * $Scale
+$ExpectSamples = ((($X1 - $X0) / 2) * (($Y1 - $Y0) / 2))
 
 $rows = @()
 foreach ($f in Get-ChildItem $Dir -Filter 'st-*.png' | Sort-Object Name) {
-    $bmp = [System.Drawing.Bitmap]::FromFile($f.FullName)
-    try {
-        $dark = 0
-        $sampled = 0
-        for ($y = $Y0; $y -lt $Y1; $y += 2) {
-            for ($x = $X0; $x -lt $X1; $x += 2) {
-                $c = $bmp.GetPixel($x, $y)
-                $sampled++
-                # 墨 rgb(20,26,31) 与铅笔灰 rgb(76,90,99) 都落在这个亮度带内，
-                # 而纸底是暖黄 rgb(243,230,192)、取景框外是纯白。
-                if (($c.R + $c.G + $c.B) -lt 330) { $dark++ }
-            }
-        }
-        $rows += [pscustomobject]@{
-            态   = $f.BaseName -replace '^st-', ''
-            采样 = $sampled
-            墨点 = $dark
-            占比 = [math]::Round(100 * $dark / $sampled, 2)
-        }
-    } finally { $bmp.Dispose() }
+  $bmp = [System.Drawing.Bitmap]::FromFile($f.FullName)
+  try {
+    $dark = 0
+    $sampled = 0
+    for ($y = $Y0; $y -lt $Y1; $y += 2) {
+      for ($x = $X0; $x -lt $X1; $x += 2) {
+        $c = $bmp.GetPixel($x, $y)
+        $sampled++
+        # 墨 rgb(20,26,31) 与铅笔灰 rgb(76,90,99) 都落在这个亮度带内，
+        # 而纸底是暖黄 rgb(243,230,192)、取景框外是纯白。
+        if (($c.R + $c.G + $c.B) -lt 330) { $dark++ }
+      }
+    }
+    $rows += [pscustomobject]@{
+      态   = $f.BaseName -replace '^st-', ''
+      图   = "$($bmp.Width)x$($bmp.Height)"
+      采样 = $sampled
+      墨点 = $dark
+      占比 = [math]::Round(100 * $dark / $sampled, 2)
+    }
+  } finally { $bmp.Dispose() }
 }
 $rows | Format-Table -AutoSize
 
-# 量具自检：采样数对不上说明取景框几何写错了，**这时上面那些数字全是假的**。
-# 量具自检：采样数对不上说明取景框几何写错了，这时上面的数字不可信。
-if (($rows | Where-Object { $_.采样 -ne 57000 }).Count -gt 0) {
-    throw '采样数不等于 57000 —— 取景框几何（X0/X1/Y0/Y1）与实际出图尺寸不符，上面的占比不可用。'
+if ($rows.Count -eq 0) { throw 'no st-*.png found - render them first, the gauge has no input.' }
+
+# ── self-check 1: image size ─────────────────────────────────────────
+# 视口或缩放变了，逐像素循环的下标就会越界 / 漏采样。
+$badSize = @($rows | Where-Object { $_.图 -ne "$ExpectW`x$ExpectH" })
+if ($badSize.Count -gt 0) {
+  throw "image is not ${ExpectW}x${ExpectH} (got $($badSize[0].图)): viewport or Scale changed, X0/X1/Y0/Y1 must follow."
+}
+
+# ── self-check 2: sample count ───────────────────────────────────────
+$badSample = @($rows | Where-Object { $_.采样 -ne $ExpectSamples })
+if ($badSample.Count -gt 0) {
+  throw "sample count != $ExpectSamples (got $($badSample[0].采样)): X0/X1/Y0/Y1 arithmetic is wrong, ratios unusable."
+}
+
+# ── self-check 3: the window must actually land on body text (the key one)
+#
+# 判据用 `drafted`：它是唯一有整段正文的状态，取景窗一旦整体偏出正文，
+# 它的墨点必然是 0。而 `drafting` / `failed` / `noprep` / `silent`
+# 本来就接近 0，**不能用它们当判据**——那样「全都 0」反而看着自洽。
+#
+# 这条正是旧自检缺的那条：旧版只校验采样数，于是窗口整体偏掉也照样通过。
+$drafted = $rows | Where-Object { $_.态 -eq 'drafted' } | Select-Object -First 1
+if ($null -eq $drafted) { throw 'st-drafted.png missing - cannot tell whether the window still lands on body text.' }
+if ($drafted.墨点 -le 0) {
+  throw 'no dark pixel inside the window for st-drafted: the window drifted off the body text, so **the zeros above mean no ink was measured, not that there is no content**. Scan the dark-pixel y-bands first, then fix Y0/Y1.'
 }

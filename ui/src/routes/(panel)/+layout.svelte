@@ -17,6 +17,20 @@
    */
   let offline = $state(false);
 
+  /**
+   * 取景框宽度。默认 380 = `tauri.conf.json` 里主窗口的 `width`。
+   *
+   * ⚠ **下限不做保护。** `?w=0` 会得到一个零宽的框——那是探针参数
+   * 打错了，不是产品缺陷。与其静默钳到 380（那样出图看着「没生效」，
+   * 却不知道是被钳了），不如让它真的塌给你看。
+   * ⚠ 数值是 CSS px，和 `tauri.conf.json` 里的同一个单位，可直接对着读。
+   */
+  const frameW = (() => {
+    const raw = new URLSearchParams(location.search).get('w');
+    const n = raw === null ? NaN : Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : 380;
+  })();
+
   onMount(() => {
     // ⚠ **这里不订阅任何事件，也不轮询。**
     //
@@ -63,8 +77,14 @@
 
     也就是说：一个用来验收窄面板的工具，本身跑在宽面板上。
     这里把它钉到 380px 并居中，让演示页第一次真的能当尺子用。
+
+    ⚠ **宽度可以用 `?w=<px>` 改**（票 27）。钉死 380 仍然够不到
+    `tauri.conf.json` 里那个 `minWidth: 340`，而那正是要验收的那一档
+    ——一个验不到自己下限的尺子，不是尺子。默认仍是 380（真实窗口宽）。
+    ⚠ 改宽度的是**取景框**，不是面板：面板自己永远是 `width: 100%`，
+    所以取景框多宽，面板就是多宽，两者不会各说各话。
   -->
-  <div class="cs-demo-frame">
+  <div class="cs-demo-frame" style:width={frameW + 'px'}>
     {@render children?.()}
   </div>
 {:else}
@@ -91,11 +111,14 @@
 -->
 
 <style>
-  /* 演示模式的取景框。尺寸 = `tauri.conf.json` 里的 380 × 560。
+  /* 演示模式的取景框。默认尺寸 = `tauri.conf.json` 里的 380 × 560，
+   * 宽度可由 `?w=` 覆盖（票 27 要验的 340 就在那下面）。
    * 外圈那一圈不是装饰：它标出**这就是面板的边界**，
    * 免得看的人把外面的浏览器留白也算进布局里。 */
   .cs-demo-frame {
-    width: 380px;
+    /* 宽度由内联的 `style:width` 给（见上面 `frameW`）；
+     * 这里不给默认值，免得内联一旦失效就退回浏览器铺满——
+     * 那正是这个取景框存在的理由要防的事。 */
     height: 560px;
     max-height: 100%;
     margin: 0 auto;

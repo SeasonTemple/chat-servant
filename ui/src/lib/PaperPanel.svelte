@@ -394,6 +394,8 @@
       .catch(() => fetch('/demo/drafted.json').then((x) => x.json()))) as {
       phase?: string;
       peer?: string;
+      tier?: string;
+      reason?: string;
       messages?: Message[];
       candidates?: Candidate[];
       error?: string | null;
@@ -402,6 +404,17 @@
     const msgs = r.messages ?? [];
     const cands = r.candidates ?? [];
     const hint = r.status_hint ?? null;
+    // ⚠ **`tier` 原来根本没读**（2026-10-14 实测）。于是 `confirm.json`
+    // 与 `drafted.json` 渲染出来**逐字节相同**——两个夹具的唯一差别就是
+    // `tier` 与 `reason`，而后者一个都没接。演示页于是只演得出四态，
+    // 文档里写的「七态」有一半是假的。
+    //
+    // 边界要写清楚：这里**没有第二份真值**。脱离 Tauri 时压根没有 Rust
+    // （`HAS_TAURI` 为 false），`chooseTier` 也是直接改本地 state 的——
+    // 同一个「演示下本地说了算」的约定，不是新增的一套。
+    if (!HAS_TAURI && r.tier && TIERS.some((t) => t.key === r.tier)) {
+      tier = r.tier as TierKey;
+    }
     readout =
       r.phase === 'drafting'
         ? { phase: 'drafting', messages: msgs, status_hint: hint }
