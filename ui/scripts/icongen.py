@@ -52,6 +52,22 @@ TICK_CX, TICK_CY = 256, 262
 RENDER = 1024         # 实际开窗尺寸，必须是 DESIGN 的整数倍
 MASTER = 512          # 落盘的基准图
 
+# ── 分离度实验口（票 29 未做完的那一项）─────────────────────────────
+#
+# 浅色任务栏 `#F3F3F3` 上，纸 `rgb(246,231,191)` 与背景只有 **1.11 : 1**
+# （`iconsep.py` 实测），16px 上糊成一团淡斑；深色 `#1F1F1F` 上是 13.39:1。
+# 两个待验方案，默认都是「什么都不改」：
+#
+#   PAPER_BRIGHTNESS  纸的亮度系数。1.0 = 现状。
+#                     ⚠ 要在浅色背景上够到 3:1 得压到 **0.60**，那已经是
+#                       一张深卡其色的纸，不再是「奶白纸」了。
+#   PAPER_SHADOW_CSS  纸上的投影 CSS。票 29 原先建议的是「极淡的暖色暗边
+#                     ／投影」，而投影在 16px 上是**亚像素**的——1024 开窗的
+#                     3px 缩到 16px 只剩 0.05px，量出来是否等于零**要测**，
+#                     不要靠推理下结论。
+PAPER_BRIGHTNESS = 1.0
+PAPER_SHADOW_CSS = ""
+
 PNG_SIZES = {
     "32x32.png": 32,          # ⚠ tray_icon 用 include_bytes! 读这一张
     "64x64.png": 64,
@@ -97,13 +113,22 @@ def build_html(scale):
     ty = (TICK_CY * k) - tick_h / 2
     paper = PAPER_BOX * k
     pl = (DESIGN * k - paper) / 2
+    # `filter` 里 brightness 作用在纸上（含撕口的 alpha，撕边不会被啃掉），
+    # drop-shadow 作用在**纸的渲染结果**上，所以跟着撕边走，而不是一个方框晕。
+    bits = []
+    if PAPER_BRIGHTNESS != 1.0:
+        bits.append(f"brightness({PAPER_BRIGHTNESS})")
+    if PAPER_SHADOW_CSS:
+        bits.append(f"drop-shadow({PAPER_SHADOW_CSS})")
+    paper_filter = " ".join(bits) if bits else "none"
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><style>
   html,body {{ margin:0; padding:0; background:transparent; }}
   .icon {{ position:relative; width:{DESIGN * k:.0f}px; height:{DESIGN * k:.0f}px; }}
   .paper {{ position:absolute; left:{pl:.1f}px; top:{pl:.1f}px;
             width:{paper:.1f}px; height:{paper:.1f}px;
-            background:url('file:///{PAPER.as_posix()}') center/100% 100% no-repeat; }}
+            background:url('file:///{PAPER.as_posix()}') center/100% 100% no-repeat;
+            filter:{paper_filter}; }}
 </style></head><body><div class="icon">
   <div class="paper"></div>
   <svg style="position:absolute;inset:0" width="{DESIGN * k:.0f}" height="{DESIGN * k:.0f}"
@@ -142,12 +167,18 @@ def assert_fills_canvas(im, size):
     return box
 
 
-def main():
+def main(out_dir=None):
+    """`out_dir` 给 None 时落进 `ui/src-tauri/icons`，给路径时落进那里。
+
+    分流是为了**实验**：分离度那项要渲好几个候选（亮度/投影），
+    而候选不能盖掉托盘正在用的那张真图标。
+    """
+    out = Path(out_dir) if out_dir else OUT
     for p in (CHROME, str(MARKS), str(PAPER)):
         if not os.path.exists(p):
             raise SystemExit(f"ABORT: missing {p}")
     WORK.mkdir(parents=True, exist_ok=True)
-    OUT.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
 
     scale = RENDER / DESIGN
     html = WORK / "icon-master.html"
@@ -163,13 +194,22 @@ def main():
 
     for name, size in PNG_SIZES.items():
         im = master.resize((size, size), Image.LANCZOS)
-        im.save(OUT / name)
+        im.save(out / name)
         print(f"  {name:<18} {size}x{size}  bbox={im.getbbox()}")
     print(f"  {'icon.ico':<18} {ICO_SIZES}")
 
-    master.save(OUT / "icon.ico", format="ICO", sizes=ICO_SIZES)
-    print("done")
+    master.save(out / "icon.ico", format="ICO", sizes=ICO_SIZES)
+    print(f"done -> {out}")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default=None, help="输出目录（默认 ui/src-tauri/icons）")
+    ap.add_argument("--brightness", type=float, default=PAPER_BRIGHTNESS)
+    ap.add_argument("--shadow", default=PAPER_SHADOW_CSS)
+    a = ap.parse_args()
+    PAPER_BRIGHTNESS = a.brightness
+    PAPER_SHADOW_CSS = a.shadow
+    main(a.out)
