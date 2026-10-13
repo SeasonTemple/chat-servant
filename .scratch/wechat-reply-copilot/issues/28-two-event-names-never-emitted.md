@@ -35,6 +35,51 @@
 ⇒ 两者都加了 `events::KNOWN_UNLISTENED` 显式豁免，并把原因写在表旁边。
 `armed` 那一条**豁免是临时的**：动作行做完就删，删了测试立刻红。
 
+## 命令名也进了契约层（2026-10-14）
+
+上面两张表都是事件名的。**命令名同样跨进程边界，却一个都没进清单**
+——本文件的模块注释写着「凡是跨进程边界传的东西，都在这个文件里定义」，
+而它当时只做到了事件那一半。
+
+⇒ 新增 `contract::commands`（`ALL` 28 条 + `KNOWN_UNREACHED` 5 条），
+与两条测试：
+
+| 测试 | 查什么 |
+|---|---|
+| `every_reachable_command_is_invoked_from_the_frontend` | 注册了、前端却不调的命令（不在在册豁免里就失败） |
+| `command_list_matches_the_invoke_handler` | 清单与 `generate_handler!` **双向**对账 |
+
+第二条尤其重要：`ALL` 是手抄的，**抄漏一条，上一条测试就会假装全覆盖**。
+
+### 28 条里前端只调 23 条，差的 5 条分两类
+
+| 命令 | 性质 |
+|---|---|
+| `dispatch` | **真欠账**——发送那一排按钮（动作行）未做 |
+| `probe_anchor` | **真欠账**——锚点探针的前端入口没做（`cargo xtask probe anchor` 走的是库函数，不经这条 IPC） |
+| `open_settings` / `open_debug` / `show_panel` | **不是死代码**——托盘菜单与托盘左键在 **Rust 内部**直接调同一个函数，前端不需要第二入口 |
+
+⚠ 后三条删掉会破托盘，所以它们留在 `KNOWN_UNREACHED` 里，
+但要写清理由——**豁免表不是垃圾桶**。
+
+### 命令名与事件名有个关键区别
+
+`main.rs` 的 `generate_handler!` 里写的是**函数路径** `commands::foo`，
+不是字符串，所以「命令名字面量不许出本文件」这条纪律**没法照搬**。
+能照搬的是「函数名与命令名必须逐字一致」，由
+`command_list_matches_the_invoke_handler` 守住。
+
+⇒ 两条测试都自证过会响：临时从 `ALL` 里删掉 `get_tier`（模拟抄漏）、
+再把 `open_debug` 从豁免表里去掉，它分别报出「清单里有而注册表里没有」
+与「注册了而前端没调」。
+
+⚠ 第一版的反向扫描扫了整个 `main.rs` 的 `commands::xxx(`，
+把 `set_app_handle` / `start` / `tray_icon` 这些**内部调用**也算成
+「注册了」——是**测试自己越界**。已改成只切 `generate_handler!` 那一块。
+
+⚠ `commands::ALL` 只被测试读，所以要 `#[allow(dead_code)]`。
+**别为了消掉它去生产代码里硬凑一次引用**——那是让门禁反过来决定代码形状。
+
 后果，两条：
 
 1. **调试画布只在挂载时拉一次。** `debug/+page.svelte` 里 `await pull()`
