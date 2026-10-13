@@ -1145,6 +1145,17 @@
   .cs-sheet[data-draft-font='hei'] .cs-draft-text {
     font-family: SimHei, '黑体', sans-serif;
   }
+  /* ⚠ 这一条 2026-10-14 才补上。`DRAFT_FONTS` 里早就有 `lxgw` 这个 key，
+   *  但**没有对应的 CSS 规则**——探针把 `data-draft-font="lxgw"` 设上了，
+   *  没人消费，于是正文静默回落成默认的仿宋。
+   *
+   *  症状特别能骗人：出图看着「字体没生效」，而**同一张图逐字节等于
+   *  仿宋那张**。不比对哈希就会以为「霞鹜文楷效果不行」。
+   *  判据：换了字体却出一模一样的图，先 `Get-FileHash` 比一遍，
+   *  再怀疑字体。 */
+  .cs-sheet[data-draft-font='lxgw'] .cs-draft-text {
+    font-family: 'LXGW WenKai', KaiTi, STKaiti, '楷体', serif;
+  }
 
   /* ── 归属行「名字」的呈现（`?peer=`）───────────────────────────
    *
