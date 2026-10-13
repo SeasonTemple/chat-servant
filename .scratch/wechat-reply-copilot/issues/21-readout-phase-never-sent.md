@@ -5,8 +5,9 @@
 
 **Blocked by:** None（可以立刻做）
 
-**Status:** ready-for-agent · **P0 · 2026-10-12 实测，不是推断**
-· ✅ **2026-10-13 修了（选 A + 补一帧 Drafting）**，真机两项待验，见下
+**Status:** ready-for-human · **P0 · 2026-10-12 实测，不是推断**
+· ✅ **2026-10-13 修了（选 A + 补一帧 Drafting）**
+· ⚠ 剩下的两项要开真实微信会话验，`ready-for-human` 而非 `ready-for-agent`
 
 ## 症状
 
