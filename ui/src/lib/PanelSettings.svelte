@@ -41,6 +41,7 @@
   import TierSwitch from '$lib/TierSwitch.svelte';
   import SegSlider from '$lib/SegSlider.svelte';
   import { IS_DEMO as DEMO } from '$lib/runtime';
+  import { markShape, type MarkShape } from '$lib/mark-shape.svelte';
   import type { BudgetView, Tier } from '$lib/types';
 
   interface ProviderView {
@@ -246,6 +247,30 @@
   }
 
   /**
+   * 「标记形状」。与主面板**共用 `$lib/mark-shape.svelte` 那一份**。
+   *
+   * ⚠ 不能各存一份：设置页切了、主面板没跟，就是「同一个事实两个来源」，
+   * 而用户在界面上看不出哪里不同步。
+   */
+  let shape = $state<MarkShape>(markShape.current);
+  let shapeNote = $state('');
+
+  const SHAPE_OPTIONS = [
+    { id: 'tick' as const, label: '勾' },
+    { id: 'ring' as const, label: '圈' },
+  ];
+
+  async function setShape(next: MarkShape) {
+    shapeNote = '';
+    const r = await markShape.set(next);
+    if (!r.ok) {
+      shapeNote = `没存上：${r.note}`;
+    }
+    // 无论成败都读回镜像 —— 成功时它等于 next，失败时它等于程序认定的值。
+    shape = markShape.current;
+  }
+
+  /**
    * 「关闭时」的行为。与主面板**共用 Rust 那一个 setting**。
    *
    * ⚠ Rust 侧会验证：托盘不存在时**拒收**「收进托盘」—— 那样关掉面板
@@ -367,6 +392,8 @@
       } catch {
         closeBehavior = 'exit';
       }
+      // 标记形状也要读回来：界面显示的必须是程序认定的那个。
+      shape = await markShape.load();
       try {
         // 模型要**读回来**：界面显示的必须是程序认定的那个。
         // 没接上真实传输时 Rust 会返回错误——那时候整块不显示，
@@ -398,6 +425,31 @@
   <TierSwitch bind:tier onchange={changeTier} />
   {#if tierNote}
     <p class="cs-fail" role="alert">{tierNote}</p>
+  {/if}
+
+  <!-- ══ 外观 ══ -->
+  <h2 class="cs-h2">外观</h2>
+  <p class="cs-label">顶边标出当前档位的那一笔</p>
+  <!--
+    勾 / 圈是**审美偏好**，所以交给用户选，不在这里替他们定。
+    两支笔在 `$lib/marks` 里本来就都生成好了，切换只是换一组 path，
+    笔性一致（同为「中心线 + 宽度剖面」算出的轮廓）。
+
+    ⚠ 这是**外观偏好**，不是发送档位：它落盘、跨会话保留。
+    档位走 Rust 的 `TierCell`，会话结束必须回落 `Manual`（硬约束第 5 条）。
+    两种生命周期不能混 —— 一个要在重启后记得，一个**必须**忘掉。
+
+    ⚠ 写失败时 `markShape.set` 会读回真实值，所以这里的绑定不会停在
+    一个程序其实没存的状态上（与「关闭时」同一策略）。
+  -->
+  <SegSlider
+    bind:value={shape}
+    label="标记形状"
+    options={SHAPE_OPTIONS}
+    onchange={(v) => void setShape(v as MarkShape)}
+  />
+  {#if shapeNote}
+    <p class="cs-note" role="status">{shapeNote}</p>
   {/if}
 
   <!-- ══ 窗口 ══ -->

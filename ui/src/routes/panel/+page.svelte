@@ -29,7 +29,9 @@
    *  按「中心线 + 宽度剖面」生成），不是手写 path——手写过一次收放
    *  方向反了。理由与量测都记在那边。
    */
-  import { TICK_NESTED, MARK_VIEW } from '$lib/marks';
+  import { TICK_NESTED, RING_LABEL_MARK, MARK_VIEW } from '$lib/marks';
+  import { markShape } from '$lib/mark-shape.svelte';
+  import { onMount } from 'svelte';
 
   /** 档位从低到高。Rust 侧持有档位值，这里只按顺序摆位置。 */
   const TIERS = [
@@ -48,6 +50,36 @@
   let tier = $state<TierKey>(
     TIERS.some((t) => t.key === fromUrl) ? (fromUrl as TierKey) : 'Manual',
   );
+
+  onMount(() => {
+    /*
+     * 标记形状落在 Rust 侧的 prefs，这里只读镜像。
+     *
+     * ⚠ `?shape=` 是**探针口**，与上面 `?tier=` 同一性质：方便把两支笔
+     * 各截一张 1× 图对着比。它在演示/静态页里只改内存镜像
+     * （`markShape.set` 见 `HAS_TAURI` 分支），**不落盘**，
+     * 所以拿它做实验不会把真机设置改成圈。
+     */
+    const probe = new URLSearchParams(location.search).get('shape');
+    if (probe === 'tick' || probe === 'ring') {
+      void markShape.set(probe);
+    } else {
+      void markShape.load();
+    }
+  });
+
+  /*
+   * 勾还是圈 —— **用户的选择，不是设计定论**（2026-10-13）。
+   *
+   * 两支笔在 `marks.js` 里本来就都生成好了，切换只是换一组 path；
+   * 笔性也一致：都是「中心线 + 宽度剖面」算出来的轮廓，都落在同一个
+   * 60×40 取景框里。语义分工：勾 = 「这一档被批了」，圈字环 = 「这一档
+   * 被圈中了」，形状差异在 1:1 下比粗细差异更容易读出来。
+   *
+   * ⚠ 只有两支笔。两支的**笔心在取景框里不在同一个位置**，所以摆放
+   * 不能共用一个偏移——见下面的 CSS，两者各自有实测出来的 top。
+   */
+  const MARK_LAYERS = $derived(markShape.current === 'ring' ? RING_LABEL_MARK : TICK_NESTED);
 </script>
 
 <svelte:head>
@@ -81,6 +113,7 @@
           <span class="cs-markbox">
             <svg
               class="cs-tick"
+              data-shape={markShape.current}
               viewBox="0 0 {MARK_VIEW.w} {MARK_VIEW.h}"
               width={MARK_VIEW.w}
               height={MARK_VIEW.h}
@@ -93,7 +126,7 @@
                 同框实测：落在中间密度带的像素 23.0% → 70.5%，总墨量反而少
                 17%。密度从芯往外逐级下降，才有「芯重边虚」。
               -->
-              {#each TICK_NESTED as layer (layer.d)}
+              {#each MARK_LAYERS as layer (layer.d)}
                 <path d={layer.d} fill-opacity={layer.o} />
               {/each}
             </svg>
@@ -202,9 +235,7 @@
     align-items: center;
   }
 
-  /*  取景框只负责给勾一个固定高度，好让三行字对齐。
-   *  它**不画任何东西**——勾的横纵比是 1.48 : 1，接近参考的
-   *  1.17 : 1；框高留 40px 是让勾的底角不压到字。 */
+  /*  取景框只负责给标记一个固定高度，好让三行字对齐。它**不画任何东西**。 */
   .cs-markbox {
     position: relative;
     display: block;
@@ -212,15 +243,40 @@
     height: 40px;
   }
 
-  /*  勾。红铅笔，蜡质，`fill-opacity: 0.86` 让纸的颗粒透上来。
-   *  ⚠ 实心不透明会读成印刷或马克笔，照片里没有一根是那样。 */
+  /*  标记。红铅笔，蜡质，`fill-opacity: 0.86` 让纸的颗粒透上来。
+   *  ⚠ 实心不透明会读成印刷或马克笔，照片里没有一根是那样。
+   *
+   *  **盖章式：笔盖在字上，不是悬在字上方。** 用户 2026-10-13 用手绘参考
+   *  点破了这一点——标记靠**交叠**表达「这一档被批了」，躲开字反而变成
+   *  一个跟内容无关的浮标。旧版 `top: 2px` 是「图标式」排布。
+   *
+   *  ⚠ 盖住字**不会**读成删除线：删除线是一条横线穿过字中部，圈是包围，
+   *  拓扑不同。2026-10-13 我把「标记与字交叠」当成缺陷判掉过，那是拿形状
+   *  交叠去推语义的错判。
+   *
+   *  两个 top 是实测值（材质台 B 段，`?mark=overlay`），不是估的：
+   *  笔心 = `marks.js` 里 path 的 bbox 中心，字心 = 40 + 2 + 11/2 ≈ 47.5
+   *      TICK_NESTED     心 (28.0, 20.8) → top ≈ 27
+   *      RING_LABEL_MARK 心 (30.1, 17.1) → top ≈ 30
+   *  **两支笔的笔心在取景框里位置不同，所以不能共用一个偏移。**
+   *
+   *  水平同理：`left:50% + margin-left:-30px` 对准的是**取景框**中心，
+   *  要对准的是**笔心**。勾的笔心 x=28（框心 30）天生偏左 2px，但实测
+   *  （截图数出「入」露在勾的右臂外）要右移 9px 才盖得住三个字。
+   *  圈字环不动——它是横长环，左右本该盖满字，实测 -30 已经对。
+   */
   .cs-tick {
     position: absolute;
     left: 50%;
-    top: 2px;
-    margin-left: -30px;
+    top: 27px;
+    margin-left: -21px;
     opacity: 0;
     transition: opacity var(--cs-dur) var(--cs-ease);
+  }
+
+  .cs-tick[data-shape='ring'] {
+    top: 30px;
+    margin-left: -30px;
   }
 
   /*  只有 fill，不设 fill-opacity——每层的透明度是**笔迹数据的一部分**，
