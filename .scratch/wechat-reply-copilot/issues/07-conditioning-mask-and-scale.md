@@ -19,6 +19,24 @@
 **Status:** 语义遮罩 done / 尺度归一 纯算术 done（DPI + 预算拟合 + 上限），
 区域检测与视觉链路未开工（见 ticket 15）
 
+⚠ **本票引用的证据帧 `target/probe/text-chat.png` 已经不存在**（2026-10-13 实测）。
+`docs/adr/0002-frame-conditioning-pipeline.md` 也引用了同一张，同样是悬空引用。
+该文件在 `target/` 下、被 gitignore、从未进过版本库，所以**没有任何副本可恢复**——
+扫过 C 盘与 E 盘全部回收站条目均无 `text-chat` 记录。
+
+**所以下面所有「实测数据」现在只能读、不能复现。** 票里的数字本身仍然成立，
+缺的是可复核性——而**复核本身有代价，不要顺手就去做**：
+
+> ⚠ 要重抓这一帧，只能用 `cargo xtask probe frame`，那是硬约束第 3 条
+> （截图不落盘）**唯一允许的例外**：它会把**真实聊天内容**写到 `target/probe/`。
+> 触发它之前必须先向用户说明并得到同意；抓完的帧**只留在本机**，
+> 不得提交、不得上传、不得贴进任何对话。
+> 同理，下面提到的 `panel-*.png` / `ring-size-compare.png` 也都是取证图，
+> 一律只在 `target/probe/` 里，不进仓库。
+已确认同批的 `panel-tick-big.png` / `panel-tick-big-zoom.png` /
+`ring-size-compare.png` / `panel-drafting-zoom.png` / `panel-drafting.png`
+**都还在**——那几张是真的丢了。
+
 ## 语义遮罩：验收标准是准确率，不是成本
 
 ADR-0002 第 3 级是五级里**唯一**以准确率为主的一级。
