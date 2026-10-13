@@ -217,6 +217,9 @@
    *  「机器认的」和「你写的」）。要改就改这一个默认值。 */
   let peerLook = $state<PeerLook>('tracked');
 
+  /** 手绘滤镜探针（`?pencil=1`），默认关。理由见 CSS 里那段注释。 */
+  let pencilOn = $state(false);
+
   /**
    *  档位整格放大系数。**1.35 是量出来的**：用户判「1.0 不够、1.5 太抢」，
    *  落在两者之间。1.35 下取景框 81×54、档位名 14.85px、整格 71.6px，
@@ -262,6 +265,7 @@
     if (peerLookProbe !== null && looks.includes(peerLookProbe as PeerLook)) {
       peerLook = peerLookProbe as PeerLook;
     }
+    if (q.get('pencil') === '1') pencilOn = true;
 
     if (sizeProbe !== null && sizes.includes(sizeProbe as MarkSize)) {
       markSize = sizeProbe as MarkSize;
@@ -459,6 +463,7 @@
   style:--tk={tierK}
   style:--peer-probe={peerPx ?? ''}
   data-peer-look={peerLook}
+  data-pencil={pencilOn ? '1' : ''}
 >
   <!--
     ⚠ **撕口那条上沿是拖拽带**（`data-tauri-drag-region`）。
@@ -1095,13 +1100,19 @@
     color: var(--cs-pencil);
   }
 
-  /*  正文。楷体 21px / 行高 1.5（§4.2a 定案）。
-   *  ⚠ 21px 是定案值，换之前先看 §4.2a 那条取舍：19px 是唯一保持 4 行的
+  /*  正文。**仿宋** 21px / 行高 1.5（§4.2a 定案，2026-10-14 由楷体改）。
+   *  ⚠ 21px 是定案值，换字号前先看 §4.2a 那条取舍：19px 是唯一保持 4 行的
    *    档，但 48.4% 的笔画 ≤1px 会断笔——**断笔 = 读不出来**。
+   *  ⚠ 字体由楷体改仿宋的理由（用户 2026-10-14 判「仿宋最合适」）：
+   *    同屏其余文字（归属行 / 档位名 / 面板标签）全是黑体族，楷体是
+   *    全屏唯一一支不同的笔，读起来「突兀」。仿宋的横细竖粗印刷感
+   *    与纸材同源，又比黑体软。
+   *  ⚠ 仿宋比楷体**细**。这条要盯：若实机上出现断笔，先加粗重或退回楷体，
+   *    不要靠降字号解决（降字号正是 §4.2a 否掉的那条路）。
    */
   .cs-draft-text {
     margin: 0;
-    font-family: KaiTi, STKaiti, '楷体', serif;
+    font-family: FangSong, STFangsong, '仿宋', serif;
     font-size: 21px;
     line-height: 1.5;
     color: var(--cs-ink);
@@ -1168,6 +1179,20 @@
   .cs-sheet[data-peer-look='fang'] .cs-peer {
     font-weight: 400;
     font-family: FangSong, STFangsong, '仿宋', serif;
+  }
+
+  /* ── 手绘滤镜探针（`?pencil=1`）────────────────────────────────
+   *
+   *  把记号用的 `url(#pencil)`（feTurbulence 颗粒 + feDisplacementMap
+   *  边缘位移）套到**正文文字**上。零新依赖，是「不像印刷字」最便宜的一招。
+   *
+   *  ⚠ 但它有真实风险，不能默认开：`feDisplacementMap` 会把笔画边缘
+   *    推开，而 §4.2a 否掉 19px 楷体的理由正是「笔画 ≤1px 会断笔」。
+   *    位移再叠上去只会更容易断。判据：出图放大看**细笔画有没有真的断开**，
+   *    不是看「有没有颗粒感」。
+   */
+  .cs-sheet[data-pencil='1'] .cs-draft-text {
+    filter: url(#pencil);
   }
 
   /*  归属行字号探针（`?peersz=`）。同理，默认不上规则。 */
