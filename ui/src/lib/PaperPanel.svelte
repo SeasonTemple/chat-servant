@@ -194,7 +194,6 @@
     song: "SimSun, '宋体', NSimSun, serif",
     yahei: "'Microsoft YaHei', '微软雅黑', sans-serif",
     hei: "SimHei, '黑体', sans-serif",
-    lxgw: "'LXGW WenKai', KaiTi, STKaiti, '楷体', serif",
   } as const;
   type DraftFontKey = keyof typeof DRAFT_FONTS;
   let draftFont = $state<DraftFontKey | null>(null);
@@ -1153,7 +1152,16 @@
 
   /*  正文字体探针（`?draft=`）。默认（`data-draft-font` 为空）**不上任何
    *  规则**，也就是说默认走下面 `.cs-draft-text` 里那一条定案值——
-   *  探针口只能由探针口触发，不能让默认路径自己漂走。 */
+   *  探针口只能由探针口触发，不能让默认路径自己漂走。
+   *
+   *  ⚠ **每个 key 都必须有一条同名规则**，这是本项目的第一条探针纪律。
+   *    踩过：`DRAFT_FONTS` 里有过一个 `lxgw`，但没写对应规则——探针把
+   *    `data-draft-font="lxgw"` 设上去了却没人消费，正文**静默回落**成默认。
+   *    症状特别能骗人：出图看着「字体没生效」，而那张图**逐字节等于**
+   *    默认字体那张。不比对哈希就会以为「这台字体效果不行」。
+   *    判据：换了参数却出一模一样的图，先 `Get-FileHash` 比一遍，
+   *    再怀疑字体。（`lxgw` 已随「正文走本机真有的字体」一并删除，
+   *    体积数据与重开条件见票 22 与 `ui/scripts/subset_font.py`。） */
   .cs-sheet[data-draft-font='kai'] .cs-draft-text {
     font-family: KaiTi, STKaiti, '楷体', serif;
   }
@@ -1168,17 +1176,6 @@
   }
   .cs-sheet[data-draft-font='hei'] .cs-draft-text {
     font-family: SimHei, '黑体', sans-serif;
-  }
-  /* ⚠ 这一条 2026-10-14 才补上。`DRAFT_FONTS` 里早就有 `lxgw` 这个 key，
-   *  但**没有对应的 CSS 规则**——探针把 `data-draft-font="lxgw"` 设上了，
-   *  没人消费，于是正文静默回落成默认的仿宋。
-   *
-   *  症状特别能骗人：出图看着「字体没生效」，而**同一张图逐字节等于
-   *  仿宋那张**。不比对哈希就会以为「霞鹜文楷效果不行」。
-   *  判据：换了字体却出一模一样的图，先 `Get-FileHash` 比一遍，
-   *  再怀疑字体。 */
-  .cs-sheet[data-draft-font='lxgw'] .cs-draft-text {
-    font-family: 'LXGW WenKai', KaiTi, STKaiti, '楷体', serif;
   }
 
   /* ── 归属行「名字」的呈现（`?peer=`）───────────────────────────

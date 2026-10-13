@@ -1,8 +1,20 @@
 """Subset LXGW WenKai Lite to a shippable size.
 
-Why: the full TTF is 13.3 MB and the Lite build is still 13.3 MB. Neither can
+⚠ NOT WIRED UP. Nothing in `ui/` loads these outputs — the `@font-face` that
+  pointed at them was removed on 2026-10-14. The body font is FangSong, a font
+  already installed on Windows (ticket 22, "霞鹜文楷评估").
+  This script is kept as the *reproduction* for the measured sizes below, so
+  nobody re-derives them from a blog post. Re-run it before reopening the
+  question; do not trust numbers quoted from elsewhere.
+
+Why: the full TTF is 14.9 MB and the Lite build is still 13.3 MB. Neither can
 go into an installer. This produces two woff2 subsets so the size/character
 coverage trade-off is a measured choice rather than a guess.
+
+Measured 2026-10-14 on this machine:
+  LXGW-WenKai-gb2312.woff2   1.54 MB   6763 hanzi
+  LXGW-WenKai-cjk.woff2      4.28 MB  20992 hanzi
+The "GB2312 subset is ~300 KB" figure floating around the web is off by 5x.
 
 Outputs (next to the input font):
   LXGW-WenKai-gb2312.woff2  only chars encodable in GB2312
