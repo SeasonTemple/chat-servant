@@ -82,6 +82,80 @@ pub mod events {
     pub const KNOWN_UNLISTENED: [&str; 1] = [ARMED];
 }
 
+/// Tauri **命令**名。⚠ **2026-10-14 才补上**——本文件原来只收事件名，
+/// 而命令名同样是跨进程边界的东西，却一个都没进清单。
+///
+/// 代价已经付过：托盘的「重新锁定当前会话」发 `menu:relock` 没人收，
+/// 而 `relock_session` 前端一次都没调过，两头都没人管（票 28 / `cc0c2b4`）。
+///
+/// ⚠ 注意与事件名的**关键区别**：`main.rs` 的 `generate_handler!` 里写的是
+///   **函数路径** `commands::foo`，不是字符串，所以「命令名字面量不许出
+///   本文件」这条纪律在命令这边**没法照搬**——能照搬的是
+///   「函数名与命令名必须逐字一致」，由下面那条测试守住。
+pub mod commands {
+    /// ⚠ 只被下面那两条测试读，生产代码不碰它——所以要 `allow(dead_code)`。
+    ///
+    /// 而**必须**留着它：没有这份清单，「注册了没人调」这件事就没人管
+    /// （`relock_session` 就是这么被托盘放过的）。
+    /// ⚠ 别为了消掉这条 allow 去生产代码里硬凑一次引用——那是让门禁
+    ///   反过来决定代码形状。
+    #[allow(dead_code)]
+    pub const ALL: [&str; 28] = [
+        "probe_anchor",
+        "latest_readout",
+        "debug_pane",
+        "dispatch",
+        "open_settings",
+        "open_debug",
+        "get_settings",
+        "save_setting",
+        "forget_key",
+        "probe_key",
+        "get_model",
+        "set_model",
+        "get_recent_n",
+        "set_recent_n",
+        "get_token_budget",
+        "set_token_budget",
+        "get_images_out",
+        "set_images_out",
+        "get_tier",
+        "set_tier",
+        "relock_session",
+        "get_close_behavior",
+        "set_close_behavior",
+        "get_mark_shape",
+        "set_mark_shape",
+        "hide_panel",
+        "show_panel",
+        "quit_app",
+    ];
+
+    /// **明知道「注册了、前端却不调」的命令。**
+    ///
+    /// 每条都要写清**为什么现在没人调**。⚠ 豁免要显式、逐条可见，
+    /// 别给测试留通用跳过开关——被习惯绕过的检查等于没有检查。
+    ///
+    /// | 命令 | 现在谁在用 | 为什么不调 |
+    /// |---|---|---|
+    /// | `probe_anchor` | 没人（`cargo xtask probe anchor` 走的是库函数，不是这条 IPC） | 锚点探针的**前端入口没做** |
+    /// | `dispatch` | 没人 | 发送那一排按钮（**动作行**）未做，见 `docs/前端设计进度.md` §3 |
+    /// | `open_settings` | 托盘菜单在 **Rust 内部**直接调同一个函数 | 前端不需要第二入口 |
+    /// | `open_debug` | 同上 | 同上 |
+    /// | `show_panel` | 托盘与托盘左键都在 Rust 内部直接调 | 同上 |
+    ///
+    /// ⚠ 后三条是**内部复用**而非死代码，删掉会破托盘；前两条是真欠账。
+    ///   两者都列在这里，是因为「前端不调」这件事本身需要有人盯着。
+    #[allow(dead_code)] // 同 ALL：只服务测试，见上面那句「别硬凑引用」。
+    pub const KNOWN_UNREACHED: [&str; 5] = [
+        "probe_anchor",
+        "dispatch",
+        "open_settings",
+        "open_debug",
+        "show_panel",
+    ];
+}
+
 /// 投递动作。
 ///
 /// **原先是 `String`**——`action: "删库"` 也能一路传进 `dispatch`。
@@ -540,6 +614,107 @@ mod tests {
     }
 
     /// 按扩展名递归收文件。前端那边是 `.svelte` / `.ts`，Rust 这边是 `.rs`。
+    /// **守住命令清单的另一半：注册了的，前端要么调得到，要么有人在册豁免。**
+    ///
+    /// 事件名那两条测试已经证明了同一个问题的三种形态：
+    /// 「声明了却永远不触发」/「发了却没人听」/「注册了没人调」。
+    /// 命令能在 devtools 里手动 `invoke`，于是它看起来是活的，
+    /// 可产品里没有任何路径走得到。
+    ///
+    /// ⚠ 这条不能简单写成「每条命令都必须被前端调」：`open_settings` 之类
+    ///   是**内部复用**（托盘在 Rust 里直接调同一个函数），前端不需要第二入口。
+    ///   所以形态是「不在 `KNOWN_UNREACHED` 里，就必须能在前端源码里找到
+    ///   `'命令名'`」。
+    #[test]
+    fn every_reachable_command_is_invoked_from_the_frontend() {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = here.parent().and_then(|p| p.parent()).unwrap_or(here);
+
+        let mut frontend = String::new();
+        let mut visited: Vec<std::path::PathBuf> = Vec::new();
+        walk_ext(
+            &root.join("ui").join("src"),
+            &["svelte", "ts"],
+            &mut visited,
+        );
+        for p in &visited {
+            if let Ok(t) = std::fs::read_to_string(p) {
+                frontend.push_str(&t);
+            }
+        }
+        assert!(
+            !frontend.is_empty(),
+            "读不到任何前端源码 —— 本测试会**假装一切正常**，先查路径。"
+        );
+
+        let mut unreached = Vec::new();
+        for name in commands::ALL {
+            if commands::KNOWN_UNREACHED.contains(&name) {
+                continue;
+            }
+            if !frontend.contains(&format!("'{name}'")) {
+                unreached.push(name);
+            }
+        }
+        assert!(
+            unreached.is_empty(),
+            "这些命令注册在 `invoke_handler!` 里，前端**一次都没 invoke**：\n  {}\n\
+             （真要还没接，请加进 `commands::KNOWN_UNREACHED` 并写清为什么没人调。）",
+            unreached.join("\n  ")
+        );
+    }
+
+    /// **清单与注册表不许分家。**
+    ///
+    /// `commands::ALL` 是手抄的，抄漏一条就会让上一条测试**假装全覆盖**——
+    /// 一个从未被注册的命令不会触发任何失败。
+    /// ⇒ 双向对账：清单里每条都要真的出现在 `main.rs` 的 `generate_handler!`
+    /// 里，而那里出现的每个 `commands::xxx` 也都要在清单里。
+    #[test]
+    fn command_list_matches_the_invoke_handler() {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let main_rs =
+            std::fs::read_to_string(here.join("src").join("main.rs")).expect("读不到 main.rs");
+
+        let mut missing = Vec::new();
+        for name in commands::ALL {
+            if !main_rs.contains(&format!("commands::{name}")) {
+                missing.push(name);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "命令清单与注册表对不上，清单里有这些而 generate_handler! 里没有：\n  {}",
+            missing.join("\n  ")
+        );
+
+        // 反向：只扫 `generate_handler!` 那一块。
+        // ⚠ 第一版扫的是整个 main.rs 的 `commands::xxx(`，于是把
+        //   `set_app_handle` / `start` / `tray_icon` 这些**内部调用**
+        //   也算成「注册了」——是测试自己越界了，不是代码有问题。
+        let handler = main_rs
+            .split_once("generate_handler![")
+            .and_then(|(_, rest)| rest.split_once("])"))
+            .map(|(block, _)| block)
+            .expect("main.rs 里找不到 generate_handler! 块");
+        let registered: std::collections::BTreeSet<&str> = handler
+            .lines()
+            .filter_map(|l| l.split("commands::").nth(1))
+            .filter_map(|rest| rest.trim_end_matches(',').trim().split('(').next())
+            .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .collect();
+        let unregistered: Vec<&str> = registered
+            .iter()
+            .copied()
+            .filter(|n| !commands::ALL.contains(n))
+            .collect();
+        assert!(
+            unregistered.is_empty(),
+            "这些函数注册进了 invoke_handler!，却不在 `commands::ALL` 里：\n  {}",
+            unregistered.join("\n  ")
+        );
+    }
+
     fn walk_ext(dir: &std::path::Path, exts: &[&str], acc: &mut Vec<std::path::PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else {
             return;
