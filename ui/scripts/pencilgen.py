@@ -192,6 +192,65 @@ RING_LABEL_PASSES = [
 ]
 
 
+# ── 幅面档位（2026-10-13）─────────────────────────────────────────
+#
+#  两支笔都按「同一支笔放大」处理：中心线缩放，**笔重剖面原样不动**。
+#  改的是笔画画多大，不是笔多重——放大了笔也跟着粗就成了一块墨饼。
+#
+#  实测（解析 marks.js 生成的 path 坐标 + 6× 真像素，不是估的）：
+#      档位名「只填入」排版宽 33.66px（CJK 全角 11px + 0.02em 字距 ×3），
+#      行高 11px（`.cs-slot-name` 的 font-size/line-height 都是 11）
+#
+#  原始的圈是 52.10 × 16.40，套在 11px 的字上：横向每侧还空 9.2px，
+#  纵向只空 2.7px —— 扁椭圆的上沿直接压在字头上，读成「圈没画开」
+#  而不是「圈大」。放到 74.20 × 28.60 之后才读成「盖了一个章」。
+#  💭 这里的判据是**圈高与字高的比**：小于约 1.5 倍读成「字的边框」，
+#  超过约 2.5 倍才读成「印章」。1.66 倍正好卡在中间，所以两头都不像。
+def _scale_centerline(pts, kx, ky):
+    """绕自身外框中心缩放中心线。手抖的形状原样保留，只改幅面。"""
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    cx = (min(xs) + max(xs)) / 2
+    cy = (min(ys) + max(ys)) / 2
+    return [(cx + (x - cx) * kx, cy + (y - cy) * ky) for x, y in pts]
+
+
+def _recenter(pts, w, h):
+    """把中心线摆到 (w/2, h/2)。取景框变了，笔心就得重新对回框心，
+    否则页面上按笔心反算出来的偏移量全错。"""
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    dx = w / 2 - (min(xs) + max(xs)) / 2
+    dy = h / 2 - (min(ys) + max(ys)) / 2
+    return [(x + dx, y + dy) for x, y in pts]
+
+
+#  ⚠ 取景框必须跟着放大：根 `<svg>` 的 overflow 是 hidden，画到 60×40
+#    之外会被**静默裁掉**——症状是「代码改了、图没变」，那正是量具
+#    自己骗自己。所以放大的档位各自配一个更大的 VIEW。
+RING_VIEW = {"w": 84, "h": 52}
+TICK_VIEW = {"w": 56, "h": 34}
+
+#  圈：纵向比横向放得多，让扁椭圆的长宽比往字靠
+RING_LABEL_LINE_BIG = _scale_centerline(RING_LABEL_LINE, 1.10, 1.46)  # → 约 57 × 22.6
+RING_LABEL_LINE_HUGE = _recenter(
+    _scale_centerline(RING_LABEL_LINE, 1.45, 1.90), RING_VIEW["w"], RING_VIEW["h"]
+)  # → 约 74 × 28.6
+
+#  勾：**加宽压扁**，不是等比放大。2026-10-13 用户判「纵向过长」。
+#  💭 病根不是「高」是**窄**：三个字排版宽 33.66px，base 勾只有 29.10px
+#    宽——盖不住词就只剩一竖；等比放到 44.5 × 47.1 更糟，宽还是不够而
+#    高已 4.3 倍字高，读成「一竖划了个钩」。圈那边踩过同一个坑
+#    （RING_LABEL_LINE），判据是**盖不盖得住词**。故两档都 kx 上 ky 下，
+#    外廓落在「宽过词、矮于圈」这一带。
+TICK_LINE_MID = _recenter(
+    _scale_centerline(TICK_LINE, 1.375, 0.909), TICK_VIEW["w"], TICK_VIEW["h"]
+)  # → 约 40 × 28
+TICK_LINE_BIG = _recenter(
+    _scale_centerline(TICK_LINE, 1.718, 0.844), TICK_VIEW["w"], TICK_VIEW["h"]
+)  # → 约 50 × 26
+
+
 # ── 叉 ────────────────────────────────────────────────────────────
 CROSS_A = [(12.0, 7.5), (19.0, 14.0), (27.0, 21.5), (36.0, 28.5), (42.0, 32.5)]
 CROSS_B = [(42.0, 7.5), (35.0, 14.5), (27.5, 22.0), (19.0, 29.0), (13.0, 32.5)]
@@ -293,8 +352,12 @@ def emit_js(path):
     cross_b = ribbon(CROSS_B, cross_width)
 
     tick_n = nest(TICK_LINE, tick_width)
+    tick_mid = nest(TICK_LINE_MID, tick_width)
+    tick_big = nest(TICK_LINE_BIG, tick_width)
     ring_m = pass_layers(RING_LINE, ring_width, RING_PASSES)
     ring_l_m = pass_layers(RING_LABEL_LINE, ring_label_width, RING_LABEL_PASSES)
+    ring_l_big = pass_layers(RING_LABEL_LINE_BIG, ring_label_width, RING_LABEL_PASSES)
+    ring_l_huge = pass_layers(RING_LABEL_LINE_HUGE, ring_label_width, RING_LABEL_PASSES)
 
     tw, th = bbox(TICK_LINE)
     rw, rh = bbox(RING_LINE)
@@ -357,6 +420,10 @@ def emit_js(path):
 
 /** 勾 · 嵌套羽化（由外带 → 芯，o 递增）。粗笔迹的柔边全靠它。 */
 export const TICK_NESTED = {nested_block(tick_n)};
+/** 勾 · 中幅档（→ 约 40 × 28）。同一支笔拉宽压扁，笔重剖面不变。 */
+export const TICK_NESTED_MID = {nested_block(tick_mid)};
+/** 勾 · 印章档（→ 约 50 × 26）。拉宽压扁之后才盖得住三个字。 */
+export const TICK_NESTED_BIG = {nested_block(tick_big)};
 /** 勾 · 单层平涂。**只作基线对照**，面板不要用这个。 */
 export const TICK_PATH =
   '{tick}';
@@ -369,6 +436,14 @@ export const RING_MARK = {nested_block(ring_m)};
  *  太轻圈不住。 */
 export const RING_LABEL_MARK = {nested_block(ring_l_m)};
 
+/** 圈住档位名的横长环 · 中幅档（→ 约 57 × 22.6）。 */
+export const RING_LABEL_MARK_BIG = {nested_block(ring_l_big)};
+
+/** 圈住档位名的横长环 · 印章档（→ 约 74 × 28.6）。
+ *  单独一个取景框：根 `<svg>` 的 overflow 是 hidden，画到 60×40 之外
+ *  会被静默裁掉，表现为「放大了但还是没变大」。 */
+export const RING_LABEL_MARK_HUGE = {nested_block(ring_l_huge)};
+
 /** 叉：两笔独立，各自收锋。 */
 export const CROSS_PATHS = [
   '{cross_a}',
@@ -377,6 +452,10 @@ export const CROSS_PATHS = [
 
 /** 共用取景框。1 单位 = 1 px @ 1×。 */
 export const MARK_VIEW = {{ w: {VIEW_W}, h: {VIEW_H} }};
+
+/** 放大档专用的取景框。base 放得进 MARK_VIEW，mid / big 放不进。 */
+export const RING_VIEW = {{ w: {RING_VIEW['w']}, h: {RING_VIEW['h']} }};
+export const TICK_VIEW = {{ w: {TICK_VIEW['w']}, h: {TICK_VIEW['h']} }};
 
 """
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
