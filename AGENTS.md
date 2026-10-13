@@ -59,7 +59,7 @@ Rust 核心 + Tauri 2 外壳 + Svelte 5 前端，先打通微信单聊。
 - `ui/` — SvelteKit 5 前端
 - `ui/src-tauri/` — Tauri 2 外壳：命令层、托盘、观察循环
 - `ui/static/demo/*.json` — 八态演示夹具，`?demo=1&state=<名字>`
-- `.agents/skills/` — **设计/前端/Rust/ComputerUse 技能库**（见下）
+- `.agents/skills/` — 技能库，68 个，**实际只有 6 个可用**（见「Skill 库」一节）
 - `.github/` — CI（九步，与 `gate.ps1` 对齐）、release（tag 驱动，出 msi+nsis）
 - `.githooks/` — commit-msg 校验 Conventional Commits、pre-commit 凭据闸
 
@@ -75,6 +75,9 @@ Rust 核心 + Tauri 2 外壳 + Svelte 5 前端，先打通微信单聊。
 三处 `#![forbid(unsafe_code)]` 是真的守住了，不是摆设。
 
 ## Code style
+
+⚠ **动 Rust 之前先读 `.agents/skills/rust-skills/SKILL.md`**（265 条规则的索引），
+按主题取用，别整份灌进上下文。
 
 - Rust edition 2024。lint 策略**单一出处**在根 `Cargo.toml` 的 `[workspace.lints]`。
 - **per-crate 的锁写进 `src/lib.rs`**（如 `#![forbid(unsafe_code)]`），不要写进
@@ -126,6 +129,9 @@ pwsh -NoProfile -File scripts\shotwin.ps1 <hwnd> <out.png>   # 截窗口
 
 UI 在 `ui/`，Svelte 5 + Vite + Tauri 2。
 
+⚠ **动 `.svelte` / `.svelte.ts` 之前先读 `.agents/skills/svelte-core-bestpractices/SKILL.md`**
+和 `svelte-code-writer`（见「Skill 库」一节）。这俩是真货，不要凭手感写。
+
 - 写或改任何 `.svelte` / `.svelte.ts` 之前，用官方 autofixer 校验并迭代到零告警：
   `npx -y @sveltejs/mcp svelte-autofixer <path>`
 - 查 Svelte 5 / SvelteKit 文档：`npx -y @sveltejs/mcp list-sections` 然后
@@ -171,19 +177,83 @@ Five canonical roles, default strings: `needs-triage`, `needs-info`,
 Single-context: `CONTEXT.md` at the root, ADRs in `docs/adr/`. Read `CONTEXT.md`
 before writing code that uses domain terms. See `docs/agents/domain.md`.
 
-## 参考资料：`.agents/skills/`
+## Skill 库：`.agents/skills/`（68 个，一半有毒）
 
-⚠ **改界面之前先读对应 skill，不要凭手感写。**
+装着的 68 个 skill 里，**只有 6 个真的能用**，52 个 Tauri 系全是模板生成的空壳，
+其中 **12 个还带编造的包名与命令**（npm 上查无此包）。所以「主动用 skill」
+在本仓的正确含义是**先查这张表再决定读不读**，而不是照单全收。
 
-| skill | 什么时候读 |
-|---|---|
-| `.agents/skills/frontend-design/` | 动界面布局、视觉层级之前 |
-| `.agents/skills/ui-ux-pro-max/` | 需要配色/字体/间距/图表规范，或要查 UX 准则时 |
-| `.agents/skills/ui-styling/` | 主题 token、无障碍、响应式 |
-| `.agents/skills/rust-skills/` | 写 Rust，尤其是 unsafe 与错误处理 |
-| `.agents/skills/asd-ste100/` | 函数/注释/命名写得难读时（带 linter） |
-| `.agents/skills/design-system/` | 要建 token 体系时 |
-| `.agents/skills/openspec-*/` | 需求较大、要走规格变更流程时 |
+### 唯一可信的 6 个
+
+| skill | 什么时候读 | 为什么可信 |
+|---|---|---|
+| `.agents/skills/rust-skills/` | 动 Rust 代码前 | 265 条规则、285 个文件，逐条带 Bad/Good 代码。实测有用：`anti-empty-catch.md` 正好对应本仓「空的 `catch {}` 会藏 bug」 |
+| `.agents/skills/svelte-core-bestpractices/` | 动 `.svelte` / `.svelte.ts` 前 | 有真实 Svelte 5 代码示例 |
+| `.agents/skills/svelte-code-writer/` | 同上，作为文档查询入口 | CLI 工具，查 Svelte 5 官方文档 |
+| `.agents/skills/ui-ux-pro-max/` | 要配色/字体/间距/UX 准则/图表时 | `data/` 下是可检索的真实数据，**含 `svelte.csv`** |
+| `.agents/skills/frontend-design/` | 定视觉方向、判断「这设计是不是模板货」前 | 专治「一眼就是模板」的那种审美判断 |
+| `.agents/skills/asd-ste100/` | 写难读的函数/命名/注释时 | 带 linter |
+
+**调用方式**：这些在 `.agents/` 下，**不是**我这边的内置 skill 工具。
+要读就 `read` 对应的 `SKILL.md`（如 `.agents/skills/rust-skills/SKILL.md`），
+大 skill 先读 `SKILL.md` 索引再只取需要的规则文件，**别把 265 条全灌进上下文**。
+
+### 半个可用
+
+- `.agents/skills/ui-styling/` — 98 文件 5.6 MB，但它是 **shadcn/ui + Tailwind**
+  方案。本仓 `ui/package.json` 里**没有 tailwind、没有 shadcn、没有 bits-ui/melt**，
+  只有裸 CSS + `@lucide/svelte`。→ **抄它的 token / 无障碍 / 响应式**思路，
+  **不要**引入它假设的组件库。只在明确需要无障碍或主题体系时才翻。
+- `.agents/skills/design-system/` — token 分层（primitive→semantic→component）思路可用，
+  后半段是讲 slide 的，本仓用不上。
+- `.agents/skills/openspec-*/` — 4 个，**但仓库里没有 `openspec/` 目录，流程未初始化**。
+  现有票据走 `.scratch/`，见上面「Issue tracker」一节。要用得先 `openspec init`。
+
+### 明确不适用（别浪费时间）
+
+`brand/`、`design/`、`banner-design/`、`slides/` — 品牌 VI、海报、HTML 演示。
+本仓是桌面工具面板，不是品牌资产项目。
+
+### ⚠ 52 个 Tauri 系 skill：默认按「不存在」处理
+
+`.agents/skills/tauri*/` 整个家族（52 个）是**同一模板批量生成**的，
+`SKILL.md` 约 70 行 + `examples/usage.md` 恰好 53 行、代码块数完全相同，
+正文只有 When-to-use / Outputs / Scope / Gotchas（Gotchas 五条还是
+「注意版本兼容性」这种通用废话），**没有一个字是本仓需要的具体 API**。
+
+更糟的是**生成器把 skill 目录名直接当成了包名**，于是示例里出现查无此包的东西
+（2026-10-13 复核：`https://registry.npmjs.org/tauri-plugin-tauri-ipc` 返回
+`Not found`）：
+
+```ts
+// .agents/skills/tauri-ipc/examples/usage.md 原文
+import { init } from 'tauri-plugin-tauri-ipc';        // ← npm 上不存在这个包
+await invoke('plugin:tauri-ipc|do_something');        // ← 不存在这个命令
+emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目录名 + '-event'
+```
+
+真实写法是 `@tauri-apps/api/core` 的 `invoke('我的命令名')`，命令名必须对应
+自己写的 `#[tauri::command]`，不可能长这样。照抄这段**编译不过**。
+
+含编造包名/命令的 12 个：`tauri`、`tauri-ipc`、`tauri-window`、`tauri-security`、
+`tauri-config`、`tauri-concept`、`tauri-build`、`tauri-mobile`、`tauri-scaffold`、
+`tauri-setup`、`tauri-framework-security`、`tauri-framework-upgrade`。
+
+⚠ **别把「5 个包名是真的」当成「这 5 个能用」**：`tauri-app-clipboard` / `-dialog` /
+`-file-system` / `-http-client` / `-notification` 的示例确实引了真实包
+（`@tauri-apps/plugin-clipboard-manager` 等），但它们仍是同一份 53 行模板，
+而且**假设本仓装了这些插件——本仓 `ui/src-tauri/Cargo.toml` 里一个
+`tauri-plugin-*` 都没有**，照抄等于引入一整个本项目不存在的依赖面。
+**判据是「本项目用不用得上」，不是「API 是不是真的」。**
+
+**规矩**：Tauri 2 的写法**以 `AGENTS.md` 的「容易踩的坑」和 `docs/` 为准**，
+不引这些 skill 的示例。确实要查 Tauri 官方文档，走 `web_fetch https://v2.tauri.app/...`
+或它们的 References 里列的链接，别读本地模板。
+顺带一提：本仓 `tauri` 钉 `=2.12.1` 而 `tauri-build` 钉 `=2.7.1`，
+这是**实测过的真实坑**（见 `ui/src-tauri/Cargo.toml` 注释），
+而 `tauri-framework-upgrade` 讲的是 v1→v2 迁移——**跟这个问题无关，别指望它**。
+
+### 其余约定
 
 `skills-lock.json` 记录装了哪些版本。`.claude/` / `.minimax/` / `.zcode/` 是 CLI
 为别的运行时做的 symlink，**不要手改它们的内容**。⚠ **仓库只跟踪 `.agents/`
