@@ -5,7 +5,23 @@
 
 **Blocked by:** None（可以立刻做）
 
-**Status:** ready-for-agent · 2026-10-14 前提作废、范围收窄、forced-colors 已实测修完 · 5/10
+**Status:** done · 2026-10-14 · **验收项 8/8**
+
+⚠ 上一版这里写的是 `ready-for-agent · 5/10`，**那个分母是错的**——
+本票验收项实际 8 条且全勾，不是「10 条里做了 5 条」。核实用的两条命令（2026-10-14 实跑）：
+
+```bash
+rg -c '^- \[x\]' .scratch/wechat-reply-copilot/issues/23-button-component-family.md   # → 8
+rg -c '^- \[ \]' .scratch/wechat-reply-copilot/issues/23-button-component-family.md   # → 无命中（exit 1）
+```
+
+写状态行时没点一遍，于是票据对外报了一个比实际差得多的进度。
+（记下来是因为：**票据里的进度数字也是断言**，和注释里的存在性断言同类，
+得能被机器点一遍才算数。）
+
+⚠ 剩下一条**不是本票的债**，是留给设计决定的：`SegSlider` 的尺寸是否重定
+（见下「现在真正剩的债」末段）。票里明确写了「重不重定是设计决定，
+本票不擅自动」，所以它不进验收项。
 
 ## ⚠ 2026-10-14 复核：本票的前提已经不存在了
 
