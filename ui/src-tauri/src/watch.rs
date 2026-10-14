@@ -917,10 +917,17 @@ fn step(
     // 处理的对话反复读像素。闸只需要头部那块像素、不碰 OCR，
     // 所以它可以、也必须排在前面。
     // ⚠ 这里传的是 **`frame`（整帧）**，不是下面那个 `full`。
-    // 2026-10-14 修：标题栏在 `anchor.chat` **之上**，喂裁过的消息区
-    // 等于闸和会话名都取样于一块「压根没有名字」的像素。见 `header_band_rect`。
-    let print = header_print(&frame, &anchor);
-    refresh_peer(s, &frame, &anchor, print.as_ref());
+    // 2026-10-14 修：会话名行在 `anchor.chat` **之内但不在其上沿**
+    // （实测 `chat.y0 + 18`），喂裁过的消息区会切在它上面/下面。
+    // 2026-10-14 票 31：位置不再猜，由 `HeaderPrint::discover` 从像素推出。
+    let discovered = header_print(&frame, &anchor);
+    refresh_peer(
+        s,
+        &frame,
+        &anchor,
+        discovered.as_ref().map(|(p, _)| p),
+        discovered.as_ref().map(|(_, r)| *r),
+    );
     // ⚠ 重锁请求必须**在建锁判断之前**取走，否则这一轮的请求会被跳过，
     // 用户点了按钮却什么也没发生——那是最难查的一种「没反应」。
     //
@@ -931,11 +938,11 @@ fn step(
         apply_relock(s);
         watcher.rewind();
     }
-    let peer_ok = match (&s.locked_print, &print) {
+    let peer_ok = match (&s.locked_print, &discovered) {
         // 还没锁过：拿**第一帧读到的**当基准，并把名字报给用户看。
         // ⚠ 这意味着「启动时开着的那个会话」就是被锁的那个。
         //   所以界面上必须显示这个名字——用户要能一眼看出锁错了没有。
-        (None, Some(p)) => {
+        (None, Some((p, _))) => {
             s.locked_print = Some(p.clone());
             // 建锁这一刻认出来的名字才是「锁的是谁」。
             s.locked_name = s.peer.clone();
@@ -944,12 +951,13 @@ fn step(
         // 锁过但这帧认不出 → **关**。认不出不等于「是同一个」。
         // `(None, None)` 也落到这里：连基准都还没有，更不能动手。
         (_, None) => false,
-        (Some(a), Some(b)) => a.is_same(b),
+        (Some(a), Some((b, _))) => a.is_same(b),
     };
     if !peer_ok {
         // ⚠ 连水位线一起退，否则切回锁定会话时只读得到底部那条缝。
         //   见 `park_on_other_conversation`——面板清空和引擎退位必须同一次做。
-        let just_closed = park_on_other_conversation(s, watcher, print.as_ref());
+        let just_closed =
+            park_on_other_conversation(s, watcher, discovered.as_ref().map(|(p, _)| p));
         // 闸关着 = 这一帧没读任何像素。**照样记账**，
         // 否则界面挂着上一帧的数字，用户以为程序还在给那个新会话干活。
         record_cost(last_boxes, 0, None, pane_area(anchor.chat), 0);
@@ -1406,60 +1414,12 @@ fn collect_images(
         .collect()
 }
 
-/// 标题栏在**整帧坐标系**里的矩形。
-///
-/// ## ⚠⚠ 这里踩过两次坑，第二次整整藏了一轮（2026-10-14 定位）
-///
-/// **第一次（2026-10-11 已修）**：拿 `chat.x0` 去裁一块**已经是消息区**
-/// 的画面，裁出来的是消息区右半边的中部，指纹算在一片与「是谁」无关的
-/// 区域上。修法是统一换算到消息区坐标。
-///
-/// **第二次（就是这次）**：那次修法把带子的上边算成
-/// `(anchor.header_top - chat.y0).max(0)`，**看起来**是在往标题栏够。
-/// 但 `anchor::derive` 构造出来的锚点里
-/// **`chat.y0 == header_top` 是定义**（`Rect::new(x0, header_top, x1, input_top)`），
-/// 于是那个减法**恒等于 0**：带子一直是**消息区顶部** 40px，从头到尾
-/// 没碰过标题栏。后果与第一次一模一样，只是更难发现：
-///
-/// - 会话名**恒读不出来**（票 30：真机 `peer=""`，三轮取证才定位到这里）；
-/// - 闸认的是「这段消息的开头长什么样」，不是「这是谁的对话」——
-///   两个会话若开头像素相近就认不出切换（硬约束第 1 条被削弱）。
-///
-/// ## 为什么这次能确定，而不是又一次「推翻前一轮」
-///
-/// 关键不在推理，在**夹具**：`conversation_frame` 一直把标题栏字块画在
-/// **整帧 y 12..25**，而 `test_anchor()` 却给 `header_top: 0`——
-/// 于是 `chat.y0` 也是 0，字块落进了**消息区内部**，生产取错地方
-/// 反而取得到。**夹具把 bug 编码进去了**，所以闸的测试一直是绿的。
-/// 现在 `test_anchor()` 给出真实几何（`chat.y0 = header_top = 40`），
-/// 旧算法立刻取不到字、新算法才取得到——见
-/// `the_header_band_sits_above_the_message_area_not_inside_it`。
-///
-/// ## 失败方向是安全的
-///
-/// `chat.y0 == 0`（没有标题栏可取）时带子高度为 0，`crop` 给 `None`，
-/// 闸按「认不出」处理 ⇒ **关闸、不起草**。宁可不开工，不认错人。
-fn header_band_rect(
-    anchor: &chatservant_capture::anchor::PaneAnchor,
-) -> chatservant_core::frame::Rect {
-    use chatservant_core::frame::Rect;
-    let chat = anchor.chat;
-    // 宽度封顶：右半边是空面板，纳入只会稀释指纹。
-    let w = chat.width().min(HEAD_BAND_W);
-    // 带子的**下边**是消息区的上边，上边再往上取 `HEAD_BAND_H`。
-    // ⚠ 这里不再减 `chat.y0`——`header_top` 与 `chat.y0` 按构造相等，
-    //   减掉它就等于把带子推回消息区里，正是这次要修的毛病。
-    //   整帧坐标下 `x0` 必须是 `chat.x0`（不再是 0）。
-    let top = (chat.y0 - HEAD_BAND_H).max(0);
-    Rect::new(chat.x0, top, chat.x0 + w, chat.y0)
-}
-
 /// 头部区域的像素指纹。**认不出就返回 `None`**——
 /// 调用方必须把 `None` 当成「认不出」而不是「是同一个」。
 ///
-/// ## 用**固定头带**，不用 OCR 给的框
+/// ## 用**推导出来的头部行**，不用调用方给的矩形
 ///
-/// 早先用「最靠上那条 `Header` 的 rect」。实测那个框只有 **33×11**，
+/// 更早还用过「最靠上那条 `Header` 的 rect」。实测那个框只有 **33×11**，
 /// 而且它是**跟着 OCR 结果走的**：名字一个字还是三个字，框就多宽少宽。
 /// 后果有两个——指纹薄得不足以区分会话；短名字直接掉到
 /// `MIN_PIXELS` 以下，闸**永远建不起来**。
@@ -1475,8 +1435,23 @@ fn header_band_rect(
 fn header_print(
     frame: &chatservant_capture::Frame,
     anchor: &chatservant_capture::anchor::PaneAnchor,
-) -> Option<chatservant_perceive::identity::HeaderPrint> {
-    chatservant_perceive::identity::HeaderPrint::of(frame, header_band_rect(anchor))
+) -> Option<(
+    chatservant_perceive::identity::HeaderPrint,
+    chatservant_core::frame::Rect,
+)> {
+    // ⚠⚠ 2026-10-14：**不再自己拼矩形**。
+    //
+    // 原先这里按 `chat.y0` 猜头部带子的位置，连猜三次全错
+    // （消息区顶部 / `chat.y0` 之上 / `chat.y0` 之下），
+    // 而三次的测试都是绿的——因为夹具也按各自的错误假设画字块。
+    // 病根是**没有任何一层算出过「头部在哪」**，于是每次都得改魔数。
+    //
+    // 现在由感知层从像素**推**出来（`discover`：逐行数墨、找第一条
+    // 成行的字），布局变了它自己跟着走。
+    // ⇒ 见 `.scratch/…/31-perceive-has-no-relayout-duty.md`。
+    //
+    // ⚠ 返回 `None` = **认不出**，调用方必须按「认不出」处理（关闸不起稿）。
+    chatservant_perceive::identity::HeaderPrint::discover(frame, anchor.chat, HEAD_BAND_W)
 }
 
 /// OCR 读会话名用的带高，**与指纹那块刻意不同**。
@@ -1491,32 +1466,43 @@ fn header_print(
 ///
 /// 带子太窄、里面又只有一个小字时，`Windows.Media.Ocr` **不收**——
 /// 与「乐」气泡那次是同一类毛病：它需要周围有内容。
-/// 指纹那块继续用 [`HEAD_BAND_H`]（40 px 是照实测定的，动了会破 `MIN_PIXELS`）。
+///
+/// ⚠ 2026-10-14 票 31：这行原先写的是「指纹那块继续用 [`HEAD_BAND_H`]」，
+///   而那个常量**连同 `header_band_rect` 一起删掉了**——闸那块不再有固定高度，
+///   高度由 `HeaderPrint::discover` 从像素推出（真机实测 11 ⇒ 量化到 12）。
+///   这个 72 只管**这里**（取名字时的 OCR 窗口），与闸的取样范围无关。
 const PEER_NAME_BAND_H: i32 = 72;
 
-/// 从**标题栏**里读会话名。坐标系要求同 [`header_print`]——**整帧**。
+/// 从**推导出的头部行**里读会话名。坐标系要求同 [`header_print`]——**整帧**。
 ///
-/// ## 2026-10-14：这里原先读的是消息区顶部，恒读不出名字
+/// ## 这里原来读的是消息区顶部、再改到 `chat.y0` 之上，两次都读不出名字
 ///
-/// 取的是 `head_band_rect(...).with_height(72)`，而那个带子的上边等于
-/// `chat.y0`——**在消息区里面**，标题栏在它**上面**。
-/// 票 30 真机 `peer=""` 查了三轮取证才落到这个事实上：
-/// 那 72px 里压根没有会话名，换坐标、改预处理（连反色都试过）都救不回来。
-/// 现在改成往 `chat.y0` **之上**取，高度被 `chat.y0` 夹住，
-/// 免得标题栏比 72px 矮时又越界到窗口外。
+/// 票 30 真机 `peer=""` 查了三轮取证才落到「那块像素里没有名字」这个事实上；
+/// 修的时候又按「标题栏在 `chat.y0` 之上」猜了一次，**仍然读不出**——
+/// 真机上会话名在 `chat.y0` **之下**（y 49..59，`chat.y0 = 31`）。
+///
+/// ⇒ 现在**不猜**：矩形由
+/// [`chatservant_perceive::identity::HeaderPrint::discover`] 从像素里推出来，
+/// 这里直接用它。判据
+/// `identity::tests::discover_follows_the_header_line_wherever_it_moves`
+/// 守着「挪了位置也跟得上」；把它退回写死 y 时那条立刻红。
+///
+/// ⚠ 带高不写死：OCR 需要周围有内容才肯收（见 [`PEER_NAME_BAND_H`] 的实测），
+/// 所以在推导出的行**上下各留一点余量**，且不越过 `chat` 的下沿。
 fn peer_name_from_header(
     frame: &chatservant_capture::Frame,
-    anchor: &chatservant_capture::anchor::PaneAnchor,
+    head: chatservant_core::frame::Rect,
+    chat: chatservant_core::frame::Rect,
 ) -> Option<String> {
     use chatservant_core::frame::Rect;
-    let chat = anchor.chat;
-    // 标题栏实际有多高就取多高，绝不越过 `chat.y0` 往消息区里借。
-    let h = PEER_NAME_BAND_H.min(chat.y0);
-    if h <= 0 {
+    // 上下各留一点余量：11px 的行直接丢给 OCR，它会返回 0 行。
+    let pad = (PEER_NAME_BAND_H - head.height()).max(0) / 2;
+    let y0 = (head.y0 - pad).max(chat.y0);
+    let y1 = (head.y1 + pad).min(chat.y1);
+    if y1 <= y0 {
         return None;
     }
-    let w = chat.width().min(HEAD_BAND_W);
-    let strip = frame.crop(Rect::new(chat.x0, chat.y0 - h, chat.x0 + w, chat.y0))?;
+    let strip = frame.crop(Rect::new(head.x0, y0, head.x1, y1))?;
     // 小字要放大才认得准——与 `read_lines` 同一个理由（ADR-0002 补记）。
     let view = strip.upscaled_nearest(chatservant_perceive::OCR_UPSCALE)?;
     let ocr = chatservant_capture::ocr::recognize(&view).ok()?;
@@ -1549,6 +1535,7 @@ fn refresh_peer(
     frame: &chatservant_capture::Frame,
     anchor: &chatservant_capture::anchor::PaneAnchor,
     print: Option<&chatservant_perceive::identity::HeaderPrint>,
+    head: Option<chatservant_core::frame::Rect>,
 ) {
     let changed = match (&s.last_print, print) {
         // 还没记过：第一次总得读一次。
@@ -1562,14 +1549,15 @@ fn refresh_peer(
         return;
     }
     s.last_print = print.cloned();
-    if let Some(name) = peer_name_from_header(frame, anchor) {
-        s.peer = name;
+    // ⚠ 指纹变了但**没推出头部矩形**（`discover` 认不出）⇒ 不动已认出的名字。
+    //   「认不出」不是「名字变了」，也不是「没有名字」。
+    if let Some(rect) = head {
+        if let Some(name) = peer_name_from_header(frame, rect, anchor.chat) {
+            s.peer = name;
+        }
     }
 }
 
-/// 头带高度 40 px。实测标题行只有 11 px 高，多留一点是为了
-/// 框住整条标题栏（含右侧图标），而不是只框那行字。
-const HEAD_BAND_H: i32 = 40;
 /// 头带宽度上限 400 px。够装下会话名与右侧几个图标，
 /// 又不至于把大片空面板算进来——那会稀释指纹。
 const HEAD_BAND_W: i32 = 400;
@@ -1616,7 +1604,7 @@ mod tests {
     use super::{
         BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message, Phase, Readout, RecentN,
         Relock, SESSION, Scratch, Speaker, TierCell, TokenBudget, apply_gate_closed, apply_relock,
-        collect_images, header_band_rect, header_print, park_on_other_conversation, snapshot,
+        collect_images, header_print, park_on_other_conversation, snapshot,
     };
     use chatservant_perceive::{Decision, PaneWatcher};
     use chatservant_reason::context;
@@ -1783,9 +1771,10 @@ mod tests {
     /// 左侧边栏宽度，**实测微信的值**。
     ///
     /// ⚠ 夹具里它必须**非零**，否则 `frame.crop(anchor.chat)` 是恒等操作，
-    /// 两套坐标系一模一样，`head_band_rect` 里那次减法算错也就看不出来——
+    /// 两套坐标系一模一样，头部取样那次减法算错也就看不出来——
     /// 而那正是 2026-10-11 那个破口的形态：闸在真实帧上从来没关过，
     /// 而当时所有测试都是绿的。
+    /// （那次出错的 `head_band_rect` 已于 2026-10-14 票 31 删除。）
     const SIDEBAR_W: u32 = 304;
 
     /// 消息区自身宽高（**不含**侧边栏）。
@@ -1858,13 +1847,20 @@ mod tests {
     ///
     /// 字块起点固定在 x=24/42/60，宽度 13 px，落在 y=12..24，
     /// 与实测那块区域（16000 px 里 189 个墨迹像素）同一量级。
+    ///
+    /// ⚠⚠ 2026-10-14 票 31：原先画在 `y 0..40`，而夹具的 `chat.y0 = 40`
+    /// ⇒ 字块整块落在**消息区上沿之上**。于是「头部在哪」这个答案
+    /// 被夹具自带了——被测代码猜哪个位置都能对上。
+    /// 现在按真机几何画在 `y 58..69`（`chat.y0` 往下 18px、行高 11），
+    /// **必须由 `discover` 自己推出来**。
     fn header_frame(w: u32, h: u32, name: u32) -> chatservant_capture::Frame {
         let mut px = vec![30u8; (w * h * 3) as usize];
-        for y in 0..40u32.min(h) {
+        let name_top = 40u32 + 18; // == chat.y0 + 18，与 test_anchor 的几何一致
+        for y in name_top..(name_top + 11u32).min(h) {
             for x in 0..w {
                 let mut on = false;
                 for sx in [24u32, 42, 60] {
-                    let (Some(cx), Some(cy)) = (x.checked_sub(sx), y.checked_sub(12)) else {
+                    let (Some(cx), Some(cy)) = (x.checked_sub(sx), y.checked_sub(name_top)) else {
                         continue;
                     };
                     if cx < 13 && cy < 13 {
@@ -1909,12 +1905,18 @@ mod tests {
     }
 
     /// 取一块「标题栏」的头部指纹。
+    ///
+    /// ⚠ 走 `discover`，**不自己拼矩形**——这正是票 31 要禁的做法。
+    /// 帧按 `header_frame` 的真实几何放大到能装下会话名行。
     fn print_of(name: u32) -> chatservant_perceive::identity::HeaderPrint {
         use chatservant_core::frame::Rect;
         const W: u32 = 200;
-        const H: u32 = 40;
+        // header_frame 把字块画在 y 58..69，帧至少要 72 高才装得下。
+        const H: u32 = 72;
         let f = header_frame(W, H, name);
-        chatservant_perceive::identity::HeaderPrint::of(&f, Rect::new(0, 0, W as i32, H as i32))
+        let chat = Rect::new(0, 40, W as i32, H as i32);
+        chatservant_perceive::identity::HeaderPrint::discover(&f, chat, W as i32)
+            .map(|(p, _)| p)
             .expect("取得到指纹")
     }
 
@@ -2095,11 +2097,16 @@ mod tests {
     /// 用的是 `print_of(n)`——**手搓指纹**，然后直接调闸函数。
     /// 它跳过了「帧 → [`header_print`] → 闸」这条链。
     ///
-    /// 而上一轮那个破口恰恰出在链子上：`head_band_rect` 曾经拿
-    /// `chat.x0` 去裁一块**已经是消息区坐标**的画面，裁出来的是消息区
+    /// 而上一轮那个破口恰恰出在链子上：**头部矩形曾经**在这里自己拼
+    /// （`header_band_rect`，2026-10-14 票 31 已连同 `HEAD_BAND_H` 一起删除），
+    /// 拿 `chat.x0` 去裁一块**已经是消息区坐标**的画面，裁出来的是消息区
     /// 右半边的中部——指纹算在了一片与「是谁」无关的区域上，
     /// 两个会话的指纹几乎一样，闸**从来没在真实帧上关过**。
     /// 手搓指纹的测试永远测不到这种错：它压根不经过那块坐标换算。
+    ///
+    /// ⚠ 票 31 之后矩形不再由这里拼，改由
+    ///   `chatservant_perceive::identity::HeaderPrint::discover` **从像素推出来**
+    ///   （`header_print` 那条线）。这段留作事故史，不是现状描述。
     ///
     /// 所以这条必须从**帧**出发，走生产用的 `header_print()`。
     ///
@@ -2113,7 +2120,8 @@ mod tests {
     ///
     /// | 掐掉的 | 结果 |
     /// |---|---|
-    /// | `head_band_rect` 的 `x0` 改回 `chat.x0` | 本条红，**旧的
+    /// | `head_band_rect` 的 `x0` 改回 `chat.x0`（**该函数已于票 31 删除**，
+    ///   这行是当时的历史记录） | 本条红，**旧的
     ///   `the_gate_reads_the_header_pixels_not_the_ocr_text` 照样绿** |
     /// | `park_on_other_conversation` 里的 `watcher.rewind()` | 本条 + 已有的那条一起红 |
     ///
@@ -2123,18 +2131,20 @@ mod tests {
     /// 价值在于「真实帧 → 指纹」这半条链，和帧序里闸的开关时机。
     #[test]
     fn the_gate_closes_and_reopens_over_a_frame_sequence_with_one_watcher() {
+        // 首条消息从 **y 80** 起（票 31）：与 y 58..69 的会话名行留出
+        // y 70..79 的空行，对齐真机几何。原先从 60 起会与名字行粘连。
         let rows_a: [(u32, u32); 8] = [
-            (60, 80),
-            (140, 160),
-            (220, 240),
-            (300, 320),
-            (380, 400),
-            (460, 480),
-            (540, 560),
-            (620, 640),
+            (80, 100),
+            (160, 180),
+            (240, 260),
+            (320, 340),
+            (400, 420),
+            (480, 500),
+            (560, 580),
+            (640, 660),
         ];
         // B 是另一个会话：字形不同、**亮度完全一样**，且消息更少。
-        let rows_b: [(u32, u32); 2] = [(500, 520), (600, 620)];
+        let rows_b: [(u32, u32); 2] = [(520, 540), (620, 640)];
 
         let a = conversation_frame(&rows_a, 0);
         let b = conversation_frame(&rows_b, 1);
@@ -2149,8 +2159,8 @@ mod tests {
         // 以前两者都喂裁过的那块，于是闸取样取到了消息区顶部。
         // `pane` 闭包保留给 `observe`；闸那几处一律传 `&a` / `&b`。
         let pane = |f: &chatservant_capture::Frame| f.crop(anchor.chat).expect("消息区裁得出来");
-        let pa = header_print(&a, &anchor).expect("A 的指纹取得到");
-        let pb = header_print(&b, &anchor).expect("B 的指纹取得到");
+        let pa = header_print(&a, &anchor).expect("A 的指纹取得到").0;
+        let pb = header_print(&b, &anchor).expect("B 的指纹取得到").0;
         assert!(
             !pa.is_same(&pb),
             "两个会话的指纹必须不同，否则这条测的是个假闸"
@@ -2191,7 +2201,7 @@ mod tests {
         s.messages = vec![a_msg("B1")];
 
         // ── 第 3 圈：切回 A ──
-        let back = header_print(&a, &anchor).expect("切回来的指纹取得到");
+        let back = header_print(&a, &anchor).expect("切回来的指纹取得到").0;
         assert!(back.is_same(&pa), "前提：切回来认得是同一个会话");
         let out = park_on_other_conversation(&mut s, &mut w, Some(&pa));
         assert!(!out, "闸是重新开的：不该再推一次「刚关」");
@@ -2260,16 +2270,21 @@ mod tests {
                 px[i + 2] = 62;
             }
         }
-        // 标题栏：三个字块，亮度一样、笔画落点由 name 决定。
-        // ⚠ `x` 走的是**消息区局部坐标**，写回帧缓冲时才加上侧边栏偏移。
-        //   早先这里写成 `sx = SIDEBAR_W + off` 再去减——字块于是落在
-        //   局部 x≈328 处，正好落在正确取样框（0..400）与错误取样框
-        //   （304..400）的**重叠区**里，两边都取到墨，坐标算错也照样绿。
-        for y in 12..25u32 {
+        // 会话名行：按**真机几何**画（票 31）。
+        //
+        // ⚠⚠ 原来这里画在整帧 y 12..25，而 `test_anchor()` 的
+        // `chat.y0 = 40` ⇒ 字块落在**消息区上沿之上**。于是「头部在哪」
+        // 这个答案**被夹具自带了**：被测代码猜哪个位置都能对上，
+        // 三次修复的测试因此全绿——而真机上一次都没对过。
+        //
+        // 现在按实测画：`chat.y0` 往下 18px、行高 11（真机 y 49..59、
+        // `chat.y0 = 31`）。**被测代码必须自己把这个位置推出来。**
+        let name_top = 40u32 + 18; // 40 == test_anchor() 的 chat.y0 == header_top
+        for y in name_top..(name_top + 11u32) {
             for x in 0..PANE_W {
                 let mut on = false;
                 for off in [24u32, 42, 60] {
-                    let (Some(cx), Some(cy)) = (x.checked_sub(off), y.checked_sub(12)) else {
+                    let (Some(cx), Some(cy)) = (x.checked_sub(off), y.checked_sub(name_top)) else {
                         continue;
                     };
                     if cx < 13
@@ -2292,6 +2307,16 @@ mod tests {
             }
         }
         // 消息行。
+        //
+        // ⚠⚠ 2026-10-14 票 31：首条消息原本从 y=60 起，而会话名行是 y 58..69
+        // ——**两者首尾相接、中间没有空行**。于是 `discover` 的行游程把它们
+        // **合并成一个 22px 的行段**（量化后 20），取样带 8000 px 里消息文字
+        // 占 5760、会话名字形差只剩 ~189 ⇒ 相似度 0.9704 ≥ 阈值 0.90
+        //   ⇒ 判成「同一个会话」。
+        //
+        // 真机是有间隙的：名字 y 49..59、首条消息 y 80..97，中间空 60..79
+        //（`HEAD_SEARCH_H` 的注释就记着「首条消息在 y 80」）。
+        // ⇒ 首条消息一律从 **y 80** 起，否则夹具测的是「行粘连」而不是「会话身份」。
         for &(y0, y1) in rows {
             for y in y0..y1 {
                 for x in 40..(PANE_W - 40) {
@@ -2516,15 +2541,25 @@ mod tests {
 
         let a = frame_with(0);
         let b = frame_with(1);
-        let pa = header_print(&a, &anchor).expect("取得到");
-        let pb = header_print(&b, &anchor).expect("取得到");
+        let pa = header_print(&a, &anchor).expect("取得到").0;
+        let pb = header_print(&b, &anchor).expect("取得到").0;
         assert!(!pa.is_same(&pb), "两个不同会话被判成同一个");
 
-        let again = header_print(&a, &anchor).expect("取得到");
+        let again = header_print(&a, &anchor).expect("取得到").0;
         assert!(pa.is_same(&again), "同一帧被误判成换人了");
+        // ⚠ 2026-10-14 票 31：原先写 `> 5_000`，那是按**已删掉**的固定带子
+        //   （500 宽 × 40 高 = 20_000）写的。改成 `discover` 推导之后，取样范围
+        //   是**行高说了算**：400 宽 × 行高。
+        //
+        //   行高实测：真机会话名 11px，`quantize_row` 向上对齐到 4px 栅格 ⇒ 12。
+        //   ⇒ 400 × 12 = **4_800** px。
+        //
+        //   这里钉的是**下限**：`HeaderPrint::of` 的 `MIN_PIXELS = 200`。
+        //   低于它直接返回 `None`（认不出）。1_800 留了三倍余量，
+        //   既守住「掩码不能薄到没内容」，又不把具体行高写死成常量。
         assert!(
-            pa.pixels() > 5_000,
-            "头带只有 {} px，太薄不足以当身份",
+            pa.pixels() >= 1_800,
+            "头带只有 {} px，太薄不足以当身份（MIN_PIXELS = 200）",
             pa.pixels()
         );
     }
@@ -2540,13 +2575,15 @@ mod tests {
     #[test]
     fn the_gate_distinguishes_conversations_that_open_the_same_way() {
         // 同一个 `rows` ⇒ 两个会话的**开头像素逐字节相同**。
-        let same_opening: [(u32, u32); 3] = [(60, 80), (140, 160), (220, 240)];
+        // 首条消息从 y 80 起，与会话名行（y 58..69）之间留空行——见
+        // `conversation_frame` 里记的那条：粘连会让取样带被消息文字灌满。
+        let same_opening: [(u32, u32); 3] = [(80, 100), (160, 180), (240, 260)];
         let a = conversation_frame(&same_opening, 0);
         let b = conversation_frame(&same_opening, 1);
         let anchor = test_anchor();
 
-        let pa = header_print(&a, &anchor).expect("A 的指纹取得到");
-        let pb = header_print(&b, &anchor).expect("B 的指纹取得到");
+        let pa = header_print(&a, &anchor).expect("A 的指纹取得到").0;
+        let pb = header_print(&b, &anchor).expect("B 的指纹取得到").0;
         assert!(
             !pa.is_same(&pb),
             "开头像素完全相同、只有名字不同的两个会话被判成了同一个——\
@@ -2554,33 +2591,48 @@ mod tests {
         );
     }
 
-    /// 取样带必须**整条落在消息区之上**，且真的盖到标题栏。
+    /// 头部行**挪了位置，推导要跟着走**。
     ///
-    /// ⚠ 这条守的是**几何本身**，不是取样结果：修复前
-    /// `(header_top - chat.y0).max(0)` 恒为 0，带子落进消息区顶部，
-    /// 而夹具又把标题栏画在消息区里，于是两边一起错、测试一起绿。
+    /// ⚠⚠ 这条判据替掉过一条按「带子落在消息区**之上**」写的
+    /// （`the_header_band_sits_above_the_message_area_not_inside_it`）——
+    /// 那个前提本身是错的，两次修复都被真机推翻。
+    ///
+    /// 现在 `watch.rs` **不拼矩形**，矩形由
+    /// `chatservant_perceive::identity::HeaderPrint::discover` 从像素推出来。
+    /// ⇒ 几何对不对由 perceive 那边的
+    /// `discover_follows_the_header_line_wherever_it_moves` 守着；
+    /// 这条守的是**接线**：这里真的用了推导结果，没有偷偷退回常量。
     #[test]
-    fn the_header_band_sits_above_the_message_area_not_inside_it() {
-        let anchor = test_anchor();
-        let band = header_band_rect(&anchor);
-        assert_eq!(band.y1, anchor.chat.y0, "取样带下边应当正好贴着消息区上沿");
+    fn the_watch_layer_does_not_hand_roll_the_header_rect() {
+        let source = include_str!("watch.rs");
+        // 曾经自己拼带子的那个函数不许回来。
+        //
+        // ⚠⚠ 匹配串**必须拼出来**，不能写成完整字面量：判据查的是
+        // `include_str!` 进来的**整个文件**，而判据自己就住在这个文件里。
+        // 写成字面量时，它会匹配到自己那行 ⇒ 永远红。
+        // 这与「量具自检必须能因为量具偏了而失败」同源：判据也会匹配自己。
+        // ⚠⚠ 2026-10-14：**连注释里也不行**。这条注释原先写着那个完整函数名，
+        //   于是判据匹配到自己解释「为什么不能写字面量」的那行——
+        //   判据自己被自己的注释绊倒。拆成 `header_band_` + `rect` 两截。
+        let banned = format!("fn header_band_{}(", "rect");
         assert!(
-            band.y1 <= anchor.chat.y0,
-            "取样带下边 {} 越进了消息区（上沿 {}）",
-            band.y1,
-            anchor.chat.y0
+            !source.contains(&banned),
+            "header_band_rect 又回来了——头部矩形必须由 perceive 的 discover 推，\
+             不许在这里拼"
+        );
+        // ⚠ 换掉原先那条查 `chat.y0 - HEAD_BAND_H` 的检查：常量连同函数一起
+        //   删掉之后，那个字符串永远不会出现 ⇒ 判据永真、等于没有。
+        //   真正要守的是**入口**：生产代码只许走 discover，不许再拿
+        //   `HeaderPrint::of` 配一个自己拼的矩形——那正是三次猜错的形状。
+        let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            !prod.contains("HeaderPrint::of("),
+            "生产代码又直接调 HeaderPrint::of 拼矩形了——头部位置必须由 \
+             HeaderPrint::discover 从像素推出来"
         );
         assert!(
-            band.y0 < band.y1,
-            "取样带不能是空的——空带子等于闸永远认不出"
-        );
-        // 真取一次：带子里必须有墨。`conversation_frame` 把标题栏字块画在
-        // 整帧 y 12..25，盖不到就说明带子偏了或空带子。
-        let f = conversation_frame(&[], 0);
-        let print = header_print(&f, &anchor).expect("标题栏指纹取得到");
-        assert!(
-            print.pixels() > 0,
-            "带子裁出来一像素墨都没有——它压根没盖到标题栏"
+            prod.contains("HeaderPrint::discover("),
+            "生产代码没走 discover，接线断了"
         );
     }
 
@@ -2636,7 +2688,7 @@ mod tests {
 
         let mut s = Scratch::new(RecentN::new(12));
         // 先锁在「错」的会话上
-        s.locked_print = header_print(&frame_with(0), &anchor);
+        s.locked_print = header_print(&frame_with(0), &anchor).map(|(p, _)| p);
         assert!(s.locked_print.is_some());
 
         // 用户点重锁：请求被取走，旧锁被清掉
@@ -2645,11 +2697,11 @@ mod tests {
         s.locked_print = None;
 
         // 下一轮以当前像素为新基准
-        let now = header_print(&frame_with(1), &anchor).expect("取得到");
+        let now = header_print(&frame_with(1), &anchor).expect("取得到").0;
         assert!(now.is_same(&s.locked_print.clone().unwrap_or_else(|| now.clone())));
         assert_ne!(
             now,
-            header_print(&frame_with(0), &anchor).expect("取得到"),
+            header_print(&frame_with(0), &anchor).expect("取得到").0,
             "重锁之后基准必须换成当前的会话"
         );
     }

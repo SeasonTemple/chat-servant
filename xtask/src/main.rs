@@ -621,9 +621,6 @@ fn key_from_env(p: chatservant_reason::Provider) -> Option<String> {
     None
 }
 
-/// 认会话名时只看消息区顶部这么多像素——与观察循环里的同名常量一致。
-const HEADER_NAME_H_PX: i32 = 80;
-
 /// 连抓 N 帧，逐次打印**本进程线程数**。
 ///
 /// ## 它回答什么
@@ -1022,130 +1019,73 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
     }
 
     println!();
-    // ⚠ 判据用的两个边界一起打出来：`conversation_name` 只接受
-    //   `rect.y1 <= HEADER_NAME_H_PX` 的行，而指纹取的是
-    //   `anchor.header_top` 起 40px 的那一条。**两者不是同一个带子**，
-    //   以前没打出来过，看输出会以为它们是一回事。
-    println!("  会话名判据上界 header_h = {HEADER_NAME_H_PX} px（面板局部 y）");
-    println!(
-        "  指纹取的那条带子      header_top = {} .. {}",
-        r.anchor.header_top,
-        r.anchor.header_top + 40
-    );
+    // ⚠ 2026-10-14 票 31：这里原先打的是
+    //   「会话名判据上界 header_h = 80」与「指纹带子 header_top..+40」，
+    //   两个**写死的常量**，而且注释自己都承认「两者不是同一个带子」。
+    //   现在头部位置由 `discover` 推出来，两者统一吃同一个推导结果。
+    let discovered =
+        chatservant_perceive::identity::HeaderPrint::discover(&frame, r.anchor.chat, 400);
+    let head = discovered.as_ref().map(|(_, rect)| *rect);
+    match head {
+        Some(rect) => println!(
+            "  推导出的头部行        y {} .. {}（高 {}，相对 chat.y0 +{}）",
+            rect.y0,
+            rect.y1,
+            rect.height(),
+            rect.y0 - r.anchor.chat.y0
+        ),
+        None => println!("  推导出的头部行        **推不出来**"),
+    }
     println!();
     // 会话身份：闸认的是**像素指纹**，不是这段文字。
     // 头部的**归类**（NoiseClass::Header）与头部的**文字读得对不对**
     // 是两件事：真实帧上分类是对的，OCR 却可能把「小号」读成别的。
     // 两边都打出来，才能看出闸到底认的是什么。
-    // 只认**标题栏那条带子**里的 Header。判据见 `conversation_name` 的说明：
+    // 只认**推导出的头部行**里的 Header。判据见 `conversation_name` 的说明：
     // 实机上它曾把一个时间戳认成会话名。
-    match chatservant_perceive::conversation_name(&r.attributions, HEADER_NAME_H_PX) {
+    //
+    // ⚠ 上界从写死的 `HEADER_NAME_H_PX = 80` 改成 `discover` 推出来的行底。
+    //   那个 80 是第三次修复留下的（票 30），同样属于「猜坐标」。
+    let name_upper = head.map_or(r.anchor.chat.y0, |rect| rect.y1);
+    match chatservant_perceive::conversation_name(&r.attributions, name_upper) {
         Some(name) => println!("  OCR 读到的会话名：{name}"),
         None => println!("  OCR 读到的会话名：（没读出标题行）"),
     }
 
     // ── 会话名到底住在哪（2026-10-14 诊断，票 30）────────────────────
     //
-    //  ⚠ 为什么要加这段：`conversation_name` 返回 `None` 有两种完全不同的
-    //    原因——「扫到标题栏但没读出字」和「压根没扫到标题栏」。
-    //    光看上一行分不出来，而这两种的修法不同。
+    // ⚠ 2026-10-14 票 31：这段原先是票 30 的探索脚手架——「会话名住哪」，
+    //   里面裁了**三个写死的矩形**（窗口标题栏 `0..header_top`、
+    //   「消息区顶部 40px」、以及一份手抄的 `HEAD_BAND_H = 40`），
+    //   外加一次反色对照。它们回答的是「猜的三个位置哪个对」，
+    //   而那个问题**已经被 `discover` 回答掉了**：位置是推出来的，不是猜的。
     //
-    //  `anchor.rs` 的定义是 `chat.y0 == header_top`（聊天区从窗口标题栏
-    //  **下沿**开始），所以窗口标题栏整个在 `anchor.chat` **之外**。
-    //  这里直接从**整帧**上裁那条带子，看它到底有没有字。
-    println!("  —— 会话名可能在的两个位置，各采一次 ——");
-    // ⚠ `HEAD_BAND_H` 是 `watch.rs` 里的常量（40），这里手抄一份。
-    //   抄错就会量到另一块地方去——所以下面两处都把矩形原样打出来，
-    //   读的人能直接核对采样框，而不是信「它应该在那儿」。
-    const HEAD_BAND_H: i32 = 40;
-    // (a) 窗口标题栏：整帧坐标 y 0..header_top
-    let bands = [
-        (
-            "窗口标题栏（整帧）",
-            chatservant_core::frame::Rect::new(
-                r.anchor.chat.x0,
-                0,
-                r.anchor.chat.x0 + (r.anchor.chat.x1 - r.anchor.chat.x0).min(400),
-                r.anchor.header_top,
-            ),
-            None,
-        ),
-        // (b) 生产代码真正采的那块：`frame.crop(anchor.chat)` 之后的局部
-        //     y 0..40（`head_band_rect` 里 `header_top - chat.y0` 恒为 0）。
-        (
-            "消息区顶部 40px（生产代码采样处）",
-            chatservant_core::frame::Rect::new(0, 0, 400.min(r.anchor.chat.width()), HEAD_BAND_H),
-            Some(r.anchor.chat),
-        ),
-    ];
-    for (label, rect, pre_crop) in bands {
+    //   现在改成一件还有意义的事：把**推导出的那一行**拿去 OCR，
+    //   看深色主题下文字读不读得出来。位置交给 `discover`，
+    //   这里只回答「这一行的字认不认得出」。
+    if let Some(rect) = head {
+        println!("  —— 对推导出的头部行做 OCR（原色 / 反色）——");
         println!(
-            "     {label}：({},{})-({},{}) 高 {}",
+            "     采样框：({},{})-({},{}) 高 {}",
             rect.x0,
             rect.y0,
             rect.x1,
             rect.y1,
             rect.height()
         );
-        let src = match pre_crop {
-            Some(c) => frame.crop(c),
-            None => Some(frame.clone()),
-        };
-        match src
-            .and_then(|f| f.crop(rect))
-            .and_then(|s| s.upscaled_nearest(chatservant_perceive::OCR_UPSCALE))
-        {
-            None => println!("       （裁不到 / 高度为 0）"),
-            Some(view) => match chatservant_capture::ocr::recognize(&view) {
-                Ok(ocr) => {
-                    let hit = ocr
-                        .lines
-                        .iter()
-                        .map(|l| l.text.trim())
-                        .find(|t| !t.is_empty());
-                    match hit {
-                        Some(t) => println!("       读到：{t}"),
-                        None => println!(
-                            "       读到：（空）——OCR 返回了 {} 行，全是空白",
-                            ocr.lines.len()
-                        ),
-                    }
-                }
-                Err(e) => println!("       OCR 失败：{e}"),
-            },
-        }
-    }
-
-    // ⚠ 第三轮对照（2026-10-14）：**深色主题下要不要反色**。
-    //
-    //   前两轮都读到「0 行」。真机帧是微信深色主题（面板底 rgb(30,30,31)、
-    //   文字接近白），而 Windows OCR 在「浅底深字」上表现好、在
-    //   「深底浅字」上常常整段读不出来。现有证据支持这条：
-    //     · 深底浅字 → 读成乱码或空（对方气泡 / 灰色时间戳 / 标题行）
-    //     · 浅底深字 → 读得准（自己的绿色气泡）
-    //   ⇒ 这里把同一块**反色后再 OCR 一次**，直接对照。
-    //     如果反色后读得出来，问题就不在采样位置，在预处理。
-    println!("  —— 反色对照（深底浅字 → 浅底深字）——");
-    if let Some(pane) = frame.crop(r.anchor.chat)
-        && let Some(band) = pane.crop(chatservant_core::frame::Rect::new(
-            0,
-            0,
-            400.min(r.anchor.chat.width()),
-            HEAD_BAND_H,
-        ))
-    {
-        let w = band.width();
-        let h = band.height();
-        let mut inv = Vec::with_capacity(band.as_bytes().len());
-        for px in band.as_bytes().chunks_exact(3) {
-            inv.push(255 - px[0]);
-            inv.push(255 - px[1]);
-            inv.push(255 - px[2]);
-        }
-        match chatservant_core::frame::Frame::from_rgb(w, h, inv)
+        // OCR 对很窄的行常常返回 0 行，所以上下各留一点余量再送进去。
+        let pad = 12;
+        let view_rect = chatservant_core::frame::Rect::new(
+            rect.x0,
+            (rect.y0 - pad).max(0),
+            rect.x1,
+            rect.y1 + pad,
+        );
+        match frame
+            .crop(view_rect)
             .and_then(|f| f.upscaled_nearest(chatservant_perceive::OCR_UPSCALE))
         {
-            None => println!("     反色帧构造失败"),
+            None => println!("     （裁不到）"),
             Some(view) => match chatservant_capture::ocr::recognize(&view) {
                 Ok(ocr) => {
                     let texts: Vec<_> = ocr
@@ -1155,11 +1095,49 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
                         .filter(|t| !t.is_empty())
                         .collect();
                     if texts.is_empty() {
-                        println!("     读到：（空）——反色也没用");
+                        println!(
+                            "     原色读到：（空）——OCR 返回了 {} 行，全是空白",
+                            ocr.lines.len()
+                        );
                     } else {
-                        for t in texts {
-                            println!("     读到：{t}");
+                        for t in &texts {
+                            println!("     原色读到：{t}");
                         }
+                    }
+
+                    // ⚠ 深色主题下要不要反色：Windows OCR 在「浅底深字」上
+                    //   表现好、在「深底浅字」上常常整段读不出来（票 30 实测）。
+                    //   同一块反色后再 OCR 一次，直接对照。
+                    let w = view.width();
+                    let h = view.height();
+                    let mut inv = Vec::with_capacity(view.as_bytes().len());
+                    for px in view.as_bytes().chunks_exact(3) {
+                        inv.push(255 - px[0]);
+                        inv.push(255 - px[1]);
+                        inv.push(255 - px[2]);
+                    }
+                    match chatservant_core::frame::Frame::from_rgb(w, h, inv)
+                        .and_then(|f| f.upscaled_nearest(chatservant_perceive::OCR_UPSCALE))
+                    {
+                        None => println!("     反色帧构造失败"),
+                        Some(view2) => match chatservant_capture::ocr::recognize(&view2) {
+                            Ok(ocr2) => {
+                                let t2: Vec<_> = ocr2
+                                    .lines
+                                    .iter()
+                                    .map(|l| l.text.trim().to_string())
+                                    .filter(|t| !t.is_empty())
+                                    .collect();
+                                if t2.is_empty() {
+                                    println!("     反色读到：（空）——反色也没用");
+                                } else {
+                                    for t in &t2 {
+                                        println!("     反色读到：{t}");
+                                    }
+                                }
+                            }
+                            Err(e) => println!("     反色 OCR 失败：{e}"),
+                        },
                     }
                 }
                 Err(e) => println!("     OCR 失败：{e}"),
@@ -1167,25 +1145,31 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
         }
     }
     println!();
-    // 指纹来自**锚点给出的固定头带**，与观察循环用的是同一块——
-    // 不依赖 OCR 认得准，所以就算上面那串字是错的，闸照样认得出人。
-    let band = chatservant_core::frame::Rect::new(
-        r.anchor.chat.x0,
-        r.anchor.header_top,
-        r.anchor.chat.x0 + (r.anchor.chat.x1 - r.anchor.chat.x0).min(400),
-        r.anchor.header_top + 40,
-    );
-    if let Some(pane) = frame.crop(r.anchor.chat)
-        && let Some(p) = chatservant_perceive::identity::HeaderPrint::of(&pane, band)
-    {
-        println!(
-            "  闸用的像素指纹：{} px（区域 {}x{}，阈值 {:.2}）",
-            p.pixels(),
-            band.width(),
-            band.height(),
-            chatservant_perceive::identity::SAME_THRESHOLD
-        );
-        println!("  ⚠ 认的是这块**像素**，不是上面那串文字。");
+    // 指纹来自**像素推导出来的**头部行，与观察循环走同一条路
+    // （`HeaderPrint::discover`），不依赖 OCR 认得准——
+    // 所以就算上面那串字是错的，闸照样认得出人。
+    //
+    // ⚠ 2026-10-14 票 31：原先这里**手拼**了
+    //   `header_top..header_top+40` 的矩形，还在**已裁过**的 `pane` 上取，
+    //   两处都错（坐标写死 + 坐标系不匹配）。现在复用上面已经算好的
+    //   `discovered`（同一帧只推一次），与 `watch.rs` 的接缝完全一致。
+    match discovered {
+        Some((p, rect)) => {
+            println!(
+                "  闸用的像素指纹：{} px（推导出的头部行 {}x{}，位置 y={}，阈值 {:.2}）",
+                p.pixels(),
+                rect.width(),
+                rect.height(),
+                rect.y0,
+                chatservant_perceive::identity::SAME_THRESHOLD
+            );
+            println!("  ⚠ 认的是这块**像素**，不是上面那串文字。");
+        }
+        None => println!(
+            "  闸的像素指纹：**推不出来** ⇒ 按「认不出」处理（关闸、不起草）。\
+             顶部 {} px 内没有成行的字。",
+            72
+        ),
     }
 
     println!();
