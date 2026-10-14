@@ -152,3 +152,39 @@ true ⇒ **两段式被跳过，直接发送**，把用户自己写的内容覆�
       ⛔ **未验**。代码侧已由 `changing_tier_disarms` 覆盖，但它只到
       「`apply_tier` 清了 `Arming`」这一层；`STATE` 与 `inject::send_only`
       那一段仍只在真机上成立
+
+## Update 2026-10-15：机器侧已穷尽，剩下的是「界面上根本没有发送入口」
+
+本票那条未勾验收项（「真机上没有任何路径能不发确认就发出去」），
+**代码侧已可判定为成立**，全仓穷尽结果：
+
+- 全仓**唯一**的 `VK_RETURN`（回车）发送点在 `crates/capture/src/inject.rs:475`；
+  它的两个调用者里，`fill_and_send` **当前不可达**——
+  `commands.rs` 的两个调用点（`:304`、`:374`）都传 `send = false`。
+- ⇒ **没有任何路径能在用户未确认时发出。**
+
+**守卫测试（机器核过）**：
+
+| 测试 | 守什么 |
+|---|---|
+| `dispatch.rs:342` `the_tier_set_is_exactly_two_and_named` | 档位恰好两档、名字逐字、最低档在首位 |
+| `dispatch.rs:365` `no_tier_sends_without_asking` | 两档 × 五回执 × 五重试，`next()` 只许 `Retry`/`Halt` |
+| `commands.rs:1860` `only_armed_confirm_clicks_send` | 穷举 2×2×2，「能真发的组合恰好 1 个」 |
+| `commands.rs:1804` `changing_tier_disarms` | 改档即作废装填；同档再设才保留 |
+
+### ⚠⚠ 但真正的发现是另一件事：**面板上没有发送按钮**
+
+`ui/src/lib/PaperPanel.svelte` 里只有 **4 个**点击处理
+（`:571` 设置开关、`:601` `hide_panel`、`:625` `quit_app`、`:801` `chooseTier`），
+**没有「填入」也没有「确认发送」**。`contract.rs:150` 的 `KNOWN_UNREACHED`
+里 `dispatch` 就在名单中。
+
+⇒ 2026-10-07 票 16 的「八段全链路跑通」是**用调试窗口 / devtools 调的**，
+**不是产品界面上的路径**。
+⇒ 所以本票剩下的那条人工验收项，严格说**没有可在界面上点出来的对象**。
+
+⚠ UI 侧**一个测试都没有**（`ui/` 下无 `*.test.ts`），`pnpm check` 只做类型检查。
+
+**建议**：这条待验项要么改写成「用 devtools 手工 invoke 走一遍」，
+要么**先做动作行**（那是票 14 的遗留），再做人工验收。
+这是设计决定，不擅自动。

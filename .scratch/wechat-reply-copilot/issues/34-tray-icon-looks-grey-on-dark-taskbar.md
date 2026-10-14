@@ -131,3 +131,39 @@
 | `ui/scripts/strokeprobe.py` | 核验描边有没有真渲染 | 靠它才抓到「opaque 65=65、ink 0」的静默失效 |
 | `ui/scripts/iconboard.py` | 出真 16px 对照图 | 画布宽度只按标签算 ⇒ 标题被裁掉 |
 | `ui/scripts/targetaudit.py` | 数 `deps` 里每个包有几个哈希版本 | 推翻了「改 feature 留垃圾占 8 GB」的旧结论 |
+## Update 2026-10-15：管线机器侧全通，剩下两条只能人眼；另排掉一颗覆盖雷
+
+**机器能确认的部分全部通过**（像素级普查 + 只读量具）：
+
+- `icons/` 六个文件齐（32/64/128/256/512 + `icon.ico` 内含 16…256），
+  `git ls-files` 确认这就是全部被跟踪的图标，与 HEAD 无漂移。
+- **确实是 A′ 当前默认参数的产物**：512 主图 dominant 色
+  `rgb(58,47,30)` = `PAPER_STROKE_COLOR`，红勾 `rgb(143,42,30)` =
+  `TICK_SOLID_COLOR` 且占红区 54%（实心非叠层），纸 `rgb(246,231,191)`。
+- 托盘**真的显式用它**：`main.rs:129` `.icon(icon)`，
+  来源唯一 `commands.rs:960` `include_bytes!("../icons/32x32.png")`。
+- ⚠ **本项目记过的那个坑没踩**：`image-png` 特性在
+  `ui/src-tauri/Cargo.toml:55` 确实开着；解码失败走 `set_tray_ready(false)`
+  并 `error!`（旧坑「日志照样打已就绪」已被封）。
+- 只读量具对**已入库** 32×32（内部降到 16px 画布 = 托盘真实条件）：
+  `iconsilhouette` **双侧 PASS**（浅侧 readable 40.0% ≥ 门槛 30%；
+  深侧 median **10.75:1** ≥ 门槛 8.0）。
+
+### ⚠ 两条记录里的数字与入库文件对不上，已更正
+
+1. `icongen.py:93` 记的「深侧 median 10.86:1」——对入库图重跑是 **10.75:1**。
+   量级无影响，但**记下来的数必须是从入库文件上量出来的**。
+2. `icongen.py` 里「实心深红在浅色任务栏上是 7.5:1」——纯色确实是 7.52:1，
+   但**16px 渲染后勾的中位对比度只有 1.72:1**（纸 1.14:1）。
+   ⇒ 多数勾像素是抗锯齿混合色。**这是本设计目前唯一有实测风险支撑的疑点**：
+   浅色任务栏下「勾读不读得出来」，机器判不了。
+
+### ⚠ 排掉一颗覆盖雷
+
+`.gitignore` 原先写着「需要时在 ui/ 下跑 `pnpm exec tauri icon app-icon.svg`
+重新生成」——而 `ui/app-icon.svg` 是 **2026-10-07 的旧稿**
+（深灰面板 + 绿色气泡）。照做会把 A′ **整个覆盖回旧设计**，
+且 `tauri icon` 不带判据，跑完不会有任何异常提示。已改指向 `icongen.py`。
+
+ℹ `icons/android/*`、`icons/ios/*` 仍是旧图，但桌面不引用（`bundle.icon`
+只有 ico），且已在 `.gitignore` 里，无害。
