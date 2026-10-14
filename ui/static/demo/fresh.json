@@ -1,0 +1,30 @@
+{
+  "_note": "演示数据 · fresh 态（**对方还没说话**）。给 ?demo=1&state=fresh 用。**不含任何真实聊天内容。**\n⚠ 为什么需要这一具（2026-10-14 补，票 30 的缺口 2）：原来七具 `read` 态的\n   `messages` 都塞了 8 条，于是 `lastFromThem` 永远有值——面板里那支\n   「对方**没**说话时才显示」的分支在 demo 里**不可达**。判据工具一路全绿，\n   而它绿得没覆盖到。⇒ 这里 messages 为空数组，强制走那一支。\n   配套：`.cs-peer` 的疏排与「没认出」那一态都能离线验，不需要真机。",
+  "anchor": {
+    "chat": {
+      "x0": 304,
+      "y0": 31,
+      "x1": 1156,
+      "y1": 618
+    },
+    "width": 852,
+    "height": 587
+  },
+  "peer": "示例联系人",
+  "messages": [],
+  "candidates": [],
+  "reason": "这一轮对方没有新消息",
+  "model_calls": 0,
+  "counts": {
+    "judge": 0,
+    "draft": 0,
+    "rank": 0,
+    "vision": 0
+  },
+  "relock_pending": false,
+  "ticks": 3,
+  "ocr_calls": 1,
+  "error": null,
+  "phase": "read",
+  "tier": "Manual"
+}
