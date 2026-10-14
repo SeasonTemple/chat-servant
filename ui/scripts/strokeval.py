@@ -153,7 +153,10 @@ def runs_in_col(col: np.ndarray) -> list[tuple[int, int]]:
 class Blob:
     """一个连通域（8 邻接）。断笔画出来的碎片就是这种小东西。"""
 
-    __slots__ = ("area", "bbox", "elong", "max_run")
+    __slots__ = ("area", "bbox", "elong", "max_run", "_pixels")
+
+    def in_box(self, x0: int, y0: int, x1: int, y1: int) -> bool:
+        return not (self.bbox[2] < x0 or self.bbox[0] >= x1 or self.bbox[3] < y0 or self.bbox[1] >= y1)
 
     def __init__(self, area: int, bbox: tuple[int, int, int, int], max_run: int) -> None:
         self.area = area
@@ -168,7 +171,7 @@ class Blob:
         self.elong = ((w * w + h * h) ** 0.5 / eq) if eq > 0 else 0.0
 
 
-def blobs(mask: np.ndarray) -> list[Blob]:
+def blobs(mask: np.ndarray, area_max: int | None = None) -> list[Blob]:
     """8 邻接连通域。**迭代式**，不用 scipy（少一个依赖）。"""
     h, w = mask.shape
     seen = np.zeros_like(mask, dtype=bool)
@@ -212,8 +215,58 @@ def blobs(mask: np.ndarray) -> list[Blob]:
                         if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not seen[ny, nx]:
                             seen[ny, nx] = True
                             stack.append((ny, nx))
-            out.append(Blob(area, (x0, y0, x1, y1), max_run))
+            if area_max is None or area <= area_max:
+                out.append(Blob(area, (x0, y0, x1, y1), max_run))
     return out
+
+
+def tail_fragmentation(mask: np.ndarray, font_px: float, area_max: int) -> dict[str, float]:
+    """**按字窗**量碎片密度，取尾部分位数——而不是整行平均。
+
+    ## 为什么平均不够（2026-10-14 用户复核逼出来的）
+
+    用户看完五档并排图后说：「**17 开始，笔画复杂的字就糊了**」。
+    ⚠ 那不是「整行都糊」，是**尾巴**：笔画多的字先糊，简单字还好。
+
+    ⇒ 整行平均恰好把这个尾巴**抹掉**——一行里 15 个复杂字糊了、
+    20 个简单字没事，平均只动了 15/35。实测也确实如此：
+    仿宋 400 的 21px 与 17px，碎片率只差 **4 个百分点**
+    （46.62% vs 50.81%），而两档的可读性已经被判成不同。
+
+    ## 怎么取「字窗」
+
+    CJK 是全宽，理论上按字号切格子就行；本项目正文里混着拉丁与数字
+    （`30s`、`40ms`），等宽切会把一个词劈成两半。⇒ 这里**不做字形切分**，
+    改用**滑动窗**：窗宽 = 字号、步长 = 窗宽/4，取碎片密度的 p90 / p99。
+
+    ⚠ 这是个近似：**相邻窗会重叠**，所以它量的是「哪个区域最碎」，
+    不是「哪个字最碎」。好处是它不需要知道字的边界——而边界切分
+    在墨迹粘连时本就不可靠。
+    """
+    if mask.size == 0 or font_px <= 0:
+        return {"frag_p90": float("nan"), "frag_p99": float("nan"), "frag_max": float("nan")}
+    h, w = mask.shape
+    win = max(int(round(font_px)), 3)
+    step = max(win // 4, 1)
+    frags = blobs(mask, area_max)
+    dens: list[float] = []
+    ys = np.where(mask.any(axis=1))[0]
+    y0, y1 = int(ys[0]), int(ys[-1])
+    for y in range(y0, y1 + 1):
+        for x in range(0, max(w - win + 1, 1), step):
+            cell = mask[y, x : x + win]
+            if not cell.any():
+                continue
+            cnt = sum(1 for f in frags if f.area <= area_max and f.in_box(x, y, x + win, y + 1))
+            dens.append(cnt / (win * (y1 - y0 + 1)))
+    if not dens:
+        return {"frag_p90": 0.0, "frag_p99": 0.0, "frag_max": 0.0}
+    arr = np.array(dens)
+    return {
+        "frag_p90": float(np.percentile(arr, 90)),
+        "frag_p99": float(np.percentile(arr, 99)),
+        "frag_max": float(arr.max()),
+    }
 
 
 def measure(mask: np.ndarray) -> dict[str, float]:
@@ -303,6 +356,7 @@ def pick_body(mask: np.ndarray) -> tuple[list[tuple[int, int]], np.ndarray]:
 
 def full_measure(mask: np.ndarray, font_px: float, line_heights: list[int] | None = None) -> dict[str, float]:
     m = measure(mask)
+    m.update(tail_fragmentation(mask, font_px, FRAGMENT_AREA_MAX))
     if line_heights:
         m["ink_h_px"] = float(np.median(line_heights))
     else:
@@ -328,6 +382,10 @@ def report(tag: str, m: dict[str, float], font_px: float, lines: int) -> None:
     print(f"    ink height       {m.get('ink_h_px', float('nan')):6.2f}px   / size {font_px:.0f}px = {m.get('ink_h_ratio', float('nan')):5.3f}x")
     print(f"    blobs per line    {m['blobs'] / n:6.2f}   total blobs {m['blobs']:.0f}")
     print(f"    fragment ratio NEW{m['frag_ratio'] * 100:6.2f}%   frags/line {m['frag_per_line'] / n:.2f}")
+    print(
+        f"    tail p90/p99     {m.get('frag_p90', float('nan')) * 100:6.2f}%"
+        f" / {m.get('frag_p99', float('nan')) * 100:6.2f}%   <- worst glyphs, not the average"
+    )
     print(f"    elongation NEW    {m['elong_mean']:6.2f}")
 
 
