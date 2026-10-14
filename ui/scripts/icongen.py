@@ -59,13 +59,17 @@ MASTER = 512          # 落盘的基准图
 # 两个待验方案，默认都是「什么都不改」：
 #
 #   PAPER_BRIGHTNESS  纸的亮度系数。1.0 = 现状。
-#                     ⚠ 要在浅色背景上够到 3:1 得压到 **0.60**，那已经是
-#                       一张深卡其色的纸，不再是「奶白纸」了。
+#                     ⚠ 要在浅色背景上够到 3:1 得压到 **0.60**。
+#   PAPER_SATURATE    纸的饱和度系数。1.0 = 现状。
+#                     ⚠ 与 brightness **成对使用**：单纯压暗会把奶白压成
+#                       一张灰卡，而「纸」的知觉有一大半来自暖色相。
+#                       压暗的同时提饱和，得到的是**深牛皮纸**而不是灰卡，
+#                       在 16px 上仍读得出「一块纸」。
 #   PAPER_SHADOW_CSS  纸上的投影 CSS。票 29 原先建议的是「极淡的暖色暗边
-#                     ／投影」，而投影在 16px 上是**亚像素**的——1024 开窗的
-#                     3px 缩到 16px 只剩 0.05px，量出来是否等于零**要测**，
-#                     不要靠推理下结论。
-PAPER_BRIGHTNESS = 1.0
+#                     ／投影」，实测 1.11 → 1.12 等于零——投影在 16px 上是
+#                     **亚像素**的（1024 开窗的 6px 缩到 16px 只剩 0.09px）。
+PAPER_BRIGHTNESS = 0.52
+PAPER_SATURATE = 1.0
 PAPER_SHADOW_CSS = ""
 
 PNG_SIZES = {
@@ -118,6 +122,8 @@ def build_html(scale):
     bits = []
     if PAPER_BRIGHTNESS != 1.0:
         bits.append(f"brightness({PAPER_BRIGHTNESS})")
+    if PAPER_SATURATE != 1.0:
+        bits.append(f"saturate({PAPER_SATURATE})")
     if PAPER_SHADOW_CSS:
         bits.append(f"drop-shadow({PAPER_SHADOW_CSS})")
     paper_filter = " ".join(bits) if bits else "none"
@@ -208,8 +214,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=None, help="输出目录（默认 ui/src-tauri/icons）")
     ap.add_argument("--brightness", type=float, default=PAPER_BRIGHTNESS)
+    ap.add_argument("--saturate", type=float, default=PAPER_SATURATE)
     ap.add_argument("--shadow", default=PAPER_SHADOW_CSS)
     a = ap.parse_args()
     PAPER_BRIGHTNESS = a.brightness
+    PAPER_SATURATE = a.saturate
     PAPER_SHADOW_CSS = a.shadow
     main(a.out)
