@@ -78,24 +78,57 @@
 
 **自证**：把 `snapshot` 退回 `phase.status_hint()` ⇒ 本条立刻红。
 
-## ⚠ 这轮撞见的两个更值钱的坑
+## ⚠ 这轮撞见的坑：**我挑着跑判据，然后跑去看浏览器**
 
-### 一、我把面板改崩了，而**判据工具全绿**
+首次写的分支是 `{:else if readout.status_hint}`——漏了问号，
+而 `readout` 初值是 `null`（这一支排在 `readout?.phase === 'failed'` **之后**）。
+真浏览器里**整个面板崩成白屏**：
 
-首次写的分支是 `{:else if readout.status_hint}`——漏了问号。
-`readout` 初值是 `null`，而这一支排在 `readout?.phase === 'failed'` **之后**。
+```text
+TypeError: Cannot read properties of null (reading 'status_hint')
+```
 
-- `pnpm build` ✅
-- `svelte-autofixer` **零告警** ✅
-- `cargo test --workspace` ✅
-- 真浏览器里**整个面板崩成白屏**：
-  `TypeError: Cannot read properties of null (reading 'status_hint')`
+### ⚠⚠ 第一版这里写错了：「判据工具全绿」
 
-⇒ **救我的是对照实验**：先拿一个「肯定能渲染」的旧态（`drafted`）
-出图，发现它也空白 ⇒ 立刻指向「应用崩了」而不是「出图管线坏了」。
-我差一点就归咎后者然后放过去。
+当时我写的是「`pnpm build` ✅ / `svelte-autofixer` 零告警 ✅ / `cargo test` ✅
+⇒ 判据工具全绿」。
 
-⚠ 这个坑已写进 `PaperPanel.svelte` 那支的注释里。
+**这三项确实都绿，但那句话是误导的**，因为门禁里本来就有能抓住它的检查。
+2026-10-14 复验（把 bug 放回去再跑）：
+
+```text
+$ pnpm check
+Error: 'readout' is possibly 'null'. (ts)      ← 第 741 行（条件）
+Error: 'readout' is possibly 'null'. (ts)      ← 第 762 行（取值）
+svelte-check found 2 errors and 0 warnings in 1 file
+```
+
+`tsconfig.json` 的 `strict` 是开的，**`ui svelte-check` 这一步就能抓住**。
+
+⇒ **真实原因是：我在跑去看浏览器之前只跑了 build + autofixer + cargo test，
+没有跑全套门禁。** 这跟「判据抓不住」是两回事。
+
+### 教训
+
+**判据要跑就跑全套，挑着跑等于没有。** 当时「build 过了、autofixer 过了、
+测试过了」三条绿的印象，比「我压根没跑类型检查」这个事实更容易被记住。
+
+⚠ 顺带说明：`autofixer` **不是**类型检查器，它零告警不说明任何类型问题。
+`svelte-check` 才是。
+
+⇒ 由此**不必**新增浏览器 pageerror 那道门禁步骤：类型检查已经覆盖这一类，
+再叠一道只会让门禁更重而不多抓问题。（这正是先做实验再决定要不要加检查。）
+
+### 与上一节配套的另一半：**对照实验**
+
+上面那个白屏，我差一点归咎成「出图管线坏了」（Chrome headless 在这台机器上
+连出空白、换 `--headless=old` 也空白、`--virtual-time-budget` 去掉也空白）。
+
+⇒ 是**对照实验**救的：先拿一个**肯定能渲染**的旧态（`drafted`）出图，
+发现它也空白 ⇒ 空白不是量具的毛病，是**应用崩了**。
+
+⚠ 两个坑是配套的：**判据没跑全**让我直到开浏览器才发现问题；
+**没有对照实验**让我差点归错责、然后把一个真缺陷当成工具故障放过。
 
 ### 二、`?demo` 的装载器会**把要验的那一支裁掉**
 

@@ -147,8 +147,16 @@ CSS 的 `@font-face` 是**按需加载**的，而 `'LXGW WenKai'` 全仓只出�
 - [ ] 真机截图上正文**看得清**；判据用 §4.2 的三个量，不是观感
       ⛔ **这一条现在是仿宋改判的主要风险项**：75.9% 细笔画 vs 纯色纸底、
       Chrome 3× 出图，两条都还没在真环境消掉
-- [ ] `?demo=1&state=` **七态**零 pageerror（⚠ 原写「八态」，票 20 删掉
-      `auto.json` 那一态后应是七态）
+- [x] `?demo=1&state=` **九态**零 pageerror（⚠ 原写「八态」，票 20 删掉
+      `auto.json`、票 30 补 `fresh.json`、票 32 补 `parked.json`）
+      —— **2026-10-14 这条其实早被覆盖了，没人发现**：
+      票 32 那轮我写出 `readout.status_hint`（漏可选链）导致整页白屏，
+      复验时发现 `ui svelte-check` 会直接报
+      `Error: 'readout' is possibly 'null'. (ts)`。
+      ⇒ `tsconfig` 的 `strict` 开着，**类型检查就是那道 pageerror 判据**，
+      不需要另加浏览器步骤。⚠ 真正的教训是当时只跑了 build + autofixer
+      + cargo test 就去开浏览器，**没跑全套门禁**。
+      ⇒ autofixer **不是**类型检查器，它零告警不说明任何类型问题。
 - [x] 改过的 `.svelte` 过 `npx -y @sveltejs/mcp svelte-autofixer <path>` 到 `issues: []`
       （2026-10-14：`AUTOFIXER_ALL_CLEAN (11 files)`）
 - [ ] 顺手清掉 `docs/设计规范.md` §4.2 顶上的那条自我更正
