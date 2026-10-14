@@ -401,12 +401,62 @@ pub fn get_tier() -> String {
     tier_id(with_state(|s| s.tier.get()).unwrap_or(Dispatch::Manual))
 }
 
+/// 改档，并按「档位真的变了」解除装填。**返回真实生效的 id。**
+///
+/// ## 这条规则原先只活在注释里（2026-10-14 实测）
+///
+/// `Arming` 的文档写着「三种情况都必须失效：候选换了、**档位变了**、
+/// 真的发出去了」，`dispatch` 里那句注释又写着「改档就解除装填：
+/// 上一档的确认不能带到下一档」——**两处都声称有，代码里一处都没有**：
+/// `set_tier` 从头到尾没碰过 `armed`。
+///
+/// **漏出来的路**：Confirm 档点候选 A（只装填，不发）→ 切到 Manual →
+/// 在微信里改成自己想发的内容 → 切回 Confirm → 再点 A。
+/// `arm("A", 同一 ticks)` 返回 true ⇒ **两段式被跳过，直接发送**，
+/// 把用户自己写的内容覆盖掉。测试见 `changing_tier_disarms`。
+///
+/// ## 方向：只会更严，绝不放松
+///
+/// 这条只让发送**多要求一次装填**，不打开任何新路径。正是 `arm` 自己
+/// 文档里「宁可让用户多点一次」的意思。⚠ 硬约束第 5 条的档位集合没动，
+/// 动的只是「装填在什么时候作废」。
+///
+/// ## 为什么抽成独立函数
+///
+/// 它住在 `set_tier` 的行内时**没法测**——`AppState` 得靠
+/// `watch::spawn()` 才造得出来（那会真的起一条观察循环线程）。
+/// ⇒ 把「档位格 + 装填」这一小块单独拿出来，测试才能**真的走一遍
+/// `set_tier` 跑的那段代码**。
+///
+/// ⚠ 第一版的测试是在测试里**复刻**了这段判断，于是把这里的
+///   `disarm` 短路掉（`if before != after && false`）测试**照样全绿**——
+///   **复印件不是守卫**。
+fn apply_tier(tier: &crate::watch::TierCell, armed: &mut Arming, d: Dispatch) -> String {
+    // ⚠ `TierCell::set` 不告诉你是「从 A 变到 B」还是「本来就是 B」——
+    //   所以「是否真的变了」只能**先读后写**再比。
+    //
+    //   ⚠ 比的是 **`set` 的返回值**而不是传进去的 `d`。今天是同一个值
+    //   （`set` 原样返回入参），但若哪天 `set` 加了夹取，比 `d` 就会在
+    //   「请求变了、生效值没变」时**误解除装填**。比返回值对那种情况免疫。
+    let before = tier.get();
+    let after = tier.set(d);
+    if before != after {
+        armed.disarm();
+    }
+    tier_id(after)
+}
+
 /// 改档。**返回真实生效的 id**——界面上要显示程序认定的那个。
 #[tauri::command]
 pub fn set_tier(tier: String) -> String {
     // 认不出来的一律当 Manual。**不许因为解析失败就升档。**
     let d = parse_tier(&tier);
-    let real = tier_id(with_state(|s| s.tier.set(d)).unwrap_or(Dispatch::Manual));
+    // ⚠⚠ **改档必须解除装填**（原理由与漏出来的路见 `apply_tier` 的文档与
+    //   测试 `changing_tier_disarms`）。这条以前只活在注释里：`Arming` 的
+    //   文档写着「档位变了」是三种作废情况之一，`dispatch` 里那句
+    //   「上一档的确认不能带到下一档」的注释也写着它，而 `set_tier`
+    //   从头到尾没碰过 `armed`——**两处声称有，代码里一处都没有**。
+    let real = with_state(|s| apply_tier(&s.tier, &mut s.armed, d)).unwrap_or("Manual".into());
     // ⭐ 在 `with_state` **之后**刷——锁已经放掉了，这里再拿就是死锁。
     // 档位变了，托盘首行和图标状态必须跟着变：面板看不见的时候，
     // 它是唯一告诉用户「开着自动」的地方。
@@ -1717,6 +1767,83 @@ mod budget_ceiling_tests {
         assert!(!a.arm("c0", 10));
         assert!(!a.arm("c1", 10), "换了一条候选就必须重新装填");
         assert!(a.arm("c1", 10), "c1 自己装填后再点一次才放行");
+    }
+
+    /// **改档必须作废装填。**（2026-10-14 补——这条规则此前只写在注释里）
+    ///
+    /// `Arming` 的文档第一条就写着「三种情况都必须失效：候选换了、
+    /// **档位变了**、真的发出去了」，而实现里前两者都不成立：
+    /// `set_tier` 从头到尾没碰过 `armed`。
+    ///
+    /// 漏出来的路正是上面那条注释「上一档的确认不能带到下一档」要堵的：
+    /// Confirm 档装填候选 A → 切到 Manual → 在微信里改成自己的内容 →
+    /// 切回 Confirm → 再点 A，`arm("A", 同一 ticks)` 返回 true，
+    /// **两段式被跳过，直接发送**，用户写的东西被覆盖。
+    ///
+    /// ⚠ 这条**直接调 `apply_tier`**——那正是 `set_tier` 跑的那段代码。
+    ///   第一版的测试是在测试里**复刻**了判断，于是把 `set_tier` 里的
+    ///   `disarm` 短路成 `if changed && false`，测试**照样 71 条全绿**——
+    ///   **复印件不是守卫**。抽 `apply_tier` 就是为了让测试能碰到真代码。
+    ///
+    /// ⚠ 仍然只到「改档 → 装填作废」这一层：真机上连着 `STATE`、
+    ///   `inject::send_only` 一起验，是票 20 剩的那一项。
+    ///
+    /// ⚠ 原先这里还有一条 `tier_changed_only_when_the_tier_actually_differs`，
+    ///   测的是「`tier_changed(before, d)` 是否等于 `before != d`」——
+    ///   而 `tier_changed` **随后被内联进 `apply_tier` 了**，测试就悬空成
+    ///   「一个函数存在、但没有任何守卫」的假断言。它守的那件事
+    ///   （只在真变更时解除装填）**已由本条的正反两面覆盖**：
+    ///   真变更 ⇒ 装填作废；同档再设 ⇒ 装填留着。
+    ///   ⇒ 删掉它，而不是留着一条测「恒等式」的测试给人「有守卫」的错觉。
+    #[test]
+    fn changing_tier_disarms() {
+        let tier = crate::watch::TierCell::default_manual();
+        let mut armed = Arming::default();
+
+        // 升到 Confirm（从默认的 Manual 升，这是**一次真变更**）。
+        assert_eq!(apply_tier(&tier, &mut armed, Dispatch::Confirm), "Confirm");
+        assert!(!armed.arm("c0", 10), "第一次点击只是装填");
+        assert!(armed.arm("c0", 10), "第二次点击才放行");
+
+        // 切到 Manual —— 装填必须作废。
+        assert_eq!(apply_tier(&tier, &mut armed, Dispatch::Manual), "Manual");
+        assert!(
+            !armed.arm("c0", 10),
+            "改档之后那份装填必须作废，否则切回来再点一次就直接发了"
+        );
+
+        // 切回 Confirm —— 仍然作废，上一份**不许**被带回来。
+        apply_tier(&tier, &mut armed, Dispatch::Confirm);
+        assert!(!armed.arm("c0", 10), "切回同一档不该把上一份装填复活");
+
+        // ⚠ 反过来也要成立：**档位没真的变就不该作废**。
+        //   否则面板每次改档都抹掉用户的装填，Confirm 永远发不出去。
+        let mut b = Arming::default();
+        apply_tier(&tier, &mut b, Dispatch::Confirm);
+        assert!(!b.arm("c1", 7));
+        apply_tier(&tier, &mut b, Dispatch::Confirm);
+        assert!(b.arm("c1", 7), "档位没变时装填要留着，否则两段式永远走不完");
+    }
+
+    /// **解析失败一律落到最低档，且不动装填。**
+    ///
+    /// ⚠ 这条不是废话：`set_tier` 是前端唯一能改档的入口，而前端传什么
+    ///   本来就不可信。旧配置里可能还留着 `"Auto"`（2026-10-13 取消的第三档），
+    ///   它落进 `parse_tier` 的 `_` 分支 ⇒ 读成 **Manual**。
+    ///   若那时程序正停在 Manual，`apply_tier` 看到「没变」就**不解除装填**——
+    ///   这正是我们要的：一次无效输入不该顺手把用户已经装填好的状态抹掉。
+    #[test]
+    fn an_unparsable_tier_lands_on_manual_without_disarming() {
+        assert_eq!(parse_tier("Auto"), Dispatch::Manual);
+        assert_eq!(parse_tier("nonsense"), Dispatch::Manual);
+        assert_eq!(parse_tier(""), Dispatch::Manual);
+
+        let tier = crate::watch::TierCell::default_manual();
+        let mut armed = Arming::default();
+        assert!(!armed.arm("c0", 3));
+        // 程序本来就在 Manual，输入 `"Auto"` 也落到 Manual ⇒ 没变 ⇒ 装填留着。
+        apply_tier(&tier, &mut armed, parse_tier("Auto"));
+        assert!(armed.arm("c0", 3), "无效输入不该抹掉已经装填好的状态");
     }
 
     /// **穷举：除了「Confirm 档 + confirm 动作 + 已装填」，没有第二条能发出去的路。**
