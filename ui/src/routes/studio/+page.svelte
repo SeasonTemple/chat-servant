@@ -68,6 +68,87 @@
     { px: 23, perLine: 13, lines: 5, claim: '实测 13 字/行 · 5 行 · 细笔画 25.2%' },
   ];
 
+  /* ── D 段（票 24）的面板小字：每档单独成行 ──
+   *
+   *  ⚠ 这里量的是**面板里真正在用的小字**，不是正文（正文在 C 段）。
+   *  两个待测元素与它们在 `PaperPanel.svelte` 里的样式逐条对应：
+   *
+   *  | 台上的类        | 真出处                       | 现在 |
+   *  |-----------------|------------------------------|------|
+   *  | `.small-name`   | `.cs-pick-name`（档位名）     | 11px |
+   *  | `.small-where`  | `.cs-where`（归属行）        | 12px |
+   *
+   *  ⚠ **改这两个类时必须同步改这里**，否则量的是一个不存在的界面。
+   *  下面每条声明后面都注了出处行号。
+   *
+   *  ## 为什么必须「每档单独成行」
+   *
+   *  票 24 首轮数据作废的原因：字号档的文本行切分把汉字行误并进了等宽行——
+   *  一个 sheet 里混排多种行，行切分按「比纸暗」判定，等宽行的墨也进了掩码，
+   *  切出来的行于是横跨两种行。⇒ **一个 sheet 只放一个字号**，
+   *  量具的掩码才只可能落在一行文字上。
+   */
+  const SMALL_SCALES = [10.5, 11, 12];
+
+  /** 归属行样本。假内容，与 `static/demo/*.json` 同一规矩。 */
+  const SMALL_WHERE_SAMPLE = '示例联系人';
+  const SMALL_QUOTE_SAMPLE = '设成 30s 是不是太短了';
+  /** 档位名样本：两个都是面板里真实出现的档位名。 */
+  const SMALL_NAME_SAMPLE = '只填入';
+
+  /* 只出**一个**字号（`?small=11`）。默认出全部三档。
+   *
+   * ⚠ 这是为票 24 的量具准备的，不是给人看的：一次只出一档，
+   *   量具的掩码就不可能同时吃到两种字号——票 24 首轮就是这么作废的。
+   */
+  const SMALL_ONE = $derived.by(() => {
+    const v = page.url.searchParams.get('small');
+    if (v === null) return null;
+    const n = Number(v);
+    return SMALL_SCALES.includes(n) ? n : null;
+  });
+  const SMALL_VISIBLE = $derived(
+    SMALL_ONE === null ? SMALL_SCALES : SMALL_SCALES.filter((p) => p === SMALL_ONE),
+  );
+
+  /* 纸底用实色还是纸纹位图（`?paper=solid`）。
+   *
+   * ⚠ **默认纯色，这是量具的选择，不是偷懒**：
+   * 纸纹位图里有暗折痕，它比墨阈值还暗，会把一行的包围盒撑宽
+   * （实测「示例联系人」那一行被撑到 229 CSS px，真值约 60，
+   * 字面率从 27% 掉到 9%，而表看起来完全正常）。
+   * 折痕与 11px 的竖笔同形、密度也同形，按形状与密度都剔不掉。
+   *
+   * ⇒ 量**字**的三个量（字面率 / 细笔画 / 墨高比）必须在干净底上量。
+   * 纸纹只会让细笔画**更容易发虚**，方向单向——所以纯色底上量出的
+   * 细笔画占比是**乐观下界**，真机只会更差。这条与票 22 正文那套
+   * （仿宋 75.9% 就是在纯色底上量的）同一条纪律。
+   * `?paper=texture` 保留，用于肉眼看纸纹上到底糊成什么样。
+   */
+  const PAPER_SOLID = $derived(page.url.searchParams.get('paper') === 'solid');
+  const PAPER_CSS = $derived(PAPER_SOLID ? 'rgb(243 230 192)' : `url(${SHEET})`);
+
+  /* 字重探针（`?weight=600`）。默认 **600**。
+   *
+   * ⚠⚠ **默认值必须跟着 `PaperPanel.svelte` 走**：2026-10-14 票 24 已把
+   * `.cs-where-quote` 与 `.cs-pick-name` 定为 **600**（11~12px 下常规字重的
+   * ≤1px 细笔画是 75~79%，600 是 15~18%）。这里默认值不同步的话，
+   * 量具就在量一个**不存在的界面**——而它照样报出一张正常的表。
+   *
+   * ⚠ 想看 400 的数据要显式写 `?weight=400`；**500 在本机等于 400**
+   *（雅黑没有 500 字重，浏览器渲成 400，两档逐字节相同）。
+   *
+   * 为什么需要这个开关：首轮数据量出来之后冒出一个**反直觉**的结果——
+   * 同一档字号下，`.cs-peer`（本来就是 600）的 ≤1px 细笔画只有 6~14%，
+   * 而常规字重的引文与档位名是 71~82%。⇒ 断笔的杠杆很可能是
+   * **字重**而不是字号。这条只能量，不能推。
+   */
+  const SMALL_WEIGHT = $derived.by(() => {
+    const v = page.url.searchParams.get('weight');
+    const n = v === null ? 600 : Number(v);
+    return [300, 400, 500, 600, 700].includes(n) ? n : 600;
+  });
+
   const TOUCH = [
     {
       id: 'P1',
@@ -182,13 +263,23 @@
 {/snippet}
 
 <div class="desk" data-mark={MARK_MODE} data-ink={INK_MODE}>
-  <figure class="slot">
-    <figcaption>纸 · 1:1 · 380 × 560</figcaption>
-    <div class="sheet" style="width:{SHEET_W}px;height:{SHEET_H}px"></div>
-  </figure>
+  <!--
+    ⚠ **D 段（票 24）把参照纸摘掉**，否则量具会框错块。
+    量具按「暖色连通块」定位要量的那块纸，而这页左侧常驻着一张
+    380×560 的纸样参照——它也是暖色的、面积还更大。
+    初版量到的就是这张**空白参照纸**：0 行字面墨、墨高÷字号 47.6，
+    而那张表**看起来完全正常**。
+    ⇒ 渲染时只有一个纸块，量具就不必猜。
+  -->
+  {#if only !== 'small'}
+    <figure class="slot">
+      <figcaption>纸 · 1:1 · 380 × 560</figcaption>
+      <div class="sheet" style="width:{SHEET_W}px;height:{SHEET_H}px"></div>
+    </figure>
+  {/if}
 
   <div class="rack">
-    {#if only !== 'b' && only !== 'type' && MARK_MODE === 'above'}
+    {#if only !== 'b' && only !== 'type' && only !== 'small' && MARK_MODE === 'above'}
       <h1>A · 轮廓对了，表面还不对</h1>
       <p class="lede">
         笔迹的<b>收放方向和横纵比</b>都已照照片校准（1.48 : 1），但看着仍不像铅笔。 差的是<b>表面</b
@@ -225,7 +316,7 @@
       {/each}
     {/if}
 
-    {#if only !== 'type'}
+    {#if only !== 'type' && only !== 'small'}
       <h1 class="gap">B · 圈还是勾</h1>
       <p class="lede">
         {#if MARK_MODE === 'overlay'}
@@ -348,6 +439,61 @@
                    background-position:0 0"
             >
               <div class="bodytype" style="font-size:{t.px}px">{BODY_SAMPLE}</div>
+            </div>
+          </div>
+          <div class="ruler" aria-hidden="true">
+            {#each RULER as i (i)}<i class:long={i % 5 === 0}></i>{/each}
+          </div>
+        </section>
+      {/each}
+    {/if}
+
+    {#if only === 'small'}
+      <!--
+      D 段 · 面板小字（票 24）。
+
+      问的是「面板上最小的字到底能不能读」，不是「正文多大」。
+      三个候选 **10.5 / 11 / 12px**，**每个字号单独一张 sheet**——
+      混排会让行切分把两种字号的墨并进同一个掩码（票 24 首轮就是这么作废的）。
+
+      排版照抄 `PaperPanel.svelte` 的 `.cs-pick-name` / `.cs-where`，
+      **含色值**：`--cs-pencil` = `rgb(76 90 99)`（在真实纸底上 5.10 : 1）。
+      ⚠ 纸底用**真实纸材位图**，不是纯色——票 22 的仿宋风险就是这么来的：
+      纯色纸上 75.9% 的 ≤1px 细笔画，落到有纤维的纸纹上只会更容易断。
+
+      标注文案只报量出来的东西，不写观感结论。
+    -->
+      <h1 class="gap">D · 面板小字 10.5 / 11 / 12px</h1>
+      <p class="lede">
+        票 24 要回答的是<b>当前用的 11px 与 12px 站不站得住</b>， 以及要不要放 10.5。三档<b
+          >每档单独成行</b
+        >，字体、色值、行高、纸材 全部照抄 <code>PaperPanel.svelte</code> 的对应规则，只变字号一个变量。
+      </p>
+
+      {#each SMALL_VISIBLE as px (px)}
+        <section class="cand">
+          <header>
+            <b>{px}px</b><span class="cname">雅黑 · 纸材实底 · 铅笔灰 rgb(76 90 99)</span>
+            <span class="claim">量具：字面率 / ≤1px 细笔画 / 墨迹高÷字号</span>
+          </header>
+          <div class="crop" style="width:{SHEET_W}px">
+            <div
+              class="band grow"
+              style="background:{PAPER_CSS};
+                   background-size:{SHEET_W}px {SHEET_H}px;
+                   background-position:0 0"
+            >
+              <div class="small-where" style="font-size:{px}px">
+                <span class="small-peer" style="font-weight:{SMALL_WEIGHT}"
+                  >{SMALL_WHERE_SAMPLE}</span
+                >
+                <span class="small-quote" style="font-weight:{SMALL_WEIGHT}"
+                  >{SMALL_QUOTE_SAMPLE}</span
+                >
+              </div>
+              <div class="small-name" style="font-size:{px}px;font-weight:{SMALL_WEIGHT}">
+                {SMALL_NAME_SAMPLE}
+              </div>
             </div>
           </div>
           <div class="ruler" aria-hidden="true">
@@ -668,6 +814,58 @@
     margin: 0 auto;
     font-family: KaiTi, STKaiti, '楷体', serif;
     line-height: 1.5;
+    letter-spacing: 0.02em;
+    color: var(--cs-pencil);
+  }
+
+  /* ── D 段：面板小字（票 24） ──
+   *
+   * ⚠ **这里的每一条都要跟着 `PaperPanel.svelte` 走**，出处注在行尾。
+   *   两边不同步的话，量的是一个不存在的界面——而量具全绿。
+   *
+   * 为什么照抄行高与字距：判据量的是**断笔**（≤1px 的笔画占比），
+   * 而断笔既由字号决定、也由栅格化时的行距决定。只变字号一个变量，
+   * 三个候选之间才可比。
+   */
+  .small-where {
+    /* `.cs-where`：PaperPanel 的 line-height 1.45 + --cs-pencil */
+    max-width: 316px;
+    margin: 0 auto;
+    line-height: 1.45;
+    color: var(--cs-pencil);
+  }
+  .small-peer {
+    /* ⚠ 这里**不能**照抄 `.cs-peer` 的 `font-weight: 600`（2026-10-14 修正）。
+     *
+     *  `.cs-peer` 自己写的是 600，但它的默认呈现是 `data-peer-look='tracked'`
+     *  （PaperPanel.svelte:221 的 `peerLook` 初值），而 `tracked` 那条规则把
+     *  字重**改回 400**、改用 0.18em 字距扛层级。所以真实界面上名字是
+     *  **400 + 疏排**，不是 600。
+     *
+     *  照抄 600 的后果是量具把「名字 600 + 引文 600」量了一遍——那是
+     *  **一个界面上不存在的组合**，得出来的「三行同粗、层级靠颜色」结论
+     *  也就跟着失效。量具抄规则要抄**最终值**，不是抄被覆盖的那一行。
+     *  同类教训：`ui/scripts/analysetype.py` 头号坑（量具量的是别的东西）。
+     *
+     * 字重走 `SMALL_WEIGHT` 是因为「名字要不要也加粗」与「引文要不要加粗」
+     * 是**两个独立决策**却共用一个杠杆；这里先让三行共用，好让一屏里
+     * 直接比出「全 600」和「全 400」两个整档。要单独调名字再加参数。 */
+    letter-spacing: 0.18em;
+    color: var(--cs-pencil-2);
+  }
+  .small-quote {
+    /* `.cs-where-quote`：display block + margin-top 3px + --cs-pencil */
+    display: block;
+    margin-top: 3px;
+    color: var(--cs-pencil);
+  }
+  .small-name {
+    /* `.cs-pick-name`：line-height 1 + letter-spacing .02em + --cs-pencil。
+     * 上下留白是为了让行切分（按「比纸暗」判定）切得开——票 24 首轮
+     * 切错行就是因为两行墨挨得太近。 */
+    max-width: 316px;
+    margin: 26px auto 0;
+    line-height: 1;
     letter-spacing: 0.02em;
     color: var(--cs-pencil);
   }
