@@ -53,6 +53,16 @@ enum Cmd {
         #[arg(long)]
         file: Option<PathBuf>,
     },
+    /// 会话闸对照：给两张帧各建一次头部指纹，打印相似度与闸的结论
+    ///
+    /// 回答的是「**闸**认不认得出换人了」，不是「会话名 OCR 读不读得出」。
+    /// 这两条路不同——闸认像素、名字认 OCR——本票的根因正是把两者混成一件。
+    GateCmp {
+        /// 前一帧（PNG）
+        a: PathBuf,
+        /// 换会话后的后一帧（PNG）
+        b: PathBuf,
+    },
     /// 只跑 OCR，把读到的行原样打出来——**不做锚定、不做归类**
     ///
     /// 为什么要有这个：`perceive` 里 OCR 和归类是串在一起的，
@@ -186,6 +196,7 @@ fn main() -> Result<()> {
         Cmd::Read => probe_read(),
         Cmd::Fixture { name, source } => make_fixture(&name, source),
         Cmd::Perceive { file } => probe_perceive(file),
+        Cmd::GateCmp { a, b } => gatecmp(&a, &b),
         Cmd::Ocr { file, scale } => probe_ocr(&file, scale),
         Cmd::Measure { file } => probe_measure(file),
         Cmd::Layout { file } => probe_layout(file),
@@ -1187,6 +1198,84 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
             m.rect.x1,
             m.rect.y1,
             m.text
+        );
+    }
+    Ok(())
+}
+
+/// 会话闸对照：两张帧 → 两个头部指纹 → `is_same` 的结论。
+///
+/// ## 为什么要有这个命令
+///
+/// 票 30 最后一条待验是「闸能否分开两个会话」。肉眼能看见 `peer` 变了，
+/// 但那证明的是**会话名 OCR 通了**，不是**闸**分开了——闸认的是像素指纹，
+/// 名字认的是 OCR，是两条不同的路。本票的根因正是把这两件事混成一件，
+/// 所以这里必须有一个只问闸的命令。
+///
+/// ## 失败方向
+///
+/// 任何一张帧推不出指纹就整体报错退出，**不打印任何「相同/不同」的结论**。
+/// 理由与生产一致：认不出必须按「换人了」处理（关闸），而探针若在认不出的
+/// 情况下打印一个结论，那结论就是猜的——本项目踩过好几次这种坑。
+fn gatecmp(a: &Path, b: &Path) -> Result<()> {
+    use chatservant_perceive::identity::{HeaderPrint, SAME_THRESHOLD};
+
+    // 与 `probe_perceive` 走同一条接缝：`anchor::derive` + `HeaderPrint::discover`，
+    // 不自己拼矩形。探针和生产走同一条路，否则「探针说分开了」说明不了产品会分开。
+    let print_of = |p: &Path| -> Result<(HeaderPrint, chatservant_core::frame::Rect)> {
+        let img = image::open(p)
+            .with_context(|| format!("打开 PNG 失败：{}", p.display()))?
+            .to_rgb8();
+        let (w, h) = img.dimensions();
+        let frame = chatservant_capture::Frame::from_rgb(w, h, img.into_raw())
+            .context("PNG 尺寸与缓冲区不匹配")?;
+        let anchor = chatservant_capture::anchor::derive(&frame)
+            .map_err(|e| anyhow::anyhow!("推导锚点失败：{e}"))?;
+        let (print, rect) = HeaderPrint::discover(&frame, anchor.chat, 400).with_context(|| {
+            format!(
+                "{}：推不出头部指纹（锚点 chat.y0 = {}，顶部 72 px 内没有成行的字）\
+                 ⇒ 闸按「认不出」处理，不能拿它比另一张帧",
+                p.display(),
+                anchor.chat.y0
+            )
+        })?;
+        println!(
+            "  {}  锚点 ({},{})-({},{})  头部行 y {}..{}（{}x{}）  指纹 {} px",
+            p.display(),
+            anchor.chat.x0,
+            anchor.chat.y0,
+            anchor.chat.x1,
+            anchor.chat.y1,
+            rect.y0,
+            rect.y1,
+            rect.width(),
+            rect.height(),
+            print.pixels()
+        );
+        Ok((print, rect))
+    };
+
+    println!("== 会话闸对照 ==");
+    let (pa, ra) = print_of(a)?;
+    println!();
+    let (pb, rb) = print_of(b)?;
+
+    let sim = pa.similarity(&pb);
+    println!();
+    println!("相似度 = {sim:.4}   阈值 = {SAME_THRESHOLD:.2}");
+    if pa.is_same(&pb) {
+        println!(
+            "闸的结论：**同一个会话**（判据：{}x{} 与 {}x{} 的墨迹像到 {:.0}%）",
+            ra.width(),
+            ra.height(),
+            rb.width(),
+            rb.height(),
+            sim * 100.0
+        );
+    } else {
+        println!(
+            "闸的结论：**换人了**（相似度 {:.4} 低于阈值 {SAME_THRESHOLD:.2} ⇒ 闸会关）",
+            sim
         );
     }
     Ok(())
