@@ -61,6 +61,35 @@ if (Test-Path "ui\node_modules") {
 
 Write-Output ""
 Write-Output "=========================="
+
+# ---- 构建产物回收（维护，不参与 fail）--------------------------------
+#
+# 为什么要它：**Cargo 没有 target/ 的自动 GC**。Rust 1.88 加的自动清理官方原文
+# 是 "garbage collection on the cache in its home directory" —— 管的是 `~/.cargo`
+# 里下载的 .crate / registry 索引 / git 检出，**target/ 一个都不管**
+# （cargo#13060 的 `gc` 子命令至今 unstable；本机 1.94.1 的 `cargo --list`
+# 里也确实只有 `clean`）。
+#
+# 实测（2026-10-14，target 清空后全新构建对比）：
+#     deps 1.90→10.55 GB (5.5×)  incremental 0.18→3.88 GB (21×)  合计 2.82→16.2 GB
+# 而 `ui/scripts/targetaudit.py` 查过多哈希残留只占 deps 的 1%
+# ⇒ 这是**逐轮叠加**，不是残留 ⇒ `cargo clean` 只能救急，得有自动机制兜底。
+#
+# 它刻意**不参与 $fail**：磁盘占用不是代码质量，红了会让人以为代码有问题。
+# 超过 8 GiB 才动手，只回收 7 天没被动过的 `incremental/` 与 `deps/` 产物，
+# 且**保留 `.fingerprint`**（Cargo 判断要不要重编全靠它）。
+$ErrorActionPreference = "Continue"
+Write-Output "---------- target gc ----------"
+& uv run --no-project python scripts\targetgc.py 2>&1 | Select-Object -Last 6
+# ⚠ 这一步不参与 $fail，**所以它坏了必须自己喊**。
+#   不加这句的话：uv 没装 / 脚本语法错 / 路径写错，输出会和「一切正常」一模一样，
+#   而机制已经三个月没干活了没人知道——本轮反复踩的就是这类静默失效。
+if ($LASTEXITCODE -ne 0) {
+  Write-Output ">>> target gc FAILED (exit=$LASTEXITCODE) - 回收机制没干活，磁盘仍会涨"
+  Write-Output ">>> 这不是代码质量红，但请顺手修：uv 是否在 PATH、scripts\targetgc.py 是否存在"
+}
+$ErrorActionPreference = "Continue"
+
 if ($fail -eq 0) { Write-Output "GATE: ALL GREEN" } else { Write-Output "GATE: FAILED" }
 Write-Output "GATE_EXIT=$fail"
 

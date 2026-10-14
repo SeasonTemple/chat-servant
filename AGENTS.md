@@ -346,32 +346,74 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
   清掉，改写后的版本是核实过的。若它与代码冲突，**以代码为准并立刻修文档**——
   它唯一可接受的陈旧形态是「正在清理」，而不是「说过算数」。
 
-## 构建产物纪律（cargo 不会自动回收）
+## 构建产物纪律（cargo 不会自动回收 target/）
 
-**stable 的 cargo 没有 GC。** 它只在产物失效时重新生成，从不删除旧的。
-所以 `target/` 是**单调增长**的，除非手动清。
+**stable 的 cargo 没有 `target/` 的 GC。** 它只在产物失效时重新生成，从不删除旧的。
 
-什么会让它突然翻倍——不是「构建次数多」，而是这两件事：
+⚠ **别把Rust 1.88 的自动清理当解法**（2026-10-14 核实）。那一版的官方原文是
+"garbage collection on **the cache in its home directory**"——管的是 `~/.cargo` 里
+下载的 `.crate`、registry 索引、git 检出，**`target/` 一个都不管**。
+`gc` 子命令在 cargo#13060 里至今 unstable；本机 1.94.1 的 `cargo --list` 里也确实
+只有 `clean`。⇒ `target/` 在官方那里**至今没有自动方案**，只能自己补。
+
+### 病因实测：是**逐轮叠加**，不是「残留旧哈希」（2026-10-14，纠正旧结论）
+
+本节原先写「增删 feature 会产生新哈希 rlib，旧永不删除，8 GB 是垃圾」。
+`ui/scripts/targetaudit.py`（数 `target/debug/deps` 里每个包名有几个不同哈希）
+实测推翻了它——**多哈希残留只占 `deps` 的 1%（0.02 GiB）**，根本撑不起那个量级。
+
+真实数据（同机、`target/` 清空后全新 `cargo build --workspace` 对比，全量 2 分 1 秒）：
+
+| | 全新一次 | 日常+门禁几轮后 | 倍数 |
+|---|---|---|---|
+| `deps` | 1.90 GB | 10.55 GB | 5.5× |
+| `incremental` | **0.18 GB** | **3.88 GB** | **21×** |
+| `build` | 0.31 GB | 1.41 GB | 4.5× |
+| **合计** | **2.82 GB** | **16.20 GB** | 5.7× |
+
+⇒ 每跑一轮 `clippy --all-targets` / `test --workspace` / `tauri dev` 都往里叠一层，
+**`incremental` 是涨得最凶的那个**。既然是叠加，`cargo clean` 就只是**救急**，
+日常必须有自动机制兜底。
+
+### 现在的两道防线
+
+1. **`[profile.dev] incremental = false`**（根 `Cargo.toml`，2026-10-14 定）。
+   依据有两条，都是实测：① `scripts/gate.ps1` 早就在开头设
+   `$env:CARGO_INCREMENTAL = "0"`，注释记着原因——增量目录会被锁（os error 5），
+   clippy 因此以 101 退出而那不是代码红。⇒ 门禁早就认定它有害，只是**仅在门禁
+   运行期间**关，日常构建仍是默认 true。现在升格成全局配置，两条路径一致。
+   代价：改 Rust 代码后重编更慢（全量约 2 分钟）；本项目日常改动大头在前端，
+   走 Vite HMR 不碰这里，代价可接受。
+
+2. **`scripts/targetgc.py`，已挂在 `gate.ps1` 末尾**。超过 8 GiB 才动手，只回收
+   7 天没被动过的 `incremental/` 与 `deps/` 产物，且**保留 `.fingerprint`**
+   （Cargo 判断要不要重编全靠它，删了会让整棵依赖树重编）。被文件锁住的跳过
+   并计数，不报错。它**不参与 `$fail`**——磁盘占用不是代码质量，红了会让人
+   误以为代码有问题。
+   ```bash
+   python scripts/targetgc.py --dry-run     # 只报告
+   python scripts/targetgc.py --threshold-gb 6 --age-days 3
+   ```
+
+### 仍然只有这两个操作会让占用「跳一下」
 
 | 触发 | 后果 |
 |---|---|
 | 改 `[profile.*]` 任何一项 | 整份产物重编，**旧的一整套整体留下** |
 | 增删任一 crate 的 feature | 同一个库产生**新哈希**的 rlib，旧的永不删除 |
 
-实测 2026-10-10：一次改 profile + 一次改 feature，`target/` 从 4 GB 涨到
-**10.4 GB**，其中 8 GB 是 cargo 永远不会自己清掉的垃圾。
-
-**改完 feature 或 profile，立刻清对应 profile**（这两个是唯一会让占用「跳一下」的操作）：
+**改完 feature 或 profile，立刻清对应 profile**：
 
 ```bash
 cargo clean --profile dev      # 代价是下次全量重编 ~2 分钟
-cargo clean --profile release   # 重新打包前再编回来
+cargo clean --release          # 重新打包前再编回来
 ```
 
 ⚠ `cargo clean` **不带 `--profile` 会把两个都删掉**。清之前先确认那份产物是不是陈旧的。
+⚠ **改 `Cargo.toml` 的 profile 之前先 clean**，否则新旧两套并存，`target/` 正好翻倍。
 
-根 `Cargo.toml` 已加 `[profile.dev] debug = 1` 与 `[profile.dev.package."*"] debug = 0`，
-稳态 `target/` 从 10.4 GB 降到约 2.4 GB。
+根 `Cargo.toml` 的 `[profile.dev] debug = 1` 与 `[profile.dev.package."*"] debug = 0`
+仍然有效：单次构建 2.82 GB，与本节原先记的 2.4 GB 稳态吻合。
 
 ## 开发期纪律
 
