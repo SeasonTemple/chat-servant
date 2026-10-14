@@ -794,9 +794,29 @@
       opacity var(--cs-dur-fast) var(--cs-ease);
   }
 
+  /* ⚠ **禁用态不降透明度。**`disabledsep.py` 实算：
+   *   `opacity: .34` 把**整个元素**一起稀释——文字、边框、底色全淡。
+   *   `.cs-btn-mini` 的边框正常态就只有 1.57:1，被淡一次掉到 **1.16:1**，
+   *   而「禁用」恰恰是最该一眼看出来的状态。`.45` 也只有 1.21:1。
+   *   ⇒ 改用「换线型 / 换底色」，对比度与正常态保持一致。
+   *   ⚠ WCAG 1.4.3 / 1.4.11 对 disabled 是豁免的，这里量的是设计可读性。
+   */
   .cs-btn:disabled {
-    opacity: 0.45;
     cursor: not-allowed;
+  }
+
+  /* 有边框的那批（含 `.danger` 与 `.primary`）：只换线型，底色文字都不动。 */
+  .cs-btn-mini:disabled {
+    border-style: dashed;
+  }
+
+  /* ⚠ `.cs-btn-ink` 是本屏**唯一没有边框**的按钮（墨底药丸），
+   *   所以 `border-style: dashed` 对它**完全不生效** —— 不能只写一条规则
+   *   就以为全屏覆盖了。按 debug 页的先例改用「换底色」，
+   *   底色与文字同步互换，两者都保持高对比。 */
+  .cs-btn-ink:disabled {
+    background: var(--cs-paper-sunken);
+    color: var(--cs-ink);
   }
 
   /* 图片外发总闸。它是这一屏唯一的危险开关，也是**唯一一处实心**——
