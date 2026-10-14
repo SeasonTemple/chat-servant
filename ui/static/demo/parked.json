@@ -1,0 +1,32 @@
+{
+  "_note": "演示数据 · parked 态（**已停泊在别的会话上**）。给 ?demo=1&state=parked 用。**不含任何真实聊天内容。**\n⚠ 为什么需要这一具（2026-10-14 补）：真机实测发现，切到另一个会话后闸关上、\n   面板被清空，正文却说「对方说完话，这里才落笔。」——**那句话是假的**，\n   那个会话对方明明说过话。`fresh.json` 那具是「对方真没说话」，\n   两者 `messages` 都是空数组，界面分不出。\n⇒ 这一具是**停泊**：闸关着（gate_open=false），Rust 因此给出\n   「锁着别的对话，切回来才继续。」。判据在\n   `watch.rs` 的 `a_closed_gate_replaces_the_waiting_line_with_an_honest_one`。\n配套：`fresh.json` 留在那里，两具并排就能看出「同样是空、说法不同」。",
+  "anchor": {
+    "chat": {
+      "x0": 304,
+      "y0": 31,
+      "x1": 1156,
+      "y1": 618
+    },
+    "width": 852,
+    "height": 587
+  },
+  "peer": "示例联系人",
+  "gate_open": false,
+  "messages": [],
+  "candidates": [],
+  "status_hint": "锁着别的对话，切回来才继续。",
+  "reason": "当前会话已经不是锁定的那一个（锁定的是「示例锁定会话」）——本轮不动手",
+  "model_calls": 0,
+  "counts": {
+    "judge": 0,
+    "draft": 0,
+    "rank": 0,
+    "vision": 0
+  },
+  "relock_pending": false,
+  "ticks": 12,
+  "ocr_calls": 4,
+  "error": null,
+  "phase": "read",
+  "tier": "Manual"
+}

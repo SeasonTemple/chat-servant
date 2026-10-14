@@ -835,6 +835,23 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
 /// 轮末可能是 `Drafted`（起草出东西了）或 `Read`（这轮没对方说话），
 /// 轮中那一帧恒为 `Drafting`，出错恒为 `Failed`。
 /// 在这里用 `candidates.is_empty()` 反推，等于把
+/// 闸关着时界面显示的那句话。
+///
+/// ⚠ **为什么闸一关就要压过「正在起草」**：闸一关，候选就被清空了，
+///   那一轮不会有任何产出。说「正在起草，通常几秒」是在骗用户等。
+///
+/// ⚠ **为什么由 Rust 出这句话**：界面分不出「对方真没说话」与
+///   「面板已停泊、没在读这个会话」——两者的 `messages` 都是空数组。
+///   2026-10-14 真机实测：切到另一个会话后，面板正文显示的是
+///   「对方说完话，这里才落笔。」，可那个会话对方明明说过话。
+///   **那句话在停泊这条路径上是假的。**
+///
+/// ⇒ 与 `types.ts` 的纪律一致：`status_hint` 是 Rust 的口径，
+///   **界面不许自己写死这句**。为什么要有下一半：
+///   判据 12「空状态必须给一个明确的下一步动作」——
+///   光说「不动手」用户不知道该干嘛，「切回来才继续」才是动作。
+const GATE_CLOSED_HINT: &str = "锁着别的对话，切回来才继续。";
+
 /// 「刚读出消息、模型还没回来」和「这轮没有对方说话」混成同一个态——
 /// 那正是前端一直在猜、猜错的那件事。
 fn snapshot(
@@ -848,7 +865,12 @@ fn snapshot(
 ) -> Readout {
     // ⚠ 必须在 `phase` 被移进结构体**之前**取：它的口径来自
     //   `Phase::status_hint`，而结构体字面量是按书写顺序求值的。
-    let status_hint = phase.status_hint().map(str::to_owned);
+    // ⚠ 闸关着时**改用** [`GATE_CLOSED_HINT`]，理由见那里那条注释。
+    let status_hint = if s.gate_open {
+        phase.status_hint().map(str::to_owned)
+    } else {
+        Some(GATE_CLOSED_HINT.to_owned())
+    };
     Readout {
         anchor,
         peer: s.peer.clone(),
@@ -1714,6 +1736,86 @@ mod tests {
                 assert!(v.get("candidates").is_none(), "{key} 不该带候选");
             }
         }
+    }
+
+    /// **闸一关，面板不许再说「对方说完话，这里才落笔」。**
+    ///
+    /// ⚠ 2026-10-14 真机实测出来的说假话路径：用户在微信里切到另一个会话，
+    ///   闸关上、面板被清空，于是正文显示「对方说完话，这里才落笔。」——
+    ///   **而那个会话对方明明说过话**。面板其实处在「已停泊、没在读这个会话」，
+    ///   但界面分不出这两者：`messages` 都是空数组。
+    ///
+    /// ## 为什么这条判据住在 Rust 这边
+    ///
+    /// 文案归 Rust 出（`types.ts` 的纪律：界面不许自己写死 `status_hint`），
+    /// 所以判据也在这边。界面那边只能验「有没有照着渲染」。
+    #[test]
+    fn a_closed_gate_replaces_the_waiting_line_with_an_honest_one() {
+        let st = chatservant_reason::StageCalls::default();
+
+        // ── 闸关着（停泊）：必须给「停泊」那句，且**不是**在等对方说话 ──
+        let mut parked = scratch_with(0, 0);
+        parked.gate_open = false;
+        let out = snapshot(
+            &parked,
+            None,
+            Phase::Read {
+                messages: Vec::new(),
+            },
+            7,
+            0,
+            st,
+            "当前会话已经不是锁定的那一个——本轮不动手",
+        );
+        assert!(!out.gate_open, "前提：闸是关着的");
+        let hint = out.status_hint.clone().expect("闸关着必须给一句");
+        assert_eq!(hint, super::GATE_CLOSED_HINT, "停泊时说的是别的会话");
+        assert!(
+            !hint.contains("落笔"),
+            "闸关着还说「这里才落笔」= 骗用户等一个不会来的动作：{hint}"
+        );
+
+        // ── 闸开着：这句不许出现，否则正常态全被污染 ──
+        let mut open = scratch_with(0, 0);
+        open.gate_open = true;
+        let out = snapshot(
+            &open,
+            None,
+            Phase::Read {
+                messages: Vec::new(),
+            },
+            7,
+            0,
+            st,
+            "这一轮对方没有新消息",
+        );
+        assert!(
+            out.status_hint.is_none(),
+            "闸开着却带了停泊那句，正常态会说错话：{:?}",
+            out.status_hint
+        );
+
+        // ── 闸关着 + 正在起草：**压过**「正在起草，通常几秒」 ──
+        // 闸一关候选就被清空了，那一轮不会有产出，
+        // 说「通常几秒」是骗用户等。这条钉住优先级。
+        let mut drafting = scratch_with(0, 0);
+        drafting.gate_open = false;
+        let out = snapshot(
+            &drafting,
+            None,
+            Phase::Drafting {
+                messages: Vec::new(),
+            },
+            7,
+            1,
+            st,
+            "本轮不动手",
+        );
+        assert_eq!(
+            out.status_hint.as_deref(),
+            Some(super::GATE_CLOSED_HINT),
+            "闸关着还显示「正在起草，通常几秒」，用户会白等"
+        );
     }
 
     /// **`Readout` 全仓只有一个构造点。**

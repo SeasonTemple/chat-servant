@@ -452,14 +452,25 @@
     if (!HAS_TAURI && r.tier && TIERS.some((t) => t.key === r.tier)) {
       tier = r.tier as TierKey;
     }
+    // ⚠⚠ `status_hint` **四支都要带**（2026-10-14 真机实测后补的）。
+    //   原来只有 `drafting` 那支带它，`read` 那一支写成 `{ phase, messages }`
+    //   就完了 —— 而 `status_hint` 在真实 `Readout` 里是**与 phase 正交**的：
+    //   Rust 侧闸一关就会改用它（`GATE_CLOSED_HINT`），哪怕 phase 还是 `read`
+    //   甚至 `drafting`。⇒ 夹具装载器若按 phase 挑字段，就等于在夹具里
+    //   **把「闸关着」那一支裁掉了**，那条路径在 `?demo` 下永远验不到。
     readout =
       r.phase === 'drafting'
         ? { phase: 'drafting', messages: msgs, status_hint: hint }
         : r.phase === 'failed'
-          ? { phase: 'failed', messages: msgs, error: r.error ?? '未知原因' }
+          ? {
+              phase: 'failed',
+              messages: msgs,
+              status_hint: hint,
+              error: r.error ?? '未知原因',
+            }
           : r.phase === 'drafted'
-            ? { phase: 'drafted', messages: msgs, candidates: cands }
-            : { phase: 'read', messages: msgs };
+            ? { phase: 'drafted', messages: msgs, status_hint: hint, candidates: cands }
+            : { phase: 'read', messages: msgs, status_hint: hint };
     peer = r.peer ?? '';
   }
 
@@ -727,6 +738,28 @@
           </p>
         {:else if readout?.phase === 'failed'}
           <p class="cs-draft-text cs-draft-failed">没写成：{readout.error}</p>
+        {:else if readout?.status_hint}
+          <!--
+            ⚠ 这一支守的是「闸关着」那条路径（2026-10-14 真机实测出来的假话）：
+            用户在微信里切到另一个会话，闸关上、面板被清空，正文却显示
+            「对方说完话，这里才落笔。」——**而那个会话对方明明说过话**。
+            界面分不出「对方真没说话」与「已停泊、没在读这个会话」，
+            两者的 `messages` 都是空数组。
+
+            ⇒ 判据放在 Rust 那边（`watch.rs` 的
+            `a_closed_gate_replaces_the_waiting_line_with_an_honest_one`），
+            文案也是 Rust 出的 `status_hint`；**这里只渲染，不自己写死**。
+            放在 `lastFromThem` 那一支**之前**：闸一关就压过「对方说完了」。
+
+            ⚠⚠ `readout?` 的问号**不能省**：`readout` 初值是 `null`，
+            而这一支排在 `readout?.phase === 'failed'` **之后**，
+            前几支都用了可选链。2026-10-14 首次写这里时漏了它，
+            `pnpm build` 与 `svelte-autofixer` **全过**，
+            而真浏览器里整个面板崩成白屏：
+            `TypeError: Cannot read properties of null (reading 'status_hint')`。
+            ⇒ 判据工具全绿 ≠ 界面能渲染；这一支必须用可选链。
+          -->
+          <p class="cs-draft-text cs-draft-idle">{readout.status_hint}</p>
         {:else if lastFromThem}
           <!--
             ⚠ 这一支原先不存在，于是 `noprep` 那一态在说假话（2026-10-14 截图自查）：
