@@ -17,6 +17,22 @@
 //!
 //! 两帧分别取自「G8W」（我方气泡侧）与置顶的「小号」会话（两侧都有文字气泡）。
 //!
+//! ### ⚠ 上面这一整套**全是深色主题量出来的**，浅色主题另有一套（2026-10-14 补）
+//!
+//! ```text
+//! 浅色主题（target/probe/frame-1791974144.png，1267×930）
+//!   面板底色        rgb(250,250,250)
+//!   我方气泡底色    rgb(157,242,159)   彩度 85
+//!   对方气泡底色    rgb(238,238,240)   彩度  2
+//! ```
+//!
+//! **对方气泡与面板底色只差 12, 12, 10**，而深色那套差 17, 17, 17。
+//! 这就是为什么「在不在气泡里」不能吃 `COLOR_TOL = 12` 那个宽松度：
+//! 浅色下 `12 <= 12` 成立，对方气泡被判成面板底色，那句话**不会变成消息**，
+//! 系统等于认为**对方没说过话**。改用 `is_panel_bg`（容差 2）后两个主题都成立。
+//!
+//! ⇒ **凡是本文件里的实测数字，先问一句「哪个主题量的」。**
+//!
 //! ## 三条判据，全部实测支撑
 //!
 //! 1. **在不在气泡里 = 底色是否等于面板底色**（相等性，不是距离）。
@@ -43,7 +59,7 @@
 use chatservant_capture::ocr::OcrLine;
 use chatservant_core::frame::{Frame, Rect};
 
-use crate::pixels::{BubbleHit, Rgb, chroma, dist, dominant_color, near, probe_bubble_bg};
+use crate::pixels::{BubbleHit, Rgb, chroma, dist, dominant_color, is_panel_bg, probe_bubble_bg};
 
 /// 测文字框外圈时向外扩多少像素。
 ///
@@ -204,7 +220,7 @@ pub struct Attribution {
 
 /// 归类一行。
 pub fn classify(line: &OcrLine, palette: &Palette, probe: BubbleHit) -> Attribution {
-    let on_panel = near(probe.bg, palette.panel_bg);
+    let on_panel = is_panel_bg(probe.bg, palette.panel_bg);
     let evidence = Evidence {
         bg: probe.bg,
         ink: probe.ink,

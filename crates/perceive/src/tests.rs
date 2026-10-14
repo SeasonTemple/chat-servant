@@ -10,7 +10,7 @@ use crate::attribute::{
     HEADER_MIN_CONTRAST, NoiseClass, Palette, SATURATED_MIN_CHROMA, Speaker, classify_all,
 };
 use crate::merge::group;
-use crate::pixels::{Rgb, chroma, near};
+use crate::pixels::{COLOR_TOL, PANEL_BG_TOL, Rgb, chroma, near};
 
 const PANEL: [u8; 3] = [30, 30, 31];
 /// 实测我方微信气泡色（`cargo xtask measure`）
@@ -22,6 +22,13 @@ const THEIR_INK: [u8; 3] = [225, 225, 229];
 const DARK_INK: [u8; 3] = [22, 22, 22];
 const GRAY_INK: [u8; 3] = [123, 123, 128];
 const WHITE_INK: [u8; 3] = [225, 225, 229];
+
+// ── 浅色主题实测色（2026-10-14，target/probe/frame-1791974144.png）──
+// ⚠ 对方气泡与面板底色只差 12,12,10 —— 与 COLOR_TOL 同值，这是本组夹具的全部意义。
+const LIGHT_PANEL: [u8; 3] = [250, 250, 250];
+const LIGHT_MY_BUBBLE: [u8; 3] = [157, 242, 159];
+const LIGHT_THEIR_BUBBLE: [u8; 3] = [238, 238, 240];
+const LIGHT_INK: [u8; 3] = [25, 25, 26];
 
 const W: u32 = 400;
 const H: u32 = 300;
@@ -80,6 +87,24 @@ fn stripes(px: &mut [u8], x0: u32, x1: u32, y_top: u32, c: [u8; 3]) {
     for k in 0..3u32 {
         fill(px, x0, y_top + k * 4, x1, y_top + k * 4 + 2, c);
     }
+}
+
+/// 浅色主题的同一布局。版面照 `two_sided_frame`，颜色换成 2026-10-14 实测值。
+fn light_frame() -> Frame {
+    let mut px = Vec::with_capacity((W * H * 3) as usize);
+    for _ in 0..(W * H) {
+        px.extend_from_slice(&LIGHT_PANEL);
+    }
+    fill(&mut px, 240, 40, 380, 300, LIGHT_MY_BUBBLE);
+    fill(&mut px, 20, 120, 160, 150, LIGHT_THEIR_BUBBLE);
+    fill(&mut px, 180, 180, 230, 192, GRAY_INK); // 面板上的灰字
+    fill(&mut px, 20, 15, 120, 27, LIGHT_INK); // 面板上的会话名
+
+    stripes(&mut px, 255, 370, 48, LIGHT_INK); // 我方气泡第一行
+    stripes(&mut px, 255, 370, 68, LIGHT_INK); // 我方气泡第二行
+    stripes(&mut px, 35, 145, 128, LIGHT_INK); // 对方气泡里的字（实测也是深字）
+
+    Frame::from_rgb(W, H, px).expect("frame")
 }
 
 fn chat_of(f: &Frame) -> Rect {
@@ -152,6 +177,79 @@ fn two_sided_frame_classifies_into_speakers() {
 
     assert_eq!(attrs[2].noise, NoiseClass::Gray, "时间戳是灰字");
     assert_eq!(attrs[3].noise, NoiseClass::Header, "白字大标题");
+}
+
+/// 浅色主题下对方气泡与面板底色逐通道只差 12,12,10 —— **恰好等于旧的
+/// `COLOR_TOL = 12`**。那一步之差让对方的话被判成「标题」，于是它不会变成
+/// 消息，系统等于认为**对方没说过话**。
+///
+/// **自证会响**：把 `classify` 里的 `is_panel_bg` 退回 `near`（容差 12）
+/// ⇒ `12 <= 12` 成立 ⇒ 本条立刻红。
+#[test]
+fn a_peer_bubble_stays_a_bubble_even_when_it_is_nearly_the_panel_color() {
+    let f = light_frame();
+    let palette = Palette::learn(&f, chat_of(&f)).expect("配色");
+    assert!(
+        near(palette.panel_bg, LIGHT_PANEL),
+        "先确认学到的确实是浅色面板底色，否则下面测的不是这条路径"
+    );
+
+    // 把「差多少」钉成数字：这组夹具的全部意义就是这两个数挨得极近。
+    // ⚠ 断言必须在**运行时**求值，所以色值从帧里读，不直接比常量。
+    let bubble_px = f.pixel(40, 125).expect("对方气泡内应有像素");
+    let panel_px = f.pixel(200, 100).expect("面板上应有像素");
+    let deltas = [
+        (i32::from(bubble_px[0]) - i32::from(panel_px[0])).abs(),
+        (i32::from(bubble_px[1]) - i32::from(panel_px[1])).abs(),
+        (i32::from(bubble_px[2]) - i32::from(panel_px[2])).abs(),
+    ];
+    assert_eq!(
+        deltas,
+        [12, 12, 10],
+        "浅色实测值变了就要回来改这条，别让夹具悄悄失去意义"
+    );
+    assert!(
+        deltas.iter().all(|v| *v <= COLOR_TOL),
+        "旧的宽松容差 {COLOR_TOL} 会把这组差值整个吃掉——本判据正是为此而存在"
+    );
+    assert!(
+        deltas.iter().all(|v| *v > PANEL_BG_TOL),
+        "收紧到 {PANEL_BG_TOL} 才分得开；这条红了说明容差被调回去了"
+    );
+
+    let lines = vec![
+        line("我说的", Rect::new(250, 50, 370, 64), LIGHT_INK),
+        line("他说的", Rect::new(30, 130, 150, 144), LIGHT_INK),
+        line("昨天 20:00", Rect::new(190, 182, 222, 190), GRAY_INK),
+        line("G8W", Rect::new(30, 17, 110, 25), LIGHT_INK),
+    ];
+    let attrs = classify_all(&lines, &f, &palette);
+    assert_eq!(attrs.len(), 4, "不该有行被丢掉");
+
+    assert_eq!(attrs[0].speaker, Speaker::Me, "饱和气泡 = 我");
+    assert_eq!(attrs[0].noise, NoiseClass::Text);
+
+    assert_eq!(
+        attrs[1].speaker,
+        Speaker::Them,
+        "对方气泡底色与面板只差 12,12,10，仍必须判成对方说的话"
+    );
+    assert_eq!(
+        attrs[1].noise,
+        NoiseClass::Text,
+        "判成 Header 就意味着它不会变成消息"
+    );
+
+    assert_eq!(
+        attrs[2].noise,
+        NoiseClass::Gray,
+        "面板上的灰字仍然该是灰字——收紧容差不许把它带进气泡分支"
+    );
+    assert_eq!(
+        attrs[3].noise,
+        NoiseClass::Header,
+        "会话名底色就是面板底色，仍该判成标题"
+    );
 }
 
 #[test]
