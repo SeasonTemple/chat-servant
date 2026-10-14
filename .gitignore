@@ -10,7 +10,16 @@
 
 # 本项目是**纯 Windows**（bundle targets 只有 msi / nsis），
 # `tauri icon` 顺带生成的移动端图标用不上，不入库。
-# 需要时在 ui/ 下跑 `pnpm exec tauri icon app-icon.svg` 重新生成。
+#
+# ⚠⚠ **别再按下面这句话去重新生成图标**（2026-10-15 更正）：
+# 原来这里写的是「在 ui/ 下跑 `pnpm exec tauri icon app-icon.svg`」，
+# 而 `ui/app-icon.svg` 是 **2026-10-07 的旧稿**（深灰面板 + 绿色气泡），
+# 早就不是托盘在用的设计了。照原句跑会把 2026-10-14 定案的 A′
+# （奶白纸 + 深墨描边 + 实心深红勾）**整个覆盖回旧设计**，
+# 而且 `tauri icon` 不带判据，跑完不会有任何异常提示。
+#
+# ⇒ 重新生成一律走 **`ui/scripts/icongen.py`**（票 34 的 A′ 生成器，
+#   带自检与量具），命令见该文件头部。
 /ui/src-tauri/icons/android
 /ui/src-tauri/icons/ios
 
