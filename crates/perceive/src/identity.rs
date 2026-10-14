@@ -198,11 +198,159 @@ impl HeaderPrint {
     pub fn is_same(&self, other: &Self) -> bool {
         self.similarity(other) >= SAME_THRESHOLD
     }
+
+    /// **从帧里推导出头部行**，再取它的指纹。
+    ///
+    /// ## 这是什么
+    ///
+    /// [`of`] 要调用方**给一个矩形**。而那个矩形从哪来，本来一直是
+    /// 调用方猜的——猜错三次（2026-10-14，见 `.scratch/…/31-*.md`）：
+    /// 消息区顶部 / `chat.y0` 之上 / `chat.y0` 之下，全错，
+    /// 而三次的测试都是绿的，因为夹具也按各自的错误假设画字块。
+    ///
+    /// 这里把「头部在哪」收进本模块：**从像素里推**，不让人告诉它。
+    ///
+    /// ## 怎么推
+    ///
+    /// 只看 `chat.x0` 右侧、消息区顶部往下 [`HEAD_SEARCH_H`] 的范围，
+    /// 逐行统计「与本块众数亮度差得够远」的像素数。第一行**连续成行**
+    /// 且行高在 [`MIN_ROW_H`]..=[`MAX_ROW_H`] 的，就是会话名那一行。
+    ///
+    /// ⚠ **不用 OCR**：闸要赶在 OCR 之前跑（静默期零调用那条硬约束）。
+    ///   这里只看**几何**（哪几行有墨），不读字。
+    ///
+    /// ## 高度必须稳定，否则闸会一直关着
+    ///
+    /// [`similarity`] 在两片掩码**尺寸不一致**时直接给 0。
+    /// 所以推导出的高度不能逐帧乱变，否则每一帧都判成「换了人」。
+    /// ⇒ 返回的高度**对齐到 [`ROW_QUANT`] 的整数倍**（行栅格），
+    ///   实测真机上会话名高 11px → 落到 12px 那一档。
+    ///
+    /// 返回 `None` = **认不出**（顶部没找到成行的字）。调用方必须
+    /// 按「认不出」处理——关闸、不起草——而不是当「是同一个」。
+    pub fn discover(frame: &Frame, chat: Rect, width_cap: i32) -> Option<(Self, Rect)> {
+        let band = head_search_rect(chat, width_cap);
+        let rows = ink_rows(frame, band)?;
+        // `find` 给的是 `&(i32, i32, u32)`，闭包参数解构后是引用，
+        // 所以要解一层。行高与墨数都要过闸，两条都要。
+        let &(top, bottom, _ink) = rows.iter().find(|row| {
+            let h = row.1 - row.0;
+            (MIN_ROW_H..=MAX_ROW_H).contains(&h) && row.2 >= MIN_ROW_INK
+        })?;
+
+        // 对齐到行栅格：同一行在不同帧上被推出 ±1px 时仍落到同一档，
+        // 于是掩码尺寸稳定，`similarity` 不会因为高度抖动直接给 0。
+        let h = quantize_row(bottom - top);
+        let y0 = top;
+        let rect = Rect::new(chat.x0, y0, chat.x0 + width_cap, y0 + h);
+        Some((Self::of(frame, rect)?, rect))
+    }
 }
 
 /// Rec.601 亮度。整数运算，返回 `0..=255`。
 fn luminance(r: u8, g: u8, b: u8) -> u8 {
     ((299 * r as u32 + 587 * g as u32 + 114 * b as u32) / 1000).min(255) as u8
+}
+
+/// 推导头部时往下看的最大高度（整帧坐标，从消息区上沿起）。
+///
+/// 实测真机：会话名在 `chat.y0` 往下 18~28px（`chat.y0 = 31` ⇒ y 49..59），
+/// 首条消息在 y 80。所以 72 够用，且**不会**把消息行当成头部。
+const HEAD_SEARCH_H: i32 = 72;
+
+/// 头部行的最小/最大行高。真机会话名实测高 **11px**。
+const MIN_ROW_H: i32 = 6;
+const MAX_ROW_H: i32 = 24;
+
+/// 一行至少要有这么多墨像素才配当「一行字」。压掉了分隔线与图标边。
+///
+/// ⚠ 取 **8** 是实测出来的：真机那行会话名每行的墨像素只有 **13~19**
+/// （2026-10-14，微信 `0x3D02FC` 深色主题）。先取 20 时，笔画偏细的那类
+/// 名字有整行达不到阈值，于是行段被砍断、`discover` 返回 `None`——
+/// **不是「认不出」，是「行断得太碎」**。8 留得住真机的下沿，
+/// 又远高于面板底色的逐行噪声（那几行实测墨点是 0）。
+const MIN_ROW_INK: u32 = 8;
+
+/// 头部高度对齐到这么粗的栅格。理由见 [`HeaderPrint::discover`]。
+const ROW_QUANT: i32 = 4;
+
+/// 推导要看的横向范围。右半边是空面板，纳入只会稀释。
+fn head_search_rect(chat: Rect, width_cap: i32) -> Rect {
+    let w = chat.width().min(width_cap).max(1);
+    Rect::new(chat.x0, chat.y0, chat.x0 + w, chat.y0 + HEAD_SEARCH_H)
+}
+
+/// 把高度对齐到 [`ROW_QUANT`] 的整数倍，最小一档。
+fn quantize_row(h: i32) -> i32 {
+    // ⚠ 2026-10-14：这里原先写的是 `div_euclid`，即**向下**取整。
+    //   真机会话名高 11px ⇒ 11.div_euclid(4)*4 = **8**，把字形下沿裁掉 3px。
+    //   而同一函数的文档注释明写「11px → 落到 12px 那一档」——
+    //   **代码和注释对不上**，裁掉的正是指纹最该看的那几行笔画。
+    //   改成向上取整：宁可多留 1px 底色，也不要切字。
+    //   ⚠ 手写而不是 `div_ceil`：当前 toolchain 的 `int_roundings` 还不稳定
+    //   （实测 `error[E0658]: use of unstable library feature`）。
+    let q = (h.max(1) + ROW_QUANT - 1).div_euclid(ROW_QUANT) * ROW_QUANT;
+    q.clamp(MIN_ROW_H, MAX_ROW_H)
+}
+
+/// 逐行数「与本块众数亮度差得够远」的像素，返回**连续成行**的
+/// `(y0, y1, 墨像素数)`。
+///
+/// 背景取**整块**的众数而不是每行各自取：整块里绝大多数是面板底色，
+/// 每行取自己的众数会把「一行稀疏的字」当成背景（字比底多不了几个）。
+fn ink_rows(frame: &Frame, band: Rect) -> Option<Vec<(i32, i32, u32)>> {
+    let x0 = band.x0.max(0) as u32;
+    let y0 = band.y0.max(0) as u32;
+    let x1 = (band.x1.max(0) as u32).min(frame.width());
+    let y1 = (band.y1.max(0) as u32).min(frame.height());
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+
+    // 一趟取亮度 + 直方图。
+    let mut lum = Vec::with_capacity((x1 - x0) as usize * (y1 - y0) as usize);
+    let mut hist = [0u32; 256];
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let l = frame.pixel(x, y).map_or(0, |[r, g, b]| luminance(r, g, b));
+            hist[l as usize] += 1;
+            lum.push(l);
+        }
+    }
+    let bg = mode(&hist)?;
+
+    let w = (x1 - x0) as usize;
+    let h = (y1 - y0) as usize;
+    let mut out: Vec<(i32, i32, u32)> = Vec::new();
+    // 逐行走。行段 = 连续几行里**每一行都有墨** ⇒ 合并成一条 (y0, y1, 总墨)。
+    // 中间任何一行没墨就断开——正文行之间正好有空白行断得开。
+    let mut seg_start: Option<usize> = None;
+    let mut seg_ink: u32 = 0;
+    for row in 0..h {
+        let line_ink: u32 = (0..w)
+            .filter(|&c| {
+                let l = lum[row * w + c];
+                (l as f64 - bg as f64).abs() > INK_DELTA
+            })
+            .count() as u32;
+        let y = (y0 as usize + row) as i32;
+        if line_ink >= MIN_ROW_INK {
+            if seg_start.is_none() {
+                seg_start = Some(row);
+            }
+            seg_ink += line_ink;
+        } else if let Some(s) = seg_start {
+            // 本行没墨 ⇒ 上一段结束，段尾是**本行**（不含）。
+            out.push(((y0 as usize + s) as i32, y, seg_ink));
+            seg_start = None;
+            seg_ink = 0;
+        }
+    }
+    if let Some(s) = seg_start {
+        out.push(((y0 as usize + s) as i32, y1 as i32, seg_ink));
+    }
+    out.retain(|&(a, b, _)| b > a);
+    (!out.is_empty()).then_some(out)
 }
 
 /// 直方图的众数。整片全 0（不该发生）返回 `None`。
@@ -464,5 +612,193 @@ mod tests {
         let f = header(225);
         let p = HeaderPrint::of(&f, Rect::new(0, 0, 10_000, 10_000)).expect("应裁剪后取得到");
         assert!(p.pixels() > 0);
+    }
+
+    // ─────────────── discover（票 31：从像素推头部，不让人告诉它）───────────────
+
+    /// 按**真机几何**造的帧：消息区上沿 `CHAT_Y0`，会话名行在其下 18px、高 11px。
+    ///
+    /// ⚠ 那两个数来自 2026-10-14 真机测量（微信 `0x3D02FC`，深色主题）：
+    /// `chat.y0 = 31`、会话名行 y 49..59、首条消息 y 80..97。
+    /// 写在夹具里是**为了让测试接近现实**，不是把「头部在哪」写进代码——
+    /// 推导的那一侧不知道这两个数。
+    const CHAT_Y0: i32 = 31;
+
+    /// 一帧：聊天区从 `chat.y0` 起，头部行画在 `chat.y0 + row_off`。
+    /// `row_off` 变 ⇒ 模拟微信改版 / 布局微调。
+    fn real_frame(row_off: i32, style: u32) -> Frame {
+        frame_of(
+            |x, y| {
+                let y = y as i32;
+                let top = CHAT_Y0 + row_off;
+                if y >= top && y < top + 11 {
+                    for sx in [24u32, 42, 60] {
+                        let Some(cx) = x.checked_sub(sx).filter(|v| *v < 13) else {
+                            continue;
+                        };
+                        let cy = (y - top) as u32;
+                        let on = match style {
+                            0 => cx < 7,
+                            1 => cx >= 7,
+                            _ => cy < 7,
+                        };
+                        if on {
+                            return [225, 225, 225];
+                        }
+                    }
+                }
+                [30, 30, 31]
+            },
+            W,
+            H,
+        )
+    }
+
+    fn chat_rect() -> Rect {
+        Rect::new(0, CHAT_Y0, 300, 200)
+    }
+
+    /// **头部行挪了位置，推导要跟着走。**
+    ///
+    /// ⚠ 这条是票 31 的核心判据。它证明「头部在哪」是**推出来的**：
+    /// 夹具把字块放在三个不同位置，三次都要推对。
+    /// 改前两个位置都能过 ⇒ `discover` 里没有写死 y。
+    ///
+    /// 改前若 `discover` 用的是常量（比如「上沿往下 40px」），
+    /// 第二个位置（18）和第三个（30）**至少有一个会推错或推不到**。
+    #[test]
+    fn discover_follows_the_header_line_wherever_it_moves() {
+        for off in [18, 30, 8] {
+            let f = real_frame(off, 0);
+            let rows = ink_rows(&f, head_search_rect(chat_rect(), 300));
+            println!("off=+{off} rows={rows:?}");
+            let (print, rect) = HeaderPrint::discover(&f, chat_rect(), 300)
+                .unwrap_or_else(|| panic!("头部行在 +{off} 时没推出来——它把位置写死了"));
+            assert_eq!(
+                rect.y0,
+                CHAT_Y0 + off,
+                "推出来的上边不对：头部行在 +{off}，推到 {}",
+                rect.y0 - CHAT_Y0
+            );
+            assert!(print.pixels() > 0, "+{off} 那一行推出了一块没墨的区域");
+        }
+    }
+
+    /// **推出来的高度要对齐栅格**，否则 `similarity` 会因尺寸不一致给 0，
+    /// 闸会每帧都判成「换了人」。
+    #[test]
+    fn the_discovered_height_is_quantized_so_the_mask_size_is_stable() {
+        // 两个高度差 1px 的头部行，推出来必须是**同一个**尺寸。
+        let (a, ra) = HeaderPrint::discover(&real_frame(18, 0), chat_rect(), 300).unwrap();
+        let (b, rb) = HeaderPrint::discover(&real_frame(19, 0), chat_rect(), 300).unwrap();
+        assert_eq!(
+            ra.height(),
+            rb.height(),
+            "行高差 1px 就推出不同尺寸 ⇒ 闸会每帧判成换人（{} vs {}）",
+            ra.height(),
+            rb.height()
+        );
+        // 高度差 1px 不该被当成换了会话
+        assert!(
+            a.is_same(&b),
+            "头部只挪了 1px 却被判成换了会话，相似度 {}",
+            a.similarity(&b)
+        );
+    }
+
+    /// **量化只许向上，不许裁字。**
+    ///
+    /// ⚠⚠ 这条是 2026-10-14 实测出来的：`quantize_row` 原先写 `div_euclid`，
+    /// 即**向下**取整。真机会话名高 11px ⇒ 落到 **8px**，把字形下沿裁掉 3px。
+    /// 而它的文档注释明写「11px → 落到 12px 那一档」——**代码和注释对不上**。
+    ///
+    /// ⚠ **为什么裁字没被别的判据抓住**：实测把 `quantize_row` 退回 `div_euclid`
+    ///   之后，`chat-servant-app` 侧 73 条测试**全绿**（含专门盯着像素量的那条）。
+    ///   闸仍然关得对、仍然分得开两个会话——所以「少了 3px 笔画」在行为上
+    ///   几乎看不出来。**判别力退化是静默的**，只能靠断言把它钉住。
+    ///
+    /// ⇒ 这里直接断言「推出的行高 ≥ 实际行高」，不钉具体数值：
+    ///   钉死了改 `ROW_QUANT` 就得改测试，而那个量本来就该能调。
+    #[test]
+    fn quantization_may_round_up_but_must_never_crop_the_glyph() {
+        // 真机行高 11（`real_frame` 里画的就是 `top..top+11`）。
+        const REAL_ROW_H: i32 = 11;
+        for off in [18, 30, 8] {
+            let f = real_frame(off, 0);
+            // 先从像素里量出**没量化之前**的真实行高。
+            let raw = ink_rows(&f, head_search_rect(chat_rect(), 300))
+                .expect("量得到行段")
+                .iter()
+                .find(|row| {
+                    let h = row.1 - row.0;
+                    (MIN_ROW_H..=MAX_ROW_H).contains(&h) && row.2 >= MIN_ROW_INK
+                })
+                .map(|row| row.1 - row.0)
+                .expect("量得到头部那一行");
+            assert_eq!(
+                raw, REAL_ROW_H,
+                "夹具画的是 {REAL_ROW_H}px，量出来却是 {raw}——量具本身偏了"
+            );
+
+            let (_print, rect) = HeaderPrint::discover(&f, chat_rect(), 300).expect("推出头部");
+            assert!(
+                rect.height() >= raw,
+                "+{off}：行高 {raw} 被量化成 {} —— 向下取整把字形裁掉了\
+                 （宁可多留 1px 底色，也不要切字）",
+                rect.height()
+            );
+            // 向上取整 ⇒ 最多多留 ROW_QUANT-1 px，不能多到把下一行也吃进来。
+            assert!(
+                rect.height() < raw + ROW_QUANT,
+                "+{off}：行高 {raw} 被量化成 {} —— 多留了太多，下一行的笔画会被吃进来",
+                rect.height()
+            );
+        }
+    }
+
+    /// **认不出必须返回 `None`**，而不是随便给一块指纹。
+    ///
+    /// ⚠ 这是**失败方向**：返回 `None` ⇒ 闸按「认不出」处理 ⇒ 关闸不起草。
+    /// 若这里给了一个空/错指纹，闸会以为「还是同一个人」而继续动手——
+    /// 那就正好撞在硬约束第 1 条上。
+    #[test]
+    fn discover_returns_none_when_there_is_no_header_line() {
+        let blank = frame_of(|_, _| [30, 30, 31], W, H);
+        assert!(
+            HeaderPrint::discover(&blank, chat_rect(), 300).is_none(),
+            "一片纯底色也推出了头部——认不出时必须返回 None，让闸关着"
+        );
+    }
+
+    /// **同一会话、头部位置微移 ⇒ 仍然判为同一个**（闸要能扛布局抖动）。
+    #[test]
+    fn discover_is_stable_across_a_small_layout_shift() {
+        let a = HeaderPrint::discover(&real_frame(18, 0), chat_rect(), 300)
+            .unwrap()
+            .0;
+        let b = HeaderPrint::discover(&real_frame(21, 0), chat_rect(), 300)
+            .unwrap()
+            .0;
+        assert!(
+            a.is_same(&b),
+            "布局挪了 3px 就判成换人了，相似度 {}",
+            a.similarity(&b)
+        );
+    }
+
+    /// **换个会话，推出来的指纹必须不同**——推导对了，判别力不能丢。
+    #[test]
+    fn discover_still_tells_two_conversations_apart() {
+        let a = HeaderPrint::discover(&real_frame(18, 0), chat_rect(), 300)
+            .unwrap()
+            .0;
+        let b = HeaderPrint::discover(&real_frame(18, 1), chat_rect(), 300)
+            .unwrap()
+            .0;
+        assert!(
+            !a.is_same(&b),
+            "两个字形不同的会话被判成同一个——推导对了但判别力丢了，相似度 {}",
+            a.similarity(&b)
+        );
     }
 }
