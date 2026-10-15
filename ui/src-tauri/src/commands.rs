@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 use crate::contract::Action;
 use crate::secret::{self, KeyStatus};
 use crate::watch::{DraftCandidate, LoopConfig, Readout, RecentN, TokenBudget, Watcher};
-use chatservant_reason::TurnContext;
+use chatservant_reason::{ModelGroup, Protocol, Provider, Route, TurnContext};
 
 /// 全局单例：一个应用只有一个观察循环。
 ///
@@ -55,8 +55,11 @@ struct AppState {
     /// 「用哪个模型」。**同样必须与推理器共用同一格**——
     /// 新造一个的话设置页会显示「已切到 X」，而出网时发的还是旧模型。
     ///
-    /// `None` = 没有真实传输（没 key），此时设置页**不列模型**。
-    model: Option<chatservant_reason::ModelCell>,
+    /// **两组**（`None` = 还没有真实传输）。为什么要两组见 [`ModelGroup`]：
+    /// 「决策走 A、文字走 B」在只有一格模型名时表达不了。
+    models: Option<ModelGroups>,
+    /// 出站代理。**网络层的属性，两组共用**——所以界面上是单独一栏。
+    proxy: chatservant_reason::ProxyCell,
     /// 发送档位。**唯一事实来源**，前端只请求改。
     tier: crate::watch::TierCell,
     /// 「重新锁定当前会话」的请求。与循环共用同一个格子。
@@ -1242,62 +1245,166 @@ pub fn tier_can_send() -> bool {
     matches!(current_tier(), Dispatch::Auto)
 }
 
-/// 当前支持的模型供应商。
+/// 设置页能写的供应商。**「预设」那些。**
 ///
-/// 换供应商只需在这里加一项，**不用重配整个应用**——
-/// 设置页按这个列表渲染，每个供应商的 key 独立存在凭据管理器里。
-pub const PROVIDERS: &[&str] = &["openai", "anthropic", "minimax"];
+/// 换供应商只需在这里加一项，**不用重配整个应用**——设置页按这个列表
+/// 渲染，每个供应商在**每一组**里的 key 独立存在凭据管理器里。
+///
+/// ⚠ `custom` 在里面，但**它不是一家供应商**：它是「自己填端点」那个动作。
+/// 它收下的时候走的是 [`Route::custom`]（带校验），预设则走
+/// [`Route::preset`]（端点定死，用户填什么都不采纳）——
+/// 「给预设换一个地址」在语义上就是自定义，所以这里**不**允许。
+///
+/// ⚠ 这张表是**白名单**：`save_setting` / `forget_key` / `set_route` 都在
+/// 它上面挡未知值。放行的后果是「拼错的名字看起来存上了，其实没有」。
+pub const PROVIDERS: &[&str] = &[
+    "openai",
+    "anthropic",
+    "minimax",
+    "deepseek",
+    "qwen",
+    "zhipu",
+    "ollama",
+    "lmstudio",
+    "custom",
+];
+
+/// 两组模型配置。与推理器**共用同一格**的句柄。
+#[derive(Clone)]
+struct ModelGroups {
+    decision: chatservant_reason::ModelCell,
+    llm: chatservant_reason::ModelCell,
+}
+
+impl ModelGroups {
+    fn cell(&self, g: ModelGroup) -> &chatservant_reason::ModelCell {
+        match g {
+            ModelGroup::Decision => &self.decision,
+            ModelGroup::Llm => &self.llm,
+        }
+    }
+
+    /// 两组其实指向同一路？（决策组没单独配 key 时就是）。
+    ///
+    /// 界面上要**明说**这一点，否则用户改「决策模型」的端点时会发现
+    /// 回复模型跟着变了，却没有任何地方解释。
+    fn shared(&self) -> bool {
+        self.decision.route() == self.llm.route() && self.decision.get() == self.llm.get()
+    }
+}
 
 /// 设置页要读的状态。**这里没有任何 key。**
 #[derive(Serialize)]
 pub struct SettingsView {
+    /// 两组，各自独立。
+    pub groups: Vec<GroupView>,
+    /// 代理。**单独一栏，两组都生效。**
+    pub proxy: ProxyView,
+    /// 「自定义端点」要选协议。**Rust 给什么前端就显示什么。**
+    pub protocols: Vec<ChoiceView>,
+}
+
+/// 一个下拉项。**只有 id 与显示名**——值一律由 Rust 持有。
+#[derive(Serialize)]
+pub struct ChoiceView {
+    pub id: String,
+    pub label: String,
+}
+
+/// 一组模型配置。
+#[derive(Serialize)]
+pub struct GroupView {
+    /// 稳定标识（凭据目标名也用它）。
+    pub id: String,
+    /// 界面上那一节的名称。
+    pub label: String,
+    /// 这一组这一段干什么。
+    pub role: String,
     pub providers: Vec<ProviderView>,
+    /// 当前生效的这一路。
+    pub route: RouteView,
+    /// 当前这一路能选的模型名（可能为空——本地与自定义）。
+    pub models: Vec<String>,
+    /// 当前选中的模型名（**真实生效值**，可能为空）。
+    pub model: String,
+    /// 关于上面那个模型名的**实话**：只列实测能通的，还是名字要你自己填。
+    pub model_note: String,
+    /// 这一组是否与另一组指向同一路。
+    pub shared_with_other: bool,
+}
+
+/// 出站代理。
+#[derive(Serialize)]
+pub struct ProxyView {
+    /// 空串 = 直连。⚠ 这是**地址**，界面上原样回显。
+    pub url: String,
+    /// 这条地址会不会被显示在日志里。恒为 true——脱敏由 `redact` 负责，
+    /// 界面上要如实告诉用户「日志里会被抹掉凭据段」。
+    pub redacted_in_logs: bool,
+}
+
+/// 当前生效的这一路。
+#[derive(Serialize)]
+pub struct RouteView {
+    pub provider: String,
+    pub provider_label: String,
+    pub protocol: String,
+    pub protocol_label: String,
+    /// **归一化后的真实端点**（自定义时是用户填的那个）。
+    pub base_url: String,
+    /// 端点与模型名有没有在本机实测过。**false 就要在界面上说「未核实」。**
+    pub measured: bool,
+}
+
+impl RouteView {
+    fn of(r: &Route) -> Self {
+        Self {
+            provider: r.provider().key().to_string(),
+            provider_label: r.provider().label().to_string(),
+            protocol: r.protocol().key().to_string(),
+            protocol_label: r.protocol().label().to_string(),
+            base_url: r.base_url().to_string(),
+            measured: r.measured(),
+        }
+    }
 }
 
 #[derive(Serialize)]
 pub struct ProviderView {
     pub id: String,
+    /// 界面上显示的名字（`id` 是稳定标识，不是显示名）。
+    pub label: String,
     /// 已经配好了。
     pub configured: bool,
     /// 值来自环境变量——这种情况下输入框应只读。
     pub from_env: bool,
+    /// 值来自**旧版那个不带组别的目标名**。界面上要说明连带删除的后果。
+    pub legacy: bool,
     /// 掩码，仅供显示。
     pub masked: String,
     /// 没配时给的下一步指引。**不能是空字符串或静默失败。**
     pub hint: String,
-    /// 这家**实测能通**的模型清单。Rust 是唯一出处——
-    /// 前端不自己列，也不多显示一个没验过的名字。
-    pub models: Vec<String>,
-    /// 当前选中的那一个（回显用的**真实生效值**）。
-    pub model: String,
 }
 
 /// 设置页那个模型选择器要的回包。
 #[derive(Serialize)]
 pub struct ModelView {
+    /// 这一组是哪一组。
+    pub group: String,
     pub provider: String,
     pub models: Vec<String>,
     pub model: String,
 }
 
-/// 读「当前用的是哪个模型」。**Rust 侧读自己那一个格子**，前端不缓存。
-#[tauri::command]
-pub fn get_model() -> Result<ModelView, String> {
-    let cell = with_state(|s| s.model.clone()).flatten();
-    cell.map(|c| model_view(&c)).ok_or_else(no_transport_note)
-}
-
 /// 切模型。**立即生效，不用重启**——推理器每一次发请求都重读那个格子。
 ///
-/// ⚠ 不在实测清单里的名字**当场拒收**：放行的话症状是
-/// 「设置成功、一调用就 404」，而那个 404 会被归类成上游失败，
-/// 用户完全看不出是自己刚选了个不存在的模型。
+/// ⚠ 拒收的口径分两种，见 [`Provider::accepts_model`]：实测过的几家
+/// 拒收清单外的名字；没有核实过清单的那几家（本机与自定义）只挡空串。
 #[tauri::command]
-pub fn set_model(model: String) -> Result<ModelView, String> {
-    with_state(|s| s.model.clone())
-        .flatten()
-        .ok_or_else(no_transport_note)
-        .and_then(|c| c.set(&model).map(|_| model_view(&c)))
+pub fn set_model(group: String, model: String) -> Result<ModelView, String> {
+    let g = parse_group(&group)?;
+    with_cell(g, |c| c.set(&model))??;
+    with_cell(g, |c| model_view(g, c))
 }
 
 /// 「没有真实传输」时那句话。**统一一处**，免得三处各写一遍、
@@ -1306,61 +1413,215 @@ fn no_transport_note() -> String {
     "还没接上真实传输（没有可用 key），所以现在没有模型可选".to_string()
 }
 
-fn model_view(cell: &chatservant_reason::ModelCell) -> ModelView {
-    let p = cell.provider();
+/// 组别的短名进到这里。**认不出来一律拒**——静默兜一个默认值
+/// 会把错一路带到凭据目标名和出网那一步。
+fn parse_group(group: &str) -> Result<ModelGroup, String> {
+    ModelGroup::from_key(group)
+        .ok_or_else(|| format!("未知的组别 {group}。只有 decision 与 llm 两组"))
+}
+
+fn model_view(group: ModelGroup, cell: &chatservant_reason::ModelCell) -> ModelView {
+    let route = cell.route();
     ModelView {
-        provider: p.key().to_string(),
-        models: p.models().iter().map(|m| (*m).to_string()).collect(),
+        group: group.key().to_string(),
+        provider: route.provider().key().to_string(),
+        models: route.models().iter().map(|m| (*m).to_string()).collect(),
         model: cell.get(),
     }
 }
 
+/// 在**共享的那一格**上跑一段闭包。
+///
+/// 拿不到格子（还没 `start()`，也就是没有可用 key）就报那句统一的话——
+/// 与其在这里造一个假格子，不如让界面知道「现在没有真东西可改」。
+fn with_cell<R>(
+    group: ModelGroup,
+    f: impl FnOnce(&chatservant_reason::ModelCell) -> R,
+) -> Result<R, String> {
+    let cell = with_state(|s| s.models.as_ref().map(|m| m.cell(group).clone())).flatten();
+    cell.as_ref().map(f).ok_or_else(no_transport_note)
+}
+
+/// 读设置页要的那一屏。**两组各自独立 + 一栏共用代理。**
 #[tauri::command]
 pub fn get_settings() -> SettingsView {
-    // 换供应商只需在 `PROVIDERS` 加一项。
-    let cell = with_state(|s| s.model.clone()).flatten();
+    let models = with_state(|s| s.models.clone()).flatten();
+    let proxy = with_state(|s| s.proxy.get()).flatten().unwrap_or_default();
     SettingsView {
-        providers: PROVIDERS
+        groups: ModelGroup::ALL
             .iter()
-            .map(|p| {
-                let s: KeyStatus = secret::status(p);
-                // 模型一栏**只对当前生效的那一家给内容**。
-                // 其余两家此刻并不会被用到，给一个「看着能选、其实选了没用」
-                // 的下拉框就是在骗人。
-                let mine = cell.as_ref().filter(|c| c.provider().key() == *p);
-                let models = mine
-                    .map(|c| {
-                        c.provider()
-                            .models()
-                            .iter()
-                            .map(|m| (*m).to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let model = mine.map(|c| c.get()).unwrap_or_default();
-                ProviderView {
-                    id: (*p).to_string(),
-                    configured: s.configured,
-                    from_env: s.from_env,
-                    masked: s.masked,
-                    hint: if s.configured {
-                        String::new()
-                    } else {
-                        secret::missing_hint(p)
-                    },
-                    models,
-                    model,
-                }
+            .map(|g| group_view(*g, models.as_ref()))
+            .collect(),
+        proxy: ProxyView {
+            url: proxy,
+            redacted_in_logs: true,
+        },
+        protocols: [Protocol::OpenAiCompatible, Protocol::Anthropic]
+            .iter()
+            .map(|p| ChoiceView {
+                id: p.key().to_string(),
+                label: p.label().to_string(),
             })
             .collect(),
     }
+}
+
+fn group_view(g: ModelGroup, models: Option<&ModelGroups>) -> GroupView {
+    // 没有真实传输时这一组也要渲染——**用户正是要在没配好的时候配置它**。
+    // 这与「没 key 时不列模型」是两条不同的规则：模型清单要真实，
+    // 而 key 输入框必须能显示（见 `.scratch/…/40-key-input-unreachable-when-unset.md`）。
+    let (route, model, models_list, shared) = match models {
+        None => (
+            // 没有真实传输时也给一个**真值**（OpenAI 预设），
+            // 而不是编一个假端点——这一格是回显「当前这一路」，
+            // 编一个的话界面显示的地址从未生效。
+            Route::preset(Provider::OpenAi).expect("OpenAI 有预设端点"),
+            String::new(),
+            Vec::new(),
+            false,
+        ),
+        Some(m) => {
+            let c = m.cell(g);
+            (
+                c.route(),
+                c.get(),
+                c.models().iter().map(|s| (*s).to_string()).collect(),
+                m.shared(),
+            )
+        }
+    };
+    let model_note = if models_list.is_empty() {
+        "这一路没有可选清单——模型名要你自己填。".to_string()
+    } else if route.measured() {
+        "只列本机实测能通的模型。".to_string()
+    } else {
+        "这一家的端点与模型名抄自官方文档，**未在本机实测**。".to_string()
+    };
+    GroupView {
+        id: g.key().to_string(),
+        label: g.label().to_string(),
+        role: match g {
+            ModelGroup::Decision => {
+                "判断对方意图的那一段。输出只有几十个字，通常配一个便宜的模型就够。".into()
+            }
+            ModelGroup::Llm => "起草与排序那两段。图片（如果外发闸开着）跟着这一组走。".into(),
+        },
+        providers: PROVIDERS.iter().map(|p| provider_view(g, p)).collect(),
+        route: RouteView::of(&route),
+        models: models_list,
+        model,
+        model_note,
+        shared_with_other: shared,
+    }
+}
+
+fn provider_view(group: ModelGroup, id: &str) -> ProviderView {
+    let s: KeyStatus = secret::status(group, id);
+    ProviderView {
+        id: id.to_string(),
+        label: Provider::from_key(id)
+            .map(|p| p.label())
+            .unwrap_or(id)
+            .to_string(),
+        configured: s.configured,
+        from_env: s.from_env,
+        legacy: s.legacy,
+        masked: s.masked,
+        hint: if s.configured {
+            String::new()
+        } else {
+            secret::missing_hint(group, id)
+        },
+    }
+}
+
+/// 换一组走哪一路（厂商 / 协议 / 自定义端点）。
+///
+/// **立即生效，不用重启**：这一格被推理器每次发请求重读。
+///
+/// ⚠ 预设**不接受**用户填的端点——「给预设换一个地址」在语义上就是自定义。
+///   放行的话界面上会同时显示「厂商 = OpenAI」和一个完全不同的地址，
+///   而那一行字就成了假话。
+#[tauri::command]
+pub fn set_route(
+    group: String,
+    provider: String,
+    protocol: Option<String>,
+    base_url: Option<String>,
+) -> Result<GroupView, String> {
+    let g = parse_group(&group)?;
+    let route = route_from_input(&provider, protocol.as_deref(), base_url.as_deref())?;
+    let models = with_state(|s| s.models.clone())
+        .flatten()
+        .ok_or_else(no_transport_note)?;
+    models.cell(g).set_route(route);
+    // ⚠ 回包是**读回来的真实状态**（含另一组是不是与我同路），
+    // 而不是把传进去的三项原样弹回去——界面必须显示程序认定的那个。
+    Ok(group_view(g, Some(&models)))
+}
+
+/// 由界面那三项（厂商 / 协议 / 端点）造出**一条真实生效的路**。
+///
+/// 认不出来的值一律拒，**不静默接受**——拼错的供应商名会让人以为配上了，
+/// 其实没有。而自定义端点走 [`Route::custom`]，那里面有 scheme 与主机名的校验。
+fn route_from_input(
+    provider: &str,
+    protocol: Option<&str>,
+    base_url: Option<&str>,
+) -> Result<Route, String> {
+    let p = Provider::from_key(provider).ok_or_else(|| {
+        format!(
+            "未知的供应商 {provider}。支持的是：{}",
+            PROVIDERS.join(" / ")
+        )
+    })?;
+    // ⚠ `from_key` 认得的**别名**（`glm` → zhipu、`tongyi` → qwen）不在白名单里，
+    //   所以在这里再核一次短名。别名的存在是为了命令行与日志可读，
+    //   而配置这一格只认白名单上的那一个拼法。
+    if !PROVIDERS.contains(&p.key()) {
+        return Err(format!(
+            "未知的供应商 {provider}。支持的是：{}",
+            PROVIDERS.join(" / ")
+        ));
+    }
+    if p != Provider::Custom {
+        return Route::preset(p);
+    }
+    let pr = Protocol::from_key(protocol.unwrap_or_default())
+        .ok_or_else(|| "自定义端点要选一种协议：OpenAI 兼容，还是 Anthropic 原生。".to_string())?;
+    Route::custom(pr, base_url.unwrap_or_default())
+}
+
+/// 读代理。
+#[tauri::command]
+pub fn get_proxy() -> Result<ProxyView, String> {
+    Ok(ProxyView {
+        url: with_state(|s| s.proxy.get()).flatten().unwrap_or_default(),
+        redacted_in_logs: true,
+    })
+}
+
+/// 写代理。**空串 = 不走代理。**
+///
+/// ⚠ **一次设置，两组都生效**——代理是网络层的属性，不是任何一家的属性。
+///   重复填两遍就迟早有两份不一样的，而「一组走代理、一组不走」是个
+///   没人主动想要的状态。
+#[tauri::command]
+pub fn set_proxy(url: String) -> Result<ProxyView, String> {
+    let applied = with_state(|s| s.proxy.set(&url))
+        .ok_or_else(|| "观察循环还没起来，改不了设置".to_string())??;
+    Ok(ProxyView {
+        url: applied.unwrap_or_default(),
+        redacted_in_logs: true,
+    })
 }
 
 /// 提交设置。**立即生效，不用重启。**
 ///
 /// `key` 为 `None` 或空白 = 保留原值。删 key 走 `forget_key`。
 #[tauri::command]
-pub fn save_setting(provider: String, key: Option<String>) -> Result<bool, String> {
+pub fn save_setting(group: String, provider: String, key: Option<String>) -> Result<bool, String> {
+    let g = parse_group(&group)?;
     if !PROVIDERS.contains(&provider.as_str()) {
         // 认不出来的 provider 一律拒绝，**不静默接受**——
         // 拼错的供应商名会让人以为 key 存上了，其实没有。
@@ -1369,7 +1630,7 @@ pub fn save_setting(provider: String, key: Option<String>) -> Result<bool, Strin
             PROVIDERS.join(" / ")
         ));
     }
-    let wrote = secret::apply(&provider, key.as_deref())?;
+    let wrote = secret::apply(g, &provider, key.as_deref())?;
     if wrote {
         secret::forget_all();
     }
@@ -1440,7 +1701,11 @@ pub struct BudgetView {
     pub visible: bool,
     /// 供应商的固定底账。预算低于它就**无解**，界面要如实说。
     pub provider_base: u32,
-    /// 当前供应商名。
+    /// ⚠ **这个底账核实过没有。** 端点可换之后「第三方模型」这个词不再准确，
+    ///   而没核实过的数字**必须能在界面上说出来**——否则用户会照着一个
+    ///   编出来的数估自己的账单。
+    pub provider_base_verified: bool,
+    /// 当前这一组走的是哪家。
     pub provider: String,
 }
 
@@ -1451,14 +1716,16 @@ fn budget_view(budget: u32, provider: &chatservant_reason::Provider) -> BudgetVi
     use chatservant_reason::Provider;
     // 底账是**随模型变**的：gpt-4o-mini 是 2833，Claude 的 patch 计费是 0。
     // 这里如实反映当前 provider，界面据此显示「预算不够」的警告。
-    let provider_base = match provider {
-        Provider::Anthropic => 0,
-        Provider::OpenAi => 2833,
-        // ⚠ **MiniMax 的视觉 token 计费没有实测过。**
-        // 拿不到权威数字时**不许编一个**——编出来的预算会让用户以为
-        // 花了那个数，实际账单却是别的。这里如实报 0 并标「未核实」，
-        // 让界面把图片外发说成「成本未知」而不是给个假精确的数。
-        Provider::MiniMax => 0,
+    //
+    // ⚠ **只有 OpenAI 那一项是核实过的数字。** 其余各家（MiniMax 之外
+    // 新加的云端与本机、以及自定义端点）我们没有权威数字：端点可换之后，
+    // 「第三方模型」这个词已经不准了，同一个端点可能是任何人的服务。
+    // 拿不到数字时**不许编一个**——编出来的预算会让用户以为花了那个数。
+    // 这里报 0 并把 `verified` 置 false，让界面说「成本未知」。
+    let (provider_base, verified) = match provider {
+        Provider::OpenAi => (2833, true),
+        Provider::Anthropic => (0, true),
+        _ => (0, false),
     };
     BudgetView {
         budget: budget.min(budget_ceiling(provider)),
@@ -1474,6 +1741,7 @@ fn budget_view(budget: u32, provider: &chatservant_reason::Provider) -> BudgetVi
         // 现在它读总闸：闸关着就不显示滑块。
         visible: with_state(|s| s.images_out.get()).unwrap_or(false),
         provider_base,
+        provider_base_verified: verified,
         provider: provider.key().to_string(),
     }
 }
@@ -1486,9 +1754,14 @@ pub fn get_images_out() -> Result<bool, String> {
 
 /// 改图片外发总闸。
 ///
-/// ⚠ **这是个危险开关**：打开之后，对方发来的图片区域会被裁出、缩放、
-/// base64 编码，然后发给第三方模型。媒体检测的准确率尚未在真实帧上
-/// 完整验证，所以这里**只允许显式开启**，没有「自动」档。
+/// ⚠ **这是个危险开关**，而且端点可换之后**更危险**：
+///
+/// 1. 对方发来的图片区域会被裁出、缩放、base64 编码，然后发出去。
+///    媒体检测的准确率尚未在真实帧上完整验证，所以这里**只允许显式开启**，
+///    没有「自动」档。
+/// 2. 「发给第三方模型」这句话**已经不准了**：端点可以指向任何地址
+///    ——用户自己填的自定义端点、本机 Ollama、或者一台内网机器。
+///    ⇒ 界面上要显示**真实的目标地址**，而不是厂商名。
 #[tauri::command]
 pub fn set_images_out(on: bool) -> Result<bool, String> {
     with_state(|s| s.images_out.set(on)).ok_or_else(|| "观察循环还没起来，改不了设置".to_string())
@@ -1502,11 +1775,11 @@ pub fn set_images_out(on: bool) -> Result<bool, String> {
 fn budget_ceiling(provider: &chatservant_reason::Provider) -> u32 {
     use chatservant_reason::Provider;
     match provider {
-        Provider::Anthropic => 1568,
         Provider::OpenAi => 2833 + 5667,
-        // MiniMax 的视觉计费未核实（见上面 `budget_view` 的说明），
+        Provider::Anthropic => 1568,
+        // 其余各家的视觉计费未核实（见 `budget_view` 的说明），
         // 所以给 Anthropic 同级的保守上界，**并让界面标「成本未知」**。
-        Provider::MiniMax => 1568,
+        _ => 1568,
     }
 }
 
@@ -1535,48 +1808,47 @@ pub fn set_token_budget(budget: u32) -> Result<BudgetView, String> {
     Ok(budget_view(applied, &active_provider()))
 }
 
-/// 当前生效的供应商。**没配 key 时退回 OpenAI**——
-/// 纯展示用的，不参与任何路由决策。
+/// 当前生效的供应商。**取「回复模型」那一组**——
+///
+/// 图片外发那一闸管的是**跟着起草走的那些图**，所以计费规则要看那一组，
+/// 而不是决策组。**没配 key 时退回 OpenAI**——纯展示用的，
+/// 不参与任何路由决策。
 fn active_provider() -> chatservant_reason::Provider {
-    if secret::load("anthropic").is_some() {
-        chatservant_reason::Provider::Anthropic
-    } else {
-        chatservant_reason::Provider::OpenAi
-    }
+    with_cell(ModelGroup::Llm, |c| c.provider()).unwrap_or(chatservant_reason::Provider::OpenAi)
 }
 
 #[tauri::command]
-pub fn forget_key(provider: String) -> Result<(), String> {
+pub fn forget_key(group: String, provider: String) -> Result<(), String> {
+    let g = parse_group(&group)?;
     if !PROVIDERS.contains(&provider.as_str()) {
         return Err(format!("未知的供应商 {provider}"));
     }
-    secret::erase(&provider)
+    secret::erase(g, &provider)
 }
 
-/// 测试连通性。**只回「通不通」**，不回任何响应体——
+/// 测连通性。**只回「通不通」**，不回任何响应体——
 /// 上游的错误正文可能带 key。
+///
+/// ⚠ 测的是**这一组当前这一路**，包括用户自己填的端点。所以它同时
+/// 是「自定义端点填对没有」的那一次验证——而界面上不会说它是另一样东西。
 #[tauri::command]
-pub fn probe_key(provider: String) -> Result<bool, String> {
-    use chatservant_reason::{Provider, probe_connectivity};
-
-    let p = match provider.as_str() {
-        "openai" => Provider::OpenAi,
-        "anthropic" => Provider::Anthropic,
-        "minimax" => Provider::MiniMax,
-        // 认不出来的一律拒绝，**不静默接受**。
-        _ => return Err(format!("未知的供应商 {provider}")),
+pub fn probe_key(group: String) -> Result<bool, String> {
+    let g = parse_group(&group)?;
+    let route = with_cell(g, |c| c.route())?;
+    let Some(key) = secret::load(g, route.provider().key()) else {
+        return Err(secret::missing_hint(g, route.provider().key()));
     };
-    let Some(key) = secret::load(&provider) else {
-        return Err(secret::missing_hint(&provider));
-    };
-    // 真的发一次请求。早先这里恒返回 false，注释说「网络层 ticket 10 接上」——
-    // 但网络层早就是真的了，于是这个按钮**永远说不通**。
-    // 恒假的指示器比没有更糟：用户会以为 key 坏了，反复重填。
-    //
-    // ⚠ **探针走 `GET /v1/models`，不调模型**：不产生 token、不花钱。
+    let proxy = with_state(|s| s.proxy.get()).flatten();
+    // ⚠ 探针走 `GET {base_url}models`，不调模型：不产生 token、不花钱。
     // 协议层归 genai 之后，这条 GET 是**唯一**一处没外包出去的网络调用，
-    // 因为 genai 的 `WebClient` 是私有的、而 `/v1/models` 不是任何适配器的操作。
-    match probe_connectivity(p, &key, std::time::Duration::from_secs(10)) {
+    // 因为 genai 的 `WebClient` 是私有的、而 `models` 不是任何适配器的操作。
+    // 代理与聊天那条路**同一个** `reqwest::Proxy::all`，别写第二套。
+    match chatservant_reason::probe_route(
+        &route,
+        &key,
+        std::time::Duration::from_secs(10),
+        proxy.as_deref(),
+    ) {
         Ok(()) => Ok(true),
         // 失败原因已经过 `redact`，可以安全显示。
         Err(e) => Err(e),
@@ -1589,7 +1861,7 @@ pub fn probe_key(provider: String) -> Result<bool, String> {
 /// 没 key 就用**明确标注的预置传输**——界面上每条候选都带「预置」字样，
 /// 不能让用户以为模型接通了。
 pub fn start(app: &AppHandle) {
-    let (cfg, model) = build_loop_config();
+    let (cfg, models, proxy) = build_loop_config();
     let transport_ready = cfg.transport_ready;
     // 关键：**先把句柄 clone 一份给命令层，再把 cfg move 进循环。**
     // 两边指的是同一个 `Arc<AtomicUsize>`，所以 `set_recent_n` 写进去的
@@ -1608,7 +1880,8 @@ pub fn start(app: &AppHandle) {
             recent_n,
             token_budget,
             images_out,
-            model,
+            models,
+            proxy,
             tier,
             relock,
             armed: Arming::default(),
@@ -1706,72 +1979,181 @@ const LOCKED_PEER: &str = "小号";
 
 /// 组装循环配置。**key 从凭据管理器读**，读不到就用预置传输。
 ///
-/// 第二个返回值是「用哪个模型」那个格子的句柄。**它不在 `LoopConfig` 里**：
-/// 循环自己不读这个格子，读它的是推理器内部——而推理器已经被
-/// `Box<dyn Reasoner>` 吃掉了，从外面拿不回来。命令层要改模型就必须
-/// 拿到**同一个**格子，所以在这里一并交出去。
-fn build_loop_config() -> (LoopConfig, Option<chatservant_reason::ModelCell>) {
-    use chatservant_reason::{HttpReasoner, ModelCell, Provider};
+/// ## 两组各自装配
+///
+/// 判断那一段走**决策组**，起草与排序走**回复组**——这是用户要的两组
+/// （票 43）。合并成一个推理器就表达不了「视觉/判断走 A、文字走 B」。
+///
+/// ⚠ **决策组没单独配 key 时，它与回复组是同一路。**
+///   这是有意的默认：绝大多数用户只有一把 key，逼他配两把只会让人
+///   第一步就卡住。界面上用 `shared_with_other` **明说**这件事，
+///   而一旦在这一组填了自己的 key / 选了别的端点，两边立刻分开。
+///
+/// 第二个返回值是两组格子的句柄。**它们不在 `LoopConfig` 里**：
+/// 循环自己不读这些格子，读它的是推理器内部——而推理器已经被
+/// `Box<dyn Reasoner>` 吃掉了，从外面拿不回来。命令层要改模型与端点
+/// 就必须拿到**同一个**格子，所以在这里一并交出去。
+///
+/// ⚠ **不落盘**：这两组配置与代理都只在内存里，与 `recent_n` / 预算
+///   那一批设置同生命周期。重启后回到预设默认——凭据本身在凭据管理器里，
+///   但「走哪一家」要重新选。持久化不在本票范围内。
+fn build_loop_config() -> (
+    LoopConfig,
+    Option<ModelGroups>,
+    chatservant_reason::ProxyCell,
+) {
+    use chatservant_reason::{HttpReasoner, ModelCell, ProxyCell};
 
+    let proxy = ProxyCell::new();
     // 谁有 key 就用谁。**默认先试 OpenAI**——设置页上它是第一个选项。
-    for (name, provider) in [
-        ("openai", Provider::OpenAi),
-        ("anthropic", Provider::Anthropic),
-        ("minimax", Provider::MiniMax),
-    ] {
-        if let Some(key) = secret::load(name) {
+    let order: [Provider; 3] = [Provider::OpenAi, Provider::Anthropic, Provider::MiniMax];
+
+    let build = |group: ModelGroup| -> Option<(HttpReasoner, ModelCell)> {
+        for provider in order {
+            let Some(key) = secret::load(group, provider.key()) else {
+                continue;
+            };
+            let Ok(route) = chatservant_reason::Route::preset(provider) else {
+                continue;
+            };
             // 模型格子**先建一份**，推理器和命令层各拿一个 clone ——
             // 两边指的是同一格，所以设置页改完下一次生成就用新的。
-            let model = ModelCell::new(provider);
+            let model = ModelCell::new(route);
             // ⚠ **起不起得来传输不是「配好了」的同义词。** genai 那条路要起一个
             // tokio runtime，那是真会失败的一步。失败就**退回预置传输**，
             // 不能让整个面板起不来——而预置候选每条都带自曝标记，
             // 用户不会把它当成模型输出。
-            let Ok(r) = HttpReasoner::with_model_cell(provider, key, model.clone()) else {
-                tracing::error!(
-                    "provider={} 有 key，但装不起真实传输——退回预置传输",
-                    provider.key()
-                );
-                break;
-            };
-            return (
-                LoopConfig {
-                    source: crate::watch::FrameSource::from_env(),
-                    ignore_top: IGNORE_TOP,
-                    reasoner: Box::new(r),
-                    transport_ready: true,
-                    recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
-                    locked_peer: LOCKED_PEER.to_string(),
-                    token_budget: TokenBudget::new(BUDGET_DEFAULT),
-                    images_out: crate::watch::ImagesOut::off(),
-                    tier: crate::watch::TierCell::default_manual(),
-                    relock: crate::watch::Relock::new(),
-                    provider,
-                },
-                Some(model),
-            );
+            match HttpReasoner::with_config(model.clone(), key, proxy.clone()) {
+                Ok(r) => return Some((r, model)),
+                Err(_) => {
+                    tracing::error!(
+                        "provider={} 有 key，但装不起真实传输——这一组退回预置传输",
+                        provider.key()
+                    );
+                    return None;
+                }
+            }
         }
-    }
+        None
+    };
+
+    let llm = build(ModelGroup::Llm);
+    // 决策组优先用自己的；没有就**沿用回复组那一路**（同一个格子）。
+    let decision_owned = build(ModelGroup::Decision).or_else(|| llm.clone());
+    let decision_cell = decision_owned
+        .as_ref()
+        .map(|(_, c)| c.clone())
+        .unwrap_or_else(|| {
+            ModelCell::new(
+                chatservant_reason::Route::preset(Provider::OpenAi).expect("OpenAI 有预设端点"),
+            )
+        });
+    let llm_cell = llm
+        .as_ref()
+        .map(|(_, c)| c.clone())
+        .unwrap_or_else(|| decision_cell.clone());
+
+    let transport_ready = llm.is_some();
+    // ⚠ 计数要**覆盖三段全部**：「静默期零调用」那条硬约束断言的就是
+    // `calls()`，所以任何一段走了预置传输都要被如实计入（它本来就不发请求）。
+    let reasoner: Box<dyn chatservant_reason::Reasoner + Send> = match (&decision_owned, &llm) {
+        (Some((d, _)), Some((l, _))) => Box::new(SplitReasoner {
+            decision: d.clone(),
+            llm: l.clone(),
+        }),
+        // ⚠ **至少要有回复组**，否则整个程序没有真实传输。
+        (Some((d, _)), None) => Box::new(d.clone()),
+        (None, Some((l, _))) => Box::new(l.clone()),
+        (None, None) => Box::new(PresetReasoner),
+    };
+
+    let groups = ModelGroups {
+        decision: decision_cell,
+        llm: llm_cell,
+    };
+    let provider = groups.llm.provider();
 
     (
         LoopConfig {
             source: crate::watch::FrameSource::from_env(),
             ignore_top: IGNORE_TOP,
-            reasoner: Box::new(PresetReasoner),
-            transport_ready: false,
+            reasoner,
+            transport_ready,
             recent_n: RecentN::new(chatservant_reason::context::DEFAULT_RECENT),
             locked_peer: LOCKED_PEER.to_string(),
             token_budget: TokenBudget::new(BUDGET_DEFAULT),
             images_out: crate::watch::ImagesOut::off(),
             tier: crate::watch::TierCell::default_manual(),
             relock: crate::watch::Relock::new(),
-            provider: chatservant_reason::Provider::OpenAi,
+            provider,
         },
         // ⚠ **没有真实传输就没有模型格子。** 返回 `None` 而不是造一个：
         // 造一个的话设置页会列出一堆「可选模型」，而点下去什么也不会发生
         // ——那正是这个项目一直在删的「调了没反应的控制项」。
-        None,
+        // ⚠ 但 key 输入框**仍然要显示**（见 `group_view`），
+        //   因为没配 key 正是用户来这一页的原因。
+        transport_ready.then_some(groups),
+        proxy,
     )
+}
+
+/// **两段式路由**：判断走一组，起草与排序走另一组。
+///
+/// ## 为什么是「判断 / 起草+排序」这个分法
+///
+/// 票 43 说的是「决策模型」与「LLM」两组。当前三段式里，判断那一段是
+/// 唯一一个「读上下文、输出几十个字」的，起草与排序是「照着口吻写」的那两段——
+/// 前者换便宜的模型省一大截钱，后者换好的模型提质量。
+///
+/// ⚠ 图片跟着**起草**走（`ctx.images` 在 draft 那次请求里），所以
+///   **图片外发走的是回复组**，而图片的视觉计费规则也按回复组取。
+///
+/// ## 计数怎么合
+///
+/// `calls` 是两边的**和**，而「静默期零调用」那条硬约束断言的正是这个数——
+/// 所以它必须覆盖三段全部。分段计数逐项相加，不合并。
+struct SplitReasoner {
+    decision: chatservant_reason::HttpReasoner,
+    llm: chatservant_reason::HttpReasoner,
+}
+
+impl chatservant_reason::Reasoner for SplitReasoner {
+    fn judge(
+        &mut self,
+        ctx: &TurnContext,
+    ) -> Result<chatservant_reason::Intent, chatservant_reason::ReasonError> {
+        self.decision.judge(ctx)
+    }
+
+    fn draft(
+        &mut self,
+        ctx: &TurnContext,
+        intent: &chatservant_reason::Intent,
+    ) -> Result<chatservant_reason::DraftSet, chatservant_reason::ReasonError> {
+        self.llm.draft(ctx, intent)
+    }
+
+    fn rank(
+        &mut self,
+        ctx: &TurnContext,
+        draft: &chatservant_reason::DraftSet,
+    ) -> Result<Vec<chatservant_reason::Candidate>, chatservant_reason::ReasonError> {
+        self.llm.rank(ctx, draft)
+    }
+
+    fn calls(&self) -> u32 {
+        self.decision.calls() + self.llm.calls()
+    }
+
+    fn stage_calls(&self) -> chatservant_reason::StageCalls {
+        let d = self.decision.stage_calls();
+        let l = self.llm.stage_calls();
+        chatservant_reason::StageCalls {
+            judge: d.judge + l.judge,
+            draft: d.draft + l.draft,
+            rank: d.rank + l.rank,
+        }
+    }
 }
 
 /// 顶部跳过多高（置顶公告条）。**由 ChatSurface 给，不该写死在引擎里**；

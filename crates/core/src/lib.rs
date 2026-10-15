@@ -2,6 +2,7 @@
 
 pub mod dispatch;
 pub mod frame;
+pub mod redact;
 pub mod scale;
 
 pub use dispatch::{DeliveryReceipt, Dispatch, Dispatcher, Next};

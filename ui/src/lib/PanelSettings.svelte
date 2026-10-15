@@ -48,31 +48,75 @@
   import { markShape, type MarkShape } from '$lib/mark-shape.svelte';
   import type { BudgetView, Tier } from '$lib/types';
 
+  /**
+   * 一个供应商在**某一组**里的 key 状态。**Rust 是唯一出处**，前端不缓存。
+   *
+   * ⚠ `providers` 现在是**「预设 + 自定义」**两类，而不只是几家。
+   *   「OpenAI 兼容」被做成**协议**而不是一家供应商——所以「自定义端点」
+   *   要单独选协议、单独填地址。见 `$lib` 下的 `Provider` 契约。
+   */
   interface ProviderView {
     id: string;
+    label: string;
     configured: boolean;
     from_env: boolean;
+    /** 值来自旧版那个不带组别的凭据目标名。删它会连带另一组。 */
+    legacy: boolean;
     masked: string;
     hint: string;
-    /** 这家实测能通的模型清单。**Rust 是唯一出处**，前端不自己列。 */
+  }
+
+  /** 当前生效的这一路。**界面只显示它，不自己存第二份。** */
+  interface RouteView {
+    provider: string;
+    provider_label: string;
+    protocol: string;
+    protocol_label: string;
+    /** 归一化后的真实端点。自定义时**就是用户填的那个**。 */
+    base_url: string;
+    /** 端点与模型名有没有在本机实测过。false ⇒ 界面上必须说「未核实」。 */
+    measured: boolean;
+  }
+
+  /** 一组模型配置。两组**互不影响**。 */
+  interface GroupView {
+    id: string;
+    label: string;
+    role: string;
+    providers: ProviderView[];
+    route: RouteView;
     models: string[];
-    /** 当前选中的那一个（Rust 回的真实生效值）。 */
     model: string;
+    model_note: string;
+    /** 与另一组指向同一路？（决策组没单独配 key 时就是） */
+    shared_with_other: boolean;
+  }
+
+  interface ProxyView {
+    url: string;
+    redacted_in_logs: boolean;
+  }
+
+  interface ChoiceView {
+    id: string;
+    label: string;
   }
 
   interface SettingsView {
-    providers: ProviderView[];
+    groups: GroupView[];
+    proxy: ProxyView;
+    protocols: ChoiceView[];
   }
 
   /**
    * 「用哪个模型」那一栏。
    *
-   * ⚠ `models` 是一份**只填实测能通的**清单，由 `Provider::models()` 给。
-   * 它现在很短（一家一个），**这不是没做完**——填一个没验过的名字，
-   * 症状是「设置成功、一调用就 404」，比明确不支持更难查。
-   * 清单该变长的条件是「实测通了」，不是「文档上写了」。
+   * ⚠ `models` 是一份**只填实测能通的**清单（实测过的三家）或**抄自文档**
+   *   的候选（其余几家）。空清单不是没做完——本机推理与自定义端点的
+   *   模型名只能用户自己给。
    */
   interface ModelView {
+    group: string;
     provider: string;
     models: string[];
     model: string;
@@ -127,9 +171,20 @@
   let imagesNote = $state<string | null>(null);
   let view = $state<SettingsView | null>(null);
   let closeNote = $state('');
-  /** 「用哪个模型」。读不到时整块不显示——别摆一个选了也不生效的控件。 */
-  let model = $state<ModelView | null>(null);
-  let modelNote = $state<string | null>(null);
+  /**
+   * 「模型名没设成」的错误，**按组分开**。
+   *
+   * ⚠ 2026-10-15 修一个真缺陷：两组结构重写时，展示错误的那段标记
+   *   （`{#if modelNote}<p class="cs-fail">`）被删掉了，而两处赋值
+   *   （`pickModel` / `commitModelName` 的 catch）留着 ⇒
+   *   `set_model` 被 Rust 拒收时，错误被 catch 住存进状态，
+   *   **界面上一个字都不显示**。
+   *   症状是「点了没反应」，而真实原因（模型名不在实测清单里）被吞掉了。
+   *
+   *   为什么按组而不是一个 `modelNote`：现在有两组配置，
+   *   报在「决策模型」下的错不该出现在「回复模型」那一节旁边。
+   */
+  let modelErr = $state<Record<string, string>>({});
 
   /**
    * 换模型。
@@ -137,19 +192,33 @@
    * ⚠ **用回包覆盖**：Rust 会拒收不在实测清单里的名字，而界面必须显示
    * 拒收之后的真实状态。只显示用户点的那一格，就成了一个说谎的控件。
    */
-  async function pickModel(m: string) {
-    modelNote = null;
+  async function pickModel(g: GroupView, m: string) {
+    delete modelErr[g.id];
     try {
-      model = await invoke<ModelView>('set_model', { model: m });
+      await invoke<ModelView>('set_model', { group: g.id, model: m });
+      await refresh();
     } catch (e) {
       // 写失败就**读回真实值**，别让控件停在一个程序并不认同的状态上。
-      model = await invoke<ModelView>('get_model').catch(() => null);
-      modelNote = String(e);
+      await refresh();
+      modelErr = { ...modelErr, [g.id]: String(e) };
     }
   }
 
-  /** 分段控件的选项。Rust 给什么就是什么，前端不排序也不改名。 */
-  const modelOptions = $derived((model?.models ?? []).map((id) => ({ id, label: id })));
+  /**
+   * 自由填模型名。**只在 Rust 说「这一路没有可选清单」时出现**——
+   * 有清单却让你手打一个不在清单里的名字，那是教用户去撞 404。
+   */
+  async function commitModelName(g: GroupView) {
+    delete modelErr[g.id];
+    try {
+      await invoke<ModelView>('set_model', { group: g.id, model: drafts[g.id] ?? '' });
+      drafts[g.id] = '';
+      await refresh();
+    } catch (e) {
+      await refresh();
+      modelErr = { ...modelErr, [g.id]: String(e) };
+    }
+  }
 
   /**
    * 「展开输入框」的哨兵值。
@@ -160,53 +229,102 @@
    * 全失效，review 只能靠肉眼。用具名常量，哨兵的意图也看得见了。
    */
   const REVEAL = '__reveal__';
-  /** 每个供应商的输入框内容。**只存在于组件内存里**，提交后立刻清空。 */
+  /** 输入框内容。**只存在于组件内存里**，提交后立刻清空。
+   *
+   * ⚠ 键是 `组`，不是供应商——**一组只显示当前那一家的 key 卡片**。
+   *   九家 × 两组 = 十八张卡，而它们绝大多数永远不会被用到；
+   *   测连通走的也是「当前这一路」，所以卡片与它是同一个对象。
+   */
   let drafts = $state<Record<string, string>>({});
+  /** 自定义端点的地址草稿。**提交前不生效**——每一次换协议/换厂商都要重发。 */
+  let endpoints = $state<Record<string, string>>({});
   let busy = $state<Record<string, boolean>>({});
   let notes = $state<Record<string, string>>({});
   let fail = $state<string | null>(null);
+  let proxyDraft = $state('');
+  let proxyNote = $state<string | null>(null);
 
   async function refresh() {
     try {
       view = await invoke<SettingsView>('get_settings');
+      // 自定义地址的草稿**只在没有草稿时**从回包填。
+      // 覆盖它会让用户正在输入的东西在每次失败提示后被冲掉。
+      const next = view.groups.filter((g) => g.route.provider === 'custom');
+      for (const g of next) {
+        if (endpoints[g.id] === undefined) endpoints[g.id] = g.route.base_url;
+      }
+      proxyDraft = view.proxy.url;
     } catch (e) {
       // 这里的 e 是 Rust 侧已经**脱敏过**的文本，可以直接显示。
       fail = String(e);
     }
   }
 
-  async function save(p: ProviderView) {
-    busy[p.id] = true;
-    notes[p.id] = '';
+  /** 当前这一组选中的那家供应商（**Rust 给的那一份**，前端不自己挑）。 */
+  function currentProvider(g: GroupView): ProviderView | undefined {
+    return g.providers.find((p) => p.id === g.route.provider);
+  }
+
+  /**
+   * 换一家 / 换协议 / 换自定义端点。**一条命令三件事**——
+   * 它们在出网时是同一个值（`Route`），拆成三次调用就会允许
+   * 「显示的是 A、实际发的是 B」这种组合。
+   */
+  async function applyRoute(g: GroupView, provider: string, protocol?: string) {
+    busy[g.id] = true;
+    notes[g.id] = '';
     try {
-      const wrote = await invoke<boolean>('save_setting', {
-        provider: p.id,
-        key: drafts[p.id] || null,
+      await invoke<GroupView>('set_route', {
+        group: g.id,
+        provider,
+        protocol: protocol ?? g.route.protocol,
+        base_url: provider === 'custom' ? (endpoints[g.id] ?? '') : null,
       });
-      notes[p.id] = wrote
-        ? '已存进 Windows 凭据管理器。**下一次生成立即生效，不用重启。**'
-        : '留空 = 保留原值，没有改动。';
-      // 提交后清掉输入框：明文不该在内存里多待一刻
-      drafts[p.id] = '';
       await refresh();
     } catch (e) {
-      notes[p.id] = String(e);
+      notes[g.id] = String(e);
     } finally {
-      busy[p.id] = false;
+      busy[g.id] = false;
     }
   }
 
-  async function forget(p: ProviderView) {
-    busy[p.id] = true;
+  async function save(g: GroupView) {
+    const p = currentProvider(g);
+    if (!p) return;
+    busy[g.id] = true;
+    notes[g.id] = '';
     try {
-      await invoke('forget_key', { provider: p.id });
-      notes[p.id] = '已从凭据管理器删除。';
-      drafts[p.id] = '';
+      const wrote = await invoke<boolean>('save_setting', {
+        group: g.id,
+        provider: p.id,
+        key: drafts[g.id] || null,
+      });
+      notes[g.id] = wrote
+        ? '已存进 Windows 凭据管理器。**下一次生成立即生效，不用重启。**'
+        : '留空 = 保留原值，没有改动。';
+      // 提交后清掉输入框：明文不该在内存里多待一刻
+      drafts[g.id] = '';
       await refresh();
     } catch (e) {
-      notes[p.id] = String(e);
+      notes[g.id] = String(e);
     } finally {
-      busy[p.id] = false;
+      busy[g.id] = false;
+    }
+  }
+
+  async function forget(g: GroupView) {
+    const p = currentProvider(g);
+    if (!p) return;
+    busy[g.id] = true;
+    try {
+      await invoke('forget_key', { group: g.id, provider: p.id });
+      notes[g.id] = '已从凭据管理器删除。';
+      drafts[g.id] = '';
+      await refresh();
+    } catch (e) {
+      notes[g.id] = String(e);
+    } finally {
+      busy[g.id] = false;
     }
   }
 
@@ -216,17 +334,40 @@
    * 失败**必须显示**。早先的 `probe_key` 恒返回 false、前端又没有按钮，
    * 等于这个功能从来没存在过；现在它真的会发请求了，失败信息就是用户
    * 唯一能判断「是 key 不对还是网络不通」的依据。吞掉它等于白做。
+   *
+   * ⚠ 它测的是**这一组当前这一路**——包括用户自己填的端点。
    */
-  async function probe(p: ProviderView) {
-    busy[p.id] = true;
-    notes[p.id] = '';
+  async function probe(g: GroupView) {
+    busy[g.id] = true;
+    notes[g.id] = '';
     try {
-      await invoke<boolean>('probe_key', { provider: p.id });
-      notes[p.id] = '连上了。走的是只读的 /v1/models，没有产生任何 token 费用。';
+      await invoke<boolean>('probe_key', { group: g.id });
+      notes[g.id] = '连上了。走的是只读的 models 端点，没有产生任何 token 费用。';
     } catch (e) {
-      notes[p.id] = `连不上：${String(e)}`;
+      notes[g.id] = `连不上：${String(e)}`;
     } finally {
-      busy[p.id] = false;
+      busy[g.id] = false;
+    }
+  }
+
+  /**
+   * 代理。**单独一栏，两组都生效。**
+   *
+   * ⚠ 不放进任何一组：代理是网络层的属性。放进去就意味着填两次，
+   *   而两份迟早不一样——「一组走代理、一组不走」是个没人主动想要的状态。
+   */
+  async function saveProxy() {
+    proxyNote = null;
+    try {
+      const p = await invoke<ProxyView>('set_proxy', { url: proxyDraft });
+      proxyDraft = p.url;
+      proxyNote = p.url ? '已设。**两组模型都走它**，下一次请求生效。' : '已清空，现在直连。';
+    } catch (e) {
+      // 写失败就**读回真实值** —— 别让输入框停在一个程序并不认同的状态上。
+      proxyDraft = await invoke<ProxyView>('get_proxy')
+        .then((p) => p.url)
+        .catch(() => proxyDraft);
+      proxyNote = String(e);
     }
   }
 
@@ -398,14 +539,9 @@
       }
       // 标记形状也要读回来：界面显示的必须是程序认定的那个。
       shape = await markShape.load();
-      try {
-        // 模型要**读回来**：界面显示的必须是程序认定的那个。
-        // 没接上真实传输时 Rust 会返回错误——那时候整块不显示，
-        // 不用一个假的默认模型把这一节撑起来。
-        model = await invoke<ModelView>('get_model');
-      } catch {
-        model = null;
-      }
+      // ⚠ **模型设置**不再单独读一条命令：它在 `get_settings` 那一屏里
+      // （两组 + 端点 + 代理）。摆两个来源就等于同一个事实两处显示，
+      // 而它们迟早不一致。
       await refresh();
     })();
   });
@@ -613,158 +749,281 @@
 
   <!-- ══ 模型 ══ -->
   <!--
-    ⚠ **这一节只在真的接上了传输时才出现。**
-    没 key 时 Rust 不会造一个模型格子出来，前端也就读不到——
-    摆一个「可选模型」但选了不生效，比不摆更糟：那正是这个项目
-    一直在删的「调了没反应的控制项」。
+    ⚠ **这一屏永远是两组，不是一组**（票 43）。用户要的是
+    「1 个决策模型的配置 + 1 个 LLM 的」：判断对方意图那一段可以配一个
+    便宜的模型，起草那两段配一个好的。合成一个列表时，这件事
+    **在数据结构上就表达不了**，而这里必须两节都摆出来才不算偷懒。
 
-    ⚠ **清单只有一条时不给分段控件。** 一颗滑块的控件只有一个选项，
-    它回答不了任何问题，看着却像个选择器。此时只把当前值显示出来。
+    ⚠ **没接上真实传输时这一屏仍然要显示。** 早先的版本在没 key 时
+    整块不渲染——而没 key 正是用户来这一屏的原因。那条「没 key 就不列模型」
+    的规则只适用于**模型清单**，不适用于**配置入口**。
   -->
-  {#if model}
-    <h2 class="cs-h2">模型</h2>
-    <!--
-      ⚠ 2026-10-15 把「判断和起草用同一个模型——判断那段的输出只有几十个字」
-      从下面那条独立说明**合并进名称**。
-      理由：它是「为什么只有一个模型」的**理由**，不是另一个设置项；
-      而它原来独占一行 `cs-note`，与真正需要独立成句的说明（隐私、风险）
-      长得一模一样 ⇒ 一屏里全是同样重量的句子，就等于都没有重量。
-    -->
-    <p class="cs-label" title="判断与起草用同一个模型——判断那段的输出只有几十个字">
-      {model.provider} 当前用的模型 · 判断与起草同一个
-    </p>
-    {#if modelOptions.length > 1}
-      <SegSlider
-        value={model.model}
-        options={modelOptions}
-        label="模型"
-        onchange={(v) => pickModel(v)}
-      />
-    {:else}
-      <p class="cs-note">{model.model}</p>
-    {/if}
-    {#if modelOptions.length < 2}
-      <!--
-        这一支只在「没有第二个可选项」时出现，而上面已经把模型名显示出来了。
-        剩下要说的是**为什么不给你自由输入**——那是理由，不是当前状态，
-        所以移进 `title`：需要的人悬停能看到，不占那一屏的版面。
-      -->
-      <p
-        class="cs-label"
-        title="这里只列实测能通的模型。填一个没验过的名字，表现会是「设置成功、一调用就 404」。"
-      >
-        只列实测能通的模型
-      </p>
-    {/if}
-    {#if modelNote}
-      <p class="cs-fail" role="alert">{modelNote}</p>
-    {/if}
-  {/if}
-
-  <!-- ══ 模型 key ══ -->
-  <h2 class="cs-h2">模型 key</h2>
-  <!--
-    ⚠ 2026-10-15 删掉了「key 存在 Windows 凭据管理器里，不落文件、不进日志。」
-    它与下面每个供应商的 `missing_hint` **逐字重复**——而 hint 出现三次，
-    也就是说这句承诺在一屏里本来就被说了四遍。
-    隐私承诺跟着「未配置」那个状态出现，正好是它要生效的那一刻。
-  -->
+  <h2 class="cs-h2">模型</h2>
 
   {#if fail}
     <p class="cs-fail" role="alert">{fail}</p>
   {/if}
 
-  {#each view?.providers ?? [] as p (p.id)}
-    <section class="cs-prov">
-      <div class="cs-prov-head">
-        <span class="cs-prov-name">{p.id}</span>
-        {#if p.configured}
-          <span class="cs-badge ok" class:env={p.from_env}>
-            {p.masked}{p.from_env ? '（来自环境变量）' : ''}
-          </span>
-        {:else}
-          <span class="cs-badge miss">未配置</span>
-        {/if}
-      </div>
+  {#if view}
+    {#each view.groups as g (g.id)}
+      <!--
+        ⚠ `{@const}` 必须**紧贴** `{#each}` 块，不能隔着 `<section>`——
+          Svelte 报 `const_tag_invalid_placement`。所以它放在标签的最前面，
+          而不是跟着「这一组的 key」那段注释走。
+      -->
+      {@const p = currentProvider(g)}
+      <section class="cs-group">
+        <div class="cs-group-head">
+          <span class="cs-group-name">{g.label}</span>
+          <span class="cs-badge miss">{g.route.provider_label}</span>
+        </div>
+        <p class="cs-hint" title="这一组干什么用的">{g.role}</p>
 
-      {#if p.configured}
-        <!-- 已配置时**不显示输入框**。要改才点「换一把」——
-             这样明文 key 不会因为打开设置就躺在界面上。 -->
-        <div class="cs-actions">
-          <button
-            class="cs-btn cs-btn-mini"
-            onclick={() => (drafts[p.id] = REVEAL)}
-            disabled={busy[p.id]}
-          >
-            换一把
-          </button>
-          <!-- 连通性测试。不调模型：走 /v1/models，只读、不花钱。 -->
-          <button class="cs-btn cs-btn-mini" onclick={() => probe(p)} disabled={busy[p.id]}>
-            {busy[p.id] ? '测试中…' : '测连通'}
-          </button>
-          <button class="cs-btn cs-btn-mini danger" onclick={() => forget(p)} disabled={busy[p.id]}>
-            删除
-          </button>
+        {#if g.shared_with_other}
+          <!-- ⚠ 必须**明说**。决策组没单独配 key 时它与回复组是同一格，
+               而用户改这一节的端点会连带改掉另一组——不说就是坑人。 -->
+          <p class="cs-note cs-warn">这一组还没有自己的 key，当前与「回复模型」是同一路。</p>
+        {/if}
+
+        <!-- 厂商。**九项不是分段控件能装的**（380px 面板里一颗滑块放不下），
+             所以用一组同族的小按钮换行排列——仍是这一屏已有的那支笔。 -->
+        <p class="cs-label">走哪一家</p>
+        <div class="cs-chips">
+          {#each g.providers as p (p.id)}
+            <button
+              class="cs-btn cs-btn-mini"
+              class:primary={p.id === g.route.provider}
+              onclick={() => applyRoute(g, p.id)}
+              disabled={busy[g.id]}
+            >
+              {p.label}
+            </button>
+          {/each}
         </div>
 
-        {#if drafts[p.id] === REVEAL}
+        {#if g.route.provider === 'custom'}
+          <!--
+            ⚠ **「OpenAI 兼容」是协议，不是供应商。** 绝大多数第三方服务
+            只兼容它，所以协议单独一选、地址自己填。
+            ⚠ 协议一改，端点文本框就在上面被 Rust 重写过一次——用户看得见
+            那一次改动，不会有一个「界面上看着是 A、实际发的是 B」的组合。
+          -->
+          <p class="cs-label">协议</p>
+          <SegSlider
+            value={g.route.protocol}
+            options={view.protocols}
+            label="协议"
+            onchange={(v) => applyRoute(g, 'custom', v)}
+          />
+          <p class="cs-label">端点地址</p>
           <div class="cs-form">
             <input
               class="cs-input"
-              type="password"
+              type="text"
               autocomplete="off"
               spellcheck="false"
-              placeholder="粘贴 key"
-              bind:value={drafts[p.id]}
+              placeholder="https://…/v1/"
+              bind:value={endpoints[g.id]}
             />
             <button
               class="cs-btn cs-btn-mini primary"
-              onclick={() => save(p)}
-              disabled={busy[p.id]}
+              onclick={() => applyRoute(g, 'custom')}
+              disabled={busy[g.id]}
             >
-              {busy[p.id] ? '写入中…' : '保存'}
+              {busy[g.id] ? '写入中…' : '用它'}
             </button>
           </div>
+          <!--
+            ⚠ **这一句是隐私承诺，必须在这一屏而不是文档里。**
+            端点可换之后「请求会发给第三方模型」这句话已经不准确了——
+            它可能是任何一台机器。所以这里显示**真实的目标地址**。
+          -->
+          <p class="cs-note">
+            <strong>聊天内容与图片会发到这个地址：</strong>{g.route.base_url}
+          </p>
+        {:else}
+          <p class="cs-note" title="这一组当前请求发去的地方">
+            请求发往 {g.route.base_url}
+          </p>
         {/if}
-      {:else}
-        <!-- p.hint 是 Rust 给的**可执行**指引：存哪、变量名叫什么。
-             不能是空字符串或「暂无」。 -->
-        <p class="cs-hint">{p.hint}</p>
 
-        <!-- ⚠ **未配置时输入框必须直接显示**，不能套 `drafts[p.id] === REVEAL`
-             那道门（2026-10-15 修的真机死路，见 `.scratch/…/40-*.md`）。
+        {#if !g.route.measured}
+          <!-- 端点与模型名抄自文档而没在本机跑过。**必须说出来**：
+               症状是「设置成功、一调用就 404」，不说就变成玄学。 -->
+          <p class="cs-note cs-warn">这一家的端点与模型名抄自官方文档，未在本机实测。</p>
+        {/if}
 
-             那道门本来只为「已配置时不把明文 key 摆在界面上」而设，
-             而 `REVEAL` 只有「换一把」按钮会去设——**而那个按钮在
-             `{#if p.configured}` 分支里**。⇒ 未配置时 `drafts[p.id]` 永远是
-             `undefined`，输入框永远出不来。
-
-             后果不是「少个控件」：提示写着「在这个页面填」，而这一页**根本没有
-             任何办法填**，全新安装只能去设环境变量。这条路是产品的第一步。
-
-             未配置时界面上没有任何 key，**没有需要藏的东西**，所以直接显示。 -->
-        <div class="cs-form">
-          <input
-            class="cs-input"
-            type="password"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="粘贴 key"
-            bind:value={drafts[p.id]}
+        <!-- 模型名。清单只有一条时不给分段控件（一颗滑块只有一个选项，
+             它回答不了任何问题，看着却像个选择器）；清单为空时给输入框。 -->
+        <p class="cs-label" title={g.model_note}>模型名</p>
+        {#if g.models.length > 1}
+          <SegSlider
+            value={g.model}
+            options={g.models.map((id) => ({ id, label: id }))}
+            label="模型名"
+            onchange={(v) => pickModel(g, v)}
           />
-          <button class="cs-btn cs-btn-mini primary" onclick={() => save(p)} disabled={busy[p.id]}>
-            {busy[p.id] ? '写入中…' : '保存'}
-          </button>
-        </div>
-      {/if}
+        {:else if g.models.length === 1}
+          <p class="cs-note">{g.model || g.models[0]}</p>
+        {:else}
+          <div class="cs-form">
+            <input
+              class="cs-input"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="模型名要你自己填"
+              bind:value={drafts[g.id]}
+            />
+            <button
+              class="cs-btn cs-btn-mini primary"
+              onclick={() => commitModelName(g)}
+              disabled={busy[g.id]}
+            >
+              用它
+            </button>
+          </div>
+          <p class="cs-hint">{g.model_note}</p>
+        {/if}
 
-      {#if notes[p.id]}
-        <p class="cs-note">{notes[p.id]}</p>
-      {/if}
-    </section>
+        <!-- 模型名没设成时的错误。**必须在这里显示**——见上面 `modelErr`
+             的注释：赋值留着而展示被删过一次，报错等于被吞掉。 -->
+        {#if modelErr[g.id]}
+          <p class="cs-fail" role="alert">{modelErr[g.id]}</p>
+        {/if}
+
+        <!-- ══ 这一组的 key ══ -->
+        {#if p}
+          <div class="cs-prov-head">
+            <span class="cs-prov-name">{p.label} 的 key</span>
+            {#if p.configured}
+              <span class="cs-badge ok" class:env={p.from_env}>
+                {p.masked}{p.from_env ? '（来自环境变量）' : ''}
+              </span>
+            {:else}
+              <span class="cs-badge miss">未配置</span>
+            {/if}
+          </div>
+
+          {#if p.configured}
+            <div class="cs-actions">
+              <button
+                class="cs-btn cs-btn-mini"
+                onclick={() => (drafts[g.id] = REVEAL)}
+                disabled={busy[g.id]}
+              >
+                换一把
+              </button>
+              <!-- 连通性测试。不调模型：走只读的 models 端点，不花钱。
+                   它测的是**当前这一路**，包括自己填的端点。 -->
+              <button class="cs-btn cs-btn-mini" onclick={() => probe(g)} disabled={busy[g.id]}>
+                {busy[g.id] ? '测试中…' : '测连通'}
+              </button>
+              <button
+                class="cs-btn cs-btn-mini danger"
+                onclick={() => forget(g)}
+                disabled={busy[g.id]}
+              >
+                删除
+              </button>
+            </div>
+
+            {#if drafts[g.id] === REVEAL}
+              <div class="cs-form">
+                <input
+                  class="cs-input"
+                  type="password"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="粘贴 key"
+                  bind:value={drafts[g.id]}
+                />
+                <button
+                  class="cs-btn cs-btn-mini primary"
+                  onclick={() => save(g)}
+                  disabled={busy[g.id]}
+                >
+                  {busy[g.id] ? '写入中…' : '保存'}
+                </button>
+              </div>
+            {/if}
+          {:else}
+            <!-- p.hint 是 Rust 给的**可执行**指引：存哪、变量名叫什么。
+                 不能是空字符串或「暂无」。 -->
+            <p class="cs-hint">{p.hint}</p>
+
+            <!-- ⚠ **未配置时输入框必须直接显示**，不能套
+                 `drafts[g.id] === REVEAL` 那道门（2026-10-15 修的真机死路，
+                 见 `.scratch/…/40-*.md`）。那道门本来只为「已配置时不把
+                 明文 key 摆在界面上」而设，而 `REVEAL` 只有「换一把」
+                 按钮会去设——**而那个按钮在 `{#if p.configured}` 分支里**
+                 ⇒ 未配置时输入框永远出不来。
+
+                 后果不是「少个控件」：这是产品的第一步。
+                 未配置时界面上没有任何 key，**没有需要藏的东西**。 -->
+            <div class="cs-form">
+              <input
+                class="cs-input"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="粘贴 key"
+                bind:value={drafts[g.id]}
+              />
+              <button
+                class="cs-btn cs-btn-mini primary"
+                onclick={() => save(g)}
+                disabled={busy[g.id]}
+              >
+                {busy[g.id] ? '写入中…' : '保存'}
+              </button>
+            </div>
+          {/if}
+
+          {#if p.legacy}
+            <p class="cs-note cs-warn">
+              这一把来自旧版那个不带组别的存档，两组共用。删除它对<strong>两组都生效</strong>。
+            </p>
+          {/if}
+        {/if}
+
+        {#if notes[g.id]}
+          <p class="cs-note">{notes[g.id]}</p>
+        {/if}
+      </section>
+    {/each}
+
+    <!-- ══ 代理 ══ -->
+    <h2 class="cs-h2">代理</h2>
+    <!--
+      ⚠ **单独一栏，不放进任何一组。** 代理是网络层的属性，
+      两组模型都走它；放进去就意味着填两次，而两份迟早不一样——
+      「一组走代理、一组不走」是个没人主动想要却真实会发生的状态。
+
+      ⚠ 地址里常有 `user:pass@`。**它会进日志**，所以 Rust 那边对它
+      走的是与 key 同一条脱敏路径（只抹凭据段，host 与端口留着）。
+    -->
+    <p class="cs-label" title="两组模型与「测连通」都走它。留空 = 直连。">出站代理</p>
+    <div class="cs-form">
+      <input
+        class="cs-input"
+        type="text"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="http://127.0.0.1:7897（留空 = 直连）"
+        bind:value={proxyDraft}
+      />
+      <button class="cs-btn cs-btn-mini primary" onclick={saveProxy}
+        >{view.proxy.url ? '改用它' : '用它'}</button
+      >
+    </div>
+    <p class="cs-note">两组模型与「测连通」都走它。账号密码那部分在日志里会被抹掉。</p>
+    {#if proxyNote}
+      <p class="cs-note" role="status">{proxyNote}</p>
+    {/if}
   {:else}
-    <p class="cs-note">{DEMO ? '演示模式没有后端，这里不列供应商。' : '正在读设置…'}</p>
-  {/each}
+    <p class="cs-note">{DEMO ? '演示模式没有后端，这里不列模型配置。' : '正在读设置…'}</p>
+  {/if}
 </div>
 
 <style>
@@ -1044,19 +1303,58 @@
     text-decoration: none;
   }
 
-  /* ── 供应商 ───────────────────────────────────────────────── */
-  .cs-prov {
+  /* ── 两组模型配置（票 43） ─────────────────────────────────────
+   *
+   * ⚠ 这一段是 2026-10-15 新写的，而配套样式当时**一条都没写**——
+   *   标记在、样式不在，于是两组区块渲染成完全裸的块级元素：
+   *   没有边框、没有底色、没有分组间距。svelte-check **不会**因为
+   *   「类名在标记里但样式表里没有」而报错（它只报反过来的
+   *   `css_unused_selector`），所以这种缺口能一路躲过 type check。
+   *
+   * 几何沿用这一屏既有的那一支：`.cs-prov` 那种「字条落在纸上」的卡片
+   * （`--cs-rule` 1px 描边 + `--cs-paper-raised` 底 + `--cs-radius-sm`）。
+   * 换句话说：**两组 = 两张字条**，这是这一屏已经有的语言，
+   * 不为「两组」另发明一套。
+   */
+  .cs-group {
     padding: 0.5rem 0.6rem;
     border: 1px solid var(--cs-rule);
     border-radius: var(--cs-radius-sm);
-    /* 字条落在纸上 —— 主面板里那张「递给你的条子」就是这一档。 */
     background: var(--cs-paper-raised);
   }
 
-  .cs-prov + .cs-prov {
-    margin-top: 0.35rem;
+  /* 两组之间要**看得见地分开**——它们是两份互不影响的配置，
+   * 挤在一起会被读成一张卡的上下两段。用留白 + 一条细则，
+   * 不加第二条重描边（这一屏每组的边框已经是一道了）。 */
+  .cs-group + .cs-group {
+    margin-top: 0.5rem;
   }
 
+  .cs-group-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .cs-group-name {
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+
+  /* 厂商选择：九项在 380px 的面板里**换行排**，不做分段控件
+   * （票 43 原话「一颗滑块放不下」）。仍是 `.cs-btn-mini` 那一族，
+   * 所以选中态直接借用 `.primary`，不另造一颗药丸。 */
+  .cs-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-top: 0.3rem;
+  }
+
+  /* 供应商卡片那一支已随两组结构退场，只留仍在用的 head / name。
+   * `.cs-prov` 与 `.cs-prov + .cs-prov` 2026-10-15 删除：
+   * 新标记里不再有 `.cs-prov` 卡片（svelte-check 报 css_unused_selector）。 */
   .cs-prov-head {
     display: flex;
     align-items: center;
