@@ -361,8 +361,28 @@ pwsh -NoProfile -File scripts\shotwin.ps1 <hwnd> <out.png>
    上沿（同时是拖拽带），设置是纸面板内的一块互斥主区。
    ⚠ **只剩「冷启动实机」一项未验**——本轮改动全在 `ui/src`，但真 Tauri
    窗口里显示的是新面板这件事只有起一次进程才算数。
-2. **正文区的动作行 + 按钮组件族。** 要动发送路径，单独一轮，
-   改完必须跑真机（两档 + phase 事件 + 外观 IPC 往返）。
+2. ~~**正文区的动作行 + 按钮组件族**~~ **已做**（2026-10-15，提交 `6417804`）。
+   三变体按 `设计规范.md` §4.2c 落地，映射是「不可逆优先于推荐」：
+   `Auto` 档整组红批，`Manual` 档首选实墨、备选墨线。
+   ⚠ **真机只验了 `Manual` 档**，`Auto` 档那半条仍欠票 20。
+
+   > ⛔ **本机不要在真机上把档位切到「自动发送」去试。**
+   > 切档那一刻起，观察循环里的 `AutoGate` 就会在**对方下次发消息时自动发**，
+   > 不只是「点按钮才发」。而本机没配 API key，起草器是 `PresetReasoner`，
+   > 候选正文恒为「预置候选，没配置 key，不是模型输出」——
+   > 往真人会话里发出去的是这句占位话。
+   > 要看 `Auto` 档长什么样，用夹具出图：
+   > `pwsh -NoProfile -File scripts\shoturl.ps1 -Url "http://localhost:1420/panel?demo=1&state=auto" -OutPng target\probe\act-auto.png`
+   > ⚠ **别用 `?tier=Auto`**：夹具里的 `tier` 字段会盖掉那个探针口（实测）。
+   > ⚠ 真机面板截图用 `shotwin.ps1` 收**十六进制**句柄、**相对**输出路径，
+   > 且它走 `PrintWindow`（截托盘溢出那类 XAML island 会压成竖条，
+   > 但普通面板窗口没问题）。
+   >
+   > ✅ **顺带修掉一个假警报（同一个提交）**：「仅填入」档点候选后，
+   > 面板曾显示「可能已经发出去了」而对话流根本没有新消息——
+   > `fill_input_box` 全程没按回车却返回了 `PossiblySent`。
+   > 现已拆成 `DeliveryReceipt::Filled`，面板如实写「没有发出去」。
+
    ⚠ 顺带收掉一个现在看得见的分裂：设置页里的档位控件仍是旧 `SegSlider`
    （墨底滑块），与顶边那道红铅笔勾是两套形态语言，并排出现在同一屏。
    → `.scratch/…/23-button-component-family.md`
