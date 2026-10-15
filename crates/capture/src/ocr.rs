@@ -109,6 +109,21 @@ pub fn recognize(frame: &Frame) -> Result<OcrText, OcrError> {
 /// 具体某条。早先留了个 `Auto` 分支，于是 `recognize` 的 match 不穷尽、
 /// 编译器把「以后再加变体忘了处理」这件事留到了运行期——而 OCR 选错路的后果
 /// 是**静默读到别的文字**，不是报错。
+///
+/// ## ⚠ 「回落」是静默的，而那条 warning 在探针里看不见（2026-10-15）
+///
+/// [`recognize`] 回落时只有 [`crate::ocr_pp_pipeline::recognize_in`] 里的一句
+/// `tracing::warn!`。而 `xtask` 的日志过滤器是
+/// `with_env_filter("xtask=debug,wgc=trace")`——**没有全局档位**，
+/// 于是 `chatservant_capture` 这个 target 的记录一律被丢掉。
+///
+/// 后果实测过一次：PP-OCR 每帧都失败回落 WinRT，而 `xtask ocr` 打出的是
+/// **WinRT 的逐字输出**，看上去像「PP-OCR 把整张图切成单字框」。
+/// 排查方向因此整段跑偏——调了半天的 det 参数，而 det 一次都没真正跑起来。
+///
+/// **判据**：PP-OCR 跑 det 要几秒（debug 构建十几秒），
+/// WinRT 只要 300ms 量级。两个数字差一个量级，就说明你看到的是哪条路。
+/// 要看那条 warning，用能覆盖 `chatservant_capture` 的过滤器再跑一次。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Engine {
     Ppocr,
