@@ -204,10 +204,11 @@ pub fn apply(provider: &str, input: Option<&str>) -> Result<bool, String> {
 
 /// 抹掉文本里可能出现的 key。
 ///
-/// 三个来源：
+/// 四个来源：
 /// 1. 已知的 key 值本身（我们知道，就直接替换）
 /// 2. `sk-` / `Bearer ` 开头的 token 形状
 /// 3. `api_key=...` / `"key": "..."` 形状的赋值
+/// 4. **URL 里的凭据**（用户名密码段 + 查询参数里的 token）——见 [`mask_url_credentials`]
 ///
 /// **宁可多抹。** 日志里少几个字符无所谓，泄一次就是事故。
 pub fn redact(text: &str) -> String {
@@ -217,7 +218,99 @@ pub fn redact(text: &str) -> String {
             out = out.replace(&known, MASK);
         }
     }
-    mask_sk_shaped(&out)
+    out = mask_sk_shaped(&out);
+    mask_url_credentials(&out)
+}
+
+/// 抹掉 URL 里带的凭据。
+///
+/// **为什么必须单独做**（2026-10-15，票 43 的前置）：一旦允许配置自定义端点与
+/// 代理，凭据就会以两种**新形状**出现在报错文本里，而
+/// [`mask_sk_shaped`] 只认 `sk-` 开头、`redact` 的前两步只认已知值——
+///
+/// 1. **用户名密码段**：`https://user:pass@host/v1/`（代理几乎都长这样）
+/// 2. **查询参数里的 token**：`…/v1/?access_token=…&model=…`
+///
+/// ⚠ URL 本身**要留着**——它是不含凭据时判断「是哪家、哪个端点」的唯一线索，
+/// 抹掉等于让报错失去排查价值。所以只抹凭据那一段。
+///
+/// ⚠ 宁可多抹：`user:pass@` 整段换成掩码是可接受的。
+fn mask_url_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let bytes: Vec<char> = text.chars().collect();
+    let n = bytes.len();
+    let mut i = 0;
+
+    // 查询参数里那几个「名字里带 token/key/secret」的参数
+    const SENSITIVE_PARAMS: [&str; 6] = [
+        "api_key",
+        "apikey",
+        "access_token",
+        "token",
+        "secret",
+        "password",
+    ];
+
+    while i < n {
+        // ① 用户名密码段：形如 scheme://<creds>@host
+        if bytes[i] == ':' && i + 2 < n && bytes[i + 1] == '/' && bytes[i + 2] == '/' {
+            let scheme_start = i + 3;
+            // 段结束于 '/'、'?'、'#' 或任何分隔符
+            let mut seg_end = scheme_start;
+            while seg_end < n
+                && !matches!(
+                    bytes[seg_end],
+                    '/' | '?' | '#' | ' ' | '"' | '\'' | '\n' | '>' | ')'
+                )
+            {
+                seg_end += 1;
+            }
+            // 这一段里最后一个 '@' 之前就是凭据
+            if let Some(at_rel) = bytes[scheme_start..seg_end].iter().rposition(|c| *c == '@') {
+                let cred_end = scheme_start + at_rel;
+                out.extend(bytes[i..scheme_start].iter());
+                // ⚠ **凭据段要跳过而不是推进去**。写反的话 MASK 会被插在
+                // 凭据**后面**，看起来像掩了码、其实原文还在——测试当场抓到。
+                out.push_str(MASK);
+                out.push('@');
+                i = cred_end + 1;
+                continue;
+            }
+            out.extend(bytes[i..seg_end].iter());
+            i = seg_end;
+            continue;
+        }
+
+        // ② 查询参数
+        let mut matched: Option<(usize, usize)> = None;
+        for p in SENSITIVE_PARAMS {
+            let pl = p.chars().count();
+            if i + pl < n && bytes[i..i + pl].iter().collect::<String>() == p {
+                let next = bytes[i + pl];
+                // 必须紧跟 '='，否则 `tokenizer` 之类会被误伤
+                if next == '=' {
+                    matched = Some((p.chars().count(), i + pl + 1));
+                    break;
+                }
+            }
+        }
+        if let Some((_, val_start)) = matched {
+            let mut val_end = val_start;
+            while val_end < n
+                && !matches!(bytes[val_end], '&' | ' ' | '"' | '\'' | '\n' | '>' | ')')
+            {
+                val_end += 1;
+            }
+            out.extend(bytes[i..val_start].iter());
+            out.push_str(MASK);
+            i = val_end;
+            continue;
+        }
+
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
 }
 
 /// 扫出所有 `sk-…` 形状的 token 并替换。
@@ -377,5 +470,48 @@ mod tests {
         let dumped = format!("{s:?}");
         assert!(!dumped.contains(KEY), "状态里带出了 key：{dumped}");
         forget_all();
+    }
+
+    /// 代理地址里的**用户名密码段**不能进日志（票 43 的前置）。
+    #[test]
+    fn a_url_with_basic_auth_credentials_is_masked() {
+        let msg = "代理连不上：https://alice:hunter2@proxy.internal:8080/ 拒绝连接";
+        let safe = redact(msg);
+        assert!(!safe.contains("hunter2"), "代理口令泄了：{safe}");
+        assert!(!safe.contains("alice"), "代理账号泄了：{safe}");
+        // ⚠ host 与端口必须留着——那是判断「哪个代理出问题」的唯一线索
+        assert!(
+            safe.contains("proxy.internal:8080"),
+            "host 被抹掉了：{safe}"
+        );
+    }
+
+    /// 查询参数里的 token 同样不能进日志。
+    #[test]
+    fn a_query_string_api_key_is_masked() {
+        let msg = "GET /v1/models?access_token=abc123DEF456&model=x 失败";
+        let safe = redact(msg);
+        assert!(
+            !safe.contains("abc123DEF456"),
+            "query 里的 token 泄了：{safe}"
+        );
+        assert!(safe.contains("model=x"), "非敏感参数被误抹：{safe}");
+    }
+
+    /// 没有凭据的 URL **不许被动**——抹掉它等于让报错失去排查价值。
+    ///
+    /// 这条与 `plain_text_is_untouched` 同族：宁可少抹，也不能把
+    /// 「是哪家、哪个端点」这条线索一起抹掉。
+    #[test]
+    fn a_url_without_credentials_is_left_alone() {
+        let msg = "连不上 https://api.openai.com/v1/ 超时";
+        assert_eq!(redact(msg), msg, "无凭据的 URL 被动了");
+    }
+
+    /// `tokenizer` 这类**只是碰巧含有 token 字样**的词不能被误伤。
+    #[test]
+    fn a_parameter_merely_containing_the_word_token_is_not_masked() {
+        let msg = "字段 tokenizer 缺失";
+        assert_eq!(redact(msg), msg, "误伤了非敏感字段名：{msg}");
     }
 }
