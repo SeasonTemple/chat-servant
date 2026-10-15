@@ -1,0 +1,186 @@
+<!doctype html>
+<!--
+  票 44 的排版量具 —— 量真面板里每一段的**实际**几何。
+
+  ## 为什么需要它
+
+  `stripgen.py` 从面板自己的位图裁下真撕边，`SLICE = 32`（源 px）= **16 CSS px**。
+  而 2026-10-16 上午那版用 3px 时记的实测是「余量只有 4px」。
+  两者差 **92px**，而那个「4px」是**上一轮量具记下的数**，不是这一轮量出来的。
+
+  ⚠ 本项目的教训：**记下来的数会跟代码对不上**（`SLICE` 当天就从 20 调到 6）。
+  ⇒ 动手腾空间之前先重新量。
+
+  ## 为什么用 iframe 而不是直接改面板
+
+  ⚠ 改 `PaperPanel.svelte` 加临时输出 = 往产品代码里塞调试代码，
+  忘了删就进仓库。而同源 iframe 可以量到**真实渲染结果**，
+  量具本身不碰产品代码一行。
+
+  ## ⚠ 同源是前提
+
+  iframe 要读 `iframe.contentDocument`，必须同源。
+  本文件在 `ui/static/` 下，由 dev server 提供 ⇒ 与 `/panel` 同源 ⇒ 可读。
+  若被 SvelteKit 拦成 404，先确认 static 目录的服务方式。
+
+  ## 输出
+
+  量到的 JSON 写进 `#out`（`<pre>`）。**键名一律 ASCII**：
+  控制台与文件编码在 Windows 上是 GBK/UTF-16，中文键名会被吃掉。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>budget</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #222;
+        color: #eee;
+        font: 12px/1.4 monospace;
+      }
+      #host {
+        display: flex;
+        gap: 12px;
+        padding: 8px;
+      }
+      iframe {
+        width: 380px;
+        height: 560px;
+        border: 1px solid #555;
+      }
+      pre {
+        white-space: pre-wrap;
+        word-break: break-all;
+        max-width: 520px;
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="host">
+      <pre id="out">booting</pre>
+      <div id="frames"></div>
+    </div>
+    <script>
+      const STATES = ['drafted', 'auto', 'sent'];
+
+      /** 量一个 iframe 文档里的几何。 */
+      function measure(doc) {
+        const one = (sel) => {
+          const el = doc.querySelector(sel);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return {
+            top: +r.top.toFixed(1),
+            bottom: +r.bottom.toFixed(1),
+            h: +r.height.toFixed(1),
+            w: +r.width.toFixed(1),
+          };
+        };
+        const acts = [...doc.querySelectorAll('.cs-act')].map((el) => {
+          const r = el.getBoundingClientRect();
+          const cs = doc.defaultView.getComputedStyle(el);
+          const inner = [...el.children].map((c) => ({
+            cls: c.className.split(' ')[0],
+            w: +c.getBoundingClientRect().width.toFixed(1),
+            h: +c.getBoundingClientRect().height.toFixed(1),
+            lines: Math.round(c.getBoundingClientRect().height / parseFloat(cs.lineHeight || 18)),
+          }));
+          return {
+            top: +r.top.toFixed(1),
+            bottom: +r.bottom.toFixed(1),
+            h: +r.height.toFixed(1),
+            bw: cs.borderTopWidth,
+            bstyle: cs.borderTopStyle,
+            pad: cs.padding,
+            inner,
+          };
+        });
+        const a = doc.querySelector('.cs-actions');
+        const acs = a ? doc.defaultView.getComputedStyle(a) : null;
+        return {
+          sheet: one('.cs-sheet'),
+          topbar: one('.cs-topbar'),
+          draft: one('.cs-draft'),
+          actions: one('.cs-actions'),
+          warn: one('.cs-act-warn'),
+          note: one('.cs-act-note'),
+          picks: [...doc.querySelectorAll('.cs-pick')].map((el) => {
+            const r = el.getBoundingClientRect();
+            return {
+              top: +r.top.toFixed(1),
+              bottom: +r.bottom.toFixed(1),
+              h: +r.height.toFixed(1),
+            };
+          }),
+          slots: [...doc.querySelectorAll('.cs-pick-slot')].map((el) => {
+            const r = el.getBoundingClientRect();
+            return {
+              top: +r.top.toFixed(1),
+              bottom: +r.bottom.toFixed(1),
+              h: +r.height.toFixed(1),
+              w: +r.width.toFixed(1),
+            };
+          }),
+          gap: acs ? acs.rowGap : null,
+          apad: acs ? `${acs.paddingTop}/${acs.paddingBottom}` : null,
+          acts,
+        };
+      }
+
+      const out = document.getElementById('out');
+      const host = document.getElementById('frames');
+      const results = {};
+      let done = 0;
+
+      /**
+       * ⚠ **轮询等元素出现，不能用固定帧数**（第一版踩到）。
+       *   第一版是 `load` 事件 + 两帧 rAF，量出来 `.cs-sheet` 等**全是 null**、
+       *   `acts: []` —— 而同一时刻的截图里面板明明渲染好了。
+       *   原因：iframe 的 `load` 在 SvelteKit 路由与字体度量之前就触发，
+       *   两帧 rAF 只够跑两遍布局，跑不完路由解析。
+       *   ⇒ 症状极具误导性：**返回的是一个合法的、全 null 的对象**，
+       *   不报错、JSON 完整，于是很容易被当成「面板里没有这些元素」
+       *   而去查产品代码 —— 而 product 代码完全正常。
+       */
+      function waitFor(fn, ms = 8000) {
+        return new Promise((res) => {
+          const t0 = performance.now();
+          (function tick() {
+            let v;
+            try {
+              v = fn();
+            } catch {
+              v = null;
+            }
+            if (v) return res(v);
+            if (performance.now() - t0 > ms) return res(null);
+            requestAnimationFrame(tick);
+          })();
+        });
+      }
+
+      for (const st of STATES) {
+        const f = document.createElement('iframe');
+        f.src = `/panel/?demo=1&state=${st}`;
+        host.appendChild(f);
+        (async () => {
+          await waitFor(() => f.contentDocument && f.contentDocument.querySelector('.cs-act'));
+          // 再等两帧，让字体度量与 GSAP 补间落定
+          await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          try {
+            results[st] = measure(f.contentDocument);
+          } catch (e) {
+            results[st] = { error: String(e) };
+          }
+          if (++done === STATES.length) {
+            out.textContent = JSON.stringify(results, null, 1);
+            document.title = 'READY';
+          }
+        })();
+      }
+    </script>
+  </body>
+</html>
