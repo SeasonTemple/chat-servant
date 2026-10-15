@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **35** ｜ 验收项全勾 **20** ｜ 已收但留有说明项 **11** ｜ 未收 **4**
+票据总数 **36** ｜ 验收项全勾 **21** ｜ 已收但留有说明项 **11** ｜ 未收 **4**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -62,6 +62,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `30-real-frame-ocr-accuracy.md` | 9/9 |
 | `31-perceive-has-no-relayout-duty.md` | 8/8 |
 | `32-parked-panel-tells-a-lie.md` | 7/7 |
+| `36-message-roi-left-edge-collapsed-to-zero.md` | 0/0 |
 
 ## 四、⚠ 脚本当场抓出来的漂移（Status 行自己写的数字与实点不符）
 
