@@ -274,22 +274,72 @@ fn parse_line(line: &windows::Media::Ocr::OcrLine) -> Option<OcrLine> {
 ///
 /// 那条规则在「纯中文」上对，碰上中英混排就会把 `用 3D 建模` 粘成
 /// `用3D建模`。间隙是图像里真实存在的量，比字符类别可靠。
+///
+/// ⚠ **但票 41 的 ② 把这条推翻了，规则收窄成「两个单字汉字之间」**。
+///
+/// 真机 2× 实测有一档 1.15~1.18 的间隙会插出假空格：
+///
+/// ```text
+/// 直│迭   间隙 14px  字高 12  比值 1.17
+/// 幸│啡   间隙 13px  字高 11  比值 1.18
+/// 的│言   间隙 15px  字高 13  比值 1.15
+/// ```
+///
+/// 而**真空格那一档是 1.15~1.73**——两档**完全重叠**，所以
+/// **比值本身分不开它们**，任何「把比值阈值往上/往下挪」的改法都必然
+/// 吃掉真空格或者留着假空格。那次「降阈值迁就编出来的测试几何」的事故
+/// 就是这么来的，这里不能再犯一次。
+///
+/// ⚠ **票面写的成因（「检测把一个字拆成了两个框」）不成立**：
+/// 汉字的字身框是方的（宽 ≈ 高 = 1 em），**一个字的左右两半之间
+/// 不可能有 ≥1 em 的空隙**。比值 1.15~1.18 的间隙本身就 ≥ 一个字身框，
+/// 所以那两框之间是**真的空**——要么原文有空格，要么识别器在那里丢了一个字。
+/// ⇒ **不能按「框合并」把它们并成一个框**：并出来的框会横跨那片空白，
+/// 几何上是错的，而且会把真空格一起吃掉。
+///
+/// 现在这条规则只做一件事：**两个都是单个汉字时，不插空格**。
+/// 依据是排版事实——中文正文里字与字之间本来就不打空格，而实测里
+/// 每一对**真空格**都至少有一侧不是汉字（`口│.tgz`、`]│h`），
+/// 两条都保住。已知代价见 [`is_single_ideograph`] 的注释。
 fn join_words(words: &[OcrWord]) -> String {
     let mut out = String::new();
     for (i, w) in words.iter().enumerate() {
         if i > 0 {
             let prev = &words[i - 1];
-            let gap = w.rect.x0 - prev.rect.x1;
-            let h = w.rect.height().max(prev.rect.height());
-            // 写成 `gap * 2 >= h` 而不是 `gap >= h / 2`：字高是奇数时后者会
-            // 向下取整，21px 的字高会得到阈值 10 而不是 10.5，边界用例会飘。
-            if gap * 2 >= h {
+            if needs_space_between(prev, w) {
                 out.push(' ');
             }
         }
         out.push_str(&w.text);
     }
     out
+}
+
+/// 两个相邻词之间该不该插一个空格。
+fn needs_space_between(prev: &OcrWord, next: &OcrWord) -> bool {
+    let gap = next.rect.x0 - prev.rect.x1;
+    let h = next.rect.height().max(prev.rect.height());
+    // 写成 `gap * 2 >= h` 而不是 `gap >= h / 2`：字高是奇数时后者会
+    // 向下取整，21px 的字高会得到阈值 10 而不是 10.5，边界用例会飘。
+    if gap * 2 < h {
+        return false;
+    }
+    // 两个**单字汉字**之间不插空格（票 41 的 ②，理由见 [`join_words`]）。
+    !is_single_ideograph(&prev.text) || !is_single_ideograph(&next.text)
+}
+
+/// 是不是**一个**汉字（基本区 CJK 统一表意文字 U+4E00..=U+9FFF）。
+///
+/// ⚠ 只认这一个区：全角标点 `（）、：` 在 U+FFxx、`讠` 类偏旁在 U+8BA0
+/// ——后者**故意**算汉字，因为实测里 `讠` 确实是被拆出来的偏旁；
+/// 前者不算，于是 `（ 好的 ）` 这种带空格的排版原样保留。
+/// 拉丁字母、数字、`.tgz` 这类多字符词一律不算。
+fn is_single_ideograph(s: &str) -> bool {
+    let mut it = s.chars();
+    match (it.next(), it.next()) {
+        (Some(c), None) => ('\u{4e00}'..='\u{9fff}').contains(&c),
+        _ => false,
+    }
 }
 
 fn denorm(r: windows::Foundation::Rect) -> Rect {
@@ -401,6 +451,126 @@ mod tests {
     fn a_single_word_is_returned_verbatim() {
         assert_eq!(join_words(&[word("G8W", 10, 30, 10)]), "G8W");
         assert_eq!(join_words(&[]), "");
+    }
+
+    /// **假空格那一档不再产生空格**（票 41 的 ②）。
+    ///
+    /// 三组几何逐字取自 `cargo xtask ocr <帧> --scale 2` 的真机实测
+    /// （票 41 §②），宽度按「汉字字身框 ≈ 字高」补齐：
+    ///
+    /// ```text
+    /// 直│迭  间隙 14  字高 12  比值 1.17
+    /// 幸│啡  间隙 13  字高 11  比值 1.18
+    /// 的│言  间隙 15  字高 13  比值 1.15
+    /// ```
+    ///
+    /// **自证会响**：把这三组几何交给旧逻辑（比值 ≥ 0.5 ⇒ 插空格），
+    /// 得到的正是 `直 迭` / `幸 啡` / `的 言`——即票面记的那三个症状。
+    #[test]
+    fn the_measured_one_one_five_band_no_longer_produces_a_space() {
+        let cases: [(Vec<OcrWord>, &str, f32); 3] = [
+            (
+                vec![word("直", 100, 12, 12), word("迭", 126, 12, 12)],
+                "直迭",
+                1.17,
+            ),
+            (
+                vec![word("幸", 100, 11, 11), word("啡", 124, 11, 11)],
+                "幸啡",
+                1.18,
+            ),
+            (
+                vec![word("的", 100, 13, 13), word("言", 128, 13, 13)],
+                "的言",
+                1.15,
+            ),
+        ];
+        for (ws, want, measured_ratio) in cases {
+            let gap = ws[1].rect.x0 - ws[0].rect.x1;
+            let ratio = gap as f32 / ws[0].rect.height() as f32;
+            assert!(
+                (ratio - measured_ratio).abs() < 0.005,
+                "这组夹具几何不是实测那一档（期望比值 {measured_ratio}，实际 {ratio:.2}），\
+                 守卫就失去意义了"
+            );
+            assert_eq!(join_words(&ws), want, "比值 {ratio:.2} 不该插空格");
+        }
+    }
+
+    /// **偏旁被拆出来的那一类也要并回去**（票 39 实测 `不是前面讠 就豆了演进`）。
+    ///
+    /// `讠`（U+8BA0）落在基本区之内，所以算单字汉字；它与右半边之间
+    /// 那个 ≥1 em 的间隙照样不插空格。
+    #[test]
+    fn a_split_radical_does_not_get_a_space_either() {
+        let ws = vec![word("\u{8ba0}", 100, 8, 12), word("就", 122, 12, 12)];
+        assert_eq!(ws[1].rect.x0 - ws[0].rect.x1, 14, "夹具几何要与实测一致");
+        assert_eq!(join_words(&ws), "讠就");
+    }
+
+    /// **实测的真空格一对都不能少**（票 39 的 `]│h`：间隙 38 / 字高 22）。
+    ///
+    /// 它的比值 1.73 落在「真空格 1.15~1.73」那一档的顶端，
+    /// 而新判据只看**两侧是不是单个汉字**，所以它不受影响。
+    #[test]
+    fn the_measured_widest_real_space_survives() {
+        let ws = vec![word("]", 100, 8, 22), word("h", 146, 12, 22)];
+        assert_eq!(ws[1].rect.x0 - ws[0].rect.x1, 38, "夹具几何要与实测一致");
+        assert_eq!(join_words(&ws), "] h");
+    }
+
+    /// **同一比值下，中英混排与汉字之间的结论必须不同**。
+    ///
+    /// `口│.tgz`（间隙 26 / 字高 22 = 1.18）与假空格那一档比值几乎一样，
+    /// 却是**真**空格——它靠「右侧不是单个汉字」活下来。
+    /// 这条同时守着「别把中英混排的空格一起吃掉」这个已知的坑。
+    #[test]
+    fn the_same_ratio_splits_cjk_pairs_from_mixed_script_pairs() {
+        let false_space = [word("直", 100, 12, 12), word("迭", 126, 12, 12)];
+        let real_space = [word("口", 100, 18, 22), word(".tgz", 144, 30, 22)];
+        let ratio =
+            |ws: &[OcrWord]| (ws[1].rect.x0 - ws[0].rect.x1) as f32 / ws[0].rect.height() as f32;
+        assert!(
+            (ratio(&false_space) - ratio(&real_space)).abs() < 0.05,
+            "两组比值必须仍然重叠，否则这条守卫证明不了「比值分不开它们」"
+        );
+        assert_eq!(join_words(&false_space), "直迭");
+        assert_eq!(join_words(&real_space), "口 .tgz");
+    }
+
+    /// **代价钉在这里**：用户真在两个汉字之间打了空格，会被吃掉。
+    ///
+    /// 中文正文里字间空格极罕见（排版事实），而实测里每一对真空格都
+    /// 至少有一侧不是汉字，所以选了这条。**要改这个取舍，先改这里**，
+    /// 别让它悄悄发生。
+    #[test]
+    fn a_real_space_between_two_chinese_characters_is_given_up_deliberately() {
+        // 间隙 48 / 字高 12 = 4 个字身框——图上真的是一大片空。
+        let ws = vec![word("直", 100, 12, 12), word("迭", 160, 12, 12)];
+        assert_eq!(ws[1].rect.x0 - ws[0].rect.x1, 48);
+        assert_eq!(join_words(&ws), "直迭", "已知代价：汉字之间的真空格被吃掉");
+    }
+
+    /// 全角标点**不算**汉字，所以带空格的排版原样保留。
+    #[test]
+    fn full_width_punctuation_keeps_its_space() {
+        let ws = vec![word("\u{ff08}", 100, 12, 12), word("好", 130, 12, 12)];
+        assert_eq!(join_words(&ws), "（ 好");
+    }
+
+    /// 单词判定本身：只认基本区的一个字。
+    #[test]
+    fn only_one_basic_ideograph_counts_as_an_ideograph() {
+        assert!(is_single_ideograph("文"));
+        assert!(
+            is_single_ideograph("\u{8ba0}"),
+            "偏旁也算，它是实测里被拆出来的"
+        );
+        assert!(!is_single_ideograph("文件"), "两个字的词不算");
+        assert!(!is_single_ideograph("0"));
+        assert!(!is_single_ideograph(".tgz"));
+        assert!(!is_single_ideograph("\u{ff08}"), "全角标点不算");
+        assert!(!is_single_ideograph(""), "空串不算");
     }
 
     /// **没设 `CHATSERVANT_OCR` 时必须落在某条真路上**，不能是「三不管」。
