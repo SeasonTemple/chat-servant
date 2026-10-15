@@ -61,7 +61,7 @@ struct AppState {
     tier: crate::watch::TierCell,
     /// 「重新锁定当前会话」的请求。与循环共用同一个格子。
     relock: crate::watch::Relock,
-    /// **Confirm 档的「已装填」状态。** 见 [`Arming`]。
+    /// **防重状态：「这条候选本轮是不是已经发过了」。** 见 [`Arming`]。
     armed: Arming,
     /// 程序**锁定并正在处理**的会话名。托盘的状态行读它。
     ///
@@ -71,11 +71,21 @@ struct AppState {
     peer: String,
 }
 
-/// Confirm 档的二次确认：**程序不许替人省这一步，但人也不能被卡在这一步。**
+/// 防重状态：**这条候选本轮是不是已经发过了。**
+///
+/// ## 它现在防的是什么（2026-10-15 改了语义）
+///
+/// 早先它是「**已装填**」——`Confirm` 档第一次点击后记一笔，
+/// 等人第二次点击才发。砍掉 `Confirm` 之后**没有第二次点击了**，
+/// 那个语义随之消失。
+///
+/// 现在它只挡一件事：**同一条候选在同一轮里被发两遍**。
+/// 点一下就发的情况下，连点两下就会往对方的聊天框里塞两条一样的消息，
+/// 而发出去的撤不回来。
 ///
 /// ## 这里曾经是一个死胡同
 ///
-/// 早先的实现是：
+/// `Confirm` 档早先的实现是：
 ///
 /// ```text
 /// if tier == Dispatch::Confirm && action == "confirm" {
@@ -87,7 +97,7 @@ struct AppState {
 /// 第二次点击进来时，`tier` **仍然是 Confirm**、`action` **仍然是 confirm**
 /// ——**同一个分支又命中**，于是永远走不到下面的 `deliver`。
 ///
-/// 后果不是「多一步确认」，而是 **Confirm 档根本发不出去**：
+/// 后果不是「多一步确认」，而是 **`Confirm` 档根本发不出去**：
 /// 用户点一次回一句「再点一次」，点两次还是「再点一次」，
 /// 点一百次也还是。而那句话是一个**明晃晃的假承诺**——
 /// 它承诺下一次会发，下一次不会。
@@ -95,17 +105,15 @@ struct AppState {
 /// 2026-10-09 实机复现：点「填入并确认发送」→ 文字进了输入框、
 /// 没有发出去、回执说「再点一次」。再点，无限循环。
 ///
-/// `armed` 事件当时也没有任何前端监听者——装填状态发出去就没了。
-///
 /// ## 为什么状态必须在 Rust 侧
 ///
-/// 「这一次点击是装填还是发送」是**决定一条消息会不会真的发出去**的判断。
+/// 「这一条能不能发出去」是**决定一条消息会不会真的发出去**的判断。
 /// 放在前端就等于把这条判断交给一个可以随手改的变量，
 /// 硬约束第 5 条（升档必须人按、默认档最低）当场失效。
 ///
-/// ## 装填什么时候失效
+/// ## 防重什么时候失效
 ///
-/// 三种情况都必须失效，否则「装填」会变成一张可以囤起来的许可证：
+/// 三种情况都必须失效，否则它会变成一张可以囤起来的许可证：
 /// · 候选换了（`ticks` 变了）——上一轮的候选已经不是这一轮的候选了；
 /// · 档位变了；
 /// · 真的发出去了。
@@ -212,7 +220,13 @@ pub struct DispatchReply {
 }
 
 #[tauri::command]
-pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> DispatchReply {
+pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
+    // ⚠ **这里曾经收一个 `app: AppHandle`，只为 `app.emit(ARMED, …)`。**
+    //   2026-10-15 砍掉两段式之后那次 emit 就没有存在理由了（`armed`
+    //   的语义从「已装填」变成「本轮已发过」，而前端至今没有监听者——
+    //   见 `contract.rs` 的 `KNOWN_UNLISTENED`）。留着它就是留一个
+    //   只为不存在的功能存在的参数，`-D warnings` 会先把它喊出来。
+    //
     // ⚠ **动作先解析，再谈别的。**（票 26）
     //
     // `action` 从 IPC 过来是 `String`，任何字符串都能到这一行。以前这里是
@@ -261,16 +275,13 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
     let mut d = Dispatcher::new();
     d.set_tier(tier);
 
-    // Confirm 档：**没确认就不发送**。这条是硬约束，程序不许替人省这一步。
-    //
-    // ⚠⚠ 判据是「**这一条候选已经装填过、且候选没有换过**」，
-    // 不是 action。早先这里写 `tier == Confirm && action == "confirm"`——
-    // 两次点击进来的条件完全相同，于是第二次又命中这里，永远发不出去，
-    // 而回执每次都写着「再点一次就会发出去」。见 [`Arming`]。
+    // ⚠ `Auto` 档：**点一下就填入并发送，没有第二次确认**（2026-10-15 决定，
+    // 砍掉的是 `Confirm`）。所以这里**没有装填分支**；`Arming` 在 `Auto` 档上
+    // 不再表示「人已装填过一次，等他再点」，而只挡「同一条被重复发」。
     let ticks = with_state(|s| s.watcher.latest())
         .flatten()
         .map(|o| o.ticks);
-    if tier == Dispatch::Confirm && act == Action::Confirm {
+    if tier == Dispatch::Auto && act == Action::Confirm {
         let already = {
             let Ok(mut g) = STATE.lock() else {
                 return DispatchReply {
@@ -289,41 +300,21 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
                 None => false,
             }
         };
-        if !already {
-            // 装填是**状态变化**。emit 本身是对的（契约里 `ARMED` 也在），
-            // 但 ⚠ **2026-10-14 实测：前端当前没有监听者**——旧面板删掉时
-            // （`5031ab3`）连它一起没了，而发送那一排（动作行）至今未做。
-            // 所以注释原先写的「按钮文案从『填入并确认发送』变成『确认发送』，
-            // 样式也换掉」描述的是**还不存在**的界面。
-            //
-            // ⚠ 别把这条注释改回「已经有监听者了」：动发送路径要单独一轮，
-            //   见 `docs/前端设计进度.md` §3「宁可少一行，不要一个没验过的
-            //   发送控件」。
-            let _ = app.emit(crate::contract::events::ARMED, &candidate_id);
-            // 第一次点击：**只填入，不发**。这一步同时是让人读、让人改的窗口。
-            let filled = deliver(&candidate_id, false);
-            let next = d.next(filled.clone(), 0);
+        if already {
+            // ⚠ 防重：同一条候选、同一轮里已经发过一次 ⇒ 不许再发一遍。
+            // 重复发送撤不回来，所以这里直接拒绝而不是「再发一次看看」。
             return DispatchReply {
-                outcome: outcome_name(&filled),
-                detail: format!(
-                    "{}。已填入输入框——**看一眼、改一改**，再点一次「确认发送」才真的发出去。",
-                    filled.explain()
-                ),
-                next_hint: Some(next.explain()),
+                outcome: "NotSent",
+                detail: "这条候选本轮已经发送过了，没有重复发。".into(),
+                next_hint: None,
             };
         }
-        // 第二次点击：**只按回车，不再往输入框里写任何东西。**
-        //
-        // ⚠ 两次都填会发出去两份拼接——`fill_input_box` 的语义是
-        // 「在光标处追加」，它不动用户已经打了一半的字。
-        // 实测（2026-10-09）：发出去的是同一句话连着两遍。
-        // ⚠⚠ **这是整个代码库里唯一按下回车的地方**，而它前面那道不变量
-        //   是硬约束第 5 条的落点：`sends_for_real` 把三个条件穷举成
-        //   一句话。`debug_assert` 是为了让「哪天有人改了上面的分支条件」
-        //   当场炸，而不是等发错一条消息才发现。
+        // ⚠⚠ **这是整个代码库里唯一会把消息真的发出去的地方。**
+        // `sends_for_real` 把条件穷举成一句话；`debug_assert` 让
+        // 「哪天有人改了上面的分支条件」当场炸，而不是等发错一条消息。
         debug_assert!(
-            sends_for_real(tier, act, already),
-            "走到二次确认分支却不是「Confirm 档 + confirm 动作 + 已装填」"
+            sends_for_real(tier, act),
+            "走到自动发送分支却不是「Auto 档 + confirm 动作」"
         );
         let Some(hwnd) = find_wechat() else {
             return DispatchReply {
@@ -332,11 +323,17 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
                 next_hint: None,
             };
         };
-        let receipt = chatservant_capture::inject::send_only(hwnd);
+        // ⚠ 填入 + 发送**一步做完**。
+        //
+        // 这里必须用 `deliver_send`（填了再按回车），**不能**用老的
+        // `send_only`（只按回车、不写字）——那个路径成立的前提是
+        // 「上一步已经装填过了」，而 `Auto` 档**没有上一步**。
+        // 用错会得到「回执说发成功了，输入框里其实什么都没有」。
+        let receipt = deliver_send(hwnd, &candidate_id);
         if let Ok(mut g) = STATE.lock()
             && let Some(s) = g.as_mut()
         {
-            // 一次装填只服务一次发送；发过就作废。
+            // 这一轮的防重记录已经用掉了，换候选要重新 arm。
             s.armed.disarm();
         }
         let next = d.next(receipt.clone(), 0);
@@ -352,9 +349,9 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
         };
     }
 
-    // 改档就解除装填：上一档的确认不能带到下一档。
+    // 改档就清掉防重记录：上一档的记录不能带到下一档。
     // ⚠ 放在这里而不是 `set_tier` 里：`set_tier` 是命令层的入口，
-    // 而这里保证「**任何一次投递动作**之前，装填都是有效的」。
+    // 而这里保证「**任何一次投递动作**之前，防重状态都是干净的」。
     if let Ok(mut g) = STATE.lock()
         && let Some(s) = g.as_mut()
     {
@@ -363,7 +360,7 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
 
     // ⚠ 走到这里只有一种可能：**tier == Manual**。
     //
-    // `Confirm` 在上面那个分支里已经 return 了（装填 / 二次确认发送）。
+    // `Auto` 在上面那个分支里已经 return 了（填入并发送）。
     // 所以这一行的 `send` 恒为 `false`，而且**恒为 false 是对的**。
     //
     // ⚠⚠ 别把它「简化」成 `deliver(&candidate_id)` 或加个可变参数——
@@ -387,13 +384,13 @@ pub fn dispatch(app: AppHandle, candidate_id: String, action: String) -> Dispatc
     }
 }
 
-/// 档位 → **枚举 id**（`"Manual"` / `"Confirm"` / `"Auto"`）。**IPC 契约用这个。**
+/// 档位 → **枚举 id**（`"Manual"` / `"Auto"`）。**IPC 契约用这个。**
 ///
 /// ⚠ 这里和 `tier_name` 是**两回事**，2026-10-10 实测踩过：
-/// 早先 `get_tier` / `set_tier` 直接返回 `tier_name`（中文「只填入」），
-/// 而前端 `types.ts` 的契约是 `type Tier = 'Manual' | 'Confirm' | 'Auto'`。
+/// 早先 `get_tier` / `set_tier` 直接返回 `tier_name`（中文「仅填入」），
+/// 而前端 `types.ts` 的契约是 `type Tier = 'Manual' | 'Auto'`。
 /// 于是 `TIER_NAME[tier]` 是 `undefined` → 面板头部档位名**整格空白**，
-/// `SegSlider` 拿 `"只填入"` 去匹配 `data-val` 也**一个都匹配不上**，
+/// `SegSlider` 拿中文去匹配 `data-val` 也**一个都匹配不上**，
 /// 滑块因此不定位。**id 归 Rust 定、显示名归前端 `TIER_NAME` 与托盘**——
 /// 中文名一改字，前端要跟着改代码才能跟上。
 #[tauri::command]
@@ -468,26 +465,30 @@ pub fn set_tier(tier: String) -> String {
 /// 不升档、不报错——面板刚起来时还没有状态可读，报错只会让用户看见一句红字。
 fn parse_tier(raw: &str) -> Dispatch {
     match raw {
-        "Confirm" => Dispatch::Confirm,
-        // ⚠ `"Auto"` 于 2026-10-13 取消该档之后落进这一支 ⇒ 读成 **Manual**。
-        //   降档方向是对的：旧配置或旧前端传 Auto，得到的必须是最低档，
-        //   绝不因为「不认识」就升上去。
+        "Auto" => Dispatch::Auto,
+        // ⚠ **两处历史值都落进这一支 ⇒ 读成 Manual**（最低档）：
+        //
+        // ① `"Confirm"`——2026-10-15 之前那一档的名字。本机 prefs 里
+        //    **很可能还存着这个值**，解析不到就必须回落。
+        // ② 任何未知字符串（前端版本不一致、手改过 prefs）。
+        //
+        // 降档方向是对的：解析不出来时得到的必须是最低档，
+        // 绝不因为「不认识」就升上去——升上去意味着**自动发送**。
         _ => Dispatch::Manual,
     }
 }
 
-/// **三个条件同时成立**才允许按下回车。
+/// **两个条件同时成立**才允许按下回车。
 ///
-/// 抽成纯函数是为了让测试能**穷举全部 8 种组合**——写在 `dispatch` 里的话，
+/// 抽成纯函数是为了让测试能**穷举全部组合**——写在 `dispatch` 里的话，
 /// 「能不能发出去」只能靠人读分支顺序，读错一次就是发错一条真消息。
 ///
-/// 判据与硬约束第 5 条逐字对应：两档、默认最低、装填之后才发。
-/// 任何新增的档位或动作都会让这个穷举测试变红，那正是它该做的。
-fn sends_for_real(tier: Dispatch, act: Action, armed: bool) -> bool {
-    matches!(
-        (tier, act, armed),
-        (Dispatch::Confirm, Action::Confirm, true)
-    )
+/// ⚠ 2026-10-15 起条件从三个减到两个：`Confirm` 档取消后
+/// 「已装填过」不再是独立条件（`Auto` 一步到位，没有上一步）。
+/// ⚠ **注意这里成立的那一档就是不问就发的那一档**——
+///   砍掉 `Confirm` 正是拆掉了「发送前再问一次」那道闸。
+fn sends_for_real(tier: Dispatch, act: Action) -> bool {
+    matches!((tier, act), (Dispatch::Auto, Action::Confirm))
 }
 
 /// 档位 → IPC 契约里的枚举 id。见 `get_tier` 的说明：这是**给前端拿去索引
@@ -495,7 +496,7 @@ fn sends_for_real(tier: Dispatch, act: Action, armed: bool) -> bool {
 fn tier_id(d: Dispatch) -> String {
     match d {
         Dispatch::Manual => "Manual",
-        Dispatch::Confirm => "Confirm",
+        Dispatch::Auto => "Auto",
     }
     .to_string()
 }
@@ -504,8 +505,8 @@ fn tier_id(d: Dispatch) -> String {
 /// 前端拿不到这个，它自己有 `TIER_NAME`。
 fn tier_name(d: Dispatch) -> String {
     match d {
-        Dispatch::Manual => "只填入",
-        Dispatch::Confirm => "确认后发",
+        Dispatch::Manual => "仅填入",
+        Dispatch::Auto => "自动发送",
     }
     .to_string()
 }
@@ -533,8 +534,10 @@ fn find_wechat() -> Option<windows::Win32::Foundation::HWND> {
 /// 都只填不发。而设置页写着「自动发送，填入即发送，不打断」——
 /// 界面承诺的是整个产品里**最危险的那个能力**，代码却根本没实现。
 ///
-/// 现在由调用方把「这一轮到底该不该发」算成 [`send`] 传进来：
-/// Auto 恒为 true；Confirm 要先在 [`Arming`] 里成立；Manual 恒为 false。
+/// 现在由调用方把「这一轮到底该不该发」算成 [`send`] 传进来。
+/// ⚠ 2026-10-15 之后**所有调用点传的都是 `false`**：
+///   `Manual` 档只填入；`Auto` 档走的是 [`deliver_send`]，不走这里。
+///   这个 `false` 是「默认档下程序不替人说话」这条约束的落点。
 ///
 /// `send` 是**显式参数**而不是再读一次 tier——「发不发」这个判断只允许
 /// 有一个地方做（`dispatch`），这里再读一遍 tier 就是第二份判断，
@@ -562,6 +565,69 @@ fn deliver(candidate_id: &str, send: bool) -> DeliveryReceipt {
     } else {
         chatservant_capture::inject::fill_input_box(&text, hwnd)
     }
+}
+
+/// **`Auto` 档专用：填入 + 发送，一步做完。**（2026-10-15 新增）
+///
+/// ## 为什么要有它，而不是直接调 [`deliver`]
+///
+/// 老结构里「填入」和「发送」是两次独立调用：第一次 `fill_input_box`
+/// 让人读、让人改，第二次 `send_only` 只按回车。
+/// `Auto` 档砍掉第二次之后，那条「只按回车」的路径就失去了它的前提——
+/// **输入框里根本没有字**，按回车等于在空输入框上发一条空消息，
+/// 而回执会写「已送达」。
+///
+/// ⚠ 所以这里必须走 `fill_and_send`（填了再按回车），
+/// **不能**沿用 `send_only`。这是个静默失败：不报错、回执说成功、
+/// 而对方的聊天窗口里出现一条空白。
+///
+/// ## 为什么它不接受 `tier` 参数
+///
+/// 「该不该发」这个判断只允许在 `dispatch` 里做一次。
+/// 这里再读一遍 tier 就是第二份判断，两份迟早分叉，而分叉的方向
+/// 永远是「多发」。档位判定在 [`sends_for_real`] 那里，穷举测试守它。
+fn deliver_send(hwnd: windows::Win32::Foundation::HWND, candidate_id: &str) -> DeliveryReceipt {
+    let Some(text) = candidate_text(candidate_id) else {
+        return DeliveryReceipt::Failed(format!(
+            "候选 {candidate_id} 已不在当前这轮的候选里（对方又发了新消息，候选被换掉了）。重新等一轮。"
+        ));
+    };
+    // ⚠ 拿不到正文就**不注入**——见 [`deliver`] 里同一段的理由：
+    // 往别人的聊天框里送一句占位假话，比不送严重得多。
+    chatservant_capture::inject::fill_and_send(&text, hwnd)
+}
+
+/// **`Auto` 档的自动发送入口。给观察循环调用**（2026-10-15 新增）。
+///
+/// ## 为什么单独一个函数，而不是让循环去调 `dispatch`
+///
+/// `dispatch` 是 `#[tauri::command]`：它要求前端传 `action`，而自动发送
+/// **没有人的点击**——那一层在这里凭空造一个 `"confirm"` 出来，
+/// 就等于让「谁点的」这个问题有了一个假的答案。
+///
+/// 循环自己知道候选是谁、为什么发（护栏判据在 `watch.rs::AutoGate`），
+/// 所以它直接调这个只做「送出去」的函数。
+///
+/// ## 护栏在哪
+///
+/// ⚠ **这里不做任何判断。** 「该不该自动发」全部在
+/// [`crate::watch`] 的 [`AutoGate`] 里，纯函数 + 穷举测试。
+/// 这里只负责「既然决定发了，那就发」——
+/// 判断与执行分成两处，是为了**判断可以被测穷尽**，
+/// 而执行不行（它要真按回车）。
+pub fn auto_send(candidate_id: &str) -> Result<DeliveryReceipt, String> {
+    // ⚠ 防重记录必须在这里更新，而不是只在循环里记：
+    //   循环记的那份在 `Scratch` 里，而这个函数才是真正按下回车的地方。
+    //   两处各记一份会漏——比如循环记了、这里发送前失败了。
+    if let Ok(mut g) = STATE.lock()
+        && let Some(s) = g.as_mut()
+    {
+        s.armed.disarm();
+    }
+    let Some(hwnd) = find_wechat() else {
+        return Err("找不到微信窗口（已退出？换了进程名？）".into());
+    };
+    Ok(deliver_send(hwnd, candidate_id))
 }
 
 /// 回执 → 前端认得的字符串。
@@ -940,17 +1006,19 @@ const APP_NAME: &str = "副驾 · chat-servant";
 /// 两头都没有 → 条目在、图标空，而日志照样打「托盘图标已就绪」。
 /// 图编进二进制（`include_bytes!`），不依赖运行期资源路径。
 ///
-/// ## `live` 的含义在 2026-10-13 变过
+/// ## `live` 的含义换过一档（2026-10-13 → 2026-10-15）
 ///
 /// 早先是 `auto`，红点表示「现在是自动发送档」。
-/// `Auto` 档取消之后红点**没有跟着取消**，而是改挂到 `Confirm` 上——
-/// 因为它要回答的问题没变：**面板看不见的时候，程序到底会不会把话发出去。**
+/// 2026-10-13 砍掉 `Auto` 之后红点改挂到 `Confirm` 上；
+/// 2026-10-15 砍掉 `Confirm`、`Auto` 回来，红点又挂回 `Auto`。
+/// 三次改动里**问题本身没变**：**面板看不见的时候，
+/// 程序到底会不会把话发出去。**
 ///
 /// - `Manual` → 无点。程序只填入，不会自己发。
-/// - `Confirm` → 红点。程序**会**发出去，只是要你先确认一次。
+/// - `Auto` → 红点。程序**会不问就发出去**。
 ///
-/// ⚠ 三档时代红点是有歧义的：`Auto` 与 `Confirm` 都带点，
-/// 看图分不出「要人确认」和「不问就发」。两档之下这个歧义反而没了。
+/// ⚠ 两档之下红点不再有歧义：只有一个会发出去的档。
+/// 三档时代 `Auto` 与 `Confirm` 都带点，看图分不出「要人确认」和「不问就发」。
 pub fn tray_icon(live: bool) -> tauri::Result<tauri::image::Image<'static>> {
     use std::sync::OnceLock;
     // 底图只解一次。`refresh_tray` 在每次档位/会话变化时都会跑，
@@ -1107,20 +1175,25 @@ fn current_tier_cn() -> String {
 }
 
 /// 当前档位。读锁拿不到就按最低档 `Manual` —— **绝不能猜一个更宽松的值**。
-fn current_tier() -> Dispatch {
+///
+/// ⚠ `pub` 是给观察循环用的：`watch.rs` 的自动发送判据要读同一个格子，
+///   两边各读一份就会分叉，而分叉方向永远是「多发」。
+pub fn current_tier() -> Dispatch {
     with_state(|s| s.tier.get()).unwrap_or(Dispatch::Manual)
 }
 
-/// 当前这一档**会不会真的把消息发出去**（要人确认也算）。
+/// 当前这一档**会不会真的把消息发出去**。
 ///
-/// ⚠ 名字里没有「自动」二字是有意的：两档之下**不存在不问就发的档**，
-/// 写一个 `current_tier_is_auto()` 只会让人以为还有那种东西。
+/// ⚠ 名字里没有「自动」二字是有意的：这个函数回答的是
+/// 「程序会不会把话发出去」，托盘红点靠它——
+/// **面板看不见的时候，程序到底会不会替我说话。**
 ///
-/// ⚠ 它**不等于**「不问就发」。`Confirm` 也会发出去，只是必须先过一次
-/// 人的确认。托盘红点问的是前者（会不会发），不是后者（会不会自己发）。
-/// 硬约束第 5 条守的是后者，两件事别混。
+/// ⚠ 2026-10-15 之后，`Auto` 档**就是**「不问就发」的那一档
+/// （`Confirm` 被砍掉，那道二次确认的闸随之拆掉）。
+/// 所以这里两者合二为一：会发 = 会不问就发。
+/// `Manual` 仍然只填入，红点不亮。
 pub fn tier_can_send() -> bool {
-    matches!(current_tier(), Dispatch::Confirm)
+    matches!(current_tier(), Dispatch::Auto)
 }
 
 /// 当前支持的模型供应商。
@@ -1806,7 +1879,7 @@ mod budget_ceiling_tests {
         let mut armed = Arming::default();
 
         // 升到 Confirm（从默认的 Manual 升，这是**一次真变更**）。
-        assert_eq!(apply_tier(&tier, &mut armed, Dispatch::Confirm), "Confirm");
+        assert_eq!(apply_tier(&tier, &mut armed, Dispatch::Auto), "Auto");
         assert!(!armed.arm("c0", 10), "第一次点击只是装填");
         assert!(armed.arm("c0", 10), "第二次点击才放行");
 
@@ -1818,75 +1891,80 @@ mod budget_ceiling_tests {
         );
 
         // 切回 Confirm —— 仍然作废，上一份**不许**被带回来。
-        apply_tier(&tier, &mut armed, Dispatch::Confirm);
+        apply_tier(&tier, &mut armed, Dispatch::Auto);
         assert!(!armed.arm("c0", 10), "切回同一档不该把上一份装填复活");
 
         // ⚠ 反过来也要成立：**档位没真的变就不该作废**。
         //   否则面板每次改档都抹掉用户的装填，Confirm 永远发不出去。
         let mut b = Arming::default();
-        apply_tier(&tier, &mut b, Dispatch::Confirm);
+        apply_tier(&tier, &mut b, Dispatch::Auto);
         assert!(!b.arm("c1", 7));
-        apply_tier(&tier, &mut b, Dispatch::Confirm);
+        apply_tier(&tier, &mut b, Dispatch::Auto);
         assert!(b.arm("c1", 7), "档位没变时装填要留着，否则两段式永远走不完");
     }
 
-    /// **解析失败一律落到最低档，且不动装填。**
+    /// **解析失败一律落到最低档，且不动防重记录。**
     ///
     /// ⚠ 这条不是废话：`set_tier` 是前端唯一能改档的入口，而前端传什么
-    ///   本来就不可信。旧配置里可能还留着 `"Auto"`（2026-10-13 取消的第三档），
-    ///   它落进 `parse_tier` 的 `_` 分支 ⇒ 读成 **Manual**。
-    ///   若那时程序正停在 Manual，`apply_tier` 看到「没变」就**不解除装填**——
-    ///   这正是我们要的：一次无效输入不该顺手把用户已经装填好的状态抹掉。
+    ///   本来就不可信。
+    ///
+    /// ⚠⚠ **本机 prefs 里很可能还存着 `"Confirm"`** —— 那是 2026-10-15
+    ///   之前那一档的名字。它落进 `parse_tier` 的 `_` 分支 ⇒ 读成 **Manual**。
+    ///   这个回落方向是**安全的那一侧**：宁可退回「只填入」，
+    ///   也不要因为一个认不出的字符串就把程序静默升到「自动发送」。
+    ///
+    ///   若那时程序正停在 Manual，`apply_tier` 看到「没变」就**不清防重记录**
+    ///   ——一次无效输入不该顺手把用户已有的状态抹掉。
     #[test]
     fn an_unparsable_tier_lands_on_manual_without_disarming() {
-        assert_eq!(parse_tier("Auto"), Dispatch::Manual);
+        assert_eq!(parse_tier("Confirm"), Dispatch::Manual);
         assert_eq!(parse_tier("nonsense"), Dispatch::Manual);
         assert_eq!(parse_tier(""), Dispatch::Manual);
+        // ⚠ 而现役的两个 id 都必须解析得出来。
+        assert_eq!(parse_tier("Auto"), Dispatch::Auto);
+        assert_eq!(parse_tier("Manual"), Dispatch::Manual);
 
         let tier = crate::watch::TierCell::default_manual();
         let mut armed = Arming::default();
         assert!(!armed.arm("c0", 3));
-        // 程序本来就在 Manual，输入 `"Auto"` 也落到 Manual ⇒ 没变 ⇒ 装填留着。
-        apply_tier(&tier, &mut armed, parse_tier("Auto"));
-        assert!(armed.arm("c0", 3), "无效输入不该抹掉已经装填好的状态");
+        // 程序本来就在 Manual，输入 `"Confirm"` 也落到 Manual ⇒ 没变 ⇒ 记录留着。
+        apply_tier(&tier, &mut armed, parse_tier("Confirm"));
+        assert!(armed.arm("c0", 3), "无效输入不该抹掉已有的防重记录");
     }
 
-    /// **穷举：除了「Confirm 档 + confirm 动作 + 已装填」，没有第二条能发出去的路。**
+    /// **穷举：除了「Auto 档 + confirm 动作」，没有第二条能发出去的路。**
     ///
     /// ⚠ 硬约束第 5 条的守门测试。2026-10-13 之前这个判断写死在 `dispatch`
     ///   的分支里，靠人读顺序保证；早先它就错过一次——`action` 是 `String`，
     ///   拼错的动作会静悄悄落进「只填入」那条路。
+    ///
+    /// ⚠⚠ **2026-10-15 条件从三个减到两个**：`Confirm` 档取消之后
+    ///   「已装填过」不再是独立条件（`Auto` 一步到位，没有上一步）。
+    ///   所以**能发出去的那个组合，恰恰就是「不问就发」的那个组合**——
+    ///   这正是被砍掉的那道闸，见 `dispatch.rs` 里
+    ///   `auto_is_the_one_tier_that_sends_without_asking`。
     #[test]
-    fn only_armed_confirm_clicks_send() {
-        let tiers = [Dispatch::Manual, Dispatch::Confirm];
+    fn only_the_auto_tier_clicks_send() {
+        let tiers = [Dispatch::Manual, Dispatch::Auto];
         let acts = [Action::Fill, Action::Confirm];
         for tier in tiers {
             for act in acts {
-                for armed in [false, true] {
-                    let expected = matches!(
-                        (tier, act, armed),
-                        (Dispatch::Confirm, Action::Confirm, true)
+                let expected = matches!((tier, act), (Dispatch::Auto, Action::Confirm));
+                assert_eq!(sends_for_real(tier, act), expected, "{tier:?} + {act:?}");
+                // 「不该发」的那些组合，一个都不许为真
+                if !expected {
+                    assert!(
+                        !sends_for_real(tier, act),
+                        "{tier:?} + {act:?} 不该发得出去"
                     );
-                    assert_eq!(
-                        sends_for_real(tier, act, armed),
-                        expected,
-                        "{tier:?} + {act:?} + armed={armed}"
-                    );
-                    // 「不该发」的那些组合，一个都不许为真
-                    if !(tier == Dispatch::Confirm && act == Action::Confirm && armed) {
-                        assert!(
-                            !sends_for_real(tier, act, armed),
-                            "{tier:?} + {act:?} + armed={armed} 不该发得出去"
-                        );
-                    }
                 }
             }
         }
-        // 钉死基线：两档之下，装填过之后还能发出去的组合恰好一个
+        // 钉死基线：能发出去的组合恰好一个
         let mut sending = 0;
         for tier in tiers {
             for act in acts {
-                if sends_for_real(tier, act, true) {
+                if sends_for_real(tier, act) {
                     sending += 1;
                 }
             }
@@ -1948,7 +2026,7 @@ mod budget_ceiling_tests {
     /// 前端要改 `Tier` 的话，这个测试就该红，那正是它该红的时候。
     #[test]
     fn the_ipc_tier_is_the_frontend_enum_id_not_a_display_name() {
-        for (d, id) in [(Dispatch::Manual, "Manual"), (Dispatch::Confirm, "Confirm")] {
+        for (d, id) in [(Dispatch::Manual, "Manual"), (Dispatch::Auto, "Auto")] {
             assert_eq!(tier_id(d), id, "{d:?} 的 IPC id 与前端 Tier 契约不符");
             assert_eq!(parse_tier(id), d, "{id:?} 解析回来不是同一个档");
             // 显示名是另一条路。它一进来，滑块就又不动了。
@@ -1956,24 +2034,33 @@ mod budget_ceiling_tests {
         }
     }
 
-    /// ⚠ **已取消的 `Auto` 必须解析成最低档，而不是崩、也不是升档。**
+    /// ⚠ **被砍掉的 `Confirm` 必须解析成最低档，而不是崩、也不是升档。**
     ///
-    /// 2026-10-13 `Auto` 整档取消，但**旧配置与旧前端还会发 `"Auto"` 过来**
-    /// （升级途中前端与后端版本不一致是常态）。这时候正确的回应是
-    /// **落到 `Manual`**：用户原本处在「不问就发」那一档，
-    /// 程序一升级就变成「只填入」，这是**降权**，方向是对的；
-    /// 反过来（落到 `Confirm`）就是升级即升档，最危险的形态。
+    /// 2026-10-15 `Confirm` 整档取消（`Auto` 请回来），而**旧 prefs 与旧前端
+    /// 还会发 `"Confirm"` 过来**（本机就极可能存着这个值）。
+    /// 这时正确的回应是**落到 `Manual`**：用户原本处在「填入后还要再点一次」
+    /// 那一档，程序一升级就变成「只填入」，这是**降权**，方向是对的。
+    ///
+    /// ⚠ 与 `"Auto"` 正好相反：`"Auto"` 现在是**现役**档，必须解析成 `Auto`
+    ///   而不是回落——见 `parse_tier`。这条测试守的是「别把两个方向搞反」，
+    ///   而搞反的后果正好是静默升档。
     #[test]
-    fn a_retired_auto_id_lands_on_the_lowest_tier() {
-        assert_eq!(parse_tier("Auto"), Dispatch::Manual);
-        // 中文名同样不许蒙混过关
-        assert_eq!(parse_tier("自动发送"), Dispatch::Manual);
+    fn a_retired_confirm_id_lands_on_the_lowest_tier() {
+        assert_eq!(parse_tier("Confirm"), Dispatch::Manual);
+        // 中文名同样不许蒙混过关——旧的「确认后发」也不再是合法输入。
+        assert_eq!(parse_tier("确认后发"), Dispatch::Manual);
+        // ⚠ 而现役的 `"Auto"` 必须**不能**回落。
+        assert_eq!(parse_tier("Auto"), Dispatch::Auto);
     }
 
     /// **认不出来的档位一律落到最低档，不许升档。**
     ///
     /// 面板刚起来、状态还读不到时会传空串过来；那里不能报错弹红字，
     /// 更不能猜一个更宽松的值。
+    ///
+    /// ⚠ 列表里那些中文名（`只填入` / `自动发送`）**永远不该被解析成功**——
+    ///   `parse_tier` 只认 IPC 契约里的枚举 id。中文是给人看的，
+    ///   前端传过来就说明它拿错了字段，这时回落比猜一个更好。
     #[test]
     fn an_unparsable_tier_falls_back_to_manual_never_up() {
         for raw in [
@@ -1982,6 +2069,7 @@ mod budget_ceiling_tests {
             "auto",
             "AUTO",
             "自动发送",
+            "仅填入",
             "只填入",
             "Manual ",
             "nope",
@@ -2001,7 +2089,7 @@ mod budget_ceiling_tests {
         assert!(tip.contains("·"), "tooltip 没有档位那半：{tip:?}");
         assert_eq!(
             tip,
-            format!("{APP_NAME} · 只填入"),
+            format!("{APP_NAME} · 仅填入"),
             "状态是全局的，别硬编码"
         );
     }

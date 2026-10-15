@@ -15,9 +15,10 @@ Rust 核心 + Tauri 2 外壳 + Svelte 5 前端，先打通微信单聊。
    `xtask probe` 这类显式调试命令写入 `target/probe/`，且必须提示用户。
 4. **不碰钱。** 转账、红包、收款相关界面元素一律不碰；起草的 system prompt 里
    也禁了这几个话题。
-5. **发送是分档的，且默认档最低。** 只有两档：`Manual`（只填入）→ `Confirm`
-   （二次确认后发送）。**2026-10-13 取消了第三档 `Auto`**（填入即发）——
+5. **发送是分档的，且默认档最低。** 只有两档：`Manual`（仅填入）→ `Auto`
+   （自动发送）。**2026-10-15 砍掉的是 `Confirm`（二次确认后发送）**——
    决定与理由见 `docs/设计规范.md` §10 第 3b 条，不要凭空加回来。
+   ⚠ `Auto` **不二次确认**：人点一下就发出去了，这拆掉了原先那道闸。
    升档必须是显式的、可回退的、会话结束自动回落到 `Manual` 的操作。
    ⚠ 这是**安全模型**，不是排版：代码与本文必须逐字一致，
    守卫是 `crates/core/src/dispatch.rs` 的 `the_tier_set_is_exactly_two_and_named`。
@@ -112,10 +113,11 @@ cargo test --workspace
 cargo deny check                 # 许可证/advisory/来源合规，见 ADR-0003
 cd ui && pnpm check && pnpm lint
 
-# ⚠ `cargo deny` 要联网拉 advisory-db，而 github.com 直连不通（实测 2026-10-12：
-#   `unable to access ... SSL_ERROR_SYSCALL`）。跑完整门禁前先把代理挂上，
-#   环境变量会被 `gate.ps1` 继承：
-$env:HTTPS_PROXY='http://127.0.0.1:7897'; $env:HTTP_PROXY='http://127.0.0.1:7897'
+# ⚠ `cargo deny` 要联网拉 advisory-db。**本机直连 github.com 实测可用**
+# （2026-10-15：`git ls-remote .../advisory-db HEAD` ⇒ exit=0），
+# 而本机并没有 `127.0.0.1:7897` 那个代理。`scripts/deny.ps1` 因此**默认直连**，
+# 代理只在设了 `CHATSERVANT_PROXY` / `HTTPS_PROXY` 时才启用。
+# ⇒ 跑完整门禁直接 `pwsh -NoProfile -File scripts\gate.ps1`，不必先挂代理。
 pwsh -NoProfile -File scripts\gate.ps1
 
 # 启动与探针

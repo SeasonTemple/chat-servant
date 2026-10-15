@@ -21,7 +21,7 @@
 
   const TIERS: { id: Tier; label: string; hint: string }[] = [
     { id: 'Manual', label: '只填入', hint: '默认。填进输入框，停在光标处，不发送。' },
-    { id: 'Confirm', label: '确认后发', hint: '填入后还要你再确认一次才发送。' },
+    { id: 'Auto', label: '自动发送', hint: '点一下就填入并发送，不再二次确认。' },
   ];
 
   /** 给 `SegSlider` 的只有 id + label；hint 由下面的 `<p>` 单独渲染。 */
@@ -32,8 +32,8 @@
   /**
    * 切到**最高档**时的一次性警示闪。dep=tier 保证只在切档时闪，不在挂载时闪。
    *
-   * ⚠ 2026-10-13 从 `Auto` 改挂到 `Confirm`：`Auto` 取消后，
-   * `Confirm` 成为唯一「会把话发出去」的档，**警示该跟着最高档走**，
+   * ⚠ 2026-10-15 从 `Confirm` 改挂回 `Auto`：砍掉二次确认那一档之后，
+   * `Auto` 是唯一「会把话发出去」的档，**警示该跟着最高档走**，
    * 而不是跟着某个具体档名走。删掉它等于取消升档提示，那是另一回事。
    */
   const flashPulse = (dep: Tier) =>
@@ -53,9 +53,9 @@
       options={OPTIONS}
       onchange={(v) => onchange?.(v as Tier)}
     />
-    <!-- 警示闪只在**最高档**（Confirm）时存在。dep 传 tier：挂载时 tier 已是 Confirm，
+    <!-- 警示闪只在**最高档**（Auto）时存在。dep 传 tier：挂载时 tier 已是 Auto，
          闪一次；之后切走再切回来，tier 变了，attachment 重跑又闪一次。 -->
-    {#if tier === 'Confirm'}
+    {#if tier === 'Auto'}
       <div {@attach flashPulse(tier)} class="cs-pulse" aria-hidden="true"></div>
     {/if}
   </div>

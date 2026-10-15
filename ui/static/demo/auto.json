@@ -1,5 +1,5 @@
 {
-  "_note": "演示数据 · confirm 态。给 ?demo=1&state=confirm 用。**不含任何真实聊天内容。**",
+  "_note": "演示数据 · auto 态。给 ?demo=1&state=auto 用。**不含任何真实聊天内容。**",
   "anchor": {
     "chat": {
       "x0": 304,
@@ -126,7 +126,7 @@
       "probability": 0.1
     }
   ],
-  "reason": "确认后发",
+  "reason": "自动发送",
   "model_calls": 3,
   "counts": {
     "judge": 1,
@@ -139,5 +139,5 @@
   "ocr_calls": 7,
   "error": null,
   "phase": "drafted",
-  "tier": "Confirm"
+  "tier": "Auto"
 }

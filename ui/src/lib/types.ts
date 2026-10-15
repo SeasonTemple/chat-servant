@@ -6,11 +6,11 @@
 /**
  * 发送档位。与 `chatservant_core::dispatch::Dispatch` 一一对应。
  *
- * ⚠ **只有两档。** 2026-10-13 取消 `Auto`（填入即发），
+ * ⚠ **只有两档。** 2026-10-15 砍掉 `Confirm`（二次确认），保留 `Auto`（自动发送），
  * 见 `docs/设计规范.md` §10 第 3b 条与根 `AGENTS.md` 硬约束第 5 条。
  * 加第三个值之前先读那两处——它动的是安全模型，不是排版。
  */
-export type Tier = 'Manual' | 'Confirm';
+export type Tier = 'Manual' | 'Auto';
 
 /** 一次投递的回执。**不是布尔值**——`PossiblySent` 禁止自动重放。 */
 export type Outcome = 'NotSent' | 'Sent' | 'PossiblySent' | 'Failed' | 'TimedOut';

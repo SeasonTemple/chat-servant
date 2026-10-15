@@ -89,7 +89,7 @@
   /** 档位从低到高。Rust 侧持有档位值，这里只按顺序摆位置。 */
   const TIERS = [
     { key: 'Manual', label: '只填入' },
-    { key: 'Confirm', label: '确认后发' },
+    { key: 'Auto', label: '自动发送' },
   ] as const;
 
   type TierKey = (typeof TIERS)[number]['key'];
@@ -100,7 +100,7 @@
    *  初值分两种情况，差别就是安全观感：
    *    · 脱离 Tauri（演示）→ 认 `?tier=`，那是**探针口**，
    *      本来就没有「真档位」可言。
-   *    · 真 Tauri → **一律从最低档起步**，哪怕 URL 写了 `?tier=Confirm`。
+   *    · 真 Tauri → **一律从最低档起步**，哪怕 URL 写了 `?tier=Auto`。
    *      因为 `get_tier` 是异步的，回包之前界面已经画出来了；
    *      那一瞬若显示高档，用户看到的是「程序自己升到确认档」，
    *      而硬约束第 5 条要求默认档最低。真值回来后立刻被覆盖，
@@ -132,7 +132,7 @@
       const real = await invoke<string>('set_tier', { tier: key });
       // ⚠ **采信返回值，不乐观更新。** Rust 侧可能不认这次升档
       // （`parse_tier` 认不出来一律落到 `Manual`），会话结束时也会自动回落。
-      // 界面先动的话，用户点了「确认后发」、勾已经挪过去了，
+      // 界面先动的话，用户点了「自动发送」、勾已经挪过去了，
       // 而程序发出去的仍按旧档走——屏幕和事实不一致的那一秒最要命。
       if (TIERS.some((t) => t.key === real)) {
         tier = real as TierKey;
@@ -441,8 +441,9 @@
     const msgs = r.messages ?? [];
     const cands = r.candidates ?? [];
     const hint = r.status_hint ?? null;
-    // ⚠ **`tier` 原来根本没读**（2026-10-14 实测）。于是 `confirm.json`
-    // 与 `drafted.json` 渲染出来**逐字节相同**——两个夹具的唯一差别就是
+    // ⚠ **`tier` 原来根本没读**（2026-10-14 实测）。于是高档夹具（原
+    // `confirm.json`，2026-10-15 已改名 `auto.json`）与 `drafted.json`
+    // 渲染出来**逐字节相同**——两个夹具的唯一差别就是
     // `tier` 与 `reason`，而后者一个都没接。演示页于是只演得出四态，
     // 文档里写的「七态」有一半是假的。
     //
@@ -1417,17 +1418,17 @@
     color: var(--cs-pencil-2);
   }
 
-  /*  Confirm：会把话发出去。笔从红铅笔换成**警报红**——这是红铅笔
+  /*  Auto：会把话发出去。笔从红铅笔换成**警报红**——这是红铅笔
    *  唯一让位给 `--cs-live` 的地方。
    *
-   *  ⚠ 2026-10-13：`Auto` 取消后，`Confirm` 成为唯一不可逆的档，
+   *  ⚠ 2026-10-15：砍掉二次确认那一档之后，`Auto` 成为唯一不可逆的档，
    *  「红＝不可逆」这条规则从它身上继续成立。
    *
    *  ⚠ 这里**只能改 fill，不能写 fill-opacity**。CSS 声明会盖掉
    *  每层 path 上的 `fill-opacity` 属性，五层嵌套立刻塌成单层平涂，
    *  不可逆的档就成了唯一一支不像铅笔的。要改浓度就改生成器里的
    *  `NEST` 剖面，让五级一起动。 */
-  .cs-sheet[data-tier='Confirm'] .cs-tick path {
+  .cs-sheet[data-tier='Auto'] .cs-tick path {
     fill: var(--cs-live);
   }
 

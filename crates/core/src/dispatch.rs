@@ -18,33 +18,27 @@
 //! 升上去或降下去。档位只被两个东西改：人的显式操作，和会话结束。
 //! 会话结束一律回落到 [`Dispatch::Manual`]，不管之前在哪一档。
 //!
-//! ## 为什么只剩两档（2026-10-13）
+//! ## 档位集合为什么是这两档（2026-10-15 改）
 //!
-//! 早先有三档：`Manual` → `Confirm` → `Auto`（填入即发、不打断）。
-//! **`Auto` 整档取消**，依据是 `docs/设计规范.md` §10 第 3b 条。
+//! **历史走过的三档**是 `Manual` → `Confirm` → `Auto`（填入即发、不打断）。
+//! 2026-10-13 曾整档取消 `Auto`，理由是它与 `Confirm` 的差别只是
+//! 「少一次点击」，而那一次点击正是硬约束第 5 条的闸门。
 //!
-//! 取消它顺带删掉了一段**真实行为**，记在这里，否则下一个读代码的人
-//! 会以为「Auto 只是一档更快的 Confirm」：
+//! 2026-10-15 **用户重新拍板：砍掉的是 `Confirm`，`Auto` 回来。**
+//! 现行两档：
 //!
-//! ```text
-//! if self.tier == Dispatch::Auto {
-//!     return Next::NeedsConfirmation { proposed: Dispatch::Confirm, … }
-//! }
-//! ```
+//! - [`Dispatch::Manual`]——只填入输入框，停在光标处。**默认档**。
+//! - [`Dispatch::Auto`]——**点一下就填入并发送，没有第二次确认**。
 //!
-//! 这段的语义是「**Auto 是『不打断』的承诺，失败的兑现方式是停下来问人，
-//! 而不是自己降档重试又发一次**」。用户以为在自动模式，结果程序偷偷降了档
-//! 又发一条，那比直接失败更糟。
+//! ⚠ **这拆掉了「发送前必须再问一次」那道闸**，是安全模型的实质变更，
+//! 不是排版改动。守卫测试相应地不再是「没有哪一档会不问就发」
+//! （`no_tier_sends_without_asking` 已随之删除），而是
+//! [`Dispatch`] 只允许这两档、且升档只能由人触发。
 //!
-//! 两档之下这个场景**不是变简单了，是不存在了**：最高的 `Confirm` 本来
-//! 就必须问人，根本没有「降档」这个动作可做。于是
-//! `Next::NeedsConfirmation` 与 `Dispatcher::confirm_downgrade`
-//! 一并删掉——留着就是一个永远构造不出来的死变体。
-//!
-//! ⚠ 删掉**不等于**失败不再问人。[`Next::Halt`] 仍然是「停下等人工」，
-//! 触发条件从「Auto 档失败」换成了**投递结果本身不可信**
-//! （[`DeliveryReceipt::PossiblySent`] / [`DeliveryReceipt::TimedOut`]）。
-//! 那是更要紧的一条：它挡的是**重发一条已经发出去的消息**。
+//! ⚠ **`Auto` 档只保证「回落到 `Manual`」，不保证「发得对」。**
+//! 概率是模型的自评，不是校准过的真实性；降级候选（`blind`）的概率更不可信。
+//! 「挑最高置信度那条自动发」这条策略的局限见
+//! `ui/src-tauri/src/watch.rs` 里自动发送那段注释。
 
 use std::fmt;
 
@@ -93,23 +87,25 @@ impl DeliveryReceipt {
 
 /// 发送档位。**默认且终态最低是 `Manual`。**
 ///
-/// **只有两档。** 早先的第三档 `Auto`（填入即发、不打断）于 2026-10-13
-/// 整档取消——见模块文档与 `docs/设计规范.md` §10 第 3b 条。
-/// 硬约束第 5 条也随之改写，见根 `AGENTS.md`。
+/// **只有两档**（2026-10-15 用户拍板，砍掉的是 `Confirm`）：
+/// `Manual` 只填入、`Auto` 点一下就填入并发送。见模块文档。
+///
+/// ⚠ `Auto` **会在不二次确认的情况下发出去**。这是显式选择的结果，
+/// 守卫是 [`Dispatch::ALL`] 恰好两项与 `the_tier_set_is_exactly_two_and_named`。
 ///
 /// 变体顺序即档位高低：靠前的更低。`Default` 落在 `Manual` 上，
-/// `#[derive(Default)]` 只能在末位变体上生效（现在是 `Confirm`），
+/// `#[derive(Default)]` 只能在末位变体上生效（现在是 `Auto`），
 /// 所以必须手写。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Dispatch {
     /// 只填入输入框，停在光标处。默认值，会话结束回落到此档。
     Manual,
-    /// 填入后二次确认才发送。
-    Confirm,
+    /// 填入并发送。**没有第二次确认**——人点一次，就发出去了。
+    Auto,
 }
 
 impl Default for Dispatch {
-    /// `Manual`——**最低档**。派生实现会默认到末位（`Confirm`），
+    /// `Manual`——**最低档**。派生实现会默认到末位（`Auto`），
     /// 而这里宁可手写也不要那个默认值：万一将来再加一档，
     /// 派生实现会**静默地把默认档升上去**，而默认档必须是最低的那档。
     fn default() -> Self {
@@ -126,14 +122,14 @@ impl Dispatch {
     ///
     /// ⚠ 加一档的话**这个数组必须同步改**——
     /// `the_tier_set_is_exactly_two_and_named` 会在你忘了改的时候红。
-    pub const ALL: [Dispatch; 2] = [Dispatch::Manual, Dispatch::Confirm];
+    pub const ALL: [Dispatch; 2] = [Dispatch::Manual, Dispatch::Auto];
 }
 
 impl fmt::Display for Dispatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Manual => "Manual（只填入）",
-            Self::Confirm => "Confirm（确认后发送）",
+            Self::Manual => "Manual（仅填入）",
+            Self::Auto => "Auto（自动发送）",
         })
     }
 }
@@ -182,7 +178,6 @@ pub enum Next {
     // 而死变体比缺功能更糟——它让人以为这条路径是通的。
     // 当时的判断逻辑原文见本文件顶部的模块文档。
 }
-
 impl Next {
     /// 界面上要显示的完整理由。**每一步都必须有话可说。**
     pub fn explain(&self) -> String {
@@ -226,10 +221,9 @@ impl Dispatcher {
 
     /// 上一次投递结果是 `receipt`、已经重试了 `attempt` 次 → 下一步。
     ///
-    /// ⚠ **这个函数与档位无关。** 早先它在末尾有一支 `Auto` 专用分支
-    /// （失败 ⇒ 停下问人，见文件顶部模块文档），随 `Auto` 取消一并删掉。
-    /// 剩下的判定全部只看 [`DeliveryReceipt`]：能不能重试、该不该停，
-    /// 取决于「发出去没有」，不取决于「人在哪一档」。
+    /// ⚠ **这个函数与档位无关。** 判定全部只看 [`DeliveryReceipt`]：
+    /// 能不能重试、该不该停，取决于「发出去没有」，不取决于「人在哪一档」。
+    /// ⇒ **升到 `Auto` 档并不会让失败变得可以静默重试**。
     pub fn next(&self, receipt: DeliveryReceipt, attempt: u32) -> Next {
         // 可能已经发出去了 —— **任何档位**都不许自动重放。
         //
@@ -293,7 +287,7 @@ mod tests {
     #[test]
     fn timed_out_is_treated_exactly_like_possibly_sent() {
         let mut d = Dispatcher::new();
-        d.set_tier(Dispatch::Confirm);
+        d.set_tier(Dispatch::Auto);
         let a = d.next(DeliveryReceipt::PossiblySent, 0);
         let b = d.next(DeliveryReceipt::TimedOut, 0);
         let kind = |n: &Next| matches!(n, Next::Halt { .. });
@@ -331,8 +325,8 @@ mod tests {
 
     /// ⚠ **档位集合是硬约束，不是实现细节。**
     ///
-    /// 2026-10-13 取消 `Auto` 档（`docs/设计规范.md` §10 第 3b 条）之后，
-    /// 这条测试就是「档位没有悄悄长回来」的唯一守卫。
+    /// 2026-10-15 用户拍板砍掉 `Confirm`、恢复 `Auto`（模块文档有完整来龙去脉）。
+    /// 这条测试是「档位没有悄悄长回来」的唯一守卫。
     ///
     /// 为什么单列一条：加一档是一个**看起来很小**的改动——
     /// 枚举加一个变体、`Display` 加一支、前端 `TIERS` 加一项，
@@ -344,46 +338,47 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "Manual（只填入）".to_string(),
-                "Confirm（确认后发送）".to_string()
+                "Manual（仅填入）".to_string(),
+                "Auto（自动发送）".to_string()
             ],
-            "档位集合变了。取消 Auto 是 2026-10-13 的决定；\
+            "档位集合变了。2026-10-15 的决定是「砍 Confirm、留 Auto」；\
              要加回来先去改 docs/设计规范.md §10 第 3b 条与根 AGENTS.md 硬约束第 5 条"
         );
         assert_eq!(Dispatch::ALL.len(), 2);
         // 最低档必须排在最前 —— `Ord` 派生的比较方向依赖这一点。
-        assert!(Dispatch::Manual < Dispatch::Confirm);
+        assert!(Dispatch::Manual < Dispatch::Auto);
     }
 
-    /// **没有任何一档会不问就发出去。**
+    /// **`Auto` 档会在不二次确认的情况下发出去——这条是已知的、被接受的。**
     ///
-    /// 这条在两档之下必然成立（因为只有两档，而最高的那档要人确认），
-    /// 它是一条**回归锁**：将来若有人加了第三档，这条会提醒他去想清楚
-    /// 「它到底发不发」。它替代了被删掉的 `Dispatch::sends_without_asking`
-    /// ——那个函数恒为 `false`，留着只是骗人。
+    /// ⚠ 2026-10-15 之前这里有一条 `no_tier_sends_without_asking`，
+    /// 它断言「没有任何一档会不问就发出去」。**那条随 `Confirm` 一起删掉了**，
+    /// 因为砍掉 `Confirm` 之后这个边界**不再成立**，`Auto` 档正是
+    /// 「不问就发」的那一档。
+    ///
+    /// 删它不是因为它测错了，而是因为它守的东西被**显式决定**改掉了。
+    /// 留着一条恒假的测试比删掉更糟：它会让人以为闸还在。
+    ///
+    /// 现在替代它守安全模型的是这三条：
+    /// · [`the_tier_set_is_exactly_two_and_named`]——档位集合恰好两档；
+    /// · [`the_default_tier_is_the_lowest_one`]——默认档是最不危险的那档；
+    /// · [`ending_a_session_always_falls_back_to_manual`]——会话结束自动回落。
+    ///
+    /// ⚠ **它们合起来仍不保证「发得对」**，那是 `Auto` 档的定义本身。
+    /// 「挑最高置信度自动发」的局限见 `watch.rs` 里自动发送那段注释。
     #[test]
-    fn no_tier_sends_without_asking() {
-        // 枚举里没有「不问就发」这个概念：`Next` 只有 Retry 与 Halt，
-        // 没有任何一项表示「直接发出去」。
-        for tier in Dispatch::ALL {
-            for attempt in 0..MAX_RETRIES + 2 {
-                for receipt in [
-                    DeliveryReceipt::Sent,
-                    DeliveryReceipt::NotSent,
-                    DeliveryReceipt::Failed("x".into()),
-                    DeliveryReceipt::TimedOut,
-                    DeliveryReceipt::PossiblySent,
-                ] {
-                    let mut d = Dispatcher::new();
-                    d.set_tier(tier);
-                    let n = d.next(receipt.clone(), attempt);
-                    assert!(
-                        matches!(n, Next::Retry { .. } | Next::Halt { .. }),
-                        "{tier} 档 / {receipt:?} / 第 {attempt} 次返回了非预期变体：{n:?}"
-                    );
-                }
-            }
-        }
+    fn auto_is_the_one_tier_that_sends_without_asking() {
+        // 这条测试存在的意义是**把已经改掉的事实写在代码里**，
+        // 免得下一个读代码的人以为还有一道「必须确认」的闸。
+        assert!(
+            matches!(Dispatch::ALL[1], Dispatch::Auto),
+            "最高档必须是 Auto——它是唯一会不问就发的那档"
+        );
+        // 而最低档必须只填入：默认状态下程序不会替人说话。
+        assert!(
+            matches!(Dispatch::ALL[0], Dispatch::Manual),
+            "最低档必须是 Manual"
+        );
     }
 
     /// 投递失败可以退避重试——**前提是确定没发出去**。
@@ -431,12 +426,11 @@ mod tests {
 
     /// 人工确认之前，重试一次都不许发生。
     ///
-    /// ⚠ 「人工确认」在两档之下的具体形态是**停下等 `Halt`**，
-    /// 而不是原来的 `NeedsConfirmation` 提议降档。
+    /// ⚠ 「停下等人工」在两档之下的具体形态是 [`Next::Halt`]。
     #[test]
     fn no_retry_happens_after_a_halt() {
         let mut d = Dispatcher::new();
-        d.set_tier(Dispatch::Confirm);
+        d.set_tier(Dispatch::Auto);
         // 停过一次之后，同一个回执在任意重试次数下都还是停——
         // 「停下」不是「第 N 次可以再试」。
         for attempt in 0..MAX_RETRIES + 2 {
@@ -452,7 +446,7 @@ mod tests {
     #[test]
     fn retries_are_bounded_and_back_off_exponentially() {
         let mut d = Dispatcher::new();
-        d.set_tier(Dispatch::Confirm);
+        d.set_tier(Dispatch::Auto);
         let mut waits = Vec::new();
         for attempt in 0..MAX_RETRIES {
             let Next::Retry { after_ms, .. } = d.next(DeliveryReceipt::Failed("x".into()), attempt)
@@ -512,7 +506,7 @@ mod tests {
     #[test]
     fn every_step_carries_a_readable_reason() {
         let mut d = Dispatcher::new();
-        d.set_tier(Dispatch::Confirm);
+        d.set_tier(Dispatch::Auto);
         for (receipt, attempt) in [
             (DeliveryReceipt::Failed("x".into()), 0u32),
             (DeliveryReceipt::PossiblySent, 0),

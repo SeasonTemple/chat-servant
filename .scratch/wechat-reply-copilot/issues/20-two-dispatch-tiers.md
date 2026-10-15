@@ -1,18 +1,39 @@
-# 20: 发送档位从三档砍到两档（Auto 整档取消）
+# 20: 发送档位砍到两档（2026-10-15 定：砍 Confirm、留 Auto）
 
-**What to build:** 面板与 Rust 只剩两档 —— `Manual`（只填入）与 `Confirm`（确认后发）。
-`Auto`（填入即发、不打断）**整档取消**。
+**What to build:** 面板与 Rust 只剩两档 —— `Manual`（仅填入）与 `Auto`（自动发送）。
+`Confirm`（二次确认后发送）**整档取消**。
+⚠ 这是**第二轮**决定，方向与 2026-10-13 那轮**相反**，别把旧结论当现状。
 
 **Blocked by:** None（可以立刻做）
 
-**Status:** ready-for-human · **决定日期 2026-10-13**
-· ✅ **2026-10-13 实现完毕**（代码与门禁）
+**Status:** ready-for-human · **现行决定日期 2026-10-15**
+· ✅ **2026-10-13 实现完毕**（当时砍的是 `Auto`）
+· ✅ **2026-10-15 用户重新拍板：砍掉的是 `Confirm`，`Auto` 回来。**
+  代码已改完（`dispatch.rs` 35 个测试全过）
 · ⚠ 标 `ready-for-human` 而不是 `ready-for-agent`：剩下的两项都要在
   **真实微信会话**上点一遍，agent 做不了（既要动手，又涉及别人的聊天窗口）
 
-## 这是什么性质的改动
+## ⚠ 两次决定的方向相反（先读这段）
 
-⚠ **不是排版改动，是安全模型变更。** 别当成「删个枚举变体顺手的事」做掉。
+| 日期 | 砍掉哪一档 | 留下的最高档 | 理由 |
+|---|---|---|---|
+| 2026-10-13 | `Auto`（填入即发） | `Confirm` | 它与 `Confirm` 只差「少一次点击」，而那次点击正是闸门 |
+| **2026-10-15** | **`Confirm`（二次确认）** | **`Auto`** | 用户重新拍板：拆掉那道闸，换成「点一下就发」 |
+
+⚠ 2026-10-15 的变更**拆掉了「发送前必须再问一次」那道闸**，
+是安全模型的实质变更，不是排版改动。
+⚠ 守卫随之换了一条：不再是「没有哪一档会不问就发」
+（`no_tier_sends_without_asking` 已随 `Confirm` 一起删除），
+而是 `the_tier_set_is_exactly_two_and_named`（只允许这两档、名字锁死）
+加上「升档只能由人触发」。
+
+下面正文里凡带 `Auto 取消` / `Confirm` 保留字样的段落，
+**描述的都是 2026-10-13 那一轮**，保留它们是因为来龙去脉要能查，
+**但不是现状**。现状以本文开头的表格与 `dispatch.rs` 模块文档为准。
+
+## ⚠ 历史：2026-10-13 那轮砍的是 Auto（已作废，保留作记录）
+
+**这不是排版改动，是安全模型变更。** 别当成「删个枚举变体顺手的事」做掉。
 
 2026-10-12 之前这个产品是三档，并在根 `AGENTS.md` 硬约束第 5 条里写死：
 
@@ -23,7 +44,7 @@ Manual（只填入）→ Confirm（二次确认后发送）→ Auto
 砍成两档会把那条约束整个改写，所以**必须同一个提交里把约束改掉**，
 否则仓库里会出现「规范说两档、代码说三档」这种反向骗人的状态。
 
-## 取消 Auto 会一并删掉一条真实行为
+### 取消 Auto 曾一并删掉一条真实行为（该行为现已随 Auto 回来，但守卫仍是删除）
 
 `crates/core/src/dispatch.rs` 的 `Dispatcher::next` 里有一条分支：
 
@@ -34,22 +55,25 @@ if self.tier == Dispatch::Auto {
 ```
 
 它的语义是「**Auto 是『不打断』的承诺，失败的兑现方式是停下来问人，
-而不是自己降档重试又发一次**」。两档之下这个场景会消失
-（Confirm 失败本来就要问人）。**这条行为差异必须写进 ADR 或注释，
-否则下一个读代码的人会以为 Auto 只是一档『更快的 Confirm』。**
+而不是自己降档重试又发一次**」。**两档之下这个场景不存在**
+（没有第三档可降）。**这条行为差异必须写进 ADR 或注释，
+否则下一个读代码的人会以为 Auto 只是一档『更快的 Manual』。**
+
+⚠ `Next::NeedsConfirmation` 与 `Dispatcher::confirm_downgrade` **仍是删除状态**，
+理由与 2026-10-13 相同：两档之下它们永远构造不出来，是死变体。
+死变体比缺功能更糟。
 
 ## 需要一起改的地方（逐条核过）
 
-- [x] `crates/core/src/dispatch.rs` 的 `enum Dispatch` 去掉 `Auto`；
-      `Default` 手写落在 `Manual` 这条**保持不变**（注释重写：末位现在是 `Confirm`，
+- [x] `crates/core/src/dispatch.rs` 的 `enum Dispatch` 去掉 `Confirm`；
+      `Default` 手写落在 `Manual` 这条**保持不变**（注释重写：末位现在是 `Auto`，
       派生默认会落到它）
 - [x] 同文件 `Display` 的三支匹配收成两支
-- [x] `sends_without_asking()` —— **删掉**。它恒为 `false`，留着就是骗人。
-      替代物不是另一个恒定的函数，而是测试：
-      `the_tier_set_is_exactly_two_and_named`（档位集合恰好两档且名字锁死）
-      与 `no_tier_sends_without_asking`（遍历两档 × 五种回执 × 五次重试，
-      断言 `next()` 只返回 `Retry`/`Halt`，没有任何「发出去」的变体）
-- [x] `dispatch.rs` 里引用 `Auto` 的测试逐条处置 ——
+- [x] `sends_without_asking()` —— **删掉**（2026-10-13 因 `Auto` 取消而恒为 `false`；
+      2026-10-15 因 `Auto` 回来而**确实会为 `true`**，更不能留一个恒定函数）。
+      替代物不是另一个恒定的函数，而是测试：`the_tier_set_is_exactly_two_and_named`
+      （档位集合恰好两档且名字锁死）
+- [x] `dispatch.rs` 里引用被砍档的测试逐条处置 ——
       **边界在两档下还成不成立，逐条确认过**：
       - `the_program_never_raises_its_own_tier` **成不立** → 改成从两档各出发，
         并删掉 `NeedsConfirmation` 分支（`next` 是 `&self`，它没能力改档）
@@ -61,12 +85,16 @@ if self.tier == Dispatch::Auto {
         `possibly_sent_is_never_replayed` → 枚举数组换成 `Dispatch::ALL`
       - **新增** `retry_is_allowed_exactly_when_nothing_was_sent`：
         现在的边界是「确定没发出去才可重试」，与档位无关
+      - **新增** `auto_is_the_one_tier_that_sends_without_asking`：
+        2026-10-15 起，**唯一会不问就发的那一档是 `Auto`**（替代已删除的
+        `no_tier_sends_without_asking`）
 - [x] `Next::NeedsConfirmation` 与 `Dispatcher::confirm_downgrade` **一并删除** ——
       两档之下它们永远构造不出来，是死变体。死变体比缺功能更糟
 - [x] `ui/src/routes/(panel)/+page.svelte`：`TIERS`、`TIER_NAME`、
       三条 `data-tier='…'` 的 CSS 选择器
-- [x] `ui/static/demo/auto.json` —— **删除**。实测它与 `confirm.json`
-      只差 3 行（`_note` / `reason` / `tier`），是纯重复
+- [x] `ui/static/demo/confirm.json` → **改名为 `auto.json`**。
+      ⚠ 2026-10-13 那轮删掉的是旧的 `auto.json`（它与 `confirm.json` 只差档位名，
+      是纯重复）。改名后两具演示数据由 `armed_id` / `reason` 区分，不再重复
 - [x] 根 `AGENTS.md` 硬约束第 5 条改写为两档，**同一提交内**
 - [x] `docs/设计规范.md` §10 第 3b 条销账，§5 措辞复查
 - [x] 全仓 grep `Auto` / `自动发送` / `auto.json`，确认没有漏掉的引用。
@@ -75,36 +103,37 @@ if self.tier == Dispatch::Auto {
 
 ## ⚠ 两处不是「删掉就完事」，需要单独说明
 
-### 1. 托盘红点没有跟着取消，而是改挂了 `Confirm`
+### 1. 托盘红点跟着「唯一会发出去的那一档」走
 
 `commands::tray_icon(auto)` 的红点要回答的问题是
 **「面板看不见的时候，程序到底会不会把话发出去」**。
-`Auto` 取消之后这个问题**没消失**——`Confirm` 照样会发出去。
+砍掉任一档之后这个问题**都没消失**——总有一档会发出去。
 
 所以参数从 `auto` 改成 `live`，判断函数从 `current_tier_is_auto()`
-改成 `tier_can_send()`（`matches!(current_tier(), Dispatch::Confirm)`）。
+改成 `tier_can_send()`（2026-10-15 起匹配 `Dispatch::Auto`）。
 
 ⚠ 命名是刻意的：`tier_can_send()` **不等于**「不问就发」。
-硬约束第 5 条守的是后者，两件事别混。
+硬约束第 5 条现在守的是「升档必须人按、默认档最低」，两件事别混。
 
 顺带修掉一个旧歧义：三档时代红点是有歧义的——`Auto` 与 `Confirm`
 都带点，看图分不出「要人确认」和「不问就发」。两档之下这个歧义反而没了。
 `stamp_auto_dot` → `stamp_live_dot`，测试同名改。
 
-### 2. `TierSwitch` 的警示闪从 `Auto` 改挂到 `Confirm`
+### 2. `TierSwitch` 的警示闪跟着「最高档」走（`Confirm` → 又回到 `Auto`）
 
 同样不能删：删掉它等于取消升档提示，那是另一回事。
 警示该跟着**最高档**走，而不是跟着某个具体档名走。
+2026-10-13 它从 `Auto` 改挂到 `Confirm`；2026-10-15 又挂回 `Auto`。
 
-### 3. `commands.rs:331` 的 `send` 参数恒为 `false`，而且恒为 false 是对的
+### 3. `commands.rs` 的 `send` 参数
 
-先确认过路径：`Confirm` 档在 `dispatch` 里走的是 254 行那个分支
-（装填 → 二次点击 `send_only` 按回车），**根本到不了 331 行**；
-331 行只服务 `Manual`。
+⚠ 本条**原描述已随语义变更作废**，且 `commands.rs` 正在改，细节见那里的注释。
 
-⇒ 两档之下，**整个代码库里按下回车的地方只剩一处**：`inject::send_only`，
-它的前置条件是 `Arming::arm` 成功（人已装填过一次）。
-比三档时更容易审。代码里写了警告，别把它「简化」掉。
+`Arming` 的语义在 2026-10-15 变了：它原先是「**已装填**」（`Confirm` 档第一次
+点击记一笔，等第二次点击才发）。**砍掉 `Confirm` 之后没有第二次点击了**，
+那个语义随之消失。现在它只挡一件事：**同一条候选在同一轮里被发两遍**。
+
+代码里写了警告，别把它「简化」掉。
 
 ## 2026-10-14 补记：「改档就解除装填」是注释里的规则，代码里没有
 
@@ -112,12 +141,15 @@ if self.tier == Dispatch::Auto {
 真的发出去了」，`dispatch` 里那句注释又写着「改档就解除装填：上一档的确认
 不能带到下一档」——**两处都声称有，`set_tier` 从头到尾没碰过 `armed`**。
 
-**漏出来的路**：Confirm 档点候选 A（只装填，不发）→ 切到 Manual → 在微信里
-改成自己想发的内容 → 切回 Confirm → 再点 A。`arm("A", 同一 ticks)` 返回
-true ⇒ **两段式被跳过，直接发送**，把用户自己写的内容覆盖掉。
+**漏出来的路**（当时的世界：`Confirm` 档点候选 A 只装填不发）→
+切到 `Manual` → 在微信里改成自己想发的内容 → 切回 `Confirm` → 再点 A。
+`arm("A", 同一 ticks)` 返回 true ⇒ **两段式被跳过，直接发送**，
+把用户自己写的内容覆盖掉。
 
 已修，方向严格保守：**只让发送更严**（多要求一次装填），不打开任何新路径。
 硬约束第 5 条的档位集合没动，动的只是「装填在什么时候作废」。
+⚠ 2026-10-15 之后 `Arming` 换成防重语义，这条规则要重新核一遍——
+见下面的验收项。
 
 配套两件事，都属于本仓的老毛病：
 
@@ -126,51 +158,80 @@ true ⇒ **两段式被跳过，直接发送**，把用户自己写的内容覆�
   ⚠ 第一版测试是在测试里**复刻**判断的，把 `disarm` 短路成 `&& false`
   测试照样全绿。**复印件不是守卫。**
 - 「档位没真变就不该解除装填」的反面同样有断言，否则面板每次改档都抹掉
-  用户的装填，`Confirm` 永远发不完。
+  用户的装填。
 
 自证会响：`disarm` 短路后 `changing_tier_disarms` FAILED。
 
 ## 验收项
 
-- [ ] 真机上**没有任何路径能不发确认就发出去**。逐条走：`Manual` 只填入、
-      `Confirm` 弹二次确认。掐掉任一处守卫，实机验证必须失败
+⚠ 下面两条是 2026-10-15 那轮留下的**新**未验项。
+原先那条「没有任何路径能不发确认就发出去」**按新模型已不成立**
+（`Auto` 就是要不问就发），它已被下面的第一条取代。
+
+- [ ] 真机上**除 `Auto` 档外没有任何路径会发出去**，且 `Auto` 档**只在人点了
+      之后**发出去、`Manual` 只填入不回车。逐条走：`Manual` 只填入、
+      `Auto` 点一下即发且不弹二次确认。掐掉任一处守卫，实机验证必须失败
       ⛔ **未验**（云端会话碰不到微信实机）。代码侧已把「按回车的调用点
       只有一处」写成注释，但那一句注释不等于实测
 - [x] `cargo test --workspace` 全绿，且**没有为了让测试过而删掉断言**
       —— 删掉的两个测试（`auto_failure_…`、`no_retry_happens_before_…`）
       是因为**它们守的边界在两档下不存在**，原文都搬进了注释
 - [x] `?demo=1&state=` 各态仍然渲染，零 pageerror
-      ⚠ **七态**不是八态：`auto.json` 删除后就是七态，
-      `?state=auto` 落到 fallback 仍能渲染但不再是独立一态
-- [x] 托盘 tooltip 的档位名不再出现「自动发送」（`tier_name` 收成两支）
+      ⚠ **八态**：`confirm.json` 已改名 `auto.json`，`?state=auto` 又是独立一态了
+- [x] 托盘 tooltip 的档位名不再出现「确认后发」（`tier_name` 收成两支）
 - [x] 根 `AGENTS.md` 硬约束第 5 条与代码**一致**，且指向守卫测试
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 绿
 - [x] `pnpm check` / `pnpm lint` 绿
-- [ ] 真机走一遍「改档 ⇒ 装填作废」：`Confirm` 档点候选（只装填）→ 切
-      `Manual` → 改微信里的话 → 切回 `Confirm` → 再点同一条候选，**必须
-      只填入、不得直接发送**
-      ⛔ **未验**。代码侧已由 `changing_tier_disarms` 覆盖，但它只到
-      「`apply_tier` 清了 `Arming`」这一层；`STATE` 与 `inject::send_only`
-      那一段仍只在真机上成立
+- [ ] 真机走一遍「改档 ⇒ 防重标记作废」：`Auto` 档点候选（发出去了）
+      → 切 `Manual` → 在微信里发一条自己的话 → 切回 `Auto` → **再点同一条
+      候选，必须真的再发一次**，不能被上一轮的防重标记静默吞掉
+      ⛔ **未验**。⚠ **这条的语义 2026-10-15 变了**：`Arming` 从「已装填」
+      变成了「本轮已发过」。原先验的是「装填不能跨档沿用」，现在验的是
+      「防重不能跨档沿用」——两者的用户可见后果**不一样**
+      （后者若失效，丢的是一条该发的回复，方向与原先相反）。
+      代码侧是否已被 `changing_tier_disarms` 覆盖，**待主 agent 改完
+      `commands.rs` 后复核**
 
-## Update 2026-10-15：机器侧已穷尽，剩下的是「界面上根本没有发送入口」
+## ⚠ Update 2026-10-15（同日，两件事把这段结论推翻了）
 
-本票那条未勾验收项（「真机上没有任何路径能不发确认就发出去」），
+### 1. 原结论的前提没了
+
+下面这段原本判定「真机上没有任何路径能不发确认就发出去」**代码侧成立**。
+⚠ **`Auto` 档回来之后这个判定按定义就不成立**——`Auto` 就是要不问就发。
+它连同 `no_tier_sends_without_asking` 一起作废。
+下面保留原始记录，但它现在只能读作「2026-10-13 那一轮机器侧已穷尽」。
+
+### 2. 但「界面上根本没有发送入口」这条**仍然成立，且更要紧了**
+
+那段穷尽里真正有价值的发现与档位无关：面板上没有能发出去的东西。
+
+⚠ 这一点在 2026-10-15 之后**更要紧**——`Auto` 档的价值就是「点一下就发」，
+而**面板上连「点一下」的那个点都不存在**。所以本票剩下的真机验收项，
+严格说仍然**没有可在界面上点出来的对象**。
+
+⚠ 原始穷尽结论里「`fill_and_send` 当前不可达，两个调用点都传 `send = false`」
+这一条，**在 `Auto` 回来之后必须重新核**——它现在很可能是**可达**的，
+可达正是新模型的预期结果。本票不改 `commands.rs`，该条留给主 agent 判定。
+
+### 原始记录（2026-10-13 那轮的穷尽结论，前提已被推翻）
+
+本票当时那条未勾验收项（「真机上没有任何路径能不发确认就发出去」），
 **代码侧已可判定为成立**，全仓穷尽结果：
 
 - 全仓**唯一**的 `VK_RETURN`（回车）发送点在 `crates/capture/src/inject.rs:475`；
-  它的两个调用者里，`fill_and_send` **当前不可达**——
+  它的两个调用者里，`fill_and_send` **当时不可达**——
   `commands.rs` 的两个调用点（`:304`、`:374`）都传 `send = false`。
-- ⇒ **没有任何路径能在用户未确认时发出。**
+- ⇒ **当时**没有任何路径能在用户未确认时发出。
 
 **守卫测试（机器核过）**：
 
-| 测试 | 守什么 |
-|---|---|
-| `dispatch.rs:342` `the_tier_set_is_exactly_two_and_named` | 档位恰好两档、名字逐字、最低档在首位 |
-| `dispatch.rs:365` `no_tier_sends_without_asking` | 两档 × 五回执 × 五重试，`next()` 只许 `Retry`/`Halt` |
-| `commands.rs:1860` `only_armed_confirm_clicks_send` | 穷举 2×2×2，「能真发的组合恰好 1 个」 |
-| `commands.rs:1804` `changing_tier_disarms` | 改档即作废装填；同档再设才保留 |
+| 测试 | 守什么 | 2026-10-15 现状 |
+|---|---|---|
+| `dispatch.rs` `the_tier_set_is_exactly_two_and_named` | 档位恰好两档、名字逐字、最低档在首位 | ✅ 仍有效 |
+| ~~`dispatch.rs` `no_tier_sends_without_asking`~~ | 两档 × 五回执 × 五重试，`next()` 只许 `Retry`/`Halt` | ⛔ **已删除**（`Auto` 会不问就发） |
+| `dispatch.rs` `auto_is_the_one_tier_that_sends_without_asking` | 唯一会不问就发的那一档是 `Auto` | ✅ **新守卫**，取代上一条 |
+| `commands.rs` `only_armed_confirm_clicks_send` | 穷举 2×2×2，「能真发的组合恰好 1 个」 | ⚠ 名字带 `Confirm`，语义已变，**待主 agent 复核** |
+| `commands.rs` `changing_tier_disarms` | 改档即作废标记；同档再设才保留 | ⚠ `Arming` 已换语义，**待主 agent 复核** |
 
 ### ⚠⚠ 但真正的发现是另一件事：**面板上没有发送按钮**
 
