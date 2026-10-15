@@ -763,9 +763,10 @@
     **撕口那条拖拽带与窗口控制留在外面**：窗口的出口不能跟着内容消失，
     而设置里也要改档，顶边那道撕口是这张纸的边界，同样得一直在。
 
-    ⚠ 设计规范 §1：设置页用**中性白**，刻意不参与「纸 + 墨 + 红批注」
-    这套叙事。`PanelSettings` 自带那份配色，这里不覆写它——
-    在撕边纸上叠一层同色系的设置，读成「纸上又贴了一张纸」。
+    ⚠ 设置态**整张换掉纸底**（`.cs-sheet[data-settings='true']`，见下面那段），
+    这不是漏改：设计规范 §1「纸面是配置界面唯一的敌人」，材质切换本身
+    就是「你现在不在抄写，在配置」这句提示。`PanelSettings` 用的仍是
+    纸面板那套 `--cs-*` 配色 token，只是不铺那张撕口纸。
   -->
   {#if settingsOpen}
     <!--
@@ -1492,9 +1493,13 @@
    *    注释写着「要右移 9px 才盖得住三个字」，但公式算出该是 -27——
    *    旧值把笔心推到了槽心**右侧 6px**。标一个东西却没对准它。
    *
-   *  ⚠ 尺寸由 SVG 的 `width`/`height` 属性给（= `ACTIVE_VIEW`），**不是** CSS。
-   *    这里若写 `width: 100%`，`big` 档会被压回 60 宽而不是被裁——
-   *    两者症状不同：裁是「放大了但没变大」，压是「选了大档但形状没变」。
+   *  ⚠⚠ **原先这里写着「尺寸由 SVG 的 `width/height` 属性给（= `ACTIVE_VIEW`），
+   *    不是 CSS」——那句话是错的，2026-10-15 真机拆穿。**
+   *    下一行的 CSS `width: calc(var(--tick-w, 60px) * var(--tk, 1))` 直接压过
+   *    SVG 属性，而 `--tick-w` 当时只对 `tick` 两支赋过值 ⇒「圈 + big」
+   *    （`RING_VIEW` 84×52）被 fallback 的 60×40 压扁并偏左 13px。
+   *    ⇒ 尺寸**确实由 CSS 给**，所以每一支都必须显式写 `--tick-w/--tick-h`，
+   *    见下面那三支。写「不是 CSS」等于给下一个人留一个假前提。
    *  交叉验证：公式代回状态圈算出 (-30.7, 30.0)，与已上线的 -30 / 30 吻合。
    */
   .cs-tick {
@@ -1517,10 +1522,33 @@
     margin-left: calc(-31px * var(--tk, 1));
   }
 
-  /*  放大档换了取景框，笔心坐标随之改变，偏移**重算**而不是在旧值上加减。
-   *  实测（解析 marks.js 的 path 坐标，非估算）：mid 笔心 (27.70, 17.50)、
-   *  big 笔心 (27.75, 17.50)——两档同框同高，偏移相同。代回公式
-   *  top = 46.4 - 笔心y = 29，margin-left = -笔心x = -28。 */
+  /* ⚠ **每一支都必须显式给 `--tick-w` / `--tick-h`，不许落 fallback。**
+   *
+   * ⚠⚠ 2026-10-15 真机踩到：`.cs-tick` 的 CSS `width/height` **压过** SVG 的
+   *   `width/height` 属性。而 `--tick-w` 的 fallback 是 `60px`，且原先**只有**
+   *   `[data-shape='tick'][data-ring='mid'|'big']` 那两支给它赋过值。
+   *   ⇒ 「圈 + big」这一支（`ACTIVE_VIEW = RING_VIEW = 84×52`）落进 fallback
+   *   60×40，被硬压扁；更糟的是偏移 `margin-left:-43px` 是按 **84 宽**的
+   *   笔心 x≈42 反算的，渲染宽只有 60 ⇒ **偏左约 13px**，
+   *   垂直同理偏上约 6px。
+   *   症状是「圈很扁 + 明显错位」，而门禁与测试全绿。
+   *
+   * ⚠ 本文件上面那段注释曾写着「尺寸由 SVG 的 `width/height` 属性给，
+   *   **不是** CSS」——**那是错的**，CSS 就在下一行把它盖掉了。
+   *   注释与代码矛盾、而真机表现跟着代码走的那种，必须改注释而不是改心。
+   *
+   * 下面的三支与 `marks.js` 的 `ACTIVE_VIEW` 逐支对应（1:1，不许有第四支漏掉）：
+   *   base / mid 两支两形态都 = `MARK_VIEW` 60×40
+   *   tick + mid/big           = `TICK_VIEW` 56×34
+   *   ring + big               = `RING_VIEW` 84×52
+   */
+  .cs-tick[data-shape='ring'][data-ring='mid'],
+  .cs-tick[data-shape='ring'][data-ring='base'],
+  .cs-tick[data-shape='tick'][data-ring='base'] {
+    --tick-w: 60px;
+    --tick-h: 40px;
+  }
+
   .cs-tick[data-shape='tick'][data-ring='mid'],
   .cs-tick[data-shape='tick'][data-ring='big'] {
     --tick-w: 56px;
@@ -1530,8 +1558,12 @@
   }
 
   .cs-tick[data-shape='ring'][data-ring='big'] {
+    /* 84 宽 ⇒ 笔心 x = 42。原先写 -43 是按 84 估的，渲染宽 60 时偏左 13px。 */
+    --tick-w: 84px;
+    --tick-h: 52px;
+    /* 字心 y 47.5 − 笔心 y 26 = 21.5。渲染宽高都对了之后这条自然对齐。 */
     top: calc(21px * var(--tk, 1));
-    margin-left: calc(-43px * var(--tk, 1));
+    margin-left: calc(-42px * var(--tk, 1));
   }
 
   /*  只有 fill，不设 fill-opacity——每层的透明度是**笔迹数据的一部分**，
