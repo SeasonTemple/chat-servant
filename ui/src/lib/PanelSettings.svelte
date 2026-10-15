@@ -789,6 +789,43 @@
     flex-direction: column;
     gap: 0.45rem;
     padding: 0 14px 16px;
+
+    /* ⚠ 滚动条是这一屏**最后一块 Web 默认外观**（票 42，2026-10-15）。
+     *   系统那条滚动条会带自己的立体凹槽与箭头，在纸面上就是一块贴上去的
+     *   异物 —— 与其余控件「1px 墨描边」的语言完全不搭。
+     *
+     *   两套属性都要写，缺一不可：
+     *     · `scrollbar-width` / `scrollbar-color` 是**标准**属性，Firefox 走它；
+     *     · `::-webkit-scrollbar` 是 Chromium 的。WebView2 是 Chromium，
+     *       所以真正生效的是下面那段 `::-webkit-scrollbar`。
+     *   ⚠ 只写标准属性在 WebView2 里**不生效**（非 `auto` 的 `scrollbar-width`
+     *   在 Blink 里被忽略），反过来只写 `::-webkit` 则在 Firefox 里失效。
+     *
+     *   底槽透明：槽画出来会在纸上留一条比 `--cs-rule` 更重的痕，
+     *   而这一屏本来就没有「装饰性横线」这个语言（分节全靠留白，见 `.cs-h2`）。 */
+    scrollbar-width: thin;
+    scrollbar-color: var(--cs-ink-2) transparent;
+  }
+
+  .cs-set::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .cs-set::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* 滑块用**墨**，不用红、不用蓝（§5.4 同一条：状态色不兼职导航色）。
+   * 常态压到铅笔档与墨之间，悬停才给足墨 —— 滚动条是「需要时才注意到」的东西。 */
+  .cs-set::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--cs-ink-2) 42%, transparent);
+    /* 纸是直角（app.css 的 --cs-radius 注释）。滚动条滑块不属于「字条」，
+     * 也不属于「可点的按钮」，所以不给药丸圆角，给 1px 刚好收住边。 */
+    border-radius: 1px;
+  }
+
+  .cs-set::-webkit-scrollbar-thumb:hover {
+    background: var(--cs-ink-2);
   }
 
   .cs-lead {
@@ -1081,9 +1118,22 @@
      * 整层丢掉它，这里照面板的纸底走，不学独立窗口那套暗底。 */
     background: var(--cs-paper);
     border: 1px solid var(--cs-rule-strong);
-    border-radius: 7px;
+    /* ⚠ 原来是硬编码的 `7px` —— 它**不对应任何一个 token**
+     *   （`--cs-radius` 是 8px、`--cs-radius-sm` 是 5px），是 Web 默认圆角
+     *   抄下来后随手改的数。同一屏的 `.cs-btn` 用的是 `--cs-radius-sm`，
+     *   输入框与它的按钮差 2px，于是「一个框里一个输入框 + 三颗按钮」
+     *   在同一行里显出两套曲率（票 42，2026-10-15）。
+     *   ⇒ 归到同一支，输入框与它的按钮同族。 */
+    border-radius: var(--cs-radius-sm);
+    /* 浏览器给密码框可能挂 UA 的内阴影/背景图，一并清掉，
+     * 免得在纸色底上出现一圈 Web 默认的灰边。 */
+    appearance: none;
+    box-shadow: none;
   }
 
+  /* ⚠ `:focus` 已有墨色描边，而全局 `:focus-visible`（app.css）另有墨色环。
+   *   这里**不**去覆盖 `:focus-visible` 的 outline：指针点击不该留环，
+   *   键盘 Tab 才该留，两件事由 `:focus` / `:focus-visible` 自己分工。 */
   .cs-input:focus {
     outline: none;
     border-color: var(--cs-ink);
