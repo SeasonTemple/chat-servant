@@ -68,6 +68,13 @@
 //!    它撞不上，因为 `probe.bg` 采的是文字框外一圈底色、采不到头像；
 //!    真要撞线还有 `RING_PURITY_MIN` 先挡。这个数被守卫测试钉住了。
 //!
+//! 4. **框里是不是一整块图**（票 41 的 ①）：[`looks_like_an_icon`]。
+//!    这条只在 [`classify_in_frame`] 里生效，`classify` 这个纯函数看不到像素。
+//!    ⚠ **它的两个数没有进 [`Evidence`]**——`ui/src-tauri/src/debug.rs` 的测试
+//!    用字面量构造 `Evidence`，加字段要两边一起改，而那一侧不归本票管。
+//!    所以「为什么被判成图标」只能从 `NoiseClass::ImageText` 看出来，
+//!    看不到填满度与色种数这两个数。
+//!
 //! ## 判据顺序是被数据逼出来的，不是设计出来的
 //!
 //! **对方气泡文字的对比度 178.3，比标题阈值 140 还高。**
@@ -120,6 +127,58 @@ pub const RING_PURITY_MIN: f32 = 0.35;
 /// 实测所有真实正文都是 11~12 px。小于此的是字形碎片或图标。
 /// ⚠ **尚未实测噪声侧的分布**，取值同样保守。
 pub const MIN_TEXT_HEIGHT: i32 = 8;
+
+/// 框内被「墨」填到这个比例 ⇒ 这一框是**一整块图**，不是一行字（票 41 的 ①）。
+///
+/// 判据是「字是稀疏笔画，头像是一块实心的图」。阈值必须**高于任何真实字形**，
+/// 否则会把笔画最密的汉字当成图标。
+///
+/// ✅ **上限是实测的**（2026-10-15，本机 GDI+ 渲染 Microsoft YaHei
+/// 12/14/24 px，取每个字形**紧贴墨迹**的包围盒覆盖率）：
+///
+/// ```text
+/// 字高 12px   文 .333  件 .356  达 .417  连 .477  罢 .492  遍 .553  藏 .606  器 .644
+/// 字高 14px   件 .310  罢 .494  遍 .524  器 .577  藏 .643
+/// 字高 24px   文 .299  达 .341  器 .460  罢 .464  0 .528
+/// ```
+///
+/// 最密的是 12px 的「器」**0.644**，其次 14px 的「藏」0.643。
+/// 阈值取 0.75：高出实测最大值 0.10，而照片/头像那种实心色块普遍在 0.85 以上。
+///
+/// 对照下侧：合成帧里那两行**真正文**（`tests.rs` 的 `stripes`）实测填满度
+/// **0.27**，被守卫钉住——阈值落在 0.27 与 0.644 之外，两侧都有余量。
+///
+/// ⚠ **这是代理字体的实测，不是微信自己的渲染**，而且 WinRT 的框并不
+/// 完全贴紧墨迹（有余量 ⇒ 覆盖率只会更低），两个方向都让 0.75 更安全。
+/// ⚠ 另外单字「一」实测覆盖率 **1.0**——一整行「一一一」因为框内有字间空隙
+/// 才降下来。这条判据因此**不能**单独用，必须与色种数那条并联（见
+/// [`looks_like_an_icon`]）。
+pub const ICON_FILL_MIN: f32 = 0.75;
+
+/// 这一行是头像/图标被读成的文字，而不是对方说的话。
+///
+/// ## 为什么不能只看 `RING_PURITY_MIN`
+///
+/// 票 41 的 ①：2× 真机帧上 30 行里有 7 行是被检测成文本框的头像与图标
+/// （`0` / `1毳06` / `14丐0` / `1400`）。而 `classify` 只在
+/// `purity < RING_PURITY_MIN` 时判 [`NoiseClass::ImageText`]——**头像那块
+/// 外圈众数占比常常还够线**，于是这一行落进气泡分支：低彩度判成
+/// [`Speaker::Them`]，彩度够高（彩色头像的主色常常很饱和）甚至判成
+/// [`Speaker::Me`]。**产品会以为这句话是对方/自己说的**，而它根本不是人话。
+///
+/// ## 两条判据并联，缺一不可
+///
+/// | 判据 | 拦什么 | 漏什么 |
+/// |---|---|---|
+/// | [`ICON_FILL_MIN`] 框内填满度 | 实心色块（实心图标、扁平底色头像里的图形） | 稀疏的图形碎片 |
+/// | 外圈色种数 ≥ [`crate::media::MEDIA_MIN_COLORS`] | 照片、贴图、花的头像 | 一整块纯色的头像 |
+///
+/// 两条都实测过安全侧，且都取自**已有的量**：填满度与
+/// [`crate::pixels::INK_DIST`] 同口径，色种数直接复用 `media.rs` 里
+/// 「真图 830~2237 种 vs 文字条 9 种」的 [`crate::media::MEDIA_MIN_COLORS`]。
+pub fn looks_like_an_icon(probe: &crate::pixels::BubbleHit) -> bool {
+    probe.fill >= ICON_FILL_MIN || probe.ring_colors >= crate::media::MEDIA_MIN_COLORS
+}
 
 /// 谁说的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -183,6 +242,10 @@ impl Palette {
 }
 
 /// 判定依据。**每条 Attribution 都带着它**，认错了能立刻看出是哪一步。
+///
+/// ⚠ 它**装不下** [`looks_like_an_icon`] 那两个数（框内填满度、外圈色种数）：
+/// `ui/src-tauri/src/debug.rs` 用字面量构造本结构，加字段要两边同时改。
+/// 那条判据的结论只能从 `noise == ImageText` 看出来。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Evidence {
     /// 文字框外圈的主色
@@ -291,9 +354,25 @@ pub fn classify(line: &OcrLine, palette: &Palette, probe: BubbleHit) -> Attribut
 }
 
 /// 量一行并归类。`frame` 与 `line` 必须同一坐标系（都相对帧左上角）。
+///
+/// ## 头像闸为什么在这一层，不在 `classify` 里
+///
+/// [`classify`] 是纯函数（只吃几何与外圈探针），要判「这是不是头像」
+/// 就得有框内像素。放在这里而不是 [`classify`] 里，还有一个更实际的原因：
+/// **`ui/src-tauri/src/watch.rs` 走的是 [`classify_all`]**，观察循环那条路
+/// 并不经过 `pipeline::read`。闸要是只装在 `pipeline::read` 上，
+/// 生产的读帧路径就绕过去了。
 pub fn classify_in_frame(line: &OcrLine, frame: &Frame, palette: &Palette) -> Option<Attribution> {
     let probe = probe_bubble_bg(frame, line.rect, RING_PAD)?;
-    Some(classify(line, palette, probe))
+    let mut attr = classify(line, palette, probe);
+    // 只在「它本来会进消息流」时才改判。已经被 [`MIN_TEXT_HEIGHT`] 判成
+    // `Fragment` 的行本来就进不去消息流，动它只会让调试视图的分类名变掉，
+    // 换不来任何准确率。
+    if attr.noise == NoiseClass::Text && looks_like_an_icon(&probe) {
+        attr.noise = NoiseClass::ImageText;
+        attr.speaker = Speaker::System;
+    }
+    Some(attr)
 }
 
 /// 测量并归类整个聊天区。

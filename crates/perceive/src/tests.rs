@@ -366,3 +366,362 @@ fn far_apart_lines_do_not_merge() {
     let msgs = group(&classify_all(&lines, &f, &palette));
     assert_eq!(msgs.len(), 2, "间距够大就不该并");
 }
+
+// ── 票 41 的 ①：头像/图标被读成文字 ─────────────────────────────────
+//
+// 真机 2× 实测：30 行里有 7 行是被检测成文本框的头像与图标（`0` /
+// `1毳06` / `14丐0` / `1400`）。它们本来会落进 `classify` 的气泡分支——
+// 低彩度头像判成「对方说的」，彩度够高的头像判成「我说的」。
+// 判成「我说的」尤其糟：面板上凭空多一句**用户自己没说过**的话。
+
+/// 一块**花的**方块（头像/照片的替身）：坐标决定颜色，色种数上百。
+fn noisy_block(px: &mut [u8], x0: u32, y0: u32, x1: u32, y1: u32) {
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let h = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503);
+            paint(
+                px,
+                x,
+                y,
+                [
+                    (h & 0xff) as u8,
+                    ((h >> 8) & 0xff) as u8,
+                    ((h >> 16) & 0xff) as u8,
+                ],
+            );
+        }
+    }
+}
+
+/// 一张有头像、有对方气泡、有我方气泡的帧。
+///
+/// 头像放**左缘**：微信里对方头像在左、我方在右，而消息流的「谁说的」
+/// 判据是底色彩度，与左右无关——所以头像放左边照样会污染消息流。
+///
+/// ⚠ 头像刻意做成「**一种主色占多数 + 少量散色**」：那样它的外圈众数占比
+/// 仍够 `RING_PURITY_MIN` 的线，**旧闸放行**——票 41 的 ① 说的就是这一类。
+/// 主色还特意挑了彩度 50（≥ `SATURATED_MIN_CHROMA = 30`），于是旧闸放行之后
+/// 它会被判成**我方说的**。
+fn frame_with_an_avatar() -> Frame {
+    let mut px = Vec::with_capacity((W * H * 3) as usize);
+    for _ in 0..(W * H) {
+        px.extend_from_slice(&PANEL);
+    }
+    // 对方头像：36x36（微信头像的量级），~75% 主色 + 散色
+    for y in 60u32..96 {
+        for x in 16u32..52 {
+            if (x * 40 + y) % 4 != 3 {
+                paint(&mut px, x, y, [70, 80, 120]);
+            } else {
+                noisy_block(&mut px, x, y, x + 1, y + 1);
+            }
+        }
+    }
+    // 头像里被 OCR 读成「0」的那一坨
+    fill(&mut px, 26, 68, 40, 84, [225, 228, 236]);
+    // 对方气泡 + 白字
+    fill(&mut px, 64, 60, 220, 96, THEIR_BUBBLE);
+    stripes(&mut px, 74, 210, 70, THEIR_INK);
+    // 我方气泡 + 深字
+    fill(&mut px, 240, 180, 380, 216, MY_BUBBLE);
+    stripes(&mut px, 250, 370, 190, DARK_INK);
+    Frame::from_rgb(W, H, px).expect("frame")
+}
+
+/// **头像被读成文字时，绝不能变成消息。**
+///
+/// **自证会响**：把 `classify_in_frame` 里那段头像闸去掉 ⇒ 这一行外圈众数
+/// 占比约 0.75，过得了 `RING_PURITY_MIN`；外圈底色 `rgb(70,80,120)` 彩度
+/// 50 ≥ `SATURATED_MIN_CHROMA` ⇒ 判成 `Me` + `Text` ⇒ 进消息流 ⇒ 本条红。
+#[test]
+fn an_avatar_recognised_as_text_never_becomes_a_message() {
+    let f = frame_with_an_avatar();
+    let palette = Palette::learn(&f, chat_of(&f)).expect("配色");
+
+    let avatar_box = Rect::new(26, 68, 40, 84);
+    let probe = chatservant_perceive_probe(&f, avatar_box);
+    assert!(
+        probe.purity >= crate::attribute::RING_PURITY_MIN,
+        "旧闸必须放行，否则这条守的不是新闸：purity={:.2}",
+        probe.purity
+    );
+    assert!(
+        chroma(probe.bg) >= SATURATED_MIN_CHROMA,
+        "头像主色必须够饱和，旧闸放行之后它会被判成我方说的（实测彩度 {}）",
+        chroma(probe.bg)
+    );
+
+    let lines = vec![
+        // OCR 把头像里的一团形状读成了「0」
+        line("0", avatar_box, THEIR_INK),
+        // 对照：真的两句话
+        line("他说的", Rect::new(70, 66, 214, 84), THEIR_INK),
+        line("我说的", Rect::new(246, 186, 374, 204), DARK_INK),
+    ];
+    let attrs = classify_all(&lines, &f, &palette);
+    assert_eq!(attrs.len(), 3, "不该有行被丢掉");
+
+    assert_eq!(
+        attrs[0].noise,
+        NoiseClass::ImageText,
+        "头像那一行必须判成图内字，依据：{}",
+        attrs[0].evidence
+    );
+    assert_eq!(
+        attrs[0].speaker,
+        Speaker::System,
+        "头像不是任何人说的话。判成 Me/Them 就是产品层面凭空造话"
+    );
+    assert_eq!(attrs[1].noise, NoiseClass::Text);
+    assert_eq!(attrs[2].noise, NoiseClass::Text);
+
+    let msgs = group(&attrs);
+    assert_eq!(msgs.len(), 2, "头像那行混进了消息流：{msgs:?}");
+    assert!(
+        msgs.iter().all(|m| m.text != "0"),
+        "头像进了消息流：{msgs:?}"
+    );
+}
+
+/// **只有「框内填满」这一条能响**：头像背景是纯色 ⇒ 外圈只有 1 种色，
+/// 色种数那条判据打不响；框内是一块实心图形 ⇒ 填满度 1.0。
+///
+/// 这条守的是「头像恰好是纯色/纯色块头像」那一类。
+#[test]
+fn a_flat_icon_is_caught_by_the_fill_rule_alone() {
+    let mut px = Vec::with_capacity((W * H * 3) as usize);
+    for _ in 0..(W * H) {
+        px.extend_from_slice(&PANEL);
+    }
+    // 纯色头像：整块一个颜色
+    fill(&mut px, 16, 60, 52, 96, [90, 95, 110]);
+    // 里面一个实心图形
+    fill(&mut px, 26, 68, 40, 84, [240, 240, 245]);
+    let f = Frame::from_rgb(W, H, px).expect("frame");
+    let palette = Palette { panel_bg: PANEL };
+
+    let probe = chatservant_perceive_probe(&f, Rect::new(26, 68, 40, 84));
+    assert_eq!(
+        probe.ring_colors, 1,
+        "这组夹具的外圈必须是 1 种色，否则色种数那条也响了，测的就不是它"
+    );
+    assert!(probe.fill >= 0.99, "实心图形的填满度应接近 1");
+
+    let attrs = classify_all(
+        &[line("0", Rect::new(26, 68, 40, 84), THEIR_INK)],
+        &f,
+        &palette,
+    );
+    assert_eq!(
+        attrs[0].noise,
+        NoiseClass::ImageText,
+        "纯色头像里的实心图形不该被当成说话：{}",
+        attrs[0].evidence
+    );
+}
+
+/// **只有「外圈色种数」这一条能响**：外圈是「一种主色占 60% + 散色」的
+/// 照片 ⇒ `purity = 0.6` 过得了 `RING_PURITY_MIN`（旧闸放行），
+/// 但色种数上百；框内是稀疏笔画 ⇒ 填满度不到 0.4。
+///
+/// 这条守的是「头像里被识别出来的那一块本身不密」的情形，
+/// 也正是票 41 说的「头像外圈众数占比常常还够线」。
+#[test]
+fn a_busy_surrounding_is_caught_by_the_ring_colour_rule_alone() {
+    let mut px = Vec::with_capacity((W * H * 3) as usize);
+    for _ in 0..(W * H) {
+        px.extend_from_slice(&PANEL);
+    }
+    // 头像 = 80% 主色 + 20% 散色（purity 约 0.8，旧闸放行）
+    for y in 60u32..96 {
+        for x in 16u32..52 {
+            if (x * 40 + y) % 5 < 4 {
+                paint(&mut px, x, y, [70, 80, 120]);
+            } else {
+                noisy_block(&mut px, x, y, x + 1, y + 1);
+            }
+        }
+    }
+    // 框内只有稀疏笔画 ⇒ 填满度低
+    fill(&mut px, 26, 70, 40, 71, [235, 235, 240]);
+    fill(&mut px, 26, 74, 40, 75, [235, 235, 240]);
+    fill(&mut px, 26, 78, 40, 79, [235, 235, 240]);
+    let f = Frame::from_rgb(W, H, px).expect("frame");
+    let palette = Palette { panel_bg: PANEL };
+
+    let probe = chatservant_perceive_probe(&f, Rect::new(26, 68, 40, 84));
+    assert!(
+        probe.purity >= crate::attribute::RING_PURITY_MIN,
+        "旧闸必须放行，否则测的不是「旧闸漏掉的那一类」：purity={:.2}",
+        probe.purity
+    );
+    assert!(
+        probe.ring_colors >= crate::media::MEDIA_MIN_COLORS,
+        "外圈应当是花的，实测只有 {} 种色",
+        probe.ring_colors
+    );
+    assert!(
+        probe.fill < crate::attribute::ICON_FILL_MIN,
+        "框内是稀疏笔画，填满度不该够阈值，实测 {:.2}",
+        probe.fill
+    );
+    assert!(
+        chroma(probe.bg) >= SATURATED_MIN_CHROMA,
+        "主色刻意选成够饱和的：旧闸放行之后它会被判成**我方说的**（实测彩度 {}）",
+        chroma(probe.bg)
+    );
+
+    let attrs = classify_all(
+        &[line("0", Rect::new(26, 68, 40, 84), THEIR_INK)],
+        &f,
+        &palette,
+    );
+    assert_eq!(
+        attrs[0].noise,
+        NoiseClass::ImageText,
+        "外圈是照片时不该被当成说话：{}",
+        attrs[0].evidence
+    );
+    assert_eq!(attrs[0].speaker, Speaker::System);
+}
+
+/// 造一个「真正文」的探针读数（与判据同口径的 `RING_PAD`）。
+fn chatservant_perceive_probe(f: &Frame, r: Rect) -> crate::pixels::BubbleHit {
+    crate::pixels::probe_bubble_bg(f, r, 6).expect("应能读到像素")
+}
+
+/// **真实正文两个信号都必须低于阈值**——否则头像闸会误伤对话。
+///
+/// ⚠ 只查**气泡里那两行**：合成帧里面板上的灰字/标题是**实心色块**
+/// （`fill` 画出来的，见 `two_sided_frame`），它的填满度恒为 1.0。
+/// 那是夹具的画法，不是真实文字的样子——真实字是稀疏笔画，
+/// 两行气泡里的 `stripes` 才是同量级的替身。
+/// 灰字/标题那两行只查外圈色种数：它们本来就判成噪声，头像闸不参与，
+/// 但外圈仍必须干净，否则阈值调低就会伤到面板上的字。
+///
+/// **自证会响**：把两个阈值调低（例如 `ICON_FILL_MIN = 0.3`），
+/// 本条立刻红。
+#[test]
+fn real_text_lines_stay_below_both_icon_thresholds() {
+    let f = two_sided_frame();
+    let palette = Palette::learn(&f, chat_of(&f)).expect("配色");
+    // 画成稀疏笔画的两行真正文
+    let text_lines = vec![
+        line("我说的", Rect::new(250, 50, 370, 64), DARK_INK),
+        line("他说的", Rect::new(30, 130, 150, 144), THEIR_INK),
+    ];
+    // 面板上的灰字/标题：夹具里是实心块，只查外圈
+    let panel_lines = [
+        line("昨天 20:00", Rect::new(190, 182, 222, 190), GRAY_INK),
+        line("群公告", Rect::new(30, 17, 110, 25), WHITE_INK),
+    ];
+    for l in text_lines.iter().chain(panel_lines.iter()) {
+        let probe = chatservant_perceive_probe(&f, l.rect);
+        assert!(
+            probe.ring_colors < crate::media::MEDIA_MIN_COLORS,
+            "{:?} 的外圈有 {} 种色，已经够头像阈值，正文会被误伤",
+            l.text,
+            probe.ring_colors
+        );
+    }
+    for l in &text_lines {
+        let probe = chatservant_perceive_probe(&f, l.rect);
+        assert!(
+            probe.fill < crate::attribute::ICON_FILL_MIN,
+            "{:?} 的填满度 {:.2} 已经够头像阈值，正文会被误伤",
+            l.text,
+            probe.fill
+        );
+        // 顺带把「合成帧里真正文的填满度」钉成一个数：**实测 0.27**。
+        // 它比实测过的最密汉字（12px 的「器」0.644）低一倍多，
+        // 阈值 0.75 落在两者之外。夹具的笔画稀疏度一变（`stripes` 的条数
+        // 或粗细），这个数就会动——那时要回来重标 `ICON_FILL_MIN`。
+        assert!(
+            probe.fill < 0.30,
+            "合成帧里真正文的填满度实测 {:.2}，与上面写下的 0.27 不符；\
+             阈值余量的依据变了，先重标 ICON_FILL_MIN 再改这里",
+            probe.fill
+        );
+    }
+    let attrs = classify_all(&text_lines, &f, &palette);
+    assert_eq!(
+        attrs.iter().filter(|a| a.noise == NoiseClass::Text).count(),
+        2,
+        "两句话都该还是正文：{attrs:?}"
+    );
+}
+
+/// **真实布局夹具上的实测余量**：真的微信气泡里，一个「可能的文字框」
+/// 外圈的色种数远低于 [`crate::media::MEDIA_MIN_COLORS`]。
+///
+/// 2026-10-15 本机在两份真实帧脱敏夹具上量过（沿气泡横向每 8px 摆一个
+/// 100x12 的文字框）：
+///
+/// ```text
+///                      采样数        外圈色种 min/中位/max
+/// 我方绿气泡 2side      2381          1 / 2 / 5
+/// 我方绿气泡 myside      532          1 / 2 / 5
+/// 对方灰气泡 2side      7594          1 / 2 / 8
+/// ```
+///
+/// 阈值 24 落在实测最大值 8 的 3 倍以外。
+///
+/// ⚠ 只查**气泡色**的段：面板底色上的行（时间戳、标题）压根不会判成
+/// `Text`，头像闸不参与；而其中一段 `rgb(47,47,48)` 在 `myside` 里
+/// 是聊天里的**照片**（黄金测试里记着它的 5509 px），不是气泡。
+///
+/// 夹具不在公开仓库里，所以**缺件即跳过**而不是失败。
+#[test]
+fn a_real_bubble_never_has_a_busy_ring() {
+    use std::path::Path;
+
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../capture/fixtures");
+    let mut sampled_total = 0usize;
+    for name in ["wechat-dark-2side", "wechat-dark-myside"] {
+        let path = dir.join(format!("{name}.png"));
+        if !path.exists() {
+            eprintln!("跳过 {name}：夹具不在本机（公开仓库不含真实会话的脱敏帧）");
+            continue;
+        }
+        let img = image::open(&path).unwrap_or_else(|e| panic!("读夹具 {name} 失败：{e}"));
+        let (w, h) = image::GenericImageView::dimensions(&img);
+        let f = Frame::from_rgb(w, h, img.into_rgb8().into_raw()).expect("尺寸与缓冲区一致");
+        let chat = Rect::new(304, 31, 1260, 683);
+
+        // 我方气泡色（两份夹具都是它；灰色那一档在 myside 里是照片，见函数文档）
+        let my_bubble: Rgb = [114, 205, 144];
+        let mut worst = 0usize;
+        let mut y = chat.y0;
+        while y < chat.y1 {
+            let mut x = chat.x0;
+            while x < chat.x1 {
+                if f.pixel(x as u32, y as u32) != Some(my_bubble) {
+                    x += 1;
+                    continue;
+                }
+                let start = x;
+                while x < chat.x1 && f.pixel(x as u32, y as u32) == Some(my_bubble) {
+                    x += 1;
+                }
+                let mut bx = start + 6;
+                while bx + 100 <= x - 2 {
+                    let probe =
+                        chatservant_perceive_probe(&f, Rect::new(bx, y - 6, bx + 100, y + 6));
+                    worst = worst.max(probe.ring_colors);
+                    bx += 8;
+                }
+            }
+            y += 1;
+        }
+        sampled_total += 1;
+        assert!(
+            worst < crate::media::MEDIA_MIN_COLORS,
+            "{name}：气泡里一个可能的文字框，外圈最多有 {worst} 种色，\
+             已经够头像阈值（{}）——真正文会被误伤",
+            crate::media::MEDIA_MIN_COLORS
+        );
+    }
+    if sampled_total == 0 {
+        eprintln!("跳过：两份夹具都不在本机");
+    }
+}

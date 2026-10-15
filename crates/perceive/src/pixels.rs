@@ -147,6 +147,12 @@ pub fn mean_color(frame: &Frame, r: Rect) -> Option<Rgb> {
     Some([(acc[0] / n) as u8, (acc[1] / n) as u8, (acc[2] / n) as u8])
 }
 
+/// 像素与底色的感知距离超过此值就算「墨」（被字形/图形覆盖）。
+///
+/// [`ink_ratio`] 与 [`probe_bubble_bg`] 的「框内填满度」共用它，
+/// 两个数必须是同一个口径，否则同一个框在两处会得出相反的结论。
+pub const INK_DIST: f32 = 40.0;
+
 /// 一行文字**周围一圈**的底色探测结果。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BubbleHit {
@@ -158,6 +164,19 @@ pub struct BubbleHit {
     pub ink: Rgb,
     /// ink 与 bg 的感知距离。
     pub contrast: f32,
+    /// 外圈出现过的**精确色种数**（票 41 的 ①）。
+    ///
+    /// 与 [`purity`] 互补：众数占比高**不代表**外圈是平的——
+    /// 一张有大片主色的照片照样能过 [`crate::attribute::RING_PURITY_MIN`]，
+    /// 而它的色种数是几百。
+    ///
+    /// 直接取自探针本来就要建的直方图，**不多读一个像素**。
+    pub ring_colors: usize,
+    /// 框内被「墨」覆盖的比例：与 bg 距离 > [`INK_DIST`] 的像素占比。
+    ///
+    /// 文字是**稀疏笔画**，头像/图标是一整块图——这个比值把两者分开。
+    /// 阈值与实测见 [`crate::attribute::ICON_FILL_MIN`]。
+    pub fill: f32,
 }
 
 /// 探测一行文字的气泡底色与墨色。
@@ -173,17 +192,26 @@ pub fn probe_bubble_bg(frame: &Frame, text_rect: Rect, pad: i32) -> Option<Bubbl
     );
     let ring = Ring::new(frame, text_rect, pad);
     let hist = ring.hist();
+    // 色种数与 purity 来自**同一张**直方图：purity 高只说明「有一种色占得多」，
+    // 色种数才说明「其余地方是不是花的」。两张图会把抗锯齿边缘算重一次。
+    let ring_colors = hist.len();
     let (bg, hits) = hist.into_iter().max_by_key(|(_, n)| *n)?;
     let purity = hits as f32 / ring.sampled().max(1) as f32;
 
     let mut ink = bg;
     let mut contrast = 0f32;
+    let mut inked = 0usize;
+    let mut total = 0usize;
     let x1 = (text_rect.x1.max(0) as u32).min(frame.width());
     let y1 = (text_rect.y1.max(0) as u32).min(frame.height());
     for y in (text_rect.y0.max(0) as u32)..y1 {
         for x in (text_rect.x0.max(0) as u32)..x1 {
             if let Some(p) = frame.pixel(x, y) {
+                total += 1;
                 let d = dist(p, bg);
+                if d > INK_DIST {
+                    inked += 1;
+                }
                 if d > contrast {
                     contrast = d;
                     ink = p;
@@ -191,6 +219,11 @@ pub fn probe_bubble_bg(frame: &Frame, text_rect: Rect, pad: i32) -> Option<Bubbl
             }
         }
     }
+    let fill = if total == 0 {
+        0.0
+    } else {
+        inked as f32 / total as f32
+    };
 
     let _ = outer;
     Some(BubbleHit {
@@ -198,6 +231,8 @@ pub fn probe_bubble_bg(frame: &Frame, text_rect: Rect, pad: i32) -> Option<Bubbl
         purity,
         ink,
         contrast,
+        ring_colors,
+        fill,
     })
 }
 
@@ -267,7 +302,7 @@ pub fn ink_ratio(frame: &Frame, r: Rect, bg: Rgb) -> f32 {
         for x in (r.x0.max(0) as u32)..x1 {
             if let Some(p) = frame.pixel(x, y) {
                 total += 1;
-                if dist(p, bg) > 40.0 {
+                if dist(p, bg) > INK_DIST {
                     inked += 1;
                 }
             }
