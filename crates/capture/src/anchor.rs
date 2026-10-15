@@ -28,6 +28,31 @@
 //! 2. **头部栏同样与面板同色**，靠文字区分，而文字属于 OCR 的活。
 //!    所以 `PaneAnchor` 只把头部锚到**标题栏下沿**，精确的头部高度
 //!    留给 ticket 03 用文字行去定，不在这里硬编一个比例。
+//!
+//! ## 2026-10-15 补记：`chat.x0` 没有退化成 0（票 36 的结论）
+//!
+//! 票 36 按观察循环的日志 `roi=Rect { x0: 0, y0: 171, x1: 940, y1: 637 }`
+//! 判定「消息区左边界退化成 0，会话列表被框进 OCR」。**那个前提是错的**：
+//! 日志里的 `roi` 是**消息区局部坐标**（`perceive::stream` 里的
+//! `PaneWatcher::observe` 收的是 `frame.crop(anchor.chat)` 裁出来的那块，
+//! 于是它的 `x0` 恒为 0），不是整帧坐标。
+//!
+//! 量法：把票 36 自己存的两帧喂回**同一条**推导链路
+//! （`cargo xtask layout --file`，重放，不抓新帧），两张都得到同一个锚点：
+//!
+//! ```text
+//! 消息区 = (316, 31) - (1256, 668)   940x637
+//! ```
+//!
+//! 三处互相印证：① `x0 = 316` 就是会话列表实测宽度（≈307~316 px），
+//! 侧栏整条在框**外**；② 日志里的 `roi.x1 = 940`、`roi.y1 = 637`
+//! 正是这张 **940×637** 的消息区——`roi` 是它的局部坐标；
+//! ③ 两帧（退化前 / 退化后）锚点逐字相同，所以退化与左边界无关。
+//!
+//! ⇒ **判据**：`roi.x1 == 消息区宽度`。哪天 `x0` 真的塌了，
+//! 变的会是 `roi.x1`（它会宽到接近帧宽），而不是 `roi.x0`。
+//! 下面的 `anchor_lands_on_the_sidebar_edge_on_measured_wechat_geometry`
+//! 把这条钉住。
 
 use chatservant_core::frame::{Frame, Rect};
 
@@ -326,6 +351,62 @@ mod tests {
     fn tiny_frame_rejected() {
         let f = synthetic(120, 100, 0.24, 0.045, 0.71);
         assert_eq!(derive(&f), Err(AnchorError::TooSmall(120, 100)));
+    }
+
+    /// 票 36 的守卫：**真实微信几何下 `chat.x0` 必须落在会话列表的右边**，
+    /// 裁出来的消息区里一个侧栏像素都不许有。
+    ///
+    /// 这条测试的坐标全部来自真机重放（2026-10-15，量法见模块头）：
+    /// `cargo xtask layout --file target/probe/wechat-parked.png` 打出
+    /// `消息区 = (316, 31) - (1256, 668)  940x637`。这里**只复刻几何与配色**，
+    /// 不带任何聊天内容，所以能进仓库；截图本身仍在 `target/probe/`。
+    #[test]
+    fn anchor_lands_on_the_sidebar_edge_on_measured_wechat_geometry() {
+        // 实测值：1267x930 的**窗口**截图（含 14px 边框），WGC 抓的是
+        // 1253x923 的客户区——两者差的就是这圈边框，侧栏宽度 307~316px。
+        const W: u32 = 1267;
+        const H: u32 = 930;
+        const SIDEBAR: u32 = 316;
+        const HEADER: u32 = 32; // 标题栏 band y 0..31 ⇒ header_top = 31
+        const INPUT_TOP: u32 = 668;
+        const BORDER: u32 = 1253; // 右边框起点，也是 x1 = 1256 的由来
+
+        let mut buf = Vec::with_capacity((W * H * 3) as usize);
+        for y in 0..H {
+            for x in 0..W {
+                let p = if y < HEADER || y == INPUT_TOP || x >= BORDER {
+                    CHROME
+                } else if x < SIDEBAR {
+                    [34, 34, 51] // 会话列表底色，实测占全图 13.3%
+                } else {
+                    [17, 17, 17] // 消息区底色，实测占全图 65.2%
+                };
+                buf.extend_from_slice(&p);
+            }
+        }
+        let f = Frame::from_rgb(W, H, buf).expect("synthetic");
+        let a = derive(&f).unwrap_or_else(|e| panic!("推导失败：{e}"));
+
+        assert_eq!(a.header_top, HEADER as i32 - 1, "标题栏下沿与实测不符");
+        assert_eq!(a.input_top, INPUT_TOP as i32, "输入框上沿与实测不符");
+        // 采样步长是 4，316 与 1256 都是 4 的整数倍，这里应当逐字相等。
+        assert_eq!(a.chat.x0, SIDEBAR as i32, "消息区左边界不在会话列表右缘");
+        assert_eq!(a.chat.x1, 1256, "右边界应停在边框内侧，不是帧宽");
+        assert_eq!(a.chat.width(), 940, "消息区宽度应与实测的 940 一致");
+        assert_eq!(a.chat.height(), 637, "消息区高度应与实测的 637 一致");
+
+        // 票 36 的要害不是坐标本身，是**框进去之后 OCR 会读到会话列表**。
+        // 所以这里按像素验一遍：裁出来的那块里不许出现侧栏底色。
+        let pane = f.crop(a.chat).expect("消息区裁得出来");
+        for y in 0..pane.height() {
+            for x in 0..pane.width() {
+                let p = pane.pixel(x, y).expect("裁剪区内必有像素");
+                assert!(
+                    !(p[0] == 34 && p[1] == 34 && p[2] == 51),
+                    "({x},{y}) 采到侧栏底色 rgb(34,34,51)——会话列表被框进消息区了"
+                );
+            }
+        }
     }
 }
 

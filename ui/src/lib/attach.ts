@@ -83,8 +83,33 @@ export function slideTo(
     const left = active.offsetLeft;
     const width = active.offsetWidth;
 
+    // ⚠⚠ **第一次落位不许补间**（票 37，2026-10-15 定位）。
+    //
+    // 药丸的初值是 CSS 里的 `left: 0; width: 0`，于是挂载那一刻
+    // `offsetLeft/offsetWidth` 都是 0，而下面对「无位移」的判断要求
+    // 两者都差 < 0.5 —— **第一次必然判成「有位移」，从 0 补间到目标**。
+    // 但挂载时根本没有「从哪来」：那段 240ms 是药丸凭空长出来，不是滑动。
+    //
+    // 后果不只是「开场动画多余」，而是**无头出图会把这半截帧当成成品**。
+    // 量法：`scripts/shoturl.ps1 -Scale 1`（1 px = 1 CSS px），数药丸
+    // **上边线那一行**（y=104）的墨线跨度 —— 那一行是药丸顶边，两端被
+    // 圆角切掉，所以跨度 = 药丸宽 − 2×4px（圆角 `calc(radius − 2px)` = 4）。
+    // 同一张图上「只填入」按钮的自然宽度是 61px：
+    //   `--virtual-time-budget` 4000 / 15000 / 40000 → 跨度 36 / 36 / 46
+    //   （即药丸 44 / 44 / 54 px，**随预算单调变长** = 补间在跑、没跑完）
+    // 真实 Chromium 里量同一页面的 DOM，内联值是 `width: 61px; left: 2px`，
+    // 与激活项 `offsetWidth: 61` 逐像素相等。
+    // ⇒ 偏差的成因是**补间中途被截图**，不是量错了，更不是窄视口改了布局。
+    //
+    // 修法：初值（offset 全 0）视为「还没落位」，直接落位。之后的切换
+    // 仍然照常滑动 —— 那才是这个组件要表达的东西。
+    const unplaced = pill.offsetLeft === 0 && pill.offsetWidth === 0;
+
     // 没有位移就不补间：否则一段无意义的 240ms 动画只会让人觉得卡
-    if (Math.abs(left - pill.offsetLeft) < 0.5 && Math.abs(width - pill.offsetWidth) < 0.5) {
+    if (
+      unplaced ||
+      (Math.abs(left - pill.offsetLeft) < 0.5 && Math.abs(width - pill.offsetWidth) < 0.5)
+    ) {
       gsap.set(pill, { left, width });
       return;
     }
