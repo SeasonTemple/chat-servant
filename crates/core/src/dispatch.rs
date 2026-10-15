@@ -51,6 +51,28 @@ pub enum DeliveryReceipt {
     NotSent,
     /// 送达且已回读验证。
     Sent,
+    /// **文本已经进输入框了，但没有按回车——确定没发出去。**
+    ///
+    /// ## 为什么必须有它（2026-10-15）
+    ///
+    /// 在这个变体出现之前，`fill_input_box` 的成功路径返回
+    /// [`Self::PossiblySent`]。那是**撒谎**：它从头到尾没按过回车，
+    /// 而 `PossiblySent` 的意思恰恰是「按了回车、回读没确认、
+    /// 不知道发没发」。真机实测的结果是面板对「仅填入」档打出一句
+    /// 假警报「可能已经发出去了——请自己看一眼聊天窗口」，
+    /// 而对话流里根本没有新消息。
+    ///
+    /// 同一声称被用在两种相反的事实上，比没有回执更糟：
+    /// 人要么被吓去检查聊天窗口，要么学不会读这个提示。
+    ///
+    /// ## 和 `Sent` 的区别不是程度，是方向
+    ///
+    /// `Sent` 说「它已经离开这台设备」，`Filled` 说「它就停在你面前」。
+    /// 后者是**本枚举里唯一关于「装填完成」的正面回执**，
+    /// 而 `fill_and_send` 需要它来当「可以按回车了」的内部信号
+    /// （在它出现之前，`fill_and_send` 是反过来拿 `PossiblySent` 当这个信号，
+    /// 于是同一个错误同时污染了「仅填入」的提示和 `Auto` 档的判据）。
+    Filled,
     /// 可能已经发了——**禁止自动重放**。
     PossiblySent,
     /// 明确失败，可按退避重试。
@@ -64,6 +86,11 @@ impl DeliveryReceipt {
     ///
     /// 只有**确定没发**才安全。`TimedOut` 与 `PossiblySent` 同等对待——
     /// 超时恰恰是最容易「其实已经发出去了」的那种情况。
+    ///
+    /// ⚠ [`Self::Filled`] 也**不在**安全这一侧，尽管它同样「没发出去」。
+    /// 判据不是「发没发」，是「**重来一遍会不会变成两条**」：
+    /// 输入框里已经有那段字了，再填一次就是追加成两份——
+    /// 那正是 2026-10-09 `Confirm` 两段式发出去两条拼接消息的机制。
     pub fn replay_safe(&self) -> bool {
         matches!(self, Self::NotSent | Self::Failed(_))
     }
@@ -78,6 +105,7 @@ impl DeliveryReceipt {
         match self {
             Self::NotSent => "确定没发，可以重试",
             Self::Sent => "已送达并回读验证",
+            Self::Filled => "已填进输入框并停在光标处——没有发出去，要发你自己按回车",
             Self::PossiblySent => "可能已经发出去了——不再自动重放，请自己看一眼聊天窗口",
             Self::Failed(_) => "明确失败，可以按退避重试",
             Self::TimedOut => "回读超时，按「可能已发送」对待——不再自动重放",
@@ -229,6 +257,10 @@ impl Dispatcher {
         //
         // 这条检查必须在最前面：它是「重发一条已经发出去的消息」的
         // 最后一道拦，而发出去的东西撤不回来。
+        //
+        // ⚠ [`DeliveryReceipt::Filled`] 也走这一支，但理由不同：
+        // 它确定**没发**，可输入框里已经有那段字了，重放就是追加成两份。
+        // 停下等人在这里是对的——该干的活干完了，剩下的是人读、人改、人按回车。
         if receipt.blocks_automatic_retry() {
             return Next::Halt {
                 reason: receipt.explain().to_string(),
@@ -278,6 +310,51 @@ mod tests {
                 "{tier} 档下 PossiblySent 必须停下，实际 {n:?}"
             );
         }
+    }
+
+    /// 「装填完成」既不会被重放，也**不会谎称自己可能已经发出去**。
+    ///
+    /// ⚠ 后半句守的是 2026-10-15 的一个实机假警报：
+    /// 「仅填入」档点候选后，面板显示「可能已经发出去了——
+    /// 请自己看一眼聊天窗口」，而对话流里根本没有新消息。
+    /// 根因是 `fill_input_box` 没按回车却返回了 `PossiblySent`。
+    ///
+    /// 修法是给回执加上 [`DeliveryReceipt::Filled`]，并让
+    /// **`PossiblySent` 这个说法只出现在真的按过回车的路径上**。
+    /// 这条测试把那个说法的可出现范围钉死：将来谁再让「只填入」的路径
+    /// 借用它，会在这里红，而不是等到真机骗了人才发现。
+    #[test]
+    fn filled_is_never_replayed_and_never_claims_it_might_have_been_sent() {
+        let mut d = Dispatcher::new();
+        for tier in Dispatch::ALL {
+            d.set_tier(tier);
+            let n = d.next(DeliveryReceipt::Filled, 0);
+
+            assert!(
+                matches!(n, Next::Halt { .. }),
+                "{tier} 档下 Filled 必须是终态（输入框里已经有字了），实际 {n:?}"
+            );
+
+            // 停下是对的，但**理由必须说真话**：说「可能已经发出去了」
+            // 就是把一条确定没发生的事报成不确定，人会白跑一趟去查。
+            let said = n.explain();
+            assert!(
+                !said.contains("可能已经发出去了"),
+                "{tier} 档的 Filled 回执不得声称可能已发送，实际：{said}"
+            );
+            assert!(
+                said.contains("没有发出去"),
+                "{tier} 档的 Filled 回执要明说「没发」，实际：{said}"
+            );
+        }
+
+        // 另一半：`PossiblySent` 那句警告必须**只**留给真的按过回车的路径。
+        assert!(
+            DeliveryReceipt::PossiblySent
+                .explain()
+                .contains("可能已经发出去了"),
+            "PossiblySent 才是那句警告的正主；`Filled` 顶替它之后它不能被改写掉"
+        );
     }
 
     /// 超时是最容易「其实已经发出去」的那种情况，按 PossiblySent 对待。

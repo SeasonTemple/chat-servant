@@ -175,6 +175,93 @@
   const drafted = $derived(readout?.phase === 'drafted' ? (readout.candidates[0] ?? null) : null);
 
   /**
+   *  动作行要选**任意一条**候选，而 `drafted` 只给了第一条
+   *  （正文行渲染的就是它）。所以这里另取一份完整的。
+   *
+   *  ⚠ 排序由 Rust 侧保证（`watch.rs` 里 `sorted()` 按 probability 降序后
+   *   才存进 `candidates`），**前端不再排一次**——排两次就会在两边
+   *   得出不同的「第一条」，而用户点的是屏幕上那条。
+   */
+  const allCandidates = $derived(readout?.phase === 'drafted' ? readout.candidates : []);
+
+  /**
+   *  投递回执。**发出去会发生什么，必须让用户看见**——
+   *  发出去的撤不回来，而面板是唯一能告诉他「你刚发了什么」的地方。
+   */
+  let sentNote = $state<{ ok: boolean; text: string } | null>(null);
+  let sending = $state(false);
+
+  /**
+   *  投递算不算「成了」——**只有真没成才是失败**。
+   *
+   *  ⚠ 2026-10-15 之前这里写的是 `r.outcome === 'Sent'`，那在两档之下
+   *  **都是错的**，而且错的方向是把成功显示成红色失败：
+   *  · `Manual` 档成功返回 `Filled`（填进输入框、没发）；
+   *  · `Auto` 档成功返回 `PossiblySent`（按了回车但拿不到更高证据，
+   *    而「发送后输入框会被清空」让 OCR 那一刻已经读不到它了——
+   *    详见 `inject::fill_and_send` 的文档）。
+   *  ⇒ 两种成功态都不叫 `Sent`，而 `Sent` 这个档位在真实链路上
+   *  **永远不会被观察到**。于是每一次成功投递界面都在报警。
+   *
+   *  红只留给「确实没成」：`Failed` 与 `NotSent`。
+   *  `PossiblySent`/`TimedOut` 是**不确定**不是失败，走中性墨色。
+   */
+  const DISPATCH_FAILED = new Set(['Failed', 'NotSent']);
+
+  /**
+   *  动作按钮用哪个变体（设计规范 §4.2c 的三档按钮族）。
+   *
+   *  ## 不可逆优先于「推荐」
+   *
+   *  两个维度本来是正交的——「这是首选吗」和「按下去可逆吗」——
+   *  但规范给的是三个**平级**变体，不是二维。于是只能有一个上位：
+   *  `Auto` 档下按任何候选都是**不可逆**的，所以整组走**红批**，
+   *  此时「首选」不再用实墨区分。
+   *
+   *  ## 为什么这条不能只做在 CSS 里
+   *
+   *  它取决于**档位**，而档位是 Rust 侧持有的安全状态。把它写成
+   *  纯 CSS 钩子（前端自己判断「这一档危险」）等于在前端复制第二份
+   *  安全判断，而那正是硬约束第 5 条不让人做的事。
+   *  这里只把 Rust 已经发过来的 `tier` **翻译成视觉**，
+   *  发不发仍然只在 `commands::dispatch` 里判一次。
+   */
+  function actVariant(i: number): 'cs-act-red' | 'cs-act-lead' | 'cs-act-alt' {
+    if (tier === 'Auto') return 'cs-act-red';
+    return i === 0 ? 'cs-act-lead' : 'cs-act-alt';
+  }
+
+  /**
+   *  点候选 → 调 `dispatch`。
+   *
+   *  ## 档位决定发不发，而判断在 Rust 侧
+   *
+   *  这里**只负责把 id 与动作送过去**，绝不自己判断「该不该发」。
+   *  理由是硬约束第 5 条：那条判断一旦在前端，就等于交给一个
+   *  可以随手改的变量。`Manual` 档只填入、`Auto` 档填入并发送，
+   *  由 `commands::dispatch` + `sends_for_real` 裁决，并有穷举测试守它。
+   *
+   *  ⚠ 动作这一支取 `Action::Confirm`（字符串 `"confirm"`）：它是
+   *  **「按这个动作去投递」**，不是「我已经确认过了」。
+   *  档位才是「允不允许发出去」那一位。两者别混。
+   */
+  async function dispatchCandidate(candidateId: string) {
+    if (sending) return;
+    sending = true;
+    try {
+      const r = await invoke<{ outcome: string; detail: string; next_hint: string | null }>(
+        'dispatch',
+        { candidateId, action: 'confirm' },
+      );
+      sentNote = { ok: !DISPATCH_FAILED.has(r.outcome), text: r.detail };
+    } catch (e) {
+      sentNote = { ok: false, text: `投递失败：${e}` };
+    } finally {
+      sending = false;
+    }
+  }
+
+  /**
    *  正文**字体**探针（`?draft=`）。与 `?tier=` / `?shape=` / `?size=` 同一性质，
    *  **只改这一次的渲染，不落盘**。
    *
@@ -777,7 +864,86 @@
       </div>
 
       <!--
-        档位行 —— **纸的底部**，紧贴将来的动作行。
+        动作行。**2026-10-15 落地**——此前 `dispatch` 是
+        `contract.rs` 的 `KNOWN_UNREACHED` 之一：命令注册了、前端不调，
+        于是「两档发送」在界面上**没有任何可点的对象**，
+        票 20 的实机验收项严格说无从验起。
+
+        ## 位置：正文之下、档位之上
+
+        它是**候选那一组的一部分**，不是一块独立的设置。
+        正文写的是第一条候选，按钮就排在这一组下面——
+        「看这句 → 按它」中间不插别的东西。
+        档位行在动作行下面：档位是**动作参数**，改档位是为了改变
+        上面那几个按钮按下去会发生什么，所以它在动作下面读起来才顺。
+
+        ## 按钮上不写「发送」二字
+
+        档位已经在下面明写了「只填入 / 自动发送」，同一个词再写一遍
+        就是把**参数**当成**动作**——而这里的动作永远是「按这个候选」，
+        发不发由档位决定。⚠ 尤其在「自动发送」档下，按钮若写着「发送」
+        会让人以为这里还有一个独立的确认步骤，而那里没有。
+      -->
+      {#if allCandidates.length > 0}
+        <div class="cs-actions" data-no-drag>
+          <!--
+            不可逆前置说明 —— 规范 §4.2b 定它在**按钮上方**。
+
+            ⚠ 只在 `Auto` 档出现。`Manual` 档按下去只是填进输入框，
+            在那里写「按下去就发出去了」是**假的**——
+            而一个在可逆路径上喊不可逆的提示，会让人对真不可逆的那次
+            也当噪音划过去。
+
+            ⚠ 这段话是**当前档位**的如实描述，不是新的判断。
+            「该不该发」仍然只在 `commands::dispatch` 里判一次。
+          -->
+          {#if tier === 'Auto'}
+            <p class="cs-act-warn">「自动发送」档：按下去就发出去了，收不回来。</p>
+          {/if}
+
+          {#each allCandidates as c, i (c.id)}
+            <!--
+              三种变体共用同一套几何（高 30 / padding 0 16 / radius 4 /
+              13px 600 / 全 1px 描边），区别只在**颜色分工**：
+                墨线 = 可逆有边界   实墨 = 本屏唯一主动作
+                红批 = 不可逆，红只在页边一道 3px 竖笔
+              映射由 [`actVariant`] 给出，见那里的理由。
+
+              ⚠ 首选**不重复正文**：那行正文就在它正上方（`.cs-draft`），
+                两处写同一句话是这张纸最明显的一处冗余。
+                备选才需要自带正文——不写就没法比、没法选。
+            -->
+            <button
+              type="button"
+              class={['cs-act', actVariant(i)]}
+              disabled={sending}
+              onclick={() => void dispatchCandidate(c.id)}
+              aria-label="{i === 0 ? '按这个候选' : `备选 ${i + 1}`}：{c.text}"
+            >
+              <span class="cs-act-tag">{i === 0 ? '按这个' : `备选 ${i + 1}`}</span>
+              {#if i > 0}
+                <span class="cs-act-text">{c.text}</span>
+              {/if}
+              <!-- ⚠ 只有一条候选时不显示概率：预设起草器恒给 100%，
+                那是「没有第二个选择」的算术结果，不是置信度。 -->
+              {#if allCandidates.length > 1}
+                <span class="cs-act-prob">{Math.round(c.probability * 100)}%</span>
+              {/if}
+            </button>
+          {/each}
+          {#if sentNote}
+            <!--
+              ⚠ 回执**必须显示**。发出去的消息撤不回来，而这是唯一能让
+              用户知道「刚才那下到底发生了什么」的地方。
+              成功走墨色、失败走红（红只给不可逆，app.css 的分工）。
+            -->
+            <p class="cs-act-note" class:cs-act-note-bad={!sentNote.ok}>{sentNote.text}</p>
+          {/if}
+        </div>
+      {/if}
+
+      <!--
+        档位行 —— **纸的底部**，紧贴动作行。
 
         位置的三次变化，每一步都是被顶出来的，不是设计出来的：
           ① 原来独占顶部一整行（撕口 40 + 槽 53 + 下边距 28 ≈ 121px，
@@ -1045,6 +1211,183 @@
    */
   /*  档位自己就是正文列的最后一个 flex 项——归属行那套
    *  `space-between` 已经连同它的容器一起去掉了（挤断归属文字）。 */
+  /* ── 动作行 ───────────────────────────────────────────────────────
+   *
+   * 位置：正文之下、档位之上。它是候选那一组的一部分——
+   * 「看这句 → 按它」中间不插别的东西。
+   *
+   * ⚠ **这里推翻了上一版「按钮不描边框」**（2026-10-15）。
+   *   那条理由是「撕边纸上再画一个矩形就是第二个边界」，
+   *   而规范 §4.2c（同为 2026-10-13，晚于那条改动）定案的是
+   *   **三个变体共用同一套几何、全是 1px 描边**——
+   *   描边恰恰是这一族能共用几何的前提，
+   *   没有它，「等宽等高」和「换线型表示禁用」两件事都无从谈起。
+   *   更要紧的是红批：红只落在页边一道竖笔上，
+   *   而**框与字仍是墨色**——不描边框时，红批和墨线在静止态
+   *   除了那 3px 之外没有第二个可分辨的特征。
+   */
+  .cs-actions {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    /* ⚠ 这里**不描边框也不加竖条**。
+     *   原先有一道 `border-left: 2px solid var(--cs-ink)` 加 `padding-left: 10px`，
+     *   两个问题：
+     *   ① 它是**装饰改了容器几何**——规范 §4.2c 明写「几何必须由 box
+     *      一处说了算，装饰不许改 padding」，红批那条警告就是这么来的；
+     *   ② 一道**永远墨色**的竖条会和红批的红色竖笔抢同一个位置的语义。
+     *      用户学会读竖条之后，墨条就不再是「动作从这里长出来」的记号，
+     *      而是「这里有条东西」——而真正要传达的恰恰是那条线的颜色。
+     * 靠留白分块。 */
+    padding: 10px 0 12px;
+  }
+
+  /* 不可逆前置说明（规范 §4.2b：它在按钮上方）。
+   * ⚠ 它在 forced-colors 下是**唯一**还能说出「这一组按下去不可逆」
+   *   的通道——高对比度接管背景色之后，红批那道竖笔会退化成墨线。 */
+  .cs-act-warn {
+    margin: 0 0 2px;
+    font-size: 12px;
+    line-height: 1.4;
+    /* 红只给不可逆，而这一句就是不可逆本身。 */
+    color: var(--cs-pencil-red);
+  }
+
+  /* ── 三变体共用的几何（规范 §4.2c）
+   *
+   * 高 30 / padding 0 16 / radius 4 / 13px 600 / 全 1px 描边。
+   *
+   * ⚠ **水平几何只有这一处。** 纵向用 `min-height` 而不是 `height`，
+   *   因为备选按钮要显示整句正文，30px 会把它截掉。
+   *   规范说的「等宽等高」是给 S5 那组「先不发 / 发送」的
+   *   （都是单行短标签），不是说要折行的长正文也压进 30px。
+   *
+   * ⚠ `position: relative` 是红批的竖笔定位的前提——
+   *   规范要求那道红笔用绝对定位伪元素而**不许改 padding**。 */
+  .cs-act {
+    position: relative;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    appearance: none;
+    margin: 0;
+    min-height: 30px;
+    padding: 0 16px;
+    border-radius: 4px;
+    border: 1px solid var(--cs-ink);
+    background: transparent;
+    color: var(--cs-ink);
+    font: 600 13px/1.5 inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  /* ⚠ 焦点环用墨不用红（规范 §5.4）。
+   *   红是「不可逆」，而焦点环会出现在**每一个**按钮上——
+   *   用红就把不可逆说成了常态，跟档位行那颗红铅笔勾撞含义。 */
+  .cs-act:focus-visible {
+    outline: 2px solid var(--cs-ink);
+    outline-offset: 1px;
+  }
+
+  /* ── 禁用**不降透明度**（规范 §4.2c，2026-10-14 `ui/scripts/disabledsep.py` 实测推翻 opacity）
+   *
+   * `opacity` 稀释的是整个元素——文字、边框、底色一起淡。
+   * `.cs-btn-mini` 的边框正常态就只有 1.57 : 1，
+   * `opacity: .34` 把它压到 **1.16 : 1**，
+   * 而「禁用」恰恰是最该一眼看出来的状态。
+   * ⇒ 有边框的换线型，两者对比度都与正常态一致。
+   *
+   * ⚠ 上一版这里写的是 `opacity: 0.55`，正是被推翻的那条。 */
+  .cs-act:disabled {
+    cursor: default;
+    border-style: dashed;
+  }
+
+  /* ── 变体一：墨线。可撤销、有边界但不是强调。 */
+  .cs-act-alt {
+    background: transparent;
+  }
+
+  /* ── 变体二：实墨。每屏最多一颗，也就是本屏唯一那个主动作。
+   *
+   * ⚠ 判据是「唯一主动作」而**不是**「第一条」。
+   *   `Auto` 档下它整组让位给红批（不可逆优先于推荐），所以这颗实墨
+   *   只可能出现在 `Manual` 档。映射见 `actVariant()`。 */
+  .cs-act-lead {
+    background: var(--cs-ink);
+    color: var(--cs-paper-raised);
+  }
+
+  /* ── 变体三：红批。不可逆。
+   *
+   * ⚠ 红**只**出现在页边一道 3px 竖笔，框与字仍是墨色——
+   *   整块红底把「不可逆」说成了「醒目」（规范 §4.2b v2 的原话）。
+   * ⚠ 竖笔用绝对定位伪元素，**不许改 padding**：早先为它把
+   *   `padding-left` 加到 19px，文字整体右移 9px，看着没居中。
+   *   几何由 `.cs-act` 的 `padding: 0 16px` 一处说了算。
+   *
+   * 用 `--cs-pencil-red`（红铅笔，蜡质发闷）而不是 `--cs-live`（警报红）：
+   * 这一族变体就叫「红批」，而红批在实物上就是一支红铅笔。 */
+  .cs-act-red::before {
+    content: '';
+    position: absolute;
+    /* ⚠ `left: 1px` 而不是 `0`：0 会让这道红笔**压在 1px 墨框线上**，
+     *   把左边框整条遮住，按钮于是读成「左边是敞开的」。
+     *   而规范要求「红只出现在页边一道竖笔，**框与字仍是墨色**」——
+     *   框必须四边完整可见，红笔才是在框旁**多出来的那一道**，
+     *   而不是把框线改色。
+     *
+     * hover 加宽到 5px 时最右只到 6px，仍在 `padding: 0 16px` 的空白里，
+     *   碰不到字——这也是「不许改 padding」换来的余量。 */
+    left: 1px;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--cs-pencil-red);
+  }
+  .cs-act-red:hover::before {
+    width: 5px;
+  }
+
+  /* 按钮标签：它是**动作**，不是内容。13px 600 是规范定的共用几何。 */
+  .cs-act-tag {
+    font-size: 13px;
+    /* 3.00:1 那档 `--cs-mark` 达不到小字门槛，用 `--cs-ink`。 */
+    color: inherit;
+    white-space: nowrap;
+  }
+
+  /* 备选正文：颜色分工上它是「机器认出来的」（规范 §4.2b），
+   * 所以走铅笔灰而不是墨色——墨色留给按钮标签与正文行。 */
+  .cs-act-text {
+    font-size: 12.5px;
+    font-weight: 400;
+    line-height: 1.5;
+    color: var(--cs-pencil);
+  }
+
+  /* 概率：等宽数字，省得两位数跳来跳去。 */
+  .cs-act-prob {
+    font-size: 12px;
+    color: var(--cs-ink);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    margin-left: auto;
+  }
+
+  /* 回执。成功走墨色、失败走红——红留给「没发成」这个必须看见的结果。 */
+  .cs-act-note {
+    margin: 2px 0 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--cs-ink);
+  }
+  .cs-act-note-bad {
+    color: var(--cs-pencil-red);
+  }
+
   .cs-pick {
     flex: none;
     display: flex;
