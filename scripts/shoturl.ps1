@@ -4,7 +4,8 @@ param(
   [int]$Width = 520,
   [int]$Height = 760,
   [int]$Wait = 20000,
-  [int]$Scale = 2
+  [int]$Scale = 2,
+  [switch]$ShowScrollbars
 )
 
 # ⚠ 量具自检 1：Chrome 会把窗口宽度**钳到最小 500px**，而 --screenshot 输出的
@@ -30,13 +31,12 @@ if (-not (Test-Path $chrome)) { throw "chrome not found" }
 $profileDir = Join-Path $env:TEMP ("shot-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
 
-$args = @(
+$chromeArgs = @(
   '--headless=new',
   "--user-data-dir=$profileDir",
   '--no-first-run',
   '--no-default-browser-check',
   '--disable-gpu',
-  '--hide-scrollbars',
   "--force-device-scale-factor=$Scale",
   "--window-size=$Width,$Height",
   "--virtual-time-budget=$Wait",
@@ -44,7 +44,16 @@ $args = @(
   $Url
 )
 
-& $chrome @args 2>&1 | Out-Null
+# ⚠ 量具自检 3：`--hide-scrollbars` 原本**写死**在这里，于是本脚本
+#   结构上就**截不出任何滚动条**——而「滚动条有没有按设计渲染」
+#   恰恰是要量的东西（票 42 的验收项就写着「实测确实渲染出来」）。
+#   ⇒ 改成开关：默认仍隐藏（面板出图要的就是画面本身），
+#     要量滚动条时显式 `-ShowScrollbars`。
+#   ⚠ 漏掉这个开关时的症状极具误导性：图出得来、布局全对，
+#     只是右边永远没有滚动条，于是被读成「CSS 写了但没生效」。
+if (-not $ShowScrollbars) { $chromeArgs = @('--hide-scrollbars') + $chromeArgs }
+
+& $chrome @chromeArgs 2>&1 | Out-Null
 $code = $LASTEXITCODE
 if (-not (Test-Path $OutPng)) { throw "no screenshot produced (exit=$code)" }
 $img = Get-Item $OutPng
