@@ -109,27 +109,41 @@
     </p>
   </section>
 
-  <!-- ── 方向二：一条 + 换一条 ─────────────────────────────────── -->
+  <!-- ── 方向三：裁剪纸条 + 抬起动效 ─────────────────────────────── -->
   <section class="cs-ar-col">
-    <h2>二 · 一条 + 换一条</h2>
+    <h2>三 · 裁剪纸条</h2>
     <p class="cs-ar-why">
-      不摊开候选，只显示一条，两个小动作换或用。纸面最省、最像对话 （Superhuman 那句「No separate AI
-      mode — intelligence is ambient」的同构做法）。 代价：<strong>看不到全部候选</strong
-      >，其余两条只能盲选。
+      每条候选是<strong>从这张纸上裁下来的一条</strong>。边是刀口不是描边，
+      厚度来自纸芯密度与那一线投影。中间那块可以拿起来 ——
+      <strong>图里第一条就是抬起状态</strong>，动效不是承诺，是画出来的。
     </p>
     <div class="cs-ar-sheet">
-      <div class="cs-one">
-        <p class="cs-draft-body big">{CANDS[0].text}</p>
-        <div class="cs-one-acts">
-          <button class="cs-one-btn" onclick={() => {}}>换一条</button>
-          <button class="cs-one-btn is-main" onclick={() => {}}>就这句</button>
-        </div>
-        <p class="cs-ar-hint">第 1 / 3 条 · 另两条按概率排后面</p>
+      <div class="cs-ar-stack">
+        {#each CANDS as c, i (c.tag)}
+          <div class="cs-strip" class:is-lifted={i === 0}>
+            <span class="cs-draft-box">
+              {#if i === 0}
+                <svg
+                  class="cs-pencil-mark"
+                  viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}"
+                  width="26"
+                  height="16"
+                  aria-hidden="true"
+                  filter="url(#pencil)"
+                >
+                  {#each TICK_NESTED as l (l.d)}<path d={l.d} fill-opacity={l.o} />{/each}
+                </svg>
+              {/if}
+            </span>
+            <p class="cs-draft-body">{c.text}</p>
+            <span class="cs-draft-prob">{c.prob}%</span>
+          </div>
+        {/each}
       </div>
     </div>
     <p class="cs-ar-note">
-      ⚠ 与硬约束冲突面最小（候选区不再并排三颗控件），
-      但把「比较」这件事交给了用户自己按「换一条」试。
+      ✓ 一条候选 = 一块纸，<strong>高度随内容长</strong>，不必给 1/2/3 行各做一张图
+      （九宫格中间可拉伸）。选中时可整条<strong>撕走</strong>。
     </p>
   </section>
 </div>
@@ -270,54 +284,53 @@
     opacity: 0.75;
   }
 
-  /* ── 方向二 ─────────────────────────────────────────────────── */
-  .cs-one {
-    padding: 9px 0;
-  }
-
-  .cs-draft-body.big {
-    font-size: 17px;
-    line-height: 1.55;
-  }
-
-  .cs-one-acts {
+  /* ── 方向三：裁剪纸条 ───────────────────────────────────────────
+   *
+   * ⚠ **不是 border。** 这里没有「描边」这个动作——纸条的四条边是**刀口**，
+   *   裁开的那一刻露出的是纸芯的密度，加上投在下面那张纸上的那一线影。
+   *   一条 1px 黑框读成「控件的外框」，一条纸口读成「一片纸的边」。
+   *
+   * 九宫格：`slice 40 / 20px` 是 @2x 的换算（源 40 源像素 → 20 CSS px）。
+   * `fill` 让中间那块纸芯铺满，`stretch` 让它随内容长度横向拉伸，
+   * 四条边保持不动 ⇒ 1 行 / 2 行 / 3 行都是**同一块纸**。
+   *
+   * 为什么纵向也能 stretch 而不出问题：上下两条边的高度由 `border-width`
+   * 定死（20px，不拉伸），被纵向拉的是中间那块**均匀纸芯**——
+   * 纸纹是细颗粒，纵向拉不出可见的条纹（横向拉才会，理由见
+   * `scripts/stripgen.py` 的说明）。
+   */
+  .cs-strip {
+    position: relative;
+    border-style: solid;
+    /* ⚠ 14px 不是随手取的：20px 时每条纸条上下各占 20px，
+     *   三条叠起来**超出面板 560px**，第三条被裁掉——而「候选看不全」
+     *   恰恰是这个方案要解决的事。14px 让三条加上间隙正好落进面板。
+     *   ⚠ 这个数依赖 `stripgen.py` 的 slice=40（@2x），
+     *   改了那边记得回来看这里。 */
+    border-width: 13px;
+    border-image: url('/strip.png') 40 fill / 13px / 0 stretch;
+    /* 内边距要**大于** border-width 才不压到刀口上。 */
+    padding: 1px 11px 1px 7px;
     display: flex;
-    gap: 10px;
-    margin-top: 12px;
+    align-items: baseline;
+    gap: 8px;
+    /* 常态：一条安静躺着的纸。只有极浅的一线影说明它压在另一张纸上。 */
+    box-shadow: 0 1px 2px rgb(24 18 10 / 0.14);
+    transition:
+      transform var(--cs-dur) var(--cs-ease),
+      box-shadow var(--cs-dur) var(--cs-ease);
   }
 
-  /* 两个动作**用墨色与字重分工**，不靠框、不靠位置。
-   * §4.2c 那套「1px 描边 + radius 4」是给 S5 那组按钮的，
-   * 而这里两个都是短标签——套上去就成了两个 Web 小按钮。 */
-  .cs-one-btn {
-    appearance: none;
-    padding: 5px 0;
-    border: 0;
-    background: transparent;
-    font: 400 12.5px/1.5 inherit;
-    /* 次动作：机器能做的（换一条）走铅笔灰。 */
-    color: var(--cs-pencil);
-    cursor: pointer;
+  /* 抬起：拿起来的那一下。⚠ 位移只有 2px、旋转 0.5°——
+   * 纸张很轻，抬得太高读成「浮起来的气泡」，而它是一张纸，
+   * 抬起的作用只是**让手知道它可以被拿走**。 */
+  .cs-strip.is-lifted,
+  .cs-strip:hover {
+    transform: translateY(-2px) rotate(-0.5deg);
+    box-shadow: 0 6px 12px rgb(24 18 10 / 0.26);
   }
 
-  /* 主动作：人要做的（就这句）走墨色 + 600。
-   * 红仍然不给——「不可逆」由档位那一行说明，不在这里抢。 */
-  .cs-one-btn.is-main {
-    font-weight: 600;
-    color: var(--cs-ink);
-  }
-
-  .cs-one-btn:hover {
-    text-decoration: underline;
-    text-underline-offset: 4px;
-  }
-
-  .cs-ar-hint {
-    margin: 10px 0 0;
-    font-size: 11px;
-    color: var(--cs-pencil);
-  }
-
+  /* ── 方向三的正文与方向一共用一套排版 ───────────────────────── */
   /* ── 对照页自身的版式（与被对照物无关） ─────────────────────── */
   .cs-defs {
     position: absolute;
@@ -369,6 +382,12 @@
   .cs-ar-stack {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    /* ⚠ 方向三的纸条之间要比方向一/现状松——它们是**摊在桌上的几张纸**，
+     *   挨太紧会读成一块被分成几段的板子。 */
+    gap: 9px;
+  }
+
+  .cs-ar-col:last-child .cs-ar-stack {
+    gap: 9px;
   }
 </style>
