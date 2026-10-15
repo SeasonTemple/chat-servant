@@ -26,6 +26,8 @@ pub use context::{Context, Summarizer, Trimmed};
 pub use model::{Candidate, DraftSet, Intent, ReasonError, Reasoner, StageCalls, TurnContext};
 pub use peer::{same_peer, similarity};
 pub use seam::{Turn, turn};
-pub use transport::{HttpReasoner, ModelCell, Provider, probe_connectivity, redact};
+pub use transport::{
+    HttpReasoner, ModelCell, ModelGroup, Protocol, Provider, ProxyCell, Route, probe_route, redact,
+};
 pub use vision::{Describer, ImagePayload, VisionBridge, VisionMode};
 pub use voice::{VOICE_MAX_CHARS, VOICE_MAX_SAMPLES, voice_samples};

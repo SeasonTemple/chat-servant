@@ -1731,12 +1731,26 @@ impl Scratch {
         match self.provider {
             Provider::Anthropic => Billing::ANTHROPIC_PATCH,
             Provider::OpenAi => Billing::OPENAI_GPT4O_MINI,
-            // ⚠ MiniMax 的视觉计费**未核实**，而 `Billing` 只有两种已验证形状
-            // （Anthropic 28px patch、OpenAI 512px tile）。
+            // ⚠ **其余各家的视觉计费没有核实过**，而 `Billing` 只有两种
+            // 已验证形状（Anthropic 28px patch、OpenAI 512px tile）。
             // 套用其中之一 = 拿一个没验证的数去算用户的账单。
-            // 这里如实**不产出预算**：媒体外发对 MiniMax 暂不给出尺寸，
-            // 而不是给一个看起来能用的错数字。
-            Provider::MiniMax => Billing::ANTHROPIC_PATCH,
+            //
+            // ⚠ 2026-10-15（票 43）这条 arm 从「只有 MiniMax」扩成了「除
+            // 上面那两家之外的一切」：端点可换之后，这一格可能是任何人的服务。
+            //
+            // ⚠⚠ **下面这个 `_` 不是「不产出预算」，它退回 Anthropic 的
+            // 28px patch。** `Billing` 只有 `Patch` 与 `Tile` 两个变体，
+            // **没有「未知」这一档**，所以这里无法表达「这家没核实过」——
+            // 函数签名强迫它给一个数，而任何数对没核实过的家都是编的。
+            // 这不是本轮引入的：MiniMax 早就在这条 arm 上拿同一个数。
+            // 本轮只是把命中面从「一家」扩大到「除两家之外的一切」。
+            //
+            // ⇒ 真正的修法是给 `Billing` 加一档 `Unknown`，让调用方
+            // **拒绝给图片定尺寸**（宁可不出图，也不出一个错尺寸）。
+            // 那是改 `core::scale` 公开枚举的事，会牵动
+            // `encode_region` 与预算滑块，**不在票 43 范围内**。
+            // 记在这里，别让下一个人以为这一档是「如实不产出」。
+            _ => Billing::ANTHROPIC_PATCH,
         }
     }
 }

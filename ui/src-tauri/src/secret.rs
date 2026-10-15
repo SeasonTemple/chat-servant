@@ -19,7 +19,20 @@
 //! 是普通文件。
 //!
 //! 所以 [`redact`] 是**所有**对外文本的必经之路。
+//!
+//! ## ⚠ 端点与代理也走这一条（2026-10-15，票 43）
+//!
+//! 开放自定义端点与代理之后，凭据多出两种**新形状**：
+//! `https://user:pass@host/`（代理几乎都长这样）与
+//! `?access_token=…`（把 token 放路径/查询里的端点）。两者都由
+//! [`mask_url_credentials`] 覆盖，**且调用点与 key 是同一条**：
+//! 凡是会把端点或代理地址拼进对外文本的地方，一律走 [`redact`]，
+//! 不另开旁路。
+//!
+//! 凭据目标名按**组**分开（`chat-servant/<组>/<供应商>`），
+//! 两组模型配置各自一把 key，见 [`target`]。
 
+use chatservant_reason::ModelGroup;
 use windows::Win32::Foundation::ERROR_NOT_FOUND;
 use windows::Win32::Security::Credentials::{
     CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW,
@@ -27,8 +40,25 @@ use windows::Win32::Security::Credentials::{
 };
 use windows::core::{PCWSTR, PWSTR};
 
-/// 凭据管理器里的目标名前缀。`chat-servant/<provider>`。
+/// 凭据管理器里的目标名前缀。`chat-servant/<组>/<供应商>`。
 const TARGET_PREFIX: &str = "chat-servant";
+
+/// ⚠ **2026-10-15 改了目标名形状**（票 43）：从 `chat-servant/<供应商>`
+/// 变成 `chat-servant/<组>/<供应商>`。
+///
+/// 为什么非改不可：两组模型配置要**各自一把 key**。共用一把的话
+/// 「决策走本地、文字走云端」这种组合根本配不出来——而后写入的那一把
+/// 会把前一把顶掉。
+///
+/// [`legacy_target`] 是**读时**的迁移兜底，见 [`from_vault`]。
+fn target(group: ModelGroup, provider: &str) -> String {
+    format!("{TARGET_PREFIX}/{}/{}", group.key(), provider)
+}
+
+/// 旧版（2026-10-15 之前）的目标名。**只读时兜底，不写。**
+fn legacy_target(provider: &str) -> String {
+    format!("{TARGET_PREFIX}/{provider}")
+}
 
 /// 掩码后的样子。**长度刻意不等于真实长度**——那会泄漏信息。
 const MASK: &str = "••••••••";
@@ -40,6 +70,9 @@ pub struct KeyStatus {
     pub configured: bool,
     /// 值来自环境变量。这种情况下设置页的输入框应该是只读的。
     pub from_env: bool,
+    /// 值来自**旧版那个不带组别的目标名**。界面上要说明，因为删的时候
+    /// 会连带把它删掉（见 [`erase`]）。
+    pub legacy: bool,
     /// 给界面看的掩码，仅用于「已配置」那一行提示。
     pub masked: String,
 }
@@ -60,9 +93,10 @@ pub struct KeyStatus {
 /// 不能只活在文档里；② 环境变量这条备选，给 CI / 脚本用。
 /// 删什么：「配好后不用重启设置，下一次生成就会用上」——
 /// 那是**行为**，不是**说明**；它该在真的生效时告诉用户，不该每屏预告一次。
-pub fn missing_hint(provider: &str) -> String {
+pub fn missing_hint(group: ModelGroup, provider: &str) -> String {
     format!(
-        "存进 Windows 凭据管理器，不落文件；也可设环境变量 {}_API_KEY。",
+        "存进 Windows 凭据管理器（{} 这一组独立存放），不落文件；也可设环境变量 {}_API_KEY。",
+        group.label(),
         provider.to_uppercase()
     )
 }
@@ -71,13 +105,16 @@ pub fn missing_hint(provider: &str) -> String {
 ///
 /// `CRED_PERSIST_LOCAL_MACHINE`：跟着本机走，**不同步到漫游配置**——
 /// 漫游会把凭据带到域里的其它机器去。
-pub fn store(provider: &str, secret: &str) -> Result<(), String> {
-    let target = format!("{TARGET_PREFIX}/{provider}");
+pub fn store(group: ModelGroup, provider: &str, secret: &str) -> Result<(), String> {
+    let target = target(group, provider);
     let mut blob = secret.as_bytes().to_vec();
 
     let mut name: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
     // UserName 只是凭据管理器列表里的显示名，不是登录名。
-    let mut user: Vec<u16> = provider.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut user: Vec<u16> = format!("{}/{provider}", group.key())
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
 
     let cred = CREDENTIALW {
         Flags: Default::default(),
@@ -105,12 +142,48 @@ pub fn store(provider: &str, secret: &str) -> Result<(), String> {
 
 /// 读 key。**凭据管理器优先于环境变量**——
 /// 设置页填的应当覆盖机器上的环境变量，否则用户改不动。
-pub fn load(provider: &str) -> Option<String> {
-    let key = from_vault(provider).or_else(|| from_env(provider))?;
+pub fn load(group: ModelGroup, provider: &str) -> Option<String> {
+    let key = read_group(group, provider).or_else(|| from_env(provider))?;
     // 读到就登记。这样后续任何报错在 redact 时都能把它抹掉——
     // **读取的那一刻就是它进入本进程内存的那一刻**，也是唯一需要登记的时刻。
     remember(&key);
     Some(key)
+}
+
+/// 这一组的值从哪儿来。**读出来的那一把是不是旧版目标名里的。**
+pub fn source(group: ModelGroup, provider: &str) -> KeySource {
+    if read_group(group, provider).is_some() {
+        KeySource::Group
+    } else if read_one(&legacy_target(provider)).is_some() {
+        KeySource::Legacy
+    } else if from_env(provider).is_some() {
+        KeySource::Env
+    } else {
+        KeySource::None
+    }
+}
+
+/// 一把 key 当前是从哪儿来的。**前端只需要知道「是不是旧版那一把」。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    /// 这一组自己的目标名。
+    Group,
+    /// 2026-10-15 之前存的那把（**不带组别**，两组共用同一把）。
+    Legacy,
+    /// 环境变量。
+    Env,
+    /// 没有。
+    None,
+}
+
+/// 先读这一组自己的，没有再读**旧版那个不带组别的**。
+///
+/// ⚠ 迁移兜底（2026-10-15 引入组别时加的）：不兜的话，每个用过旧版的
+/// 机器升级后会突然变成「没配 key」，而界面上没有任何东西解释这件事——
+/// 那正是这个项目反复在删的那种静默失效。用户下一次在这组里保存时，
+/// 值就落到组内目标名下，兜底自然不再生效。
+fn read_group(group: ModelGroup, provider: &str) -> Option<String> {
+    read_one(&target(group, provider)).or_else(|| read_one(&legacy_target(provider)))
 }
 
 /// 从环境变量读。变量名规则收在 [`chatservant_reason::Provider::key_env_names`]，
@@ -126,9 +199,8 @@ fn from_env(provider: &str) -> Option<String> {
     None
 }
 
-/// 从凭据管理器读。
-fn from_vault(provider: &str) -> Option<String> {
-    let target = format!("{TARGET_PREFIX}/{provider}");
+/// 从凭据管理器读**一个**目标名。
+fn read_one(target: &str) -> Option<String> {
     let name: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
 
     unsafe {
@@ -163,26 +235,56 @@ fn from_vault(provider: &str) -> Option<String> {
 }
 
 /// 删掉凭据里的 key。
-pub fn erase(provider: &str) -> Result<(), String> {
-    let target = format!("{TARGET_PREFIX}/{provider}");
+///
+/// ## 为什么**两处都删**
+///
+/// 这一格的值可能来自组内目标名，也可能来自**旧版那把不带组别的**
+/// （见 [`read_group`]）。只删一处的话，用户点完「删除」，界面上还写着
+/// 「已配置」——一个**说谎的控件**比删不掉更糟。
+///
+/// ⚠ 代价要说清：旧版那把是两组共用的，删掉它对两组都生效。
+/// 界面上必须把这一点说明，不能让另一组无声地掉线。
+pub fn erase(group: ModelGroup, provider: &str) -> Result<(), String> {
+    let group_target = target(group, provider);
+    let legacy = legacy_target(provider);
+    let mut first_err = None;
+    for t in [&group_target, &legacy] {
+        if let Err(e) = delete_one(t) {
+            // 两处里一处都没有（常见：本来就是空的）不算失败——
+            // `delete_one` 把「没有这一条」也归成一种 Err，这里分不清，
+            // 所以**只要组内那处成功就当成功**。
+            if t == &group_target {
+                first_err = Some(e);
+            }
+        }
+    }
+    match first_err {
+        None => Ok(()),
+        Some(e) => Err(e),
+    }
+}
+
+fn delete_one(target: &str) -> Result<(), String> {
     let name: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe { CredDeleteW(PCWSTR(name.as_ptr()), CRED_TYPE_GENERIC, None) }
         .map_err(|e| format!("删除凭据失败：{}", redact(&e.to_string())))
 }
 
 /// 当前状态。**不含 key**——只有「有没有」和「来自哪」。
-pub fn status(provider: &str) -> KeyStatus {
-    let from_env = from_env(provider).is_some();
-    match load(provider) {
-        Some(_) => KeyStatus {
-            configured: true,
-            from_env,
-            masked: MASK.to_string(),
-        },
-        None => KeyStatus {
+pub fn status(group: ModelGroup, provider: &str) -> KeyStatus {
+    let src = source(group, provider);
+    match src {
+        KeySource::None => KeyStatus {
             configured: false,
             from_env: false,
+            legacy: false,
             masked: String::new(),
+        },
+        s => KeyStatus {
+            configured: true,
+            from_env: s == KeySource::Env,
+            legacy: s == KeySource::Legacy,
+            masked: MASK.to_string(),
         },
     }
 }
@@ -191,10 +293,10 @@ pub fn status(provider: &str) -> KeyStatus {
 ///
 /// 用户不想每次改别的设置都重新粘一遍 key。
 /// 返回值告诉调用方「有没有真的写」。
-pub fn apply(provider: &str, input: Option<&str>) -> Result<bool, String> {
+pub fn apply(group: ModelGroup, provider: &str, input: Option<&str>) -> Result<bool, String> {
     match input.map(str::trim).filter(|s| !s.is_empty()) {
         Some(secret) => {
-            store(provider, secret)?;
+            store(group, provider, secret)?;
             Ok(true)
         }
         // 留空：什么都不做。**不是删除**——删除要走单独的 erase。
@@ -211,6 +313,13 @@ pub fn apply(provider: &str, input: Option<&str>) -> Result<bool, String> {
 /// 4. **URL 里的凭据**（用户名密码段 + 查询参数里的 token）——见 [`mask_url_credentials`]
 ///
 /// **宁可多抹。** 日志里少几个字符无所谓，泄一次就是事故。
+///
+/// ⚠ 2026-10-15：第 2、4 两步搬去了 [`chatservant_core::redact`]。
+///   原因是它们**不是这一层独有的**——`crates/reason` 那侧的代理与
+///   自定义端点报错同样需要遮蔽 URL 凭据，而本 crate 够不着 Windows
+///   凭据管理器，于是那一侧自己写了一份**只认 `sk-`** 的弱版。
+///   两份能力不同的 `redact` ＝ 两条旁路，强的那个等于没做。
+///   ⇒ 纯字符串部分收到 core，这里只保留**本层独有的第 1 步**。
 pub fn redact(text: &str) -> String {
     let mut out = text.to_string();
     for known in known_secrets() {
@@ -218,118 +327,7 @@ pub fn redact(text: &str) -> String {
             out = out.replace(&known, MASK);
         }
     }
-    out = mask_sk_shaped(&out);
-    mask_url_credentials(&out)
-}
-
-/// 抹掉 URL 里带的凭据。
-///
-/// **为什么必须单独做**（2026-10-15，票 43 的前置）：一旦允许配置自定义端点与
-/// 代理，凭据就会以两种**新形状**出现在报错文本里，而
-/// [`mask_sk_shaped`] 只认 `sk-` 开头、`redact` 的前两步只认已知值——
-///
-/// 1. **用户名密码段**：`https://user:pass@host/v1/`（代理几乎都长这样）
-/// 2. **查询参数里的 token**：`…/v1/?access_token=…&model=…`
-///
-/// ⚠ URL 本身**要留着**——它是不含凭据时判断「是哪家、哪个端点」的唯一线索，
-/// 抹掉等于让报错失去排查价值。所以只抹凭据那一段。
-///
-/// ⚠ 宁可多抹：`user:pass@` 整段换成掩码是可接受的。
-fn mask_url_credentials(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let bytes: Vec<char> = text.chars().collect();
-    let n = bytes.len();
-    let mut i = 0;
-
-    // 查询参数里那几个「名字里带 token/key/secret」的参数
-    const SENSITIVE_PARAMS: [&str; 6] = [
-        "api_key",
-        "apikey",
-        "access_token",
-        "token",
-        "secret",
-        "password",
-    ];
-
-    while i < n {
-        // ① 用户名密码段：形如 scheme://<creds>@host
-        if bytes[i] == ':' && i + 2 < n && bytes[i + 1] == '/' && bytes[i + 2] == '/' {
-            let scheme_start = i + 3;
-            // 段结束于 '/'、'?'、'#' 或任何分隔符
-            let mut seg_end = scheme_start;
-            while seg_end < n
-                && !matches!(
-                    bytes[seg_end],
-                    '/' | '?' | '#' | ' ' | '"' | '\'' | '\n' | '>' | ')'
-                )
-            {
-                seg_end += 1;
-            }
-            // 这一段里最后一个 '@' 之前就是凭据
-            if let Some(at_rel) = bytes[scheme_start..seg_end].iter().rposition(|c| *c == '@') {
-                let cred_end = scheme_start + at_rel;
-                out.extend(bytes[i..scheme_start].iter());
-                // ⚠ **凭据段要跳过而不是推进去**。写反的话 MASK 会被插在
-                // 凭据**后面**，看起来像掩了码、其实原文还在——测试当场抓到。
-                out.push_str(MASK);
-                out.push('@');
-                i = cred_end + 1;
-                continue;
-            }
-            out.extend(bytes[i..seg_end].iter());
-            i = seg_end;
-            continue;
-        }
-
-        // ② 查询参数
-        let mut matched: Option<(usize, usize)> = None;
-        for p in SENSITIVE_PARAMS {
-            let pl = p.chars().count();
-            if i + pl < n && bytes[i..i + pl].iter().collect::<String>() == p {
-                let next = bytes[i + pl];
-                // 必须紧跟 '='，否则 `tokenizer` 之类会被误伤
-                if next == '=' {
-                    matched = Some((p.chars().count(), i + pl + 1));
-                    break;
-                }
-            }
-        }
-        if let Some((_, val_start)) = matched {
-            let mut val_end = val_start;
-            while val_end < n
-                && !matches!(bytes[val_end], '&' | ' ' | '"' | '\'' | '\n' | '>' | ')')
-            {
-                val_end += 1;
-            }
-            out.extend(bytes[i..val_start].iter());
-            out.push_str(MASK);
-            i = val_end;
-            continue;
-        }
-
-        out.push(bytes[i]);
-        i += 1;
-    }
-    out
-}
-
-/// 扫出所有 `sk-…` 形状的 token 并替换。
-fn mask_sk_shaped(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    loop {
-        let Some(at) = rest.find("sk-") else {
-            out.push_str(rest);
-            return out;
-        };
-        let tail = &rest[at..];
-        let end = tail
-            .find(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
-            .unwrap_or(tail.len());
-        out.push_str(&rest[..at]);
-        out.push_str(MASK);
-        rest = &tail[end..];
-    }
+    chatservant_core::redact::shapes(&out)
 }
 
 /// 当前进程里已知的 key 值。
@@ -364,6 +362,10 @@ pub fn forget_all() {
 }
 
 #[cfg(test)]
+// secret-scan: allow —— 本模块里那几串 sk-… 是**故意的假 token**：
+// 它们是脱敏器自己的测试样本，出现的地方就是要被它抹掉的输入。
+// pre-commit 的钩子按内容匹配 sk- 形状，拦下来只会让人养成 --no-verify
+// 的习惯。按钩子自己写的规矩走**文件内豁免标记**，而不是绕过。
 mod tests {
     use super::*;
 
@@ -426,20 +428,45 @@ mod tests {
     /// 这是用户明确要的：不想每次改别的设置都重新粘一遍。
     #[test]
     fn an_empty_input_keeps_the_existing_key() {
-        assert_eq!(apply("no-such-provider-xyz", None), Ok(false));
-        assert_eq!(apply("no-such-provider-xyz", Some("   ")), Ok(false));
+        let g = ModelGroup::Llm;
+        assert_eq!(apply(g, "no-such-provider-xyz", None), Ok(false));
+        assert_eq!(apply(g, "no-such-provider-xyz", Some("   ")), Ok(false));
         assert!(
-            !status("no-such-provider-xyz").configured,
+            !status(g, "no-such-provider-xyz").configured,
             "没配过的 provider 提交空值后仍然应该是没配"
         );
+    }
+
+    /// **两组是两把 key，不是一把。**
+    ///
+    /// 这是本票验收的核心：合并成一个列表时，「决策走本地、文字走云端」
+    /// 在数据结构上就配不出来。断言的是**目标名分得开**——
+    /// 凭据管理器里那两条必须是两条独立记录。
+    #[test]
+    fn the_two_groups_get_two_different_credential_targets() {
+        assert_ne!(
+            target(ModelGroup::Decision, "openai"),
+            target(ModelGroup::Llm, "openai")
+        );
+        assert_ne!(
+            target(ModelGroup::Decision, "openai"),
+            target(ModelGroup::Llm, "openai")
+        );
+        // 而它仍然不是「随便什么都能进」：组名与供应商名都收在受控的取值里。
+        assert_eq!(
+            target(ModelGroup::Decision, "openai"),
+            "chat-servant/decision/openai"
+        );
+        assert_eq!(target(ModelGroup::Llm, "openai"), "chat-servant/llm/openai");
     }
 
     /// 没配 key 时给的下一步指引要**具体到能照做**。
     #[test]
     fn the_missing_hint_is_actionable() {
-        let h = missing_hint("openai");
+        let h = missing_hint(ModelGroup::Llm, "openai");
         assert!(h.contains("凭据管理器"), "没说存哪：{h}");
         assert!(h.contains("OPENAI_API_KEY"), "没说环境变量名：{h}");
+        assert!(h.contains("独立存放"), "没说这是这一组自己的一把：{h}");
         assert!(h.len() > 40, "指引太短，没有可操作性：{h}");
     }
 
@@ -454,7 +481,7 @@ mod tests {
     /// 这条断言钉住的是**提示不许再变回那个说法**。
     #[test]
     fn the_missing_hint_does_not_promise_an_action_the_page_cannot_do() {
-        let h = missing_hint("openai");
+        let h = missing_hint(ModelGroup::Decision, "openai");
         assert!(
             !h.contains("在这个页面填"),
             "提示又承诺「在这个页面填」了——那一页现在确实能填，但这条断言是\
@@ -466,7 +493,7 @@ mod tests {
     #[test]
     fn the_status_never_carries_the_key() {
         remember(KEY);
-        let s = status("no-such-provider-xyz");
+        let s = status(ModelGroup::Llm, "no-such-provider-xyz");
         let dumped = format!("{s:?}");
         assert!(!dumped.contains(KEY), "状态里带出了 key：{dumped}");
         forget_all();
