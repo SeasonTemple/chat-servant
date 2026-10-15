@@ -17,7 +17,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 
 | 票 | 勾/总 | Status | Blocked by |
 |---|---|---|---|
-| `20-two-dispatch-tiers.md` | 16/18 | ready-for-human · **决定日期 2026-10-13** | None（可以立刻做） |
+| `20-two-dispatch-tiers.md` | 16/18 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
 | `21-readout-phase-never-sent.md` | 5/7 | ready-for-human · **P0 · 2026-10-12 实测，不是推断** | None（可以立刻做） |
 | `34-tray-icon-looks-grey-on-dark-taskbar.md` | 4/6 | in-progress · **2026-10-14 载体已重新设计并定案（A′）· 正式图标已生成并入库**（`8eeb244`） | (票面没写 Blocked by) |
 | `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 4/7 | needs-triage · **2026-10-15 连否三个候选后主动收手** | None（票 22 已把反例测出来了，可以立刻做） |

@@ -295,6 +295,24 @@ pub fn paste() -> Result<(), String> {
 /// `AttachThreadInput` ——把自己的线程临时挂到目标窗口的输入队列上，
 /// 再调 `SetForegroundWindow`。这是系统提供的机制，不是绕过安全策略。
 /// 仍然失败就报失败。
+///
+/// ## 它是「追加」语义，所以对同一条候选只许调一次
+///
+/// 粘贴落在**光标处**，不动用户已经打了一半的字。好处是这样它不会
+/// 毁掉用户正在写的东西；代价是**第二次调用不是修正，是拼接**。
+///
+/// 2026-10-09 实机事故：当时还是两段式（`Confirm` 档），
+/// 两次点击都调了 `fill_and_send`，于是发出去的是两份拼接：
+///
+/// ```text
+/// 看起来你想要发送文件给我，请确认一下文件名和内容，我会准备好接收。
+/// 看起来你想要发送文件，我这边已经准备好了接收，请继续。
+/// ```
+///
+/// 两次点击之间的 5 秒里人根本来不及改任何东西——第一份还没看完。
+///
+/// ⚠ 这条也解释了为什么 [`DeliveryReceipt::Filled`] 不能重放：
+/// 停下等人在这里不是保守，是**唯一正确**的做法。
 pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
     // 第一步：写剪贴板并**回读校验**。
     // 这一步失败的话，一个字符都还没发出去——可以安全重放。
@@ -330,6 +348,11 @@ pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
     // 第四步：回读。这一步只是确认剪贴板还在——它按定义一直在。
     // 真正的确认是「输入框里出现了这段文本」，那需要 OCR 目标区域，
     // 是 ticket 16 的调试窗口。这里如实说明**没有**拿到那种证据。
+    //
+    // ⚠ 2026-10-15：这段循环以前决定回执——读到相等就报 `PossiblySent`，
+    // 超时报 `TimedOut`。那两次都在**撒谎**，因为本函数从头到尾没按过回车：
+    // 它连「发出去」这个动作都没做，哪来的「可能已经发出去了」。
+    // 现在回读只做诊断，不决定回执；理由见 [`DeliveryReceipt::Filled`]。
     let deadline = Instant::now() + READBACK_TIMEOUT;
     let mut last_err = String::from("尚未回读");
     while Instant::now() < deadline {
@@ -341,9 +364,10 @@ pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
         };
         match got {
             Ok(got) if got == text => {
-                // 拿到了字节级相等的证据。但**没有**证据证明它被粘贴了。
-                // 所以不能报 Sent——那是「确定送达」。
-                return DeliveryReceipt::PossiblySent;
+                // 旁证成立：指令发出后剪贴板一直没被换掉。
+                // ⚠ 它**不能**报 Sent——「确定送达」需要看到聊天区里那条消息，
+                // 而本函数连回车都没按，离那条还差得远。
+                return DeliveryReceipt::Filled;
             }
             Ok(_) => last_err = "剪贴板内容已被别的程序改动".into(),
             Err(e) => last_err = e,
@@ -351,10 +375,14 @@ pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    // 回执按设计是**无载荷**的（见 CONTEXT.md：TimedOut 是一个状态，不是
-    // 一条带原因的数据）。所以诊断信息走日志，不去改回执的类型。
-    tracing::warn!(reason = %last_err, "回读超时，按 PossiblySent 对待");
-    DeliveryReceipt::TimedOut
+    // 回读超时**不改变回执**：`paste()` 返回 `Ok` 已经说明指令进了目标进程的
+    // 输入队列，而「没按回车」是比回读强得多的证据。
+    //
+    // ⚠ 早先这里报 `TimedOut`，而那一句「按『可能已发送』对待」
+    // 会让「仅填入」档的界面对一件确定没发生的事拉警报。
+    // 证据弱要如实记在日志里，但不能拿它去改一个本来正确的事实。
+    tracing::warn!(reason = %last_err, "回读无旁证，按已填入对待（未按回车，确定没发）");
+    DeliveryReceipt::Filled
 }
 
 /// 发一次**单独的 ALT 按下+抬起**，什么都不输入。
@@ -494,11 +522,16 @@ pub fn press_enter() -> Result<(), String> {
 /// 所以这里**不报 `Sent`**。`Sent` 是「确定送达」，报它就是撒谎，
 /// 而撒谎的回执会让上层以为不必再做回读。拿不到更高档的回执不是缺陷，
 /// 是**证据能力的边界**，如实标出来。
+///
+/// ⚠ 「可以按回车了」这个判据用的是 [`DeliveryReceipt::Filled`]，
+/// 不是 `PossiblySent`。2026-10-15 之前用的是后者，而那正是假警报的源头：
+/// 一个「可能已经发出去了」被当成「装填成功、可以继续」的内部信号，
+/// 于是同一句撒谎既出现在界面上，又成了发送路径的前置条件。
 pub fn fill_and_send(text: &str, target: HWND) -> DeliveryReceipt {
     let filled = fill_input_box(text, target);
     // 填充失败就**到此为止**——绝不在没填进去的时候按回车，
     // 那会把输入框里原有的内容（用户自己打了一半的话）发出去。
-    if !matches!(filled, DeliveryReceipt::PossiblySent) {
+    if !matches!(filled, DeliveryReceipt::Filled) {
         return filled;
     }
 
@@ -506,55 +539,6 @@ pub fn fill_and_send(text: &str, target: HWND) -> DeliveryReceipt {
         Ok(()) => DeliveryReceipt::PossiblySent,
         Err(e) => DeliveryReceipt::Failed(format!(
             "回车发送失败（内容已填入输入框，你可以手动发）：{e}"
-        )),
-    }
-}
-
-/// 只按回车，**不再往输入框里写任何东西**——Confirm 档第二次点击走这条。
-///
-/// ## 为什么 Confirm 的第二次点击不能再填一遍
-///
-/// 2026-10-09 实机事故：Confirm 档的两次点击都调了 `fill_and_send`，
-/// 而 `fill_input_box` 是**在光标处追加**（它的语义就是「停在光标处」，
-/// 不动用户已经打了一半的字）。于是发出去的是**两份拼接**：
-///
-/// ```text
-/// 看起来你想要发送文件给我，请确认一下文件名和内容，我会准备好接收。
-/// 看起来你想要发送文件，我这边已经准备好了接收，请继续。
-/// ```
-///
-/// 两次点击之间的 5 秒里人根本来不及改任何东西——第一份还没看完。
-///
-/// ## 顺带把交互改对了
-///
-/// 「第一次填入、第二次发送」本来就是更好的形态：两次点击之间那几秒，
-/// 人可以**读、可以改**输入框里的字。这正是 Confirm 档存在的意义
-/// （硬约束第 5 条：升档必须是人按的、可回退的）。
-/// 之前两次都填，等于把这个窗口浪费掉了。
-///
-/// ## 回执同样只能到 `PossiblySent`
-///
-/// 与 [`fill_and_send`] 同理：按完回车没有证据证明消息真的走了。
-pub fn send_only(target: HWND) -> DeliveryReceipt {
-    // **先把焦点交给目标窗口，再按回车——但不碰输入框里的一个字。**
-    //
-    // ⚠ 早先这里写的是「前台不是微信就不发」，那是对的守门、错的门：
-    // 用户第二次点是**点面板上的按钮**，那一刻前台是面板不是微信，
-    // 于是这道门永远关着——实测按了没反应，文字留在输入框里发不出去。
-    //
-    // 真正的风险不是「前台不是微信」，而是「**前台不是微信却按了回车**」。
-    // 抢到焦点之后再按，那一下就确定落在微信的输入框里。
-    // 抢不到焦点就**不发**——那时按下去可能落在别的窗口，
-    // 而别的窗口里一次回车可能是提交表单、发消息、关窗口。
-    if let Err(e) = focus(target) {
-        return DeliveryReceipt::Failed(format!(
-            "无法把焦点交给微信——**没有按回车**，因为那一下可能落在别的窗口上：{e}"
-        ));
-    }
-    match press_enter() {
-        Ok(()) => DeliveryReceipt::PossiblySent,
-        Err(e) => DeliveryReceipt::Failed(format!(
-            "回车发送失败（内容已在输入框里，你可以手动发）：{e}"
         )),
     }
 }

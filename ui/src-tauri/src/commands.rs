@@ -4,7 +4,7 @@
 //! ticket 09 的验收标准是「回读剪贴板与候选原文字节级相等」，
 //! 在那之前先不接注入，免得把「以为成功了」写进产品。
 
-use chatservant_core::dispatch::{DeliveryReceipt, Dispatch, Dispatcher};
+use chatservant_core::dispatch::{DeliveryReceipt, Dispatch, Dispatcher, Next};
 // `Deserialize` 不只是给某个命令用的：`CloseBehavior` 是 `#[tauri::command]`
 // 的**入参**，Tauri 要求命令参数类型实现 `CommandArg`，
 // 而它的 blanket impl 建立在 `Deserialize` 上。
@@ -339,12 +339,7 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
         let next = d.next(receipt.clone(), 0);
         return DispatchReply {
             outcome: outcome_name(&receipt),
-            detail: format!(
-                "档位 {}｜{}｜下一步：{}",
-                tier_name(tier),
-                receipt.explain(),
-                next.explain()
-            ),
+            detail: receipt_detail(tier, &receipt, &next),
             next_hint: Some(next.explain()),
         };
     }
@@ -365,21 +360,22 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
     //
     // ⚠⚠ 别把它「简化」成 `deliver(&candidate_id)` 或加个可变参数——
     // 这个 `false` 是硬约束第 5 条的落点之一。两档之下，
-    // **整个代码库里按下回车的地方只剩一处**：`inject::send_only`，
-    // 它的前置条件是 `Arming::arm` 成功（人已经装填过一次）。
-    // 少一个条件就多一条「不问就发出去」的路。
+    // **整个代码库里按下回车的地方只剩一处**：`inject::fill_and_send`
+    // 末尾的 `press_enter`，而它**只被 `deliver_send` 调**——
+    // 也就是只被上面那个 `Auto` 分支调。少一个条件就多一条
+    // 「不问就发出去」的路。
+    //
+    // ⚠ 2026-10-15 之前这里写的是 `inject::send_only`。那个函数已经删了，
+    // 因为砍掉两段式之后它失去了存在理由：它的全部价值是「上一步装填过了，
+    // 这一步只补一个回车」，而 `Auto` 档没有上一步。它只剩注释不改，
+    // 下一个读的人会以为它是当前路径。
     let receipt = deliver(&candidate_id, false);
 
     // 让档位守则跑一遍，把下一步该做什么告诉前端。
     let next = d.next(receipt.clone(), 0);
     DispatchReply {
         outcome: outcome_name(&receipt),
-        detail: format!(
-            "档位 {}｜{}｜下一步：{}",
-            tier_name(tier),
-            receipt.explain(),
-            next.explain()
-        ),
+        detail: receipt_detail(tier, &receipt, &next),
         next_hint: Some(next.explain()),
     }
 }
@@ -635,9 +631,40 @@ fn outcome_name(r: &DeliveryReceipt) -> &'static str {
     match r {
         DeliveryReceipt::NotSent => "NotSent",
         DeliveryReceipt::Sent => "Sent",
+        DeliveryReceipt::Filled => "Filled",
         DeliveryReceipt::PossiblySent => "PossiblySent",
         DeliveryReceipt::Failed(_) => "Failed",
         DeliveryReceipt::TimedOut => "TimedOut",
+    }
+}
+
+/// 回执 + 下一步 → 面板上那一句**给人看**的话。
+///
+/// ## 为什么停下时不说「下一步」
+///
+/// [`Next::Halt`] 的 `reason` **就是** `receipt.explain()` 本身——
+/// `Dispatcher::next` 在「挡住自动重试」那条上把理由原样透传。
+/// 于是 2026-10-15 之前那种
+/// `format!("档位 {}｜{}｜下一步：{}", …, receipt.explain(), next.explain())`
+/// 会把同一句话在界面上**念两遍**。真机量出来的就是：
+///
+/// ```text
+/// 档位 仅填入｜已填进输入框并停在光标处——没有发出去，要发你自己按回车
+/// ｜下一步：停下等人工：已填进输入框并停在光标处——没有发出去，要发你自己按回车
+/// ```
+///
+/// 长句尤其明显：回执本来就该一屏读完，重复一遍直接把它顶出面板。
+/// ⇒ 停下时说一次；只有在「接下来真的还有一步动作」时才接「下一步」。
+fn receipt_detail(tier: Dispatch, receipt: &DeliveryReceipt, next: &Next) -> String {
+    let why = receipt.explain();
+    match next {
+        Next::Halt { reason } if reason == why => format!("档位 {}｜{}", tier_name(tier), why),
+        _ => format!(
+            "档位 {}｜{}｜下一步：{}",
+            tier_name(tier),
+            why,
+            next.explain()
+        ),
     }
 }
 
@@ -1864,7 +1891,7 @@ mod budget_ceiling_tests {
     ///   **复印件不是守卫**。抽 `apply_tier` 就是为了让测试能碰到真代码。
     ///
     /// ⚠ 仍然只到「改档 → 装填作废」这一层：真机上连着 `STATE`、
-    ///   `inject::send_only` 一起验，是票 20 剩的那一项。
+    ///   `inject::fill_and_send` 的回执一起验，是票 20 剩的那一项。
     ///
     /// ⚠ 原先这里还有一条 `tier_changed_only_when_the_tier_actually_differs`，
     ///   测的是「`tier_changed(before, d)` 是否等于 `before != d`」——
@@ -1970,6 +1997,39 @@ mod budget_ceiling_tests {
             }
         }
         assert_eq!(sending, 1, "能发出去的组合必须恰好一个");
+    }
+
+    /// **停下时同一句话只说一遍**；真的还有下一步动作时才接「下一步」。
+    ///
+    /// ⚠ `Next::Halt { reason }` 的 `reason` 就是 `receipt.explain()` 本身
+    /// （`Dispatcher::next` 原样透传），所以「回执 + 下一步」两段拼起来
+    /// 在**大多数回执上**都会重复一次。真机量出来的是：
+    /// 「…没有发出去，要发你自己按回车｜下一步：停下等人工：…没有发出去…」
+    /// —— 长句被念两遍，直接顶出面板。
+    #[test]
+    fn a_halt_does_not_say_the_same_thing_twice() {
+        let d = Dispatcher::new();
+
+        // 最容易重复的一支：`Filled` 的停下理由就是它自己的 explain()。
+        let r = DeliveryReceipt::Filled;
+        let n = d.next(r.clone(), 0);
+        let said = receipt_detail(Dispatch::Manual, &r, &n);
+        assert_eq!(
+            said.matches("没有发出去").count(),
+            1,
+            "同一句只该出现一次：{said}"
+        );
+        assert!(!said.contains("下一步"), "停下时不该再接「下一步」：{said}");
+
+        // 而真的还有下一步动作时（确定没发出去 ⇒ 可重试），必须说出来。
+        let r2 = DeliveryReceipt::Failed("x".into());
+        let n2 = d.next(r2.clone(), 0);
+        let said2 = receipt_detail(Dispatch::Manual, &r2, &n2);
+        assert!(said2.contains("下一步"), "可重试时要说下一步：{said2}");
+
+        // 两支都要带档位——用户得知道这句是在哪一档下发生的。
+        assert!(said.contains("仅填入"), "缺档位：{said}");
+        assert!(said2.contains("仅填入"), "缺档位：{said2}");
     }
 
     /// **候选换过之后，上一次的装填立刻作废。**
