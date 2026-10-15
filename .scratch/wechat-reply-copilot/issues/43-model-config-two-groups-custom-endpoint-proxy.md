@@ -77,7 +77,11 @@ pub fn base_url(self) -> &'static str {                 // transport.rs:169
 - [ ] 设置页拆成**两组独立配置**，互不影响
 - [ ] provider 列表支持「预设 + 自定义」两类，协议选择与厂商解耦
 - [ ] 自定义 base_url 能生效（产品路径走得到，不只是测试路径）
-- [ ] `redact` 覆盖**端点与代理地址**里的 token 形状 + 守卫测试
+- [x] **`redact` 覆盖端点与代理地址里的 token 形状** + 4 条守卫测试
+      （2026-10-15 单独做了，不必等本票其余部分）——
+      覆盖 `scheme://user:pass@host` 的用户名密码段与
+      `?access_token=…&model=…` 这类查询参数；
+      **同时钉住「无凭据的 URL 不许被动」**，否则报错会失去排查价值
 - [ ] 代理配置对两组都生效，单独一栏不重复填
 - [ ] `save_setting`/`forget_key` 的 `PROVIDERS` 白名单同步放开
 - [ ] 门禁九步全绿
