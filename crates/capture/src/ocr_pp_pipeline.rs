@@ -29,10 +29,58 @@ use chatservant_core::frame::{Frame, Rect};
 use crate::ocr::{OcrError, OcrLine, OcrText};
 use crate::ocr_pp::{self, BLANK, Plan, PpError};
 
+/// det 的权重文件名。**磁盘上就这一个**，没有「按尺寸分文件」这一说。
+pub const DET_MODEL: &str = "ch_PP-OCRv4_det_mobile.onnx";
+
+/// rec 的权重文件名。同上，**只有一个**。
+///
+/// ⚠ 2026-10-15 实测：早先的 [`BucketCache::plan_path`] 按宽度拼出
+/// `ch_PP-OCRv4_rec_mobile_w{w}.onnx`，而磁盘上从没有过这种文件，
+/// 于是每个宽度的 rec 编译都对着一个不存在的路径失败。见 [`BucketCache`]。
+pub const REC_MODEL: &str = "ch_PP-OCRv4_rec_mobile.onnx";
+
 /// det 的总下采样倍数。**8 次步长 2 的下采样 = 32。**
 ///
 /// ⚠ 所以 det 的输入 H/W 必须是 32 的倍数，否则图里的 pad 算错。
 pub const DET_STRIDE: usize = 32;
+
+/// det 的归一化常数。取自 PaddleOCR 的 `DetNormalizeImage`
+/// （`mean=[0.485,0.456,0.406]`、`std=[0.229,0.224,0.225]`）。
+///
+/// ## ⚠ 原先 `std` 写错了，把对比度压掉一半（2026-10-15 修）
+///
+/// 早先这里写的是 `std = [0.456, 0.456, 0.456]`——把 mean 的第二个分量
+/// 抄进了 std。后果是**送进网络的对比度只有应有值的一半**，
+/// DB 头的 sigmoid 输出整体偏低，按 [`DET_THRESH`] 二值化之后
+/// 只剩笔画最密的核心留下来。
+///
+/// 实测后果（`cargo xtask ocr <帧> --stats` 对同一张真帧）：
+/// 一行 6 个字的墨迹高 **12px**，而 det 给的框高只有 **8px**，
+/// 且框整体上移约 6~7px —— rec 拿到的是一个**被削掉下半截**的字，
+/// 识别结果只能是乱码。
+pub const DET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+pub const DET_STD: [f32; 3] = [0.229, 0.224, 0.225];
+
+/// rec 的归一化常数。取自 PaddleOCR 的 `RecNormalizeImage`
+/// （`mean = std = [0.5, 0.5, 0.5]`）。
+///
+/// ## ⚠ det 与 rec 是**两套**常数，不能共用（2026-10-15 修）
+///
+/// 早先 rec 复用了 det 的 ImageNet 那一套。它们在 PaddleOCR 里
+/// 本来就是分开配的，共用会让 rec 的输入整体偏离训练分布。
+pub const REC_MEAN: [f32; 3] = [0.5, 0.5, 0.5];
+pub const REC_STD: [f32; 3] = [0.5, 0.5, 0.5];
+
+/// PaddleOCR DB 后处理的 `unclip` 外扩比例。
+///
+/// 外扩是**照 DB 论文的做法**，不是为了让框变好看：二值化阈值一定会削掉
+/// 字形的抗锯齿边缘，外扩把被削掉的那一圈补回来，
+/// rec 才拿得到完整的字。
+///
+/// ⚬ 外扩量按 `w * r / sqrt(w*h)` 算，所以**细长框的纵向几乎不扩**
+/// （160x14 的行框纵向只多 0.45px）。这是公式本身的行为，
+/// 不是漏了纵向参数——纵向覆盖要靠概率图本身，扩不出来。
+pub const DET_UNCLIP_RATIO: f32 = 1.5;
 
 /// rec 的输入高。**我们给的**，不是模型的（模型四个维全是动态的）。
 pub const REC_HEIGHT: usize = 48;
@@ -56,10 +104,17 @@ pub const DET_MIN_AREA: usize = 20;
 pub const DET_MIN_W: usize = 3;
 pub const DET_MIN_H: usize = 3;
 
-/// 一张图上最多取多少个框。
+/// 一屏最多取多少个**行**框。
 ///
-/// 保护性的上限：det 在一块纯色背景上也可能吐出成百上千个噪点框，
-/// 每一个都要过一遍 rec（有编译开销）。取 64 足够覆盖一屏聊天消息。
+/// ⚠ 保护的是 rec 的计算量：每个框都要过一遍 rec（有编译开销），
+/// 而 det 在一块纯色背景上也可能吐出成百上千个噪点框。
+///
+/// **计数的单位是「行」，不是「连通域」**（2026-10-15 修）。
+/// 早先这个上限卡在 [`det_boxes`] 里、也就是行合并**之前**，
+/// 于是预算被单字框花掉：真帧上一行十四个字就是十几个框，
+/// 64 的预算几行就耗光，屏幕下半部分整片丢失，
+/// 而剩下的一半又是碎片——现场看上去就是「整张图被切成单字框」。
+/// 改成在 [`merge_into_lines`] 之后限流，64 行足够覆盖一屏聊天消息。
 pub const DET_MAX_BOXES: usize = 64;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -92,8 +147,6 @@ pub fn rec_width(w: u32) -> usize {
 /// 尺寸不足时按**最近邻复制**右下角补齐——不是补黑。补黑会在边缘造出
 /// 一条假的暗边，det 可能把它当文字。
 pub fn det_input(frame: &Frame, w: usize, h: usize) -> Vec<f32> {
-    const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-    const STD: [f32; 3] = [0.456, 0.456, 0.456];
     let (fw, fh) = (frame.width() as usize, frame.height() as usize);
     let src = frame.as_bytes();
     let mut out = vec![0.0f32; 3 * w * h];
@@ -104,7 +157,7 @@ pub fn det_input(frame: &Frame, w: usize, h: usize) -> Vec<f32> {
             let p = &src[(sy * fw + sx) * 3..(sy * fw + sx) * 3 + 3];
             let o = y * w + x;
             for c in 0..3 {
-                out[c * w * h + o] = (p[c] as f32 / 255.0 - MEAN[c]) / STD[c];
+                out[c * w * h + o] = (p[c] as f32 / 255.0 - DET_MEAN[c]) / DET_STD[c];
             }
         }
     }
@@ -116,8 +169,6 @@ pub fn det_input(frame: &Frame, w: usize, h: usize) -> Vec<f32> {
 /// 高**固定** 48（[`REC_HEIGHT`]），宽按框的比例算再取整到 8 的倍数。
 /// ⚠ 只缩不裁：宽高比要保持，否则字会被拉变形，识别率掉得很厉害。
 pub fn rec_input(frame: &Frame, box_: Rect, out_w: usize) -> Vec<f32> {
-    const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-    const STD: [f32; 3] = [0.456, 0.456, 0.456];
     let h = REC_HEIGHT;
     let (fw, fh) = (frame.width() as usize, frame.height() as usize);
     let src = frame.as_bytes();
@@ -133,7 +184,7 @@ pub fn rec_input(frame: &Frame, box_: Rect, out_w: usize) -> Vec<f32> {
             let p = &src[(sy * fw + sx) * 3..(sy * fw + sx) * 3 + 3];
             let o = y * out_w + x;
             for c in 0..3 {
-                out[c * h * out_w + o] = (p[c] as f32 / 255.0 - MEAN[c]) / STD[c];
+                out[c * h * out_w + o] = (p[c] as f32 / 255.0 - REC_MEAN[c]) / REC_STD[c];
             }
         }
     }
@@ -205,19 +256,25 @@ pub fn det_boxes(prob: &[f32], pw: usize, ph: usize, src_w: usize, src_h: usize)
         .iter()
         .filter(|(area, _, _, _, _)| *area >= DET_MIN_AREA)
         .filter_map(|(_, mnx, mny, mxx, mxy)| {
-            let w = mxx - mnx + 1;
-            let h = mxy - mny + 1;
+            let (w, h) = (mxx - mnx + 1, mxy - mny + 1);
             if w < DET_MIN_W || h < DET_MIN_H {
                 return None;
             }
+            // ⚬ PaddleOCR 的 `unclip`：按 `w*r/sqrt(w*h)` 外扩。
+            // 缺了它，框会紧贴二值化阈值留下的笔画核心，
+            // 抗锯齿被削掉的那一圈永远补不回来，rec 拿到的字是**缺的**。
+            // ⚠ 2026-10-15 补上——早先完全没有这一步。
+            let len = ((w * h) as f64).sqrt();
+            let dx = w as f64 * DET_UNCLIP_RATIO as f64 / len;
+            let dy = h as f64 * DET_UNCLIP_RATIO as f64 / len;
             // 反缩放回原图坐标。用四舍五入而不是截断：截断会让最右/最下
             // 的那一列像素永远落在框外。
             let sx = src_w as f64 / pw as f64;
             let sy = src_h as f64 / ph as f64;
-            let x0 = ((*mnx as f64) * sx).round() as i32;
-            let y0 = ((*mny as f64) * sy).round() as i32;
-            let x1 = ((*mxx as f64 + 1.0) * sx).round() as i32;
-            let y1 = ((*mxy as f64 + 1.0) * sy).round() as i32;
+            let x0 = (((*mnx as f64) - dx) * sx).round() as i32;
+            let y0 = (((*mny as f64) - dy) * sy).round() as i32;
+            let x1 = (((*mxx as f64 + 1.0) + dx) * sx).round() as i32;
+            let y1 = (((*mxy as f64 + 1.0) + dy) * sy).round() as i32;
             Some(Rect {
                 x0,
                 y0,
@@ -228,10 +285,13 @@ pub fn det_boxes(prob: &[f32], pw: usize, ph: usize, src_w: usize, src_h: usize)
         .filter(|r| r.width() > 0 && r.height() > 0)
         .collect();
 
-    // 按面积从大到小（文字块比噪点大），取前 N 个。
-    boxes.sort_by_key(|b| -(b.width() * b.height()));
-    boxes.truncate(DET_MAX_BOXES);
-    // 读出来是自上而下、自左而右。
+    // ⚠ 这里**不**按 [`DET_MAX_BOXES`] 截断（2026-10-15 移走）。
+    // 截断必须发生在 [`merge_into_lines`] **之后**，理由见那条常量的说明：
+    // 在合并前截断，预算花的是**单字框**，一行十四个字就把 64 用光了，
+    // 真正该保留的整行反而被裁掉。实测真帧上 64 个框里混着整行与碎片，
+    // 一行文字被切成 12 个 12px 的框，逐行看全是「单字框」。
+    //
+    // 排序保持稳定的语义：读出来自上而下、自左而右。
     boxes.sort_by_key(|b| (b.y0, b.x0));
     boxes
 }
@@ -277,6 +337,113 @@ pub fn merge_into_lines(boxes: &[Rect]) -> Vec<Rect> {
     }
     lines.sort_by_key(|l| (l.y0, l.x0));
     lines
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// det 层诊断（探针用，不参与识别）
+// ────────────────────────────────────────────────────────────────────────
+
+/// det 层的量化诊断。
+///
+/// ## 为什么需要它
+///
+/// 「识别成一堆单字框」这句话可以是 det 的锅、可以是 rec 的锅、
+/// 也可以是**根本没走到 PP-OCR**（回落了 WinRT）。光看最终文本分不出来——
+/// 2026-10-15 那次就是：现场看到的是 WinRT 的逐字切分，却一直在调 det 参数。
+///
+/// 唯一能定位的办法是**把 det 这一层单独量出来**：框数、框高、框宽。
+/// 一行中文在 1267x930 的微信帧上大约是十几行，框数就该是十几；
+/// 框高该接近一行字高（本帧实测 11~14px），不是单个汉字。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetStats {
+    /// det 的输入尺寸（32 的倍数）。
+    pub det_input_w: usize,
+    pub det_input_h: usize,
+    /// 概率图的尺寸。PP-OCRv4 的 det 输出与输入同尺寸。
+    pub prob_w: usize,
+    pub prob_h: usize,
+    /// 二值化后的前景像素数，用来确认阈值没有把图削空或全收进来。
+    pub fg_pixels: usize,
+    /// 连通域框数（**合并前**）。
+    pub raw_count: usize,
+    pub raw_heights: Vec<i32>,
+    pub raw_widths: Vec<i32>,
+    /// 合并成行后的框数（**限流前**）。
+    pub merged_count: usize,
+    /// 因超过 [`DET_MAX_BOXES`] 而被丢掉的行数。
+    ///
+    /// ⚠ 这个数不为 0 就意味着**屏幕下半部分根本没进 rec**，
+    /// 而它在最终文本里完全看不出来——只是「消息好像少了几条」。
+    pub dropped_lines: usize,
+    /// 限流后真正送去 rec 的行数。
+    pub line_count: usize,
+    pub line_heights: Vec<i32>,
+    pub line_widths: Vec<i32>,
+    pub line_rects: Vec<Rect>,
+}
+
+/// 只跑 det，把**概率图**原样交出去。**探针用，不参与识别。**
+///
+/// ## 为什么要有它
+///
+/// 框的统计（框数、框高）只能告诉你「框比字矮」，
+/// 答不出「概率图是整体弱、还是只削掉了边缘」。
+/// 这两者的修法完全不同：前者是阈值/归一化，后者是框的外扩。
+/// 把概率图按强度打成字符画看一眼就分得清。
+///
+/// 返回 `(展平的概率图, 宽, 高)`。
+pub fn det_prob_map(frame: &Frame) -> Result<(Vec<f32>, usize, usize), PpError> {
+    let (fw, fh) = (frame.width() as usize, frame.height() as usize);
+    if fw == 0 || fh == 0 {
+        return Err(PpError::Shape("空帧".into()));
+    }
+    let (dw, dh) = det_size(fw as u32, fh as u32);
+    let plan = det_plan(dh, dw)?;
+    let buf = det_input(frame, dw, dh);
+    let input = tract_onnx::prelude::Tensor::from_shape(&[1, 3, dh, dw], &buf)
+        .map_err(|e| PpError::Shape(format!("造 det 输入失败：{e}")))?;
+    let (vals, shape) = ocr_pp::run(&plan, input, "det")?;
+    if shape.len() != 4 || shape[0] != 1 || shape[1] != 1 {
+        return Err(PpError::Shape(format!("det 输出不是 [1,1,h,w]：{shape:?}")));
+    }
+    Ok((vals, shape[3], shape[2]))
+}
+
+/// 只跑 det，把每一层的中间量如实报出来。**探针用，不参与识别。**
+pub fn det_stats(frame: &Frame) -> Result<DetStats, PpError> {
+    let (fw, fh) = (frame.width() as usize, frame.height() as usize);
+    if fw == 0 || fh == 0 {
+        return Err(PpError::Shape("空帧".into()));
+    }
+    let (dw, dh) = det_size(fw as u32, fh as u32);
+    let (vals, pw, ph) = det_prob_map(frame)?;
+    let fg_pixels = vals
+        .iter()
+        .take(pw * ph)
+        .filter(|v| **v > DET_THRESH)
+        .count();
+    let raw = det_boxes(&vals, pw, ph, fw, fh);
+    let merged = merge_into_lines(&raw);
+    // 限流**在合并之后**——见 [`DET_MAX_BOXES`]。这里如实报出被丢掉多少行，
+    // 因为「屏幕下半截没读到」这个故障在最终文本里完全看不出来。
+    let kept = merged.len().min(DET_MAX_BOXES);
+    let lines: Vec<Rect> = merged.iter().take(DET_MAX_BOXES).copied().collect();
+    Ok(DetStats {
+        det_input_w: dw,
+        det_input_h: dh,
+        prob_w: pw,
+        prob_h: ph,
+        fg_pixels,
+        raw_count: raw.len(),
+        raw_heights: raw.iter().map(|b| b.height()).collect(),
+        raw_widths: raw.iter().map(|b| b.width()).collect(),
+        merged_count: merged.len(),
+        dropped_lines: merged.len() - kept,
+        line_count: lines.len(),
+        line_heights: lines.iter().map(|b| b.height()).collect(),
+        line_widths: lines.iter().map(|b| b.width()).collect(),
+        line_rects: lines,
+    })
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -386,8 +553,24 @@ impl BucketCache {
         }
     }
 
-    fn plan_path(&self, w: usize) -> PathBuf {
-        self.dir.join(format!("ch_PP-OCRv4_rec_mobile_w{w}.onnx"))
+    /// rec 权重路径。
+    ///
+    /// ## ⚠ 曾经按宽度拼文件名，那是个静默失效（2026-10-15 实测）
+    ///
+    /// 早先这里是 `format!("ch_PP-OCRv4_rec_mobile_w{w}.onnx")`，理由是
+    /// 「每个宽度一份预编译的图」。**但磁盘上从没有过这种文件**——
+    /// 权重是安装时一次性下载的三个固定名，代码里没有任何地方产出过
+    /// 按宽度的文件。
+    ///
+    /// 于是每个宽度的 [`ocr_pp::load_rec`] 都在 `model_for_path` 上失败，
+    /// 错误一路传到 [`recognize_in`] 被吞成 `None`，
+    /// [`crate::ocr::recognize`] 于是**静默回落 WinRT**。
+    ///
+    /// 症状极具误导性：det 白跑一遍（十几秒），而**输出是 WinRT 的**——
+    /// 于是现场看到的是「PP-OCR 把整张图切成单字框」，而真正的 det 行为
+    /// 从来没被观测过。分桶要缓存的是**编译结果**，不是**文件**。
+    fn plan_path(&self) -> PathBuf {
+        self.dir.join(REC_MODEL)
     }
 
     /// 拿宽度 `w` 的可执行计划，没有就编一个。
@@ -395,7 +578,7 @@ impl BucketCache {
         if let Some(p) = self.buckets.lock().unwrap().get(&w) {
             return Ok(Arc::clone(p));
         }
-        let plan = ocr_pp::load_rec(&self.plan_path(w), w)?;
+        let plan = ocr_pp::load_rec(&self.plan_path(), w)?;
         let mut m = self.buckets.lock().unwrap();
         if m.len() >= self.max_buckets && !m.contains_key(&w) {
             // ⚠ 清一半而不是清空：清空会让下一个框又把整轮编一遍。
@@ -415,31 +598,36 @@ impl BucketCache {
     }
 }
 
-static DET_PLAN: OnceLock<Mutex<Option<Plan>>> = OnceLock::new();
+static DET_PLAN: OnceLock<Mutex<Option<(usize, usize, Plan)>>> = OnceLock::new();
 
-fn det_plan_slot() -> &'static Mutex<Option<Plan>> {
+fn det_plan_slot() -> &'static Mutex<Option<(usize, usize, Plan)>> {
     DET_PLAN.get_or_init(|| Mutex::new(None))
 }
 
 /// det 图的缓存。**只缓存一份**——det 的输入尺寸随帧变，编一个几十毫秒，
 /// 而一帧只跑一次，缓存收益不大；缓存多份反而占内存。
+///
+/// ## ⚠ 缓存必须按形状校验（2026-10-15 修）
+///
+/// 早先这里只存 `Plan`，**不看 `h`/`w`**。而 det 的图是按具体形状编译的，
+/// 聊天窗口一被拖动尺寸，det 输入就从 `[1,3,960,1280]` 变成别的，
+/// 缓存里那份旧的会被直接返回，接着 `run` 拿到一个形状不匹配的输入而报错，
+/// 于是又走「回落 WinRT」那条静默路径。
 pub fn det_plan(h: usize, w: usize) -> Result<Plan, PpError> {
     let mut slot = det_plan_slot().lock().unwrap();
-    if let Some(p) = slot.as_ref() {
-        return Ok(Arc::clone(p));
+    if let Some((ph, pw, p)) = slot.as_ref() {
+        if *ph == h && *pw == w {
+            return Ok(Arc::clone(p));
+        }
     }
-    let p = ocr_pp::load_det(
-        &ocr_pp::models_dir().join("ch_PP-OCRv4_det_mobile.onnx"),
-        h,
-        w,
-    )?;
-    *slot = Some(Arc::clone(&p));
+    let p = ocr_pp::load_det(&ocr_pp::models_dir().join(DET_MODEL), h, w)?;
+    *slot = Some((h, w, Arc::clone(&p)));
     Ok(p)
 }
 
 /// 权重目录里有 det 模型吗。**「没装」是判定，不是错误。**
 pub fn det_file_present(dir: &std::path::Path) -> bool {
-    dir.join("ch_PP-OCRv4_det_mobile.onnx").is_file()
+    dir.join(DET_MODEL).is_file()
 }
 
 /// 整套 PP-OCRv4 识别。**权重不在就返回 `None`，不是错误。**
@@ -509,7 +697,17 @@ pub fn recognize_with(
         return Err(PpError::Shape(format!("det 输出不是 [1,1,h,w]：{shape:?}")));
     }
     let (pw, ph) = (shape[3], shape[2]);
-    let boxes = merge_into_lines(&det_boxes(&vals, pw, ph, fw, fh));
+    // ⚬ 顺序：先合并成行，再按 [`DET_MAX_BOXES`] 限流。反过来就是拿行数预算
+    // 去装单字框，屏幕下半截会被裁掉。见该常量的说明。
+    let mut boxes = merge_into_lines(&det_boxes(&vals, pw, ph, fw, fh));
+    if boxes.len() > DET_MAX_BOXES {
+        tracing::warn!(
+            lines = boxes.len(),
+            cap = DET_MAX_BOXES,
+            "det 的行数超过上限，屏幕下半部分可能没被读到"
+        );
+        boxes.truncate(DET_MAX_BOXES);
+    }
 
     // ── rec（按宽度分桶，同宽的框共用一张编译好的图）──
     let mut lines: Vec<OcrLine> = Vec::new();
@@ -568,6 +766,133 @@ mod tests {
         Frame::from_rgb(w, h, vec![v; (w * h * 3) as usize]).expect("造帧失败")
     }
 
+    /// **每个宽度分桶都要真能编译出 rec 图。**
+    ///
+    /// ⚠ 2026-10-15：这条守的是一次**静默失效**，也是「识别成一堆单字框」
+    /// 这个现象真正的成因。`BucketCache::plan_path` 曾经按宽度拼出
+    /// `ch_PP-OCRv4_rec_mobile_w{w}.onnx`，而磁盘上从没有过这种文件。
+    /// 于是每个桶的 `load_rec` 都失败，整轮 `recognize_with` 报错、
+    /// 被 `recognize_in` 吞成 `None`、`ocr::recognize` 回落 WinRT。
+    ///
+    /// **现场看到的是 WinRT 的逐字输出，却一直在调 det 的参数**——
+    /// det 的真实行为从来没被观测过。症状与真因隔了整整一层回落。
+    ///
+    /// ⚠ 撤掉修复（把 `plan_path` 改回按宽度拼名字）时这条会红。
+    #[test]
+    fn every_rec_width_bucket_compiles_against_a_real_weight_file() {
+        let dir = ocr_pp::models_dir();
+        if !dir.join(REC_MODEL).is_file() {
+            eprintln!("跳过：{} 下没有 rec 权重", dir.display());
+            return;
+        }
+        let cache = BucketCache::new(dir.clone());
+        assert!(
+            cache.plan_path().is_file(),
+            "权重路径指向一个不存在的文件：{} —— PP-OCR 会整轮回落 WinRT",
+            cache.plan_path().display()
+        );
+        // 真编一次。只走 `plan_path` 的存在性断言不够：万一哪天权重
+        // 换名或目录结构变了，「文件在」也未必「编得出图」。
+        assert!(
+            cache.get(320).is_ok(),
+            "宽度 320 的 rec 编译失败 —— PP-OCR 会整轮回落 WinRT"
+        );
+    }
+
+    /// **归一化常数必须逐字等于 PaddleOCR 的配置。**
+    ///
+    /// ⚠ 2026-10-15 实测的两处错：
+    ///
+    /// 1. det 的 `std` 曾写成 `[0.456, 0.456, 0.456]`——把 mean 的第二个
+    ///    分量抄进了 std，输入对比度只剩一半。真帧上 det 给的框高 8px，
+    ///    而同一行的字形墨迹高 12px，rec 拿到的是被削掉下半截的字。
+    /// 2. rec 曾复用 det 的 ImageNet 常数；PaddleOCR 里 rec 是
+    ///    `mean = std = 0.5`，与 det 分开配。
+    ///
+    /// ⚠ 撤掉修复时这条会红。
+    #[test]
+    fn the_normalization_constants_match_paddleocr() {
+        for (got, want, name) in [
+            (DET_MEAN[0], 0.485, "det mean[0]"),
+            (DET_MEAN[1], 0.456, "det mean[1]"),
+            (DET_MEAN[2], 0.406, "det mean[2]"),
+            (DET_STD[0], 0.229, "det std[0]"),
+            (DET_STD[1], 0.224, "det std[1]"),
+            (DET_STD[2], 0.225, "det std[2]"),
+            (REC_MEAN[0], 0.5, "rec mean[0]"),
+            (REC_STD[0], 0.5, "rec std[0]"),
+        ] {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "{name} = {got}，PaddleOCR 要的是 {want}。写错会让输入偏离训练分布，\
+                 而症状是「框比字矮、识别成乱码」，不会报错"
+            );
+        }
+        // det 的 std 若等于 mean 的某个分量，就是抄串了行——单独钉住这个形状。
+        assert!(
+            DET_STD != [DET_MEAN[1]; 3],
+            "det 的 std 又变成 mean[1] 重复了三遍"
+        );
+    }
+
+    /// **det 输入要保住完整对比度。**
+    ///
+    /// 上一条钉的是常数，这条钉的是**它实际造成的后果**：
+    /// 一张「一个黑像素、一个白像素」的图归一化之后，两者的差是
+    /// `(1/255 - 0) / std = 1 / std`。std 被写大 → 对比度被压 →
+    /// det 的连通域只剩笔画核心。
+    ///
+    /// ⚬ 2026-10-15：这条第一版把期望值写成 `(1/255)/std`，少了 255 倍，
+    /// 被自己的实现打回。`p/255 - mean` 里除的是**像素值**，
+    /// 所以满量程跨度是 `1/std`。
+    #[test]
+    fn the_det_input_preserves_black_to_white_contrast() {
+        let mut px = vec![0u8; 2 * 2 * 3];
+        for p in px.chunks_exact_mut(3).skip(1) {
+            p.copy_from_slice(&[255, 255, 255]);
+        }
+        let f = Frame::from_rgb(2, 2, px).expect("造帧失败");
+        let out = det_input(&f, 2, 2);
+        // NCHW，单通道平面 2x2=4 像素；像素 0 在索引 0、像素 1 在索引 1。
+        let spread = out[1] - out[0];
+        let want = 1.0f32 / DET_STD[0];
+        assert!(
+            (spread - want).abs() < 1e-3,
+            "黑白跨度 = {spread}，按 det std[0]={} 应该是 {want}。\
+             对比度被压掉会让 det 只框住笔画核心",
+            DET_STD[0]
+        );
+    }
+
+    /// **det 图的形状变了必须重编，不能拿旧的缓存凑。**
+    ///
+    /// ⚠ 缓存早先不记 `h`/`w`：聊天窗口一被拖动尺寸，
+    /// 拿到的就是按旧形状编的图，`run` 随即因输入形状不符而失败，
+    /// 于是又走「回落 WinRT」那条静默路径。
+    ///
+    /// ⚠ 只缓存一份，所以顺序有意义：先验同形状命中缓存，
+    /// 再验换形状会重编。反过来测会误判——缓存被换形状的那次挤掉了。
+    #[test]
+    fn a_different_det_shape_gets_its_own_plan() {
+        let dir = ocr_pp::models_dir();
+        if !dir.join(DET_MODEL).is_file() {
+            eprintln!("跳过：{} 下没有 det 权重", dir.display());
+            return;
+        }
+        let a = det_plan(32, 64).expect("32x64 编不出来");
+        let a2 = det_plan(32, 64).expect("32x64 重编失败");
+        assert!(
+            Arc::ptr_eq(&a, &a2),
+            "同形状重复调用没有命中缓存，每次都要重编一遍"
+        );
+        let b = det_plan(64, 64).expect("64x64 编不出来");
+        // 形状不同 → 必须是另一张图。拿到同一张就说明缓存没看形状。
+        assert!(
+            !Arc::ptr_eq(&a, &b),
+            "换了 det 输入形状却拿到同一张缓存的图 —— 窗口改尺寸后必然失败回落"
+        );
+    }
+
     /// **det 的输入尺寸必须取到 32 的倍数。**
     ///
     /// 这是硬要求不是风格问题：网络里有 8 次步长 2 的下采样，
@@ -596,11 +921,19 @@ mod tests {
         assert_eq!(rec_width(0), 8);
     }
 
-    /// **二值化 + 连通域：一个明显的框能被捞出来。**
+    /// **二值化 + 连通域 + unclip：一个明显的框能被捞出来。**
     ///
     /// 造一张 32x32 的概率图，中间放一个 8x8 的高概率块。
+    ///
+    /// ⚠ 期望值**含 unclip 外扩**（2026-10-15 补上这一步）：
+    /// `len = sqrt(8*8) = 8`，`dx = dy = 8*1.5/8 = 1.5`，
+    /// 所以框是 `(12-1.5, 10-1.5) .. (19+1+1.5, 17+1+1.5)`
+    /// 四舍五入后的 `(11, 9, 22, 20)`，而不是块本身的 `12,10,20,18`。
+    ///
+    /// 为什么要有这一步：二值化阈值一定削掉抗锯齿边缘，
+    /// 框紧贴剩下的核心就意味着 rec 拿到的是**缺了一圈笔画**的字。
     #[test]
-    fn a_single_bright_block_becomes_one_box() {
+    fn a_single_bright_block_becomes_one_unclipped_box() {
         let (w, h) = (32usize, 32usize);
         let mut prob = vec![0.0f32; w * h];
         for y in 10..18 {
@@ -610,10 +943,45 @@ mod tests {
         }
         let boxes = det_boxes(&prob, w, h, w, h);
         assert_eq!(boxes.len(), 1, "应该正好一个框：{boxes:?}");
-        assert_eq!(boxes[0].x0, 12);
-        assert_eq!(boxes[0].y0, 10);
-        assert_eq!(boxes[0].x1, 20);
-        assert_eq!(boxes[0].y1, 18);
+        assert_eq!(
+            (boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1),
+            (11, 9, 22, 20),
+            "框没按 unclip_ratio={} 外扩：{:?}",
+            DET_UNCLIP_RATIO,
+            boxes[0]
+        );
+    }
+
+    /// **单字框不能在行合并之前就被 [`DET_MAX_BOXES`] 截掉。**
+    ///
+    /// ⚠ 2026-10-15：限流曾经卡在 `det_boxes` 里，也就是合并**之前**。
+    /// 于是行数预算被单字框花掉——真帧上一行十四个字就是十几个框，
+    /// 64 的预算几行就耗光，屏幕下半部分整片丢失。
+    ///
+    /// ⚠ 撤掉修复（把 `truncate` 放回 `det_boxes`）时这条会红：
+    /// 现在是 100 个框，改回去就是 64 个。
+    #[test]
+    fn per_character_boxes_are_not_truncated_before_line_merging() {
+        let (pw, ph) = (800usize, 64usize);
+        let mut prob = vec![0.0f32; pw * ph];
+        // 一行里 100 个**互不相连**的 5x5 块（面积 25 > DET_MIN_AREA）。
+        // ⚬ 步距必须大于块宽，否则 8 邻域会把它们连成一块，测的就不是截断了。
+        for k in 0..100usize {
+            let x = k * 7;
+            for y in 10..15 {
+                for i in 0..5 {
+                    prob[y * pw + x + i] = 0.9;
+                }
+            }
+        }
+        let boxes = det_boxes(&prob, pw, ph, pw, ph);
+        assert_eq!(
+            boxes.len(),
+            100,
+            "单字框在行合并之前就被截断了：{} 个（上限 {}）",
+            boxes.len(),
+            DET_MAX_BOXES
+        );
     }
 
     /// **噪点要被筛掉。**
@@ -633,8 +1001,13 @@ mod tests {
 
     /// **概率图比原图小的时候，框要换算回原图坐标。**
     ///
-    /// det 的输出是 1/4 尺寸的，框必须放大回去，否则坐标差 4 倍——
+    /// det 的输出比输入小，框必须放大回去，否则坐标差好几倍——
     /// 而下游的消息区过滤全靠坐标，错了就等于没有。
+    ///
+    /// ⚠ 2026-10-15：期望值含 unclip 外扩。概率图里 8x8 的块
+    /// 外扩 `1.5` 后是 `(6.5, 6.5)..(17.5, 17.5)`，
+    /// 换算到 4 倍大的原图就是 `(26, 26)..(70, 70)`。
+    /// 早先这里断言的是块的原始位置 `(32,32)..(64,64)`。
     #[test]
     fn boxes_are_scaled_back_to_the_source_image() {
         let (pw, ph) = (32usize, 32usize);
@@ -648,8 +1021,8 @@ mod tests {
         let boxes = det_boxes(&prob, pw, ph, sw, sh);
         assert_eq!(boxes.len(), 1);
         let b = boxes[0];
-        assert_eq!((b.x0, b.y0), (32, 32), "没放大回原图：{b:?}");
-        assert_eq!((b.x1, b.y1), (64, 64), "没放大回原图：{b:?}");
+        assert_eq!((b.x0, b.y0), (26, 26), "没放大回原图：{b:?}");
+        assert_eq!((b.x1, b.y1), (70, 70), "没放大回原图：{b:?}");
         assert!(b.x1 <= sw as i32 && b.y1 <= sh as i32, "框超出画面：{b:?}");
     }
 

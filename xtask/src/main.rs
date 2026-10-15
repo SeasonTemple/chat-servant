@@ -76,6 +76,22 @@ enum Cmd {
         /// OCR 前的放大倍数。1 = 原尺寸
         #[arg(long, default_value_t = 1)]
         scale: u32,
+        /// 只量 det 的框粒度与行组装，不打印识别文本
+        ///
+        /// ⚠ **这是「识别成一堆单字框」的定位工具。** 最终文本分不出
+        /// 是 det 的锅、rec 的锅、还是压根没走到 PP-OCR（回落 WinRT）——
+        /// 2026-10-15 那次就是在错的层上调参数。框数/框高/框宽是唯一
+        /// 能把层分开的量。
+        #[arg(long)]
+        stats: bool,
+        /// 打印 det 概率图的一带，字符画。格式 `y0:y1` 或 `y0:y1:x0:x1`
+        ///
+        /// 坐标是**原图像素**。例：`--prob 280:320:120:230`
+        ///
+        /// ⚠ 框统计只说得出「框比字矮」，答不出「概率图整体弱、
+        /// 还是只削掉了边缘」——两者修法不同。看一眼图就分得清。
+        #[arg(long)]
+        prob: Option<String>,
     },
     /// 标定探针：逐行测出气泡底色、文字墨色与对比度。
     ///
@@ -197,7 +213,20 @@ fn main() -> Result<()> {
         Cmd::Fixture { name, source } => make_fixture(&name, source),
         Cmd::Perceive { file } => probe_perceive(file),
         Cmd::GateCmp { a, b } => gatecmp(&a, &b),
-        Cmd::Ocr { file, scale } => probe_ocr(&file, scale),
+        Cmd::Ocr {
+            file,
+            scale,
+            stats,
+            prob,
+        } => {
+            if let Some(spec) = prob {
+                probe_ocr_prob(&file, scale, &spec)
+            } else if stats {
+                probe_ocr_stats(&file, scale)
+            } else {
+                probe_ocr(&file, scale)
+            }
+        }
         Cmd::Measure { file } => probe_measure(file),
         Cmd::Layout { file } => probe_layout(file),
         Cmd::Media { file } => media_probe::run(file),
@@ -519,19 +548,8 @@ fn window_rect(hwnd_raw: isize) -> Result<(i32, i32, i32, i32)> {
 /// 这类假设——放大必须是最近邻，插值会把字形边缘抹掉，掩盖真实问题。
 fn probe_ocr(file: &Path, scale: u32) -> Result<()> {
     set_dpi_aware();
-    let img = image::open(file)
-        .with_context(|| format!("打开 PNG 失败：{}", file.display()))?
-        .to_rgb8();
-    let (w, h) = img.dimensions();
-
-    let frame = if scale <= 1 {
-        chatservant_capture::Frame::from_rgb(w, h, img.into_raw())
-            .context("源图尺寸与缓冲区不匹配")?
-    } else {
-        let base = chatservant_capture::Frame::from_rgb(w, h, img.into_raw())
-            .context("源图尺寸与缓冲区不匹配")?;
-        base.upscaled_nearest(scale).context("放大后的尺寸溢出")?
-    };
+    let (w, h) = file_png_dims(file)?;
+    let frame = load_frame(file, scale)?;
 
     println!("来源   = {}", file.display());
     println!(
@@ -550,6 +568,7 @@ fn probe_ocr(file: &Path, scale: u32) -> Result<()> {
         t0.elapsed().as_millis(),
         ocr.lines.len()
     );
+    print_readability(&ocr);
 
     for (i, l) in ocr.lines.iter().enumerate() {
         println!(
@@ -584,6 +603,242 @@ fn probe_ocr(file: &Path, scale: u32) -> Result<()> {
     }
     println!("\n---- 整图 ----\n{}", ocr.text);
     Ok(())
+}
+
+/// 「整图拼接出来的中文成不成句子」的判据。
+///
+/// ## 为什么要在意
+///
+/// 用户看到的症状是「识别结果像乱码」，但**乱码有两种完全不同的成因**，
+/// 修法不一样：
+///
+/// - **字认错了** → rec 的问题（输入裁错、归一化错、形状错）
+/// - **字都对，但每个字被空格拆开** → 行组装的问题。
+///   中文逐字被插空格以后，一整句看着就是乱的，**而一个字都没错**
+///
+/// 所以只报「准确率」不够，得报**每行几个 token** 与**空格占比**。
+/// 一句正常中文一行 8~15 个字；一行 1 个 token、或者空格占到字符的两成，
+/// 就说明行组装把句子切碎了。
+///
+/// ⚬ 两种引擎的 token 口径不同：**WinRT** 逐词给 `words`（中文会逐字切开），
+/// **PP-OCR** 一个框就是一行、只给 `text`。所以有 `words` 就按它数，
+/// 没有就按字符数。
+fn print_readability(ocr: &chatservant_capture::ocr::OcrText) {
+    let mut per_line: Vec<usize> = Vec::with_capacity(ocr.lines.len());
+    let mut chars = 0usize;
+    let mut spaces = 0usize;
+    for l in &ocr.lines {
+        per_line.push(if l.words.is_empty() {
+            l.text.chars().filter(|c| !c.is_whitespace()).count()
+        } else {
+            l.words.len()
+        });
+        chars += l.text.chars().filter(|c| !c.is_whitespace()).count();
+        spaces += l.text.chars().filter(|c| c.is_whitespace()).count();
+    }
+    let mut sorted: Vec<i32> = per_line.iter().map(|n| *n as i32).collect();
+    sorted.sort_unstable();
+    let single = per_line.iter().filter(|n| **n == 1).count();
+    let space_ratio = if chars == 0 {
+        0.0
+    } else {
+        spaces as f64 / chars as f64
+    };
+    println!(
+        "\n---- 成句性 ----\n行 {} 行  非空白字符 {}  空白 {}  空格/字符 = {:.3}\n\
+         每行 token 数 min/中位/max = {}/{}/{}  只有 1 个 token 的行 = {}/{}",
+        ocr.lines.len(),
+        chars,
+        spaces,
+        space_ratio,
+        pct(&sorted, 0.0),
+        pct(&sorted, 0.5),
+        pct(&sorted, 1.0),
+        single,
+        ocr.lines.len()
+    );
+}
+
+/// 只量 det 的框粒度与行组装，**不打印识别文本**。
+///
+/// ## 为什么要有它
+///
+/// 「识别结果是一堆单字框」这个现象至少有三种成因，分属三层：
+///
+/// - det 把一行切成了一个个单字框（框高 == 单字高，框数上百）
+/// - det 框是对的，后面的**行组装**按间隙把它们又切开了
+/// - **压根没走到 PP-OCR**，[`probe_ocr`] 打的是回落后的 WinRT 的输出
+///
+/// 只看最终文本这三者长得一模一样。2026-10-15 那次就是第三种，
+/// 而当时在调 det 的后处理参数——白调。判据只能是**中间量**：
+/// det 输入尺寸、概率图尺寸、二值化前景像素、连通域框数与框的宽高分布。
+///
+/// ⚠ 印的是几何量，**不印识别文本**——`target/probe/` 下的帧可能含真实
+/// 聊天内容，而这份输出是要给人看、也可能被贴进票据的。
+fn probe_ocr_stats(file: &Path, scale: u32) -> Result<()> {
+    set_dpi_aware();
+    let frame = load_frame(file, scale)?;
+
+    println!("来源   = {}", file.display());
+    let (w, h) = file_png_dims(file)?;
+    println!(
+        "尺寸   = {}x{}  放大 {}x -> {}x{}",
+        w,
+        h,
+        scale,
+        frame.width(),
+        frame.height()
+    );
+
+    let t0 = std::time::Instant::now();
+    let s = chatservant_capture::ocr_pp_pipeline::det_stats(&frame)
+        .map_err(|e| anyhow::anyhow!("det 诊断失败：{e}"))?;
+    println!("det 推理 {} ms", t0.elapsed().as_millis());
+    println!(
+        "det 输入 = {}x{}（32 的倍数）  概率图 = {}x{}",
+        s.det_input_w, s.det_input_h, s.prob_w, s.prob_h
+    );
+    let fg_ratio = s.fg_pixels as f64 / (s.prob_w * s.prob_h).max(1) as f64;
+    println!(
+        "前景像素 = {}（占概率图 {:.2}%，阈值 {}）",
+        s.fg_pixels,
+        fg_ratio * 100.0,
+        chatservant_capture::ocr_pp_pipeline::DET_THRESH
+    );
+
+    println!("\n---- 合并前（连通域原始框）----");
+    print_box_summary(s.raw_count, &s.raw_widths, &s.raw_heights);
+    println!("\n---- 合并后（行）----");
+    print_box_summary(s.merged_count, &s.line_widths, &s.line_heights);
+    println!(
+        "限流上限 {}  保留 {}  **丢弃 {} 行**（丢了 = 屏幕下半截没进 rec）",
+        chatservant_capture::ocr_pp_pipeline::DET_MAX_BOXES,
+        s.line_count,
+        s.dropped_lines
+    );
+
+    println!("\n---- 逐框（合并后，按 y 排序，最多 60 个）----");
+    for (i, r) in s.line_rects.iter().take(60).enumerate() {
+        println!(
+            "{i:>3} | x={:>4} y={:>4}  w={:>4} h={:>3}",
+            r.x0,
+            r.y0,
+            r.width(),
+            r.height()
+        );
+    }
+    if s.line_rects.len() > 60 {
+        println!("（还有 {} 个没印）", s.line_rects.len() - 60);
+    }
+    Ok(())
+}
+
+/// 把 det 概率图的一带打成字符画。
+///
+/// 纵轴是原图的 y（每一行都缩到 1 个字符行），横轴每 `step` 个像素取一个样。
+/// 字符按概率分档，`#` 最亮。看得见「概率图到底盖住了多少字形高度」，
+/// 而不只是「框有多高」。
+fn probe_ocr_prob(file: &Path, scale: u32, spec: &str) -> Result<()> {
+    set_dpi_aware();
+    let frame = load_frame(file, scale)?;
+    let parts: Vec<i32> = spec
+        .split(':')
+        .map(|p| p.parse::<i32>().context("--prob 的坐标必须是整数"))
+        .collect::<Result<Vec<_>>>()?;
+    let (y0, y1) = (parts[0], parts[1]);
+    let (x0, x1) = if parts.len() >= 4 {
+        (parts[2], parts[3])
+    } else {
+        (0, frame.width() as i32)
+    };
+    let (vals, pw, ph) = chatservant_capture::ocr_pp_pipeline::det_prob_map(&frame)
+        .map_err(|e| anyhow::anyhow!("det 概率图跑不出来：{e}"))?;
+    // 概率图与原图不同尺寸时要换算；本仓 det 是等比 1:1 附近，
+    // 但换算写在这里，别让调用方默认「坐标通用」。
+    let sy = ph as f64 / frame.height() as f64;
+    let sx = pw as f64 / frame.width() as f64;
+    println!(
+        "概率图 {pw}x{ph}   原图 {}x{}",
+        frame.width(),
+        frame.height()
+    );
+    println!("打印 y={y0}..{y1}  x={x0}..{x1}（原图坐标）");
+    println!("图例  ' ' <0.1  '.' <0.3(阈值以下)  ':' <0.5  '+' <0.7  '*' <0.9  '#' >=0.9\n");
+    for y in y0..y1 {
+        let py = ((y as f64) * sy) as usize;
+        if py >= ph {
+            continue;
+        }
+        let mut line = String::new();
+        let mut x = x0;
+        while x < x1 {
+            let px = (((x as f64) * sx) as usize).min(pw - 1);
+            let v = vals[py * pw + px];
+            line.push(match v {
+                v if v < 0.1 => ' ',
+                v if v < 0.3 => '.',
+                v if v < 0.5 => ':',
+                v if v < 0.7 => '+',
+                v if v < 0.9 => '*',
+                _ => '#',
+            });
+            x += 2;
+        }
+        println!("y={y:>4} |{line}|");
+    }
+    Ok(())
+}
+
+/// 一组框的数量与宽高分位。
+///
+/// 分位数而不是均值：均值会被一两个巨大的框拉走，而这里要回答的是
+/// 「典型的一行长什么样」。
+fn print_box_summary(count: usize, widths: &[i32], heights: &[i32]) {
+    let mut w: Vec<i32> = widths.to_vec();
+    let mut h: Vec<i32> = heights.to_vec();
+    w.sort_unstable();
+    h.sort_unstable();
+    println!(
+        "框数 = {count}   宽 min/中位/max = {}/{}/{}   高 min/中位/max = {}/{}/{}",
+        pct(&w, 0.0),
+        pct(&w, 0.5),
+        pct(&w, 1.0),
+        pct(&h, 0.0),
+        pct(&h, 0.5),
+        pct(&h, 1.0),
+    );
+}
+
+fn pct(sorted: &[i32], q: f64) -> i32 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let i = ((sorted.len() - 1) as f64 * q).round() as usize;
+    sorted[i.min(sorted.len() - 1)]
+}
+
+/// 读一张 PNG 成帧，`--scale` 先做最近邻放大。
+///
+/// ⚠ 放大必须是最近邻，插值会把字形边缘抹掉，掩盖真实问题。
+fn load_frame(file: &Path, scale: u32) -> Result<chatservant_capture::Frame> {
+    let img = image::open(file)
+        .with_context(|| format!("打开 PNG 失败：{}", file.display()))?
+        .to_rgb8();
+    let (w, h) = img.dimensions();
+    let base = chatservant_capture::Frame::from_rgb(w, h, img.into_raw())
+        .context("源图尺寸与缓冲区不匹配")?;
+    if scale <= 1 {
+        Ok(base)
+    } else {
+        base.upscaled_nearest(scale).context("放大后的尺寸溢出")
+    }
+}
+
+fn file_png_dims(file: &Path) -> Result<(u32, u32)> {
+    let img = image::open(file)
+        .with_context(|| format!("打开 PNG 失败：{}", file.display()))?
+        .to_rgb8();
+    Ok(img.dimensions())
 }
 
 /// 按产品的规则组装真实传输。**变量名规则来自 reason crate**，
