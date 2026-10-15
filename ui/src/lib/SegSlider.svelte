@@ -23,13 +23,13 @@
    * `--cs-radius`）。这个尺寸早先是给主面板 400px 宽定的，现在主面板
    * 的档位已经搬到**纸底**（`6f10f9f`），那个理由不成立了。
    *
-   * ⚠ **墨底不是待清的债**（2026-10-14 复核）：票 23 当初否的是旧面板里
-   * 316px 栏内**全宽**的红/黑色块互相压，那些按钮已随旧面板删除。
-   * 现在这三颗是 `align-self: flex-start` 的自适应小药丸（约 40×33），
-   * 既不撑满也不互相压；而「淡到 8% 的底撑不住『当前停在哪一档』」
-   * 是 2026-10-10 实测否掉的替代方案，用户当时还主动问过
-   * 「为什么不做成表面一层的滑块」。**别拿它当没审过的旧物。**
+   * ⚠ **选中态 2026-10-15 从「实墨药丸」改成「墨线 + 底部短横」**，
+   *   与动作行的墨线按钮族（`docs/设计规范.md` §4.2c）统一。
+   *   原判断与推翻它的理由都留在 `.cs-pill` 的注释里——
+   *   **别把它当没审过的旧物再翻回去**。
    */
+  import { onMount } from 'svelte';
+  import type { Attachment } from 'svelte/attachments';
   import { slideTo } from './attach';
   import { DUR, prefersReducedMotion } from './motion';
 
@@ -65,6 +65,49 @@
       },
       prefersReducedMotion() ? 0 : DUR.base,
     );
+
+  /**
+   * ⚠ **药丸是量出来的覆盖层，所以布局一变它就是陈的**（2026-10-15）。
+   *
+   * `slideTo` 读激活项的 `offsetLeft/offsetWidth` 写进药丸，写完就不再跟着。
+   * attachment 只在 `value` 变化时重跑，而字体、容器宽度、探针帧注入
+   * 都会在挂载**之后**改掉按钮宽度。
+   *
+   * ⇒ 这里补两条重量时机：字体集就绪、以及**每个按钮自身的尺寸**。
+   *   只盯容器没用——容器宽度全程没变，变的只有按钮。
+   *
+   * ⚠⚠ **这两条并没有修掉实测到的那个偏差，别当成已解决。**
+   *   加上它们前后，`shoturl.ps1 -Scale 1` 出的图**字节数一模一样**
+   *   （22926 B），药丸仍然只有 36px 而「只填入」的自然宽度约 55~61px，
+   *   最后一个字挂在框外。
+   *   · 已排除：`flex` 收缩（加 `flex: none` 后字节数不变）
+   *   · 已排除：字体就绪时机（`document.fonts.ready` 后不变）
+   *   · **在应用内浏览器里复现不出来**：那里量到药丸 rect 与激活项 rect
+   *     **逐像素相等**（只填入 61/61、勾·圈 36/36、退出 49/49），
+   *     而那边视口 671、这边 520 ⇒ 差异随视口宽度变。
+   *   ⇒ 下一手该查的是「什么在窄视口下把 seg 那一行排窄了」，
+   *     不是继续在这个组件里加钩子。已开票跟踪。
+   */
+  const reflow: Attachment<HTMLElement> = (node) => {
+    // 读一次 `value` 把它挂进依赖图：换档时这个 attachment 也会重跑。
+    void value;
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => move(value));
+    ro.observe(node);
+    // ⚠ 按钮是 `{#each}` 渲染的，attachment 跑的时候可能还没有子节点。
+    //   补一帧再盯一次，否则第一屏量到的是「空槽」。
+    const raf = requestAnimationFrame(() => {
+      for (const btn of node.querySelectorAll('.cs-seg-btn')) ro.observe(btn);
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  };
+
+  onMount(() => {
+    void document.fonts?.ready.then(() => move(value));
+  });
 
   function pick(id: string) {
     if (id === value) return;
@@ -121,6 +164,7 @@
 
 <div
   {@attach move(value)}
+  {@attach reflow}
   class="cs-seg"
   role="radiogroup"
   aria-label={label}
@@ -163,9 +207,20 @@
     align-self: flex-start;
     max-width: 100%;
     border-radius: var(--cs-radius);
-    /* 轨道应该是**几乎看不见的槽**——分段的边界靠文字和那颗指示块。 */
-    background: var(--cs-surface-sunken);
-    border: 1px solid var(--cs-rule);
+    /* ⚠ **墨线槽，不是浅灰白 + 灰边框**（2026-10-15 真机指出后修）。
+     *
+     * ⚠ 这个组件原先用 `--cs-surface-sunken` + `--cs-rule`，
+     *   而 `PanelSettings.svelte` 顶部明写着「独立设置窗口用的 `--cs-surface*`
+     *   **这里不能用**」——设置页在那一轮已经改到同一张纸，
+     *   **唯独这个被复用的组件漏了**，于是三分之二的控件还停在旧皮肤上，
+     *   读成「同一个应用里塞了两套 UI」。
+     *
+     * 现在与动作行的「墨线」按钮族（`docs/设计规范.md` §4.2c）同一套语言：
+     * 透明底 + 1px 墨描边，槽不再自己装成一张白卡。
+     * 选中的那颗仍然是墨底药丸，在墨线槽里读作「墨压在墨线上」——
+     * 那正是「当前停在哪一档」该有的重量。 */
+    background: transparent;
+    border: 1px solid var(--cs-ink);
   }
 
   /* 滑动指示块。left/width 由 GSAP 写，这里不能给 transition——
@@ -177,21 +232,62 @@
     left: 0;
     width: 0;
     border-radius: calc(var(--cs-radius) - 2px);
-    /* ⚠ **墨底反白，不是红色，也不是淡灰。**
+    /* ⚠⚠ **不再满铺墨底**（2026-10-15 改，推翻下面那段 2026-10-14 的复核）。
      *
-     * 红色：这套色板里红只给不可逆（发送、退出），而这两组都是在改一个
-     * 能改回来的设置。原来档位那块淡红是 `--cs-brass` 全局换成
-     * `--cs-live` 时被顺手带过来的，纯替换副作用。
+     *  为什么翻：那一轮把「墨底」当成**已审过的**决定留着，理由是
+     *  「当前停在哪一档必须一眼可见，淡到 8% 的底撑不住」。但**同一天
+     *  用户在动作行上明确否掉了实墨黑块**（原话「你就如此热爱？」），
+     *  理由是量级与它表示的风险不匹配。同一个应用里两处选中态
+     *  一处墨线竖笔、一处实墨黑块，读成两套 UI。
+     *  ⇒ 统一到 §4.2c 的墨线语言，**不牺牲可见度**：
+     *    墨线内描边（几何，不是色块）+ 底部一道短横（划重点）+ 字重 600。
      *
-     * 墨底：「当前停在哪一档 / 关闭窗口是退出还是收托盘」必须一眼可见，
-     * 淡到 8% 的底撑不住这件事。 */
-    background: var(--cs-ink);
+     *  用 `box-shadow` 而不是 `border`：药丸的 left/width 由 GSAP 写，
+     *  `border` 会在动画期间把内容挤动 1px。
+     *
+     *  ⚠ 2026-10-14 那段复核保留在下面，不删——它记的是**为什么曾经
+     *    是实墨**，而删掉它就会有人把它当没审过的旧物再翻回去。
+     */
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--cs-ink);
     pointer-events: none;
   }
+
+  /* 底部短横：与动作行的「竖笔」同一个词汇——**划重点，不是铺满**。
+     常态可见，因为高对比度下 `box-shadow` 会被系统抹掉。 */
+  .cs-pill::after {
+    content: '';
+    position: absolute;
+    left: 28%;
+    right: 28%;
+    bottom: 3px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--cs-ink);
+  }
+
+  /* ── 2026-10-14 的原判断（已被上面推翻，留档） ──────────────────
+   *  墨底：「当前停在哪一档 / 关闭窗口是退出还是收托盘」必须一眼可见，
+   *  淡到 8% 的底撑不住这件事。
+   *  红色：这套色板里红只给不可逆（发送、退出），而这两组都是在改一个
+   *  能改回来的设置——原来档位那块淡红是 `--cs-brass` 全局换成
+   *  `--cs-live` 时被顺手带过来的，纯替换副作用。
+   *  ⚠ 真正该保留的是**「红色只给不可逆」**那半句。
+   * ─────────────────────────────────────────────────────────── */
 
   .cs-seg-btn {
     position: relative;
     z-index: 1;
+    /* ⚠ **不许被 flex 压扁**（2026-10-15）。
+     *
+     * 槽是 `display: flex`，按钮默认 `flex-shrink: 1`。容器一旦比两项的
+     * 自然宽度窄，按钮就会被压到比文字还窄，而药丸量的是 `offsetWidth`
+     * ——**药丸会忠实地把被压过的宽度再画一遍**，不会自己修正。
+     *
+     * ⚠ 这条**不是当前那个偏差的成因**：加上 `flex: none` 前后出的图
+     *   字节数完全一样（22926 B），按钮并没有被压。留它是因为这个默认
+     *   值本身就该关掉，而理由要连着「药丸是量出来的」这件事一起记。 */
+    flex: none;
     /* ⚠ padding 按「总高 33 − 容器上下 6px」倒推，不是照抄独立按钮的
        padding——照抄会矮 4px。（曾经照抄过，量出来 29，越调越偏。） */
     padding: 0.281rem 0.75rem;
@@ -205,7 +301,8 @@
   }
 
   .cs-seg-btn.on {
-    color: var(--cs-surface-raised);
+    /* ⚠ 墨色正文而不是反白——没有满铺底了，「反白」会读成文字缺失。 */
+    color: var(--cs-ink);
     font-weight: 600;
   }
 

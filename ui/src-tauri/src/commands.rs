@@ -113,34 +113,57 @@ struct AppState {
 ///
 /// ## 防重什么时候失效
 ///
-/// 三种情况都必须失效，否则它会变成一张可以囤起来的许可证：
-/// · 候选换了（`ticks` 变了）——上一轮的候选已经不是这一轮的候选了；
-/// · 档位变了；
-/// · 真的发出去了。
+/// 两种情况都会清空整份记录，否则它会变成一张可以囤起来的许可证：
+/// · 换轮了（`ticks` 变了）——上一轮的候选已经不是这一轮的候选了；
+/// · 档位变了。
+///
+/// ⚠⚠ **它只挡「同一条被重复发」，不表示「已装填」**（2026-10-15）。
+/// 砍掉两段式之后生产里只有一个调用点（`dispatch` 的 `Auto` 分支），
+/// 用法是「这一轮这条候选发过了没有？」
+/// ⚠ 文档跟着实现走之前，这里曾经写着「装填。返回 `false` 表示之前那次装填
+///   已经作废」——而 `arm` 返回 `true` 的含义是**这条已经发过了、拒绝重发**。
+///   一个把「拒绝」写成「放行」的注释，会让下一个人以为重发是被鼓励的。
+///
+/// ## 为什么记的是「一整个列表」而不是「最近那一条」
+///
+/// 原来只有一个 `id` 槽，于是：发 c0 → 记 c0；发 c1 → 记 c1 覆盖掉 c0；
+/// 这时再点 c0，槽里存的是 c1 ⇒ **c0 被当成没发过，再发一遍**。
+/// 「一条消息被重复发出去」撤不回来，而触发它只需要连点三下——
+/// 所以槽改成**本轮发过的全部 id**。
 #[derive(Debug, Default)]
 struct Arming {
-    /// 已装填的那条候选的 id。
-    id: Option<String>,
-    /// 装填时观察循环跑到第几圈。用来判断候选是否已经换过。
+    /// **本轮已经发过**的候选 id。顺序不表意，只表「这一轮发过哪些」。
+    sent: Vec<String>,
+    /// `sent` 属于哪一轮。用来判断记录是不是上一轮留下来的。
     ticks: u64,
 }
 
 impl Arming {
-    /// 装填。**只在同一条候选、且候选没换过时才成立。**
+    /// 记一次发送，并回答「这条是不是本轮已经发过了」。
     ///
-    /// 返回 `false` 表示「之前那次装填已经作废，这次必须重新装填」——
-    /// 宁可让用户多点一次，也不要把上一轮的确认挪到这一轮的候选上。
+    /// **返回 `true` = 已经发过 ⇒ 拒绝重发。** 返回 `false` = 没发过，
+    /// 调用方可以发（并且这一次发送被记下来了）。
+    ///
+    /// ⚠ **它在发送被尝试之前就记下了。** 所以像「窗口句柄拿不到」这种
+    ///   发送根本没起步的失败，也会把这一轮的位置占掉 ⇒ 用户得等下一轮。
+    ///   这是故意的：占错了只是多点一次，放过了就是重复发一条真消息。
+    ///
+    /// ⚠ 「宁可让用户多点一次，也不要把上一轮的记录挪到这一轮的候选上」
+    /// ——这条仍然成立，只是主语从「确认」换成了「已发」。
     fn arm(&mut self, id: &str, ticks: u64) -> bool {
-        if self.id.as_deref() == Some(id) && self.ticks == ticks {
+        if self.ticks != ticks {
+            self.sent.clear();
+            self.ticks = ticks;
+        }
+        if self.sent.iter().any(|s| s == id) {
             return true;
         }
-        self.id = Some(id.to_string());
-        self.ticks = ticks;
+        self.sent.push(id.to_string());
         false
     }
 
     fn disarm(&mut self) {
-        self.id = None;
+        self.sent.clear();
     }
 }
 
@@ -293,7 +316,7 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
             match g.as_mut() {
                 Some(s) => match ticks {
                     Some(t) => s.armed.arm(&candidate_id, t),
-                    // 拿不到当前这轮（循环还没跑出快照）→ 不许装填。
+                    // 拿不到当前这轮（循环还没跑出快照）→ 不发。
                     // 宁可让他等一轮，也不要在没有基准的情况下放行发送。
                     None => false,
                 },
@@ -394,31 +417,30 @@ pub fn get_tier() -> String {
     tier_id(with_state(|s| s.tier.get()).unwrap_or(Dispatch::Manual))
 }
 
-/// 改档，并按「档位真的变了」解除装填。**返回真实生效的 id。**
+/// 改档，并按「档位真的变了」清空防重记录。**返回真实生效的 id。**
 ///
 /// ## 这条规则原先只活在注释里（2026-10-14 实测）
 ///
-/// `Arming` 的文档写着「三种情况都必须失效：候选换了、**档位变了**、
-/// 真的发出去了」，`dispatch` 里那句注释又写着「改档就解除装填：
-/// 上一档的确认不能带到下一档」——**两处都声称有，代码里一处都没有**：
+/// `Arming` 的文档写着「换轮了、**档位变了**，都要清空」，`dispatch` 里
+/// 那句注释又写着「改档就清记录」——**两处都声称有，代码里一处都没有**：
 /// `set_tier` 从头到尾没碰过 `armed`。
 ///
-/// **漏出来的路**：Confirm 档点候选 A（只装填，不发）→ 切到 Manual →
-/// 在微信里改成自己想发的内容 → 切回 Confirm → 再点 A。
-/// `arm("A", 同一 ticks)` 返回 true ⇒ **两段式被跳过，直接发送**，
-/// 把用户自己写的内容覆盖掉。测试见 `changing_tier_disarms`。
+/// 当时的漏网之鱼长这样（`Confirm` 档，2026-10-15 已砍）：Auto 档点候选 A
+/// （只装填，不发）→ 切到 Manual → 在微信里改成自己想发的内容 →
+/// 切回 Auto → 再点 A，`arm("A", 同一 ticks)` 返回 true，
+/// **两段式被跳过，直接发送**，用户写的内容被覆盖。测试见
+/// `changing_tier_disarms`。
 ///
 /// ## 方向：只会更严，绝不放松
 ///
-/// 这条只让发送**多要求一次装填**，不打开任何新路径。正是 `arm` 自己
-/// 文档里「宁可让用户多点一次」的意思。⚠ 硬约束第 5 条的档位集合没动，
-/// 动的只是「装填在什么时候作废」。
+/// 这条只让**重复发送更难发生**，不打开任何新路径。⚠ 硬约束第 5 条的
+/// 档位集合没动，动的只是「防重记录在什么时候作废」。
 ///
 /// ## 为什么抽成独立函数
 ///
 /// 它住在 `set_tier` 的行内时**没法测**——`AppState` 得靠
 /// `watch::spawn()` 才造得出来（那会真的起一条观察循环线程）。
-/// ⇒ 把「档位格 + 装填」这一小块单独拿出来，测试才能**真的走一遍
+/// ⇒ 把「档位格 + 防重记录」这一小块单独拿出来，测试才能**真的走一遍
 /// `set_tier` 跑的那段代码**。
 ///
 /// ⚠ 第一版的测试是在测试里**复刻**了这段判断，于是把这里的
@@ -430,7 +452,7 @@ fn apply_tier(tier: &crate::watch::TierCell, armed: &mut Arming, d: Dispatch) ->
     //
     //   ⚠ 比的是 **`set` 的返回值**而不是传进去的 `d`。今天是同一个值
     //   （`set` 原样返回入参），但若哪天 `set` 加了夹取，比 `d` 就会在
-    //   「请求变了、生效值没变」时**误解除装填**。比返回值对那种情况免疫。
+    //   「请求变了、生效值没变」时**误清防重记录**。比返回值对那种情况免疫。
     let before = tier.get();
     let after = tier.set(d);
     if before != after {
@@ -444,11 +466,8 @@ fn apply_tier(tier: &crate::watch::TierCell, armed: &mut Arming, d: Dispatch) ->
 pub fn set_tier(tier: String) -> String {
     // 认不出来的一律当 Manual。**不许因为解析失败就升档。**
     let d = parse_tier(&tier);
-    // ⚠⚠ **改档必须解除装填**（原理由与漏出来的路见 `apply_tier` 的文档与
-    //   测试 `changing_tier_disarms`）。这条以前只活在注释里：`Arming` 的
-    //   文档写着「档位变了」是三种作废情况之一，`dispatch` 里那句
-    //   「上一档的确认不能带到下一档」的注释也写着它，而 `set_tier`
-    //   从头到尾没碰过 `armed`——**两处声称有，代码里一处都没有**。
+    // ⚠⚠ **改档必须清空防重记录**（原理由与漏出来的路见 `apply_tier` 的
+    //   文档与测试 `changing_tier_disarms`）。这条以前只活在注释里。
     let real = with_state(|s| apply_tier(&s.tier, &mut s.armed, d)).unwrap_or("Manual".into());
     // ⭐ 在 `with_state` **之后**刷——锁已经放掉了，这里再拿就是死锁。
     // 档位变了，托盘首行和图标状态必须跟着变：面板看不见的时候，
@@ -1843,91 +1862,103 @@ mod budget_ceiling_tests {
         assert!(v.budget <= v.max && v.budget >= v.min, "超出滑块范围");
     }
 
-    /// **Confirm 档的二次确认必须真的能走完。**
+    /// **同一条候选在同一轮里发不出去第二次。**
     ///
-    /// 2026-10-09 实机事故：判据写成 `tier == Confirm && action == "confirm"`，
-    /// 两次点击条件完全相同，于是第二次又命中「装填」分支，
-    /// **Confirm 档永远发不出去**，而回执每次都写着「再点一次就会发」。
-    /// 界面上那是一个明晃晃的假承诺。
+    /// `arm` 返回 `true` 的意思是「这条本轮已经发过了，**拒绝**」。
+    /// 读反了就正好把防重变成鼓励重复发送——2026-10-09 出过一次同型的错：
+    /// 判据写成 `tier == Confirm && action == "confirm"`，两次点击条件完全相同，
+    /// 于是第二次又命中「装填」分支，**Confirm 档永远发不出去**，
+    /// 而回执每次都写着「再点一次就会发」。那是一个明晃晃的假承诺。
+    /// （`Confirm` 档本身已在 2026-10-15 砍掉，但**「返回值方向」这个坑**
+    /// 跟那一档无关，现在这条守卫的是同一个语义。）
     ///
-    /// 这条测试按用户的手来走：点一下（装填）→ 再点一下（发送）。
+    /// 这条按用户的手来走：点一下（发出去）→ 再点同一条（被拒）。
     #[test]
-    fn confirm_arm_needs_two_clicks_and_then_releases() {
+    fn the_same_candidate_cannot_be_sent_twice_in_one_round() {
         let mut a = Arming::default();
-        assert!(!a.arm("c0", 10), "第一次点击只能装填，不能放行发送");
-        assert!(a.arm("c0", 10), "第二次点击（候选没变）应当放行");
+        assert!(!a.arm("c0", 10), "本轮没发过 ⇒ 放行");
+        assert!(a.arm("c0", 10), "本轮已经发过 ⇒ 必须拒绝");
         a.disarm();
         assert!(
             !a.arm("c0", 10),
-            "发过一次之后要重新装填——一次装填只服务一次发送"
+            "解除防重之后（改档 / 换轮）才允许再发一次"
         );
     }
 
-    /// **装填不能挪到另一条候选上。**
+    /// **换了一条候选，不会把前一条的防重记录一起带走。**
     ///
-    /// 不然就是「我确认了 A，结果发出去的是 B」。
+    /// ⚠ 这条在 2026-10-15 之前是**不成立**的，而它曾经的写法（单槽）
+    ///   恰好绕过了它：`id` 只存一条，发 c1 时顺手覆盖掉 c0，再点 c0
+    ///   就当成没发过 ⇒ **同一条真消息发了第二遍**。
+    ///   重复发撤不回来，所以这里守的是「记一整个列表」那个改动。
     #[test]
-    fn an_arming_never_moves_to_another_candidate() {
+    fn dedupe_survives_switching_to_another_candidate() {
         let mut a = Arming::default();
-        assert!(!a.arm("c0", 10));
-        assert!(!a.arm("c1", 10), "换了一条候选就必须重新装填");
-        assert!(a.arm("c1", 10), "c1 自己装填后再点一次才放行");
+        assert!(!a.arm("c0", 10), "c0 本轮没发过");
+        assert!(!a.arm("c1", 10), "c1 是另一条，也该放行");
+        assert!(
+            a.arm("c0", 10),
+            "点回 c0 必须仍然被拒——换了一条候选不该把 c0 的记录冲掉"
+        );
+        assert!(a.arm("c1", 10), "c1 自己也不许发第二次");
     }
 
-    /// **改档必须作废装填。**（2026-10-14 补——这条规则此前只写在注释里）
+    /// **改档必须清空防重记录。**（2026-10-14 补——这条规则此前只写在注释里）
     ///
-    /// `Arming` 的文档第一条就写着「三种情况都必须失效：候选换了、
-    /// **档位变了**、真的发出去了」，而实现里前两者都不成立：
+    /// `Arming` 的文档写着「换轮了、**档位变了**，都要清空」，
+    /// 而实现里换轮那半是 `arm` 自己做的，**改档那半压根没人做**：
     /// `set_tier` 从头到尾没碰过 `armed`。
     ///
-    /// 漏出来的路正是上面那条注释「上一档的确认不能带到下一档」要堵的：
-    /// Confirm 档装填候选 A → 切到 Manual → 在微信里改成自己的内容 →
-    /// 切回 Confirm → 再点 A，`arm("A", 同一 ticks)` 返回 true，
-    /// **两段式被跳过，直接发送**，用户写的东西被覆盖。
+    /// 漏出来的路当时长这样（`Confirm` 档，2026-10-15 已砍）：
+    /// Auto 档发过候选 A → 切到 Manual → 在微信里改成自己想发的内容 →
+    /// 切回 Auto → 再点 A，`arm("A", 同一 ticks)` 返回 true 判成
+    /// 「已经发过」而拒绝。人以为程序坏了，其实记录早该在改档那下清掉。
+    /// 今天它拦下的是一次重复发送——同一个洞，只是后果换了个方向。
     ///
     /// ⚠ 这条**直接调 `apply_tier`**——那正是 `set_tier` 跑的那段代码。
     ///   第一版的测试是在测试里**复刻**了判断，于是把 `set_tier` 里的
     ///   `disarm` 短路成 `if changed && false`，测试**照样 71 条全绿**——
     ///   **复印件不是守卫**。抽 `apply_tier` 就是为了让测试能碰到真代码。
     ///
-    /// ⚠ 仍然只到「改档 → 装填作废」这一层：真机上连着 `STATE`、
+    /// ⚠ 仍然只到「改档 → 记录作废」这一层：真机上连着 `STATE`、
     ///   `inject::fill_and_send` 的回执一起验，是票 20 剩的那一项。
     ///
     /// ⚠ 原先这里还有一条 `tier_changed_only_when_the_tier_actually_differs`，
     ///   测的是「`tier_changed(before, d)` 是否等于 `before != d`」——
     ///   而 `tier_changed` **随后被内联进 `apply_tier` 了**，测试就悬空成
     ///   「一个函数存在、但没有任何守卫」的假断言。它守的那件事
-    ///   （只在真变更时解除装填）**已由本条的正反两面覆盖**：
-    ///   真变更 ⇒ 装填作废；同档再设 ⇒ 装填留着。
+    ///   （只在真变更时清记录）**已由本条的正反两面覆盖**：
+    ///   真变更 ⇒ 记录作废；同档再设 ⇒ 记录留着。
     ///   ⇒ 删掉它，而不是留着一条测「恒等式」的测试给人「有守卫」的错觉。
     #[test]
     fn changing_tier_disarms() {
         let tier = crate::watch::TierCell::default_manual();
         let mut armed = Arming::default();
 
-        // 升到 Confirm（从默认的 Manual 升，这是**一次真变更**）。
+        // 从默认的 Manual 升到 Auto —— 这是**一次真变更**。
         assert_eq!(apply_tier(&tier, &mut armed, Dispatch::Auto), "Auto");
-        assert!(!armed.arm("c0", 10), "第一次点击只是装填");
-        assert!(armed.arm("c0", 10), "第二次点击才放行");
+        assert!(!armed.arm("c0", 10), "本轮没发过 ⇒ 放行");
+        assert!(armed.arm("c0", 10), "已经发过 ⇒ 第二次点击被拒");
 
-        // 切到 Manual —— 装填必须作废。
+        // 切到 Manual —— 防重记录必须作废。
         assert_eq!(apply_tier(&tier, &mut armed, Dispatch::Manual), "Manual");
         assert!(
             !armed.arm("c0", 10),
-            "改档之后那份装填必须作废，否则切回来再点一次就直接发了"
+            "改档之后那份记录必须作废，否则切回来再点一次就等于同一条发两遍"
         );
 
-        // 切回 Confirm —— 仍然作废，上一份**不许**被带回来。
+        // 切回 Auto —— 仍然作废，上一份**不许**被带回来。
         apply_tier(&tier, &mut armed, Dispatch::Auto);
-        assert!(!armed.arm("c0", 10), "切回同一档不该把上一份装填复活");
+        assert!(!armed.arm("c0", 10), "切回同一档不该把上一份记录复活");
 
         // ⚠ 反过来也要成立：**档位没真的变就不该作废**。
-        //   否则面板每次改档都抹掉用户的装填，Confirm 永远发不出去。
+        //   否则每按一次「设为自动发送」就把本轮记录抹掉，
+        //   同一条候选会被反复放行——那正好是这条测试要挡的重复发送。
         let mut b = Arming::default();
         apply_tier(&tier, &mut b, Dispatch::Auto);
         assert!(!b.arm("c1", 7));
         apply_tier(&tier, &mut b, Dispatch::Auto);
-        assert!(b.arm("c1", 7), "档位没变时装填要留着，否则两段式永远走不完");
+        assert!(b.arm("c1", 7), "档位没变时记录要留着");
     }
 
     /// **解析失败一律落到最低档，且不动防重记录。**
@@ -2032,16 +2063,16 @@ mod budget_ceiling_tests {
         assert!(said2.contains("仅填入"), "缺档位：{said2}");
     }
 
-    /// **候选换过之后，上一次的装填立刻作废。**
+    /// **候选换过之后，上一轮的防重记录立刻作废。**
     ///
     /// `ticks` 前进意味着观察循环出了新一轮 readout，候选集合已经不是
-    /// 装填时那一批了。拿旧确认去放行新的候选，是把一次确认扩大成两次。
+    /// 上一轮那一批了。留着旧记录就是把新一轮也挡掉——用户点了没反应。
     #[test]
     fn an_arming_dies_when_the_readout_advances() {
         let mut a = Arming::default();
-        assert!(!a.arm("c0", 10));
-        assert!(!a.arm("c0", 11), "readout 前进后旧装填必须作废");
-        assert!(a.arm("c0", 11), "在新一轮里重新装填后，第二次点击放行");
+        assert!(!a.arm("c0", 10), "第 10 轮没发过 ⇒ 放行");
+        assert!(!a.arm("c0", 11), "换轮之后重新放行");
+        assert!(a.arm("c0", 11), "第 11 轮里同样只许发一次");
     }
 
     /// **托盘状态行就是档位，一个字的修饰都不加。**
@@ -2054,7 +2085,9 @@ mod budget_ceiling_tests {
     /// 会话名仍然完整显示在面板头部；这里只是**不复述**。
     #[test]
     fn the_status_line_is_exactly_the_tier_and_nothing_else() {
-        for tier in ["只填入", "确认后发", "自动发送"] {
+        // ⚠ 只列**现役的两档**。「确认后发」是 2026-10-15 砍掉的那一档，
+        //   留着它会让人以为面板上还有第三档。
+        for tier in ["只填入", "自动发送"] {
             let line = tray_status_line_from(tier);
             assert_eq!(line, tier, "档位被改写了");
             assert!(
