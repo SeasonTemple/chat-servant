@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **40** ｜ 验收项全勾 **24** ｜ 已收但留有说明项 **13** ｜ 未收 **3**
+票据总数 **44** ｜ 验收项全勾 **24** ｜ 已收但留有说明项 **13** ｜ 未收 **7**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -20,6 +20,10 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
 | `21-readout-phase-never-sent.md` | 5/7 | ready-for-human · **P0 · 2026-10-12 实测，不是推断** | None（可以立刻做） |
 | `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 4/7 | needs-triage · **2026-10-15 连否三个候选后主动收手** | None（票 22 已把反例测出来了，可以立刻做） |
+| `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 2/7 | ready-for-agent · **2026-10-15 已量清三项，待做** | (票面没写 Blocked by) |
+| `42-settings-page-still-native-controls-and-scrollbar.md` | 1/7 | ready-for-agent · **2026-10-15 用户截图指出，待做** | (票面没写 Blocked by) |
+| `43-model-config-two-groups-custom-endpoint-proxy.md` | 1/8 | ready-for-agent · **2026-10-15 用户提出，待做** | (票面没写 Blocked by) |
+| `44-candidate-action-row-is-button-geometry-on-prose.md` | 2/7 | ready-for-agent · **2026-10-15 用户截图指出，待做** | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
