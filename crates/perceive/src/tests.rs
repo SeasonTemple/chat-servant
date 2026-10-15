@@ -14,7 +14,7 @@ use crate::pixels::{COLOR_TOL, PANEL_BG_TOL, Rgb, chroma, near};
 
 const PANEL: [u8; 3] = [30, 30, 31];
 /// 实测我方微信气泡色（`cargo xtask measure`）
-const MY_BUBBLE: [u8; 3] = [114, 205, 144];
+const MY_BUBBLE: [u8; 3] = [53, 210, 141];
 /// 实测对方（小号）微信气泡色 `rgb(47,47,48)`——**纯灰，彩度 0**
 const THEIR_BUBBLE: [u8; 3] = [47, 47, 48];
 /// 对方气泡里的字是**白字**（与面板上的标题同色），对比 178.4
@@ -118,7 +118,7 @@ fn measured_colors_have_huge_chroma_gap() {
     let f = two_sided_frame();
     let mine = f.pixel(300, 42).expect("我方气泡内应有像素");
     let panel = f.pixel(200, 100).expect("面板上应有像素");
-    assert_eq!(chroma(mine), 91, "实测我方气泡 rgb(114,205,144) 的彩度");
+    assert_eq!(chroma(mine), 157, "实测我方气泡 rgb(53,210,141) 的彩度");
     assert_eq!(chroma(panel), 1, "实测面板底色 rgb(30,30,31) 的彩度");
     assert!(
         SATURATED_MIN_CHROMA > chroma(panel) && SATURATED_MIN_CHROMA < chroma(mine),
@@ -126,6 +126,50 @@ fn measured_colors_have_huge_chroma_gap() {
         SATURATED_MIN_CHROMA,
         chroma(panel),
         chroma(mine)
+    );
+}
+
+/// 真机三档彩度钉死，且**自证会响**。
+///
+/// 数据来源：2026-10-15 `scripts/shotwin.ps1 0x1F080A` 抓真机微信帧，
+/// 在消息区 `x 316..1256`（`anchor.rs` 实测的 `chat.x0`）做 1:1 调色板普查。
+///
+/// 为什么要单独钉：饱和阈值 `SATURATED_MIN_CHROMA` 的立足点是
+/// 「我方气泡够饱和、其余都不够」。这个余量在代码里看不出来，
+/// 只能靠把真机量到的三档数字钉死，**换主题/换微信版本时才会响**。
+///
+/// ⚠ 头像那档彩度 26 离阈值只有 4，是**已知的窄边**——它撞不上是因为
+/// `probe.bg` 采的是文字框外一圈底色、采不到头像，真撞上还有 `RING_PURITY_MIN` 挡。
+/// 把 26 显式写进来，是为了让「差 4」在数据漂移时能报警，而不是等它悄悄翻车。
+#[test]
+fn the_dark_theme_chroma_separation_the_threshold_rests_on_is_pinned() {
+    /// 2026-10-15 真机实测。
+    const MEASURED_MY_BUBBLE: [u8; 3] = [53, 210, 141]; // 我方气泡底色
+    const MEASURED_PEER_BUBBLE: [u8; 3] = [47, 47, 48]; // 对方气泡底色
+    const MEASURED_PANEL: [u8; 3] = [30, 30, 31]; // 面板底色
+    const MEASURED_AVATAR: [u8; 3] = [247, 238, 221]; // 头像里的暖白，窄边
+
+    assert_eq!(chroma(MEASURED_MY_BUBBLE), 157);
+    assert_eq!(chroma(MEASURED_PEER_BUBBLE), 1);
+    assert_eq!(chroma(MEASURED_PANEL), 1);
+    assert_eq!(chroma(MEASURED_AVATAR), 26);
+
+    // 阈值必须高于「非我方那一档里最高的」，低于我方。
+    // 头像的 26 是当前最窄的一档——阈值只要不升到 27 以上就撞不上它。
+    let highest_non_mine = chroma(MEASURED_PEER_BUBBLE)
+        .max(chroma(MEASURED_PANEL))
+        .max(chroma(MEASURED_AVATAR));
+    assert!(
+        SATURATED_MIN_CHROMA > highest_non_mine,
+        "饱和阈值 {} 已经高过非我方那一档的最高彩度 {highest_non_mine}，\
+         头像/对方气泡会被误判成我方",
+        SATURATED_MIN_CHROMA
+    );
+    assert!(
+        SATURATED_MIN_CHROMA < chroma(MEASURED_MY_BUBBLE),
+        "饱和阈值 {} 已经高过我方气泡的真实彩度 {}，我方消息会被当成对方",
+        SATURATED_MIN_CHROMA,
+        chroma(MEASURED_MY_BUBBLE)
     );
 }
 
