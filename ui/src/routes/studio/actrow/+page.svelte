@@ -20,7 +20,7 @@
   这一版的三栏是**三个真正不同的方向**，不是边框的排列组合。
 -->
 <script lang="ts">
-  import { CROSS_PATHS, TICK_NESTED, TICK_VIEW } from '$lib/marks';
+  import { TICK_NESTED, TICK_VIEW } from '$lib/marks';
 
   /*
    * 样本与上一版相同，刻意挑成**会换行两三行**的中性句子。
