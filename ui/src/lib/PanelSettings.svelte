@@ -706,13 +706,43 @@
             删除
           </button>
         </div>
+
+        {#if drafts[p.id] === REVEAL}
+          <div class="cs-form">
+            <input
+              class="cs-input"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="粘贴 key"
+              bind:value={drafts[p.id]}
+            />
+            <button
+              class="cs-btn cs-btn-mini primary"
+              onclick={() => save(p)}
+              disabled={busy[p.id]}
+            >
+              {busy[p.id] ? '写入中…' : '保存'}
+            </button>
+          </div>
+        {/if}
       {:else}
         <!-- p.hint 是 Rust 给的**可执行**指引：存哪、变量名叫什么。
              不能是空字符串或「暂无」。 -->
         <p class="cs-hint">{p.hint}</p>
-      {/if}
 
-      {#if drafts[p.id] === REVEAL}
+        <!-- ⚠ **未配置时输入框必须直接显示**，不能套 `drafts[p.id] === REVEAL`
+             那道门（2026-10-15 修的真机死路，见 `.scratch/…/40-*.md`）。
+
+             那道门本来只为「已配置时不把明文 key 摆在界面上」而设，
+             而 `REVEAL` 只有「换一把」按钮会去设——**而那个按钮在
+             `{#if p.configured}` 分支里**。⇒ 未配置时 `drafts[p.id]` 永远是
+             `undefined`，输入框永远出不来。
+
+             后果不是「少个控件」：提示写着「在这个页面填」，而这一页**根本没有
+             任何办法填**，全新安装只能去设环境变量。这条路是产品的第一步。
+
+             未配置时界面上没有任何 key，**没有需要藏的东西**，所以直接显示。 -->
         <div class="cs-form">
           <input
             class="cs-input"
