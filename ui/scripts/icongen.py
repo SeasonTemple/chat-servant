@@ -132,6 +132,43 @@ PNG_SIZES = {
 }
 ICO_SIZES = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
 
+# ── 画布留白（2026-10-15 真机指出后修）──────────────────────────────
+#
+# ⚠⚠ **死边距让图标在托盘里明显比邻居小一圈**（用户 2026-10-15 真机截图）。
+#
+# 数字不是估的（`iconboard`/量 bbox 实测入库文件）：
+#   内容（勾 350 宽，两端各溢出纸边，故勾比纸宽）只占画布 **68.4%**，
+#   剩下 31.6% 是空画布。Windows 把图标缩到固定尺寸的托盘格子里，
+#   **格子大小由系统定，不由图标定** ⇒ 同样一格，邻居约 90% 满 ours 68%
+#   ⇒ 肉眼就是「小一号」。真机实测邻居约 15.6 px、本图约 11.7 px。
+#
+# ⇒ 修法是**裁掉死边距再重采样**，不是把设计重画一遍：
+#   设计（纸、勾、描边的相对比例与 2026-10-14 定案）一个字不动，
+#   只是把外圈空白剪掉后按原比例放大到画布。
+#
+# ⚠ 为什么不直接改 `PAPER_BOX` / `TICK_W`：改了就得重推 `RENDER=1024`
+#   「必须是 DESIGN 整数倍」那条（docstring 记着 1024→512→32→16 的缩放链），
+#   而单位换算 `PAPER_STROKE_PX=32 ⇔ 托盘 16px 上 1px` 就跟着失效。
+#   裁边距不动任何设计坐标，那条换算继续成立。
+#
+# ⚠ 0.96 是**量出来的**，不是取整凑的（`--fill` 扫档 + `iconsilhouette.py`
+#   对每档的 32×32 实测；现状那档的 fill 是 0.684）：
+#
+#   fill | 浅侧 readable(≥30%) | 深侧 median(≥8:1) | 判定
+#   -----+--------------------+------------------+---------------
+#   0.684(现状) | 40.0%      | 10.75 : 1        | ✓ 但真机「小一号」
+#   0.88        | 37.2%      | **6.02 : 1**    | ✗ 深侧塌，直接出局
+#   0.92        | 31.1%      |  9.02 : 1       | ✓
+#   0.94        | 31.3%      | 10.37 : 1       | ✓
+#   **0.96**    | **43.3%**  |  9.33 : 1       | ✓ **定案**
+#
+# ⚠⚠ **不要假设这个数是单调的**：0.96 的浅侧比 0.92/0.94 还好。
+#   原因是 LANCZOS 重采样与裁切落点的耦合——每档的 alpha 分布不同，
+#   「描边吃掉多少纸」不是线性关系。⇒ **换档必须重量，不能靠内插。**
+# ⚠ 代价（据实说）：深侧 median 从 **10.75 掉到 9.33**（仍高于 8.0 的门槛）。
+#   换来的是同一格里图标大 1.40 倍——这正是用户指的那件事。
+CANVAS_FILL = 0.96
+
 
 def tick_paths():
     """从 marks.js 取真实笔迹 path，不在这里重画勾。"""
@@ -311,6 +348,60 @@ def assert_fills_canvas(im, size):
     return box
 
 
+def crop_dead_margin(im, fill=None):
+    """把死边距剪掉，让内容占到画布的 `fill`。
+
+    ⚠ **只剪外圈空白，一个设计像素都不改**：内容按原比例放大到新画布，
+      纸 / 勾 / 描边的相对关系与单位换算全部原样保留。
+
+    取**居中正方形**而不是直接按 bbox 裁：bbox 是 355×348，宽高不等，
+      直接按 bbox 裁会把方画布裁成非方，纸会被拉变形。
+
+    ⚠⚠ `fill` 的默认值**必须在调用时读全局**，不能写进函数签名当默认值。
+      写成 `fill=CANVAS_FILL` 会在 def 时就把 0.94 绑死，
+      于是 `--fill 0.88` **静默不生效**——实测连跑 0.88/0.90/0.92/0.94
+      四档，`iconsilhouette.py` 报出来的数**一模一样**（31.3% / 10.37:1）。
+      同一条命令的参数被无声吞掉，比报错更难查。
+    """
+    fill = CANVAS_FILL if fill is None else fill
+    box = im.getbbox()
+    if box is None:
+        raise SystemExit("ABORT: fully transparent render")
+    cx = (box[0] + box[2]) / 2
+    cy = (box[1] + box[3]) / 2
+    side = max(box[2] - box[0], box[3] - box[1]) / fill
+    left = cx - side / 2
+    top = cy - side / 2
+    # ⚠ 取整会差半个像素；先夹回画布内再取整，否则 PIL 允许负坐标，
+    #   负坐标 = 透明填充 = 又多出一圈边距（正是这条要治的病）。
+    left = max(0.0, min(left, im.width - side))
+    top = max(0.0, min(top, im.height - side))
+    side_i = int(round(side))
+    left_i = int(round(left))
+    top_i = int(round(top))
+    return im.crop((left_i, top_i, left_i + side_i, top_i + side_i))
+
+
+def assert_fills_most_of_canvas(im, size, lo=0.85):
+    """量具自检：内容必须**占满画布**——不是「在角落里」。
+
+    ⚠ 与 `assert_fills_canvas`（≥25%，防「缩在角落」）是两条不同的病：
+      那条管「有没有」，这条管「够不够大」。
+      2026-10-15 之前死边距让内容只占 **68.4%**，托盘里明显比邻居小一圈，
+      而 25% 那条**照样通过** ⇒ 「有守卫」不等于「守的是这条」。
+    """
+    box = im.getbbox()
+    if box is None:
+        raise SystemExit("ABORT: fully transparent render")
+    span = max(box[2] - box[0], box[3] - box[1]) / size
+    if span < lo:
+        raise SystemExit(
+            f"ABORT: content spans only {span:.0%} of canvas (need >= {lo:.0%}), "
+            f"bbox={box} —— 死边距回来了？查 CANVAS_FILL 与裁剪那一步。"
+        )
+    return span
+
+
 def main(out_dir=None):
     """`out_dir` 给 None 时落进 `ui/src-tauri/icons`，给路径时落进那里。
 
@@ -338,12 +429,22 @@ def main(out_dir=None):
     assert_fills_canvas(master, RENDER)
     if master.size != (RENDER, RENDER):
         raise SystemExit(f"ABORT: canvas is {master.size}, expected {RENDER}")
+    # ⚠ 裁死边距在**降采样之前**做：1024 上裁完再降到 512，比反过来多一倍
+    #   的有效像素，纸的撕口与勾的边缘不会先糊一遍再被放大。
+    before = max(master.getbbox()[2] - master.getbbox()[0],
+                 master.getbbox()[3] - master.getbbox()[1]) / RENDER
+    master = crop_dead_margin(master)
+    after = max(master.getbbox()[2] - master.getbbox()[0],
+                master.getbbox()[3] - master.getbbox()[1]) / master.width
+    print(f"  canvas span {before:.0%} -> {after:.0%} (CANVAS_FILL={CANVAS_FILL})")
     master = master.resize((MASTER, MASTER), Image.LANCZOS)
+    assert_fills_most_of_canvas(master, MASTER)
 
     for name, size in PNG_SIZES.items():
         im = master.resize((size, size), Image.LANCZOS)
+        span = assert_fills_most_of_canvas(im, size)
         im.save(out / name)
-        print(f"  {name:<18} {size}x{size}  bbox={im.getbbox()}")
+        print(f"  {name:<18} {size}x{size}  bbox={im.getbbox()}  span={span:.0%}")
     print(f"  {'icon.ico':<18} {ICO_SIZES}")
 
     master.save(out / "icon.ico", format="ICO", sizes=ICO_SIZES)
@@ -363,10 +464,16 @@ if __name__ == "__main__":
                          "32 = 托盘 16px 上 1px，64 = 2px（0 = 不描边）")
     ap.add_argument("--tick-solid", action="store_true", default=TICK_SOLID,
                     help="勾压成实心深红（5 条半透明叠层在 16px 上只剩偏粉合成色）")
+    ap.add_argument("--fill", type=float, default=CANVAS_FILL,
+                    help="内容占画布的比例（0.94 = 裁掉 6% 死边距）。"
+                         "调大会更醒目，但描边也跟着变粗、"
+                         "浅色任务栏的 readable 会掉——用 iconsilhouette.py 量，"
+                         "别凭手感")
     a = ap.parse_args()
     PAPER_BRIGHTNESS = a.brightness
     PAPER_SATURATE = a.saturate
     PAPER_SHADOW_CSS = a.shadow
     PAPER_STROKE_PX = a.stroke
+    CANVAS_FILL = a.fill
     TICK_SOLID = a.tick_solid
     main(a.out)
