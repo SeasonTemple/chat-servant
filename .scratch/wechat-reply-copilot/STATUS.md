@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **39** ｜ 验收项全勾 **24** ｜ 已收但留有说明项 **12** ｜ 未收 **3**
+票据总数 **40** ｜ 验收项全勾 **24** ｜ 已收但留有说明项 **13** ｜ 未收 **3**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -37,6 +37,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `24-small-type-floor-remeasure.md` | 6/7 | done · **2026-10-14 量具重建 + 三档数据 + 字重对照，结论如下** |
 | `33-attribution-thresholds-are-dark-theme-only.md` | 3/5 | done · 2026-10-14 真机浅色主题实测发现并已修 · 根因定位到具体数值 |
 | `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 6/9 | ready-for-human · **2026-10-15 已定位并修掉两个真 bug，但路还选不了** |
+| `40-key-input-unreachable-when-unset.md` | 7/9 | ready-for-agent · **2026-10-15 真机发现并已修，待门禁与提交** |
 
 ## 三、已收（验收项全勾）
 
