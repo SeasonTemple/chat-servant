@@ -485,6 +485,86 @@ struct Scratch {
     source: FrameSource,
     /// 现场模式下最近一次用到的窗口句柄。给日志与投递用。
     last_hwnd: Option<isize>,
+    /// `Auto` 档自动发送的护栏状态。见 [`AutoGate`]。
+    auto_gate: AutoGate,
+}
+
+/// `Auto` 档的自动发送护栏。**2026-10-15 新增。**
+///
+/// ## 为什么需要它
+///
+/// `Auto` 档 = **不用点，程序自己填入并发送**。这在产品上是有效的，
+/// 但直接实现会踩四个已知的坑（每一条都有依据，不是假想出来的风险）：
+///
+/// 1. **自己触发自己，无限循环。** 自动回复最经典的死法：我发的内容
+///    再次命中触发条件，于是自己回自己，来回不停。**这一条是根因。**
+/// 2. **对方连发 N 条 ⇒ 我回 N 条。** 看着像「很积极」，实际是刷屏，
+///    而且每一条都撤不回来。
+/// 3. **降级候选（`blind`）的概率不可信**，按它选「最高置信度」
+///    等于按一个没有意义的数字做决定。
+/// 4. **回得太规律 = 机器感。** 真人聊天有停顿。
+///
+/// ## 为什么做成一个结构而不是散在循环里
+///
+/// 「这一轮要不要自动发」是**决定一条消息会不会发进真人聊天窗口**的判断。
+/// 它必须是**可穷举的测试**，写成散落在循环里的 `if` 读错一次
+/// 就是发错一条真消息——本仓已经栽过（`Arming` 那个死胡同）。
+#[derive(Debug, Default)]
+struct AutoGate {
+    /// 上一次**真的自动发送出去**的时刻。冷却期用它算。
+    last_sent: Option<std::time::Instant>,
+    /// 这一轮是否已经自动发过了。对方不说话就不重置——
+    /// 于是「对方说了 N 条」也只会回一条。
+    spent_this_round: bool,
+}
+
+/// 冷却时长。**30 秒**是自动回复的常见量级。
+///
+/// ⚠ 为什么不是 0：冷却为 0 等于没有冷却，对方连发两条我就回两条。
+const AUTO_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl AutoGate {
+    /// 这一轮**能不能自动发**。纯判定，不产生副作用。
+    ///
+    /// 逐条护栏：
+    /// · `tier_is_auto`——只有 `Auto` 档才自动发；
+    /// · 未发过本轮——对方的 N 条合成一条回复；
+    /// · 冷却已过——挡连发，也留出反悔的余地。
+    ///
+    /// ⚠ `blind` 不在这里判：那是**候选集的性质**，调用点才拿得到。
+    ///   判据写在调用点，见 [`Scratch::step`] 里自动发送那段。
+    fn may_auto_send(
+        &self,
+        tier_is_auto: bool,
+        now: std::time::Instant,
+    ) -> Result<(), &'static str> {
+        if !tier_is_auto {
+            return Err("不是自动发送档");
+        }
+        if self.spent_this_round {
+            return Err("这一轮已经自动发过了");
+        }
+        if let Some(t) = self.last_sent
+            && now.duration_since(t) < AUTO_COOLDOWN
+        {
+            return Err("冷却期内，等对方把话说完");
+        }
+        Ok(())
+    }
+
+    /// 记一次「真的发出去了」。
+    fn record_sent(&mut self, now: std::time::Instant) {
+        self.last_sent = Some(now);
+        self.spent_this_round = true;
+    }
+
+    /// **对方又开口** ⇒ 进入新一轮，允许再自动发一次。
+    ///
+    /// ⚠ 冷却**照旧生效**——「对方又说话」不是「冷却结束了」。
+    ///   写成「一来消息就清冷却」等于没有冷却，这是最容易写错的一处。
+    fn begin_new_round(&mut self) {
+        self.spent_this_round = false;
+    }
 }
 
 impl Scratch {
@@ -513,6 +593,7 @@ impl Scratch {
             // 默认现场；`spawn` 会用 `LoopConfig` 里的那份覆盖。
             source: FrameSource::Live,
             last_hwnd: None,
+            auto_gate: AutoGate::default(),
         }
     }
 }
@@ -584,11 +665,11 @@ impl TierCell {
 
     pub fn get(&self) -> chatservant_core::dispatch::Dispatch {
         match self.0.load(Ordering::Relaxed) {
-            1 => chatservant_core::dispatch::Dispatch::Confirm,
+            1 => chatservant_core::dispatch::Dispatch::Auto,
             // ⚠ **未知一律当 Manual。** 解析失败就升档是最危险的默认值。
             //
-            // ⚠ 编码 `2` 曾经是 `Auto`，2026-10-13 该档整档取消。
-            //   它落进 `_` 分支 ⇒ 旧配置里的 2 会被读成 **Manual（最低档）**，
+            // ⚠ 编码 `2` 曾经是 2026-10-13 取消、2026-10-15 又请回来的第三档，
+            //   它从来不是现行两档的任何一个，所以落进 `_` ⇒ 读成 **Manual（最低档）**，
             //   而不是 panic 或升档——这是失败时唯一正确的方向。
             _ => chatservant_core::dispatch::Dispatch::Manual,
         }
@@ -1185,6 +1266,11 @@ fn step(
         };
         match chatservant_reason::turn(reasoner.as_mut(), &ctx) {
             Ok(t) => {
+                // 起草出来了。**趁 `draft` 还在手上，先把自动发送的判据算完。**
+                //
+                // ⚠ 顺序很重要：`blind` 只存在于 `DraftSet` 上，
+                //   存进 `s.candidates` 之后就拿不到了（面板契约里没有这个字段）。
+                let draft_is_blind = t.draft.blind;
                 s.candidates = t
                     .draft
                     .sorted()
@@ -1197,6 +1283,56 @@ fn step(
                     })
                     .collect();
                 s.reason = t.explain();
+
+                // ---- `Auto` 档自动发送：五道护栏在这里汇合 ----
+                //
+                // ⚠⚠ **这是唯一一处「程序替人把话发进聊天窗口」的地方。**
+                //   每一条不满足都只降级成「只填入」，绝不放行。
+                //
+                // ⚠ 对方又开口了 ⇒ 新一轮（允许再发一次）。
+                //   冷却**不在这里清**——见 [`AutoGate::begin_new_round`]。
+                s.auto_gate.begin_new_round();
+
+                let now = std::time::Instant::now();
+                // ⚠ 档位从 `STATE` 读，与 `commands::dispatch` **同一个来源**。
+                //   这里不去猜、不缓存——两份判断迟早分叉，而分叉方向永远是「多发」。
+                let tier_is_auto =
+                    crate::commands::current_tier() == chatservant_core::dispatch::Dispatch::Auto;
+
+                // 护栏 ④：降级候选**不自动发**。
+                // `blind` = 判断失败时的降级产物，它的 probability 没有意义，
+                // 「挑最高置信度那条」在这里等于按一个假数字做决定。
+                // ⇒ 宁可只填入让人看一眼，也不要替人发一条不知道哪来的话。
+                let verdict = if draft_is_blind {
+                    Err("这轮判断降级了，概率不可信，只填入")
+                } else {
+                    s.auto_gate.may_auto_send(tier_is_auto, now)
+                };
+
+                if let Err(why) = verdict {
+                    if tier_is_auto && !s.candidates.is_empty() {
+                        tracing::info!("自动发送未放行：{why}——保持只填入");
+                    }
+                } else if let Some(top) = s.candidates.first().cloned() {
+                    // 候选已按 probability 降序 ⇒ `candidates[0]` 就是最高置信度。
+                    // ⚠ **这一句真机上没验过**（要真把话打进微信窗口），
+                    //   见 `.scratch/…/20-two-dispatch-tiers.md` 的 Update。
+                    match crate::commands::auto_send(&top.id) {
+                        Ok(receipt) => {
+                            s.auto_gate.record_sent(now);
+                            s.reason = format!(
+                                "{}。已按最高置信度自动发送：{}",
+                                s.reason,
+                                receipt.explain()
+                            );
+                        }
+                        Err(e) => {
+                            // ⚠ 发失败**不记冷却**：那不是「发出去了」，
+                            //   而冷却的作用是防连发，刷失败没意义。
+                            s.reason = format!("{}。自动发送失败：{e}", s.reason);
+                        }
+                    }
+                }
             }
             // `NothingToDo` = 静默期，**不是错误**
             Err(chatservant_reason::ReasonError::NothingToDo) => {
@@ -1624,12 +1760,105 @@ impl chatservant_reason::Summarizer for NoSummary {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message, Phase, Readout, RecentN,
-        Relock, SESSION, Scratch, Speaker, TierCell, TokenBudget, apply_gate_closed, apply_relock,
-        collect_images, header_print, park_on_other_conversation, snapshot,
+        AUTO_COOLDOWN, AutoGate, BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message, Phase,
+        Readout, RecentN, Relock, SESSION, Scratch, Speaker, TierCell, TokenBudget,
+        apply_gate_closed, apply_relock, collect_images, header_print, park_on_other_conversation,
+        snapshot,
     };
     use chatservant_perceive::{Decision, PaneWatcher};
     use chatservant_reason::context;
+
+    // ── `Auto` 档自动发送的护栏 ──────────────────────────────────────
+    //
+    // ⚠ 这些是**决定消息会不会发进真人聊天窗口**的判据，
+    //   所以逐条都要能自证会响。删测试比没有测试更糟——
+    //   它会让下一个人以为这里没有判断。
+
+    /// 只填入档**永远不许自动发**。哪怕所有条件都满足。
+    ///
+    /// 这是整个护栏的地基：`Manual` 是默认档，程序在默认状态下
+    /// 绝不能替人说话。
+    #[test]
+    fn the_fill_only_tier_never_auto_sends() {
+        let g = AutoGate::default();
+        for waited in [0, 1, 10, 1_000, 100_000] {
+            let now = std::time::Instant::now() + std::time::Duration::from_secs(waited);
+            assert!(
+                g.may_auto_send(false, now).is_err(),
+                "只填入档在等了 {waited} 秒之后仍然自动发了"
+            );
+        }
+    }
+
+    /// **对方连发 N 条 ⇒ 只回一条。**
+    ///
+    /// 这是本护栏存在的首要理由：不挡这一条，`Auto` 档就是刷屏，
+    /// 而发出去的每一条都撤不回来。
+    #[test]
+    fn several_messages_in_one_round_produce_one_auto_send() {
+        let now = std::time::Instant::now();
+        let mut g = AutoGate::default();
+
+        assert!(g.may_auto_send(true, now).is_ok(), "第一轮该能发");
+        g.record_sent(now);
+
+        // 对方接着又说了 5 句，**同一轮**（水位线没推进成新一轮）
+        for i in 0..5 {
+            assert!(
+                g.may_auto_send(true, now).is_err(),
+                "第 {i} 句之后又自动发了一次 ⇒ 对方说 N 句我回 N 句"
+            );
+        }
+    }
+
+    /// **冷却期内一条都不许发**，即使已经进入了新一轮。
+    ///
+    /// ⚠ 这一条最容易写错：`begin_new_round` 只清 `spent_this_round`，
+    ///   **不许碰 `last_sent`**。若有人图省事在 `begin_new_round` 里
+    ///   一并把冷却清了，这条会红——那正是它该做的事。
+    #[test]
+    fn the_cooldown_survives_a_new_round() {
+        let t0 = std::time::Instant::now();
+        let mut g = AutoGate::default();
+        g.record_sent(t0);
+
+        // 对方很快又开口 ⇒ 新一轮（spent 清了），但冷却还在
+        g.begin_new_round();
+        let shortly_after = t0 + AUTO_COOLDOWN / 2;
+        assert!(
+            g.may_auto_send(true, shortly_after).is_err(),
+            "冷却期内就发了 ⇒ 「一来消息就清冷却」那条错误写法溜过去了"
+        );
+
+        // 冷却走完 ⇒ 允许
+        let after = t0 + AUTO_COOLDOWN + std::time::Duration::from_secs(1);
+        assert!(
+            g.may_auto_send(true, after).is_ok(),
+            "冷却都过了还不许发，那这个档就没有自动的意义了"
+        );
+    }
+
+    /// 防重自证：`record_sent` 之后立刻重复调用**不会**放行两次。
+    ///
+    /// ⚠ 把 `AUTO_COOLDOWN` 调成 0 会让上面几条失去意义——
+    ///   这条测试就是挡住那种改动的。
+    #[test]
+    fn recording_a_send_immediately_blocks_a_second_one() {
+        let now = std::time::Instant::now();
+        let mut g = AutoGate::default();
+        assert!(g.may_auto_send(true, now).is_ok());
+        g.record_sent(now);
+        assert!(
+            g.may_auto_send(true, now).is_err(),
+            "同一条立刻重发 ⇒ 防重失效"
+        );
+        // 而冷却本身也不该是 0，否则上面几条护栏全被架空
+        assert!(
+            AUTO_COOLDOWN.as_secs() >= 10,
+            "冷却被调到 {} 秒 —— 连发就会变成 N 句回 N 句",
+            AUTO_COOLDOWN.as_secs()
+        );
+    }
 
     /// 造一份最小的 `Scratch`，只为了喂 `snapshot`。
     fn scratch_with(messages: usize, candidates: usize) -> Scratch {
@@ -2543,8 +2772,8 @@ mod tests {
         use chatservant_core::dispatch::Dispatch;
         let cell = TierCell::default_manual();
         let settings = cell.clone();
-        settings.set(Dispatch::Confirm);
-        assert_eq!(cell.get(), Dispatch::Confirm, "设置页升档，主面板必须看到");
+        settings.set(Dispatch::Auto);
+        assert_eq!(cell.get(), Dispatch::Auto, "设置页升档，主面板必须看到");
     }
 
     /// **总闸关着时，一张图都不产出。**

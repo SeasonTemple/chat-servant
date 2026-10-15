@@ -195,7 +195,7 @@
 
   const TIERS = [
     { key: 'Manual', label: '只填入' },
-    { key: 'Confirm', label: '确认后发' },
+    { key: 'Auto', label: '自动发送' },
   ];
 
   type Glyph = 'tick' | 'ring' | 'ring-label';

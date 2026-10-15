@@ -139,6 +139,6 @@
   "ocr_calls": 7,
   "error": null,
   "phase": "drafted",
-  "tier": "Confirm",
+  "tier": "Auto",
   "armed_id": "c0"
 }
