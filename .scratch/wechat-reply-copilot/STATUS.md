@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **48** ｜ 验收项全勾 **25** ｜ 已收但留有说明项 **11** ｜ 未收 **12**
+票据总数 **49** ｜ 验收项全勾 **25** ｜ 已收但留有说明项 **11** ｜ 未收 **13**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -31,9 +31,10 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-agent · **2026-10-15 已量清三项，待做** | (票面没写 Blocked by) |
 | `44-candidate-action-row-is-button-geometry-on-prose.md` | 16/18 | 进行中 · **2026-10-16 四角与「读成方框」的根因已定位并修完；门禁全绿；两项复核仍未做** | (票面没写 Blocked by) |
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-16 第六轮：真机第一次真的上去了（380×560）。撕边顶边无黑边、撕边纸条读得出来——四轮 headless 的结论在真机成立；真机同时撞出新缺陷：`.cs-input` 描边实测 (212,218,221)、R−B = −9，是全面板唯一蓝多于红的颜色。齿轮底板那条没验完** | (票面没写 Blocked by) |
-| `46-judge-surface-rescans-the-same-rect-four-times.md` | 0/5 | ready-for-agent · **2026-10-16 静态审查定位，未改未验——本沙箱装不上 Rust 工具链（`static.rust-lang.org` 不通、Debian bookworm 无 `rustc` 包且版本不支持 edition 2024），改不动也验不了** | (票面没写 Blocked by) |
-| `47-pp-ocr-plan-cache-has-a-recompile-race.md` | 0/5 | ready-for-agent · **2026-10-16 静态审查定位，未改未验——同票 46 的环境限制；且 `capture` 依赖 `windows`，只能在 Windows 上编** | (票面没写 Blocked by) |
+| `46-judge-surface-rescans-the-same-rect-four-times.md` | 5/5 | ready-for-human · **2026-10-17 已改已验过门禁。本机（Windows + Rust 1.94.1）编得过， | (票面没写 Blocked by) |
+| `47-pp-ocr-plan-cache-has-a-recompile-race.md` | 5/5 | ready-for-human · **2026-10-17 已改已验过门禁。本机（Windows + Rust 1.94.1）编得过， | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
+| `49-pp-ocr-plan-cache-lifetime-and-det-lock.md` | 0/5 | ready-for-agent · **2026-10-17 票 47 做完后记档。两条都是票 47 的 | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
