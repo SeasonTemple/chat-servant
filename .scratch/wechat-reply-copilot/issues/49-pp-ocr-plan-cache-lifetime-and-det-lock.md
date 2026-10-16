@@ -2,8 +2,60 @@
 
 **What to build:** 让计划缓存真的产生复用收益，并让 det 编译不堵住别人。
 
-**Status:** ready-for-agent · **2026-10-17 票 47 做完后记档。两条都是票 47 的
-「已知且接受」或「不在本票范围」项，本机（Windows + Rust 1.94.1）编得过**
+**Status:** ready-for-human · **2026-10-17 前半条已改已验过门禁（`det_plan` 编译不再持锁）**。
+**后半条（桶缓存跨帧存活）仍需人拍板失效语义，见下**
+
+## 前半条：已做（2026-10-17）
+
+`DET_PLAN: OnceLock<Mutex<Option<(h,w,Plan)>>>` → `DetSlots<P>`，槽里存
+`HashMap<DetKey, Arc<OnceLock<Slot<P>>>>`，**编译在锁外**，锁只护「取/建 cell」。
+
+| 设计点 | 做法 | 为什么 |
+|---|---|---|
+| 键 | `DetKey = (usize, usize)`，两个分量都要 | 少一个就会拿错形状的图，而 `run` 拿到形状不匹配的输入只报错、整轮回落 WinRT，现场分不出来 |
+| 容量 | `DET_SLOT_CAP = 1`，**写死在 `Default` impl 里**，不是各调用点传的参数 | 调用点没有口子能顺手把它改成按形状分桶——**「要分桶」这个动作必须先改那个常量**，而那是需要人拍板的设计问题 |
+| 复用 | `DetSlots::get` 一行委托给票 47 的 `get_or_compile`（键泛型化成 `K: Eq+Hash+Copy`） | 两张表共用同一份同步逻辑与同一批守卫，**不存在第二份实现**；也没第二个锁 helper |
+| 为什么用 HashMap | 容量 1 走清桶分支时 `max_buckets/2 == 0` 即「全清」，与老实现 `*slot = Some(..)` **逐字等价** | 零新代码的复用，不是分桶 |
+
+新增 4 条守卫（全部注入桩——本机无权重，真跑模型的测试会 `return` 跳过 = 没守）：
+`det_shapes_compile_concurrently_instead_of_queueing_on_the_lock`、
+`one_det_shape_is_compiled_exactly_once_under_concurrency`、
+`the_det_slot_still_keeps_only_one_shape`、
+`concurrent_det_shape_churn_never_serves_the_wrong_plan`。
+
+⚠ **变红验过两种反向形状**：
+① 退回「持锁编译」⇒ 3 条红（峰值=1、驻留 2 份、驻留 5 份超上限）；
+② 改成票 47 的老形状「锁外编译+无条件写回」⇒ `同一个形状编了 8 遍  left: 8 right: 1`。
+
+capture **79 → 83**，0 failed；连续 5 轮重跑无抖动；`clippy -D warnings` exit=0。
+
+### 实测收益
+
+同一个 200ms 桩编译窗口，两个不同形状并发：
+
+| | 墙钟 | 同时在编的峰值 |
+|---|---|---|
+| 改前（持锁编译） | 401.5 ms | **1** |
+| 改后（锁外编译） | 200.6 ms | **2** |
+
+⚠ 401.5→200.6 是**桩模拟的数字**，不是真 det 编译的耗时——本机没装 det 权重，
+**真 det 编译（十几秒级）的墙钟收益未实测**。按结构事实报：**峰值 1 → 2，不同形状互不阻塞**。
+
+### ⚠ 已知缺口（如实留白）
+
+**守卫盖的是 `DetSlots::get`，不是 `det_plan` 本身。** 真 `PlanBody` 必须有 ONNX 权重
+才造得出来（tract 的 `SimplePlan::new` 需要一个 `Graph`），无权重下没法真编。
+⇒ **若有人绕过 `DetSlots::get`、把持锁编译直接内联回 `det_plan`，这 4 条守卫不会红。**
+缓解面只有一条：容量住在类型里，改容量必须动 `DetSlots`。
+
+另两处行为差异已写进注释：失败时槽会空掉（老实现留着上一份形状）；
+并发换形状时某形状可能被再编一遍（`Arc` 保证不悬垂，代价小）。
+
+## 后半条：仍需人拍板
+
+桶缓存跨帧存活 / 提 `static` **一行没碰**。提上去之前得先定失效语义：
+权重被替换/删除时缓存**要不要失效**——在「每帧新建」的现状下这个问题**根本不存在**，
+提 `static` 会让它变成真问题。
 
 ## 1. `det_plan` 在**持锁期间**编译 det 图
 
@@ -55,10 +107,17 @@ let p = ocr_pp::load_det(...)?;                       // ⚠ 在锁内编译，�
 
 ## 验收项（两条分开验，别混）
 
-- [ ] `det_plan` 编译 det 图期间**不持有** `det_plan_slot` 的锁，
-      且并发调不同 `(h, w)` 时**互不阻塞**（守卫：与票 47 同构的并发用例，
-      判据取「同时在编的峰值 ≥ 2」而不是耗时）
-- [ ] 桶缓存若改成跨帧存活（`static` 或提到调用方持有）：
+- [x] `det_plan` 编译 det 图期间**不持有** `det_plan_slot` 的锁，
+      且并发调不同 `(h, w)` 时**互不阻塞**
+      ——守卫 `det_shapes_compile_concurrently_instead_of_queueing_on_the_lock`，
+      判据取「同时在编的峰值 ≥ 2」而不是耗时。**变红已验**（退回持锁编译 ⇒ 峰值=1 变红）
+- [x] 同形状 `(h, w)` 的并发请求**仍然只编一次**
+      ——守卫 `one_det_shape_is_compiled_exactly_once_under_concurrency`，
+      8 线程同形状只调 1 次编译器且全拿到**同一个 Arc**。
+      **变红已验**（改成票 47 老形状 ⇒ `left: 8 right: 1`）
+- [x] 缓存容量**不增加** ——守卫 `the_det_slot_still_keeps_only_one_shape`
+      （6 个形状走一遍槽里始终 1 份）+ `DET_SLOT_CAP` 住在类型里、调用点无口子改
+- [ ] 桶缓存若改成跨帧存活（`static` 或提到调用方持有）：**未做，需人拍板**
       - [ ] 权重文件被替换 / 删除时，缓存**会**失效并重编
             （否则用户更新模型后永远用旧的）
       - [ ] `max_buckets` 的「清一半」在跨帧下仍成立
