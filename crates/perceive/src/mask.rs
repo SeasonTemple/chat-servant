@@ -34,7 +34,7 @@ use chatservant_capture::ocr::OcrLine;
 use chatservant_core::frame::{Frame, Rect};
 
 use crate::attribute::{NoiseClass, Speaker};
-use crate::pixels::{Rgb, dist, dominant_ratio};
+use crate::pixels::{Rgb, dist, exact_hist, ratio_of};
 
 /// 一块区域至少要有这么多种**精确色**，才不是一片平表面。
 ///
@@ -87,25 +87,36 @@ impl SurfaceVerdict {
 /// **两个判据都要满足**才算平表面——只满足一个都会被实测数据打掉：
 /// - 图片区众数占比 0.51（很高）但 2037 种色 → 只看占比会漏判
 /// - 一块刚好有 3 种色的渐变背景占比 0.9 → 只看种数会漏判
+///
+/// **一次调用只把矩形扫两遍**：色种数一遍（[`distinct_colors`]，STEP=1）、
+/// 直方图一遍（[`exact_hist`]，STEP=4）。三处判据共用后一张图。
+/// 优化前这里调了 2 次 [`crate::pixels::dominant_ratio`]，每次都重扫一遍
+/// （早返回那条分支 1 次），而本函数是**每个文本框每帧**的必经之路（票 46）。
+///
+/// ⚠ **色种数那一遍不许并进直方图**：[`distinct_colors`] 是逐像素、
+/// `exact_hist` 是 STEP=4，`hist.len()` 只数采到的样点、`set.len()` 数整块区域。
+/// 而色种数是主判据（图片区实测众数占比高达 0.51，单看占比**一定**漏判），
+/// 改采样密度就是改判据本身。
 pub fn judge_surface(frame: &Frame, r: Rect) -> Option<SurfaceVerdict> {
     let colors = distinct_colors(frame, r)?;
     if colors == 0 {
         return None;
     }
+    let purity = ratio_of(&exact_hist(frame, r));
     // 先看色种数。图片区实测众数占比高达 0.51（大片纯黑背景），
     // 单看占比**一定**会漏判，所以色种数是主判据。
     if colors > FLAT_MAX_COLORS {
         return Some(SurfaceVerdict {
             is_flat: false,
-            purity: dominant_ratio(frame, r),
+            purity,
             colors,
         });
     }
     // 色种数够少，才轮到占比：3 种色的渐变背景占比可以很高，
     // 但那仍不是一片底色。
     Some(SurfaceVerdict {
-        is_flat: dominant_ratio(frame, r) >= FLAT_MIN_PURITY,
-        purity: dominant_ratio(frame, r),
+        is_flat: purity >= FLAT_MIN_PURITY,
+        purity,
         colors,
     })
 }
@@ -114,6 +125,12 @@ pub fn judge_surface(frame: &Frame, r: Rect) -> Option<SurfaceVerdict> {
 ///
 /// 不做量化合并——量化会把「深灰 vs 近黑」并成一个桶，
 /// 那样平表面和内容区的差别就没了。要的就是精确值。
+///
+/// ⚠ **逐像素（STEP=1），不许改成 [`crate::pixels::exact_hist`] 的 STEP=4**
+/// （票 46）。两者的长度语义不同：本函数数的是**整块区域**的色种数，
+/// 直方图只数**采到的样点**。而色种数是 [`judge_surface`] 的**主判据**
+/// ——实测图片区众数占比高达 0.51，单看占比**一定**漏判。
+/// 改这里的采样密度等于改判据本身。
 pub fn distinct_colors(frame: &Frame, r: Rect) -> Option<usize> {
     use std::collections::HashSet;
     let mut set: HashSet<Rgb> = HashSet::new();
@@ -507,5 +524,112 @@ mod tests {
         let f = solid(PANEL);
         let v = judge_surface(&f, Rect::new(0, 0, W as i32, 200)).expect("应能判定");
         assert!(v.is_flat, "纯色面板是平表面：{}", v.explain());
+    }
+
+    /// **性能守卫（票 46）**：一次 `judge_surface` 只准建**一张** STEP=4 直方图。
+    ///
+    /// 这条会响。2026-10-17 实测：把 `judge_surface` 逐字改回优化前的样子，
+    /// 下面第一例报「实测建了 2 张」、第二例仍是 1 张。
+    ///
+    /// ⚠ 票面写的「`:100`/`:107`/`:108` 调 3 次、最坏 3 次重复」**与代码不符**：
+    /// `:100` 在色种数超限的早返回分支里，与 `:107`/`:108` **互斥**，
+    /// 一趟走不到。所以实测是「平表面分支 2 次、早返回分支 1 次」。
+    /// 多出来的那一次就是 `:107` 与 `:108` 为了填 `is_flat` 与 `purity`
+    /// 两个字段，把同一个比值算了两遍。
+    #[test]
+    fn one_judge_surface_call_builds_exactly_one_histogram() {
+        // 两条分支都要盖住，而且两者的优化前次数**不一样**：
+        // 早返回分支本来就只建 1 次（早返回省掉了占比判定），
+        // 冗余只发生在「色种数够少、真的去比占比」那条路上。
+        let cases = [
+            (
+                "色种数够少 → 判平表面",
+                bubble_with_text(),
+                Rect::new(260, 44, 370, 60),
+            ),
+            ("色种数超限 → 早返回", photo(), Rect::new(120, 60, 360, 180)),
+        ];
+        for (what, f, r) in cases {
+            let _ = crate::pixels::take_exact_hist_calls();
+            let v = judge_surface(&f, r).expect("应能判定");
+            let calls = crate::pixels::take_exact_hist_calls();
+            assert_eq!(
+                calls,
+                1,
+                "{what}：一次 judge_surface 只该建一张直方图，实测建了 {calls} 张（{}）",
+                v.explain()
+            );
+        }
+    }
+
+    /// **重构等价锁**：只建一次直方图之后，判据结果必须**逐例不变**。
+    ///
+    /// 这里用**两支保持原样的函数**把优化前的公式原样重算一遍：
+    /// [`distinct_colors`]（STEP=1）与 [`dominant_ratio`]（STEP=4，自己建图）
+    /// 都还在，一个字没改——所以 `before` 就是「每次都重扫」那条老路径的字面复刻。
+    /// 对比的是整个 [`SurfaceVerdict`]（`is_flat` / `purity` / `colors`），
+    /// `purity` 是 f32 精确比较：两边算的是同一份直方图上的同一个除法，
+    /// 位级相同才算过。
+    #[test]
+    fn sharing_one_histogram_gives_the_same_verdict_as_rescanning() {
+        use crate::pixels::dominant_ratio;
+
+        fn before(frame: &Frame, r: Rect) -> Option<SurfaceVerdict> {
+            let colors = distinct_colors(frame, r)?;
+            if colors == 0 {
+                return None;
+            }
+            if colors > FLAT_MAX_COLORS {
+                return Some(SurfaceVerdict {
+                    is_flat: false,
+                    purity: dominant_ratio(frame, r),
+                    colors,
+                });
+            }
+            Some(SurfaceVerdict {
+                is_flat: dominant_ratio(frame, r) >= FLAT_MIN_PURITY,
+                purity: dominant_ratio(frame, r),
+                colors,
+            })
+        }
+
+        let cases = [
+            (
+                "气泡里的字（平表面）",
+                bubble_with_text(),
+                Rect::new(260, 44, 370, 60),
+            ),
+            (
+                "气泡里的字（窄框）",
+                bubble_with_text(),
+                Rect::new(260, 48, 360, 60),
+            ),
+            (
+                "面板上的灰字",
+                bubble_with_text(),
+                Rect::new(20, 200, 120, 212),
+            ),
+            (
+                "整块图片（色种数超限）",
+                photo(),
+                Rect::new(120, 60, 360, 180),
+            ),
+            ("图片里的一小块", photo(), Rect::new(150, 90, 330, 104)),
+            ("图片与面板的交界", photo(), Rect::new(60, 30, 380, 220)),
+            ("纯色面板", solid(PANEL), Rect::new(0, 0, W as i32, 200)),
+            (
+                "退化框（x1 < x0）",
+                solid(PANEL),
+                Rect::new(300, 10, 200, 40),
+            ),
+            ("整块框在帧外", solid(PANEL), Rect::new(500, 500, 600, 600)),
+        ];
+        for (what, f, r) in cases {
+            assert_eq!(
+                judge_surface(&f, r),
+                before(&f, r),
+                "{what}：共用一张直方图之后结论必须与重扫时逐字段相同"
+            );
+        }
     }
 }
