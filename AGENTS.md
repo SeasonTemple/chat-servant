@@ -129,6 +129,45 @@ pwsh -NoProfile -File scripts\winscan.ps1    # 只报可见窗口
 pwsh -NoProfile -File scripts\shotwin.ps1 <hwnd> <out.png>   # 截窗口
 ```
 
+### 内循环：不要每次都跑全门禁（2026-10-16 加）
+
+上面那条是**完整门禁**，代价是热缓存下也要 128.7s（实测 10 步分步耗时见下）。
+改一行代码时按改动范围选入口，别每轮都付全价：
+
+```bash
+pwsh -NoProfile -File scripts\dev.ps1 help      # 列出下面这些动词
+pwsh -NoProfile -File scripts\dev.ps1 check     # fmt --check + clippy（改 Rust 最常跑）
+pwsh -NoProfile -File scripts\dev.ps1 test      # cargo test --workspace（可 -Filter 过滤）
+pwsh -NoProfile -File scripts\dev.ps1 ui-check  # svelte-check + lint + autofixer（改 .svelte）
+pwsh -NoProfile -File scripts\dev.ps1 app       # 起 Tauri dev（它自己会起 vite）
+pwsh -NoProfile -File scripts\dev.ps1 size      # target/ 体积 + 多哈希占比
+pwsh -NoProfile -File scripts\dev.ps1 clean     # 回收 target/ 旧哈希（-DryRun 只报告）
+
+# 完整门禁也能只跑一部分（子串匹配）：
+pwsh -NoProfile -File scripts\gate.ps1 -Skip 'deny,ui build'
+pwsh -NoProfile -File scripts\gate.ps1 -Only 'cargo,ui'
+```
+
+⚠ **`dev.ps1` 不复制任何一条命令**，只转发给 `gate.ps1` 与 cargo/pnpm，
+所以门禁那九步的唯一真相来源仍然是 `gate.ps1`。
+⚠ `-Skip` / `-Only` 的运行**不是完整门禁**，脚本会在结论旁边打
+`GATE_SCOPE: PARTIAL`——**别把「跳两步之后的全绿」当成「九步全绿」**。
+⚠ `dev.ps1` 的动词里**没有** `cargo deny` 与 `secret-scan`：
+   那两步要联网 / 要密钥，本来也不该进内循环。
+
+热缓存下九步实测耗时（2026-10-16，PowerShell 7）：
+
+| 步 | 秒 | 步 | 秒 |
+|---|---|---|---|
+| `cargo test --workspace` | 36.9 | `ui svelte-check` | 10.0 |
+| `ui svelte-autofixer` | 10.8 | `ui lint` | 8.0 |
+| `cargo clippy -D warnings` | 20.5 | `cargo fmt --all --check` | 3.6 |
+| `cargo deny check` | 11.9 | `mojibake scan` | 2.3 |
+| `ui build` | 10.5 | `sheet pack in sync` | 1.9 |
+
+⚠ 这张表会过期。`gate.ps1` 现在每轮都打印自己的分步耗时，**以它为准**，
+不要照抄这张表进任何文档或结论里。
+
 ⚠ **手写 Rust 之后必须先 `cargo fmt --all`**——门禁第一步就是 `fmt --check`，超长行必红。
 
 ## 前端约定
@@ -367,11 +406,25 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
 `gc` 子命令在 cargo#13060 里至今 unstable；本机 1.94.1 的 `cargo --list` 里也确实
 只有 `clean`。⇒ `target/` 在官方那里**至今没有自动方案**，只能自己补。
 
-### 病因实测：是**逐轮叠加**，不是「残留旧哈希」（2026-10-14，纠正旧结论）
+### 病因实测：**两个都在涨**，而回收机制曾经一天都没生效过（2026-10-16 二次订正）
 
-本节原先写「增删 feature 会产生新哈希 rlib，旧永不删除，8 GB 是垃圾」。
-`ui/scripts/targetaudit.py`（数 `target/debug/deps` 里每个包名有几个不同哈希）
-实测推翻了它——**多哈希残留只占 `deps` 的 1%（0.02 GiB）**，根本撑不起那个量级。
+⚠ **本节原先写「多哈希残留只占 `deps` 的 1%（0.02 GiB），撑不起那个量级」——
+那个结论是错的，实测是 55%。** 错在**基线取法**：那次是拿「`target/`
+清空后全新构建」当对照，而**逐轮叠加**出来的多版本产物正好被那一次清空抹掉了，
+于是对照里看不见它。⇒ **「清空后重建」不能当日常状态的基线。**
+
+2026-10-16 实测（`ui/scripts/targetaudit.py`，`deps` = 11.63 GiB / 732 个包）：
+
+| 包 | 哈希份数 | 占用 |
+|---|---|---|
+| `tract_core` | 11 | **1094 MiB** |
+| `chatservant_capture` | **38** | 809 MiB |
+| `chatservant_reason` | 36 | 759 MiB |
+| `tauri_utils` | 12 | 405 MiB |
+| **多版本包合计** | | **6.38 GiB = `deps` 的 55%** |
+
+连**自己写的 crate 都有 30~38 份**：每跑一轮 `clippy --all-targets` /
+`test --workspace` / `tauri dev`，同一份代码就多留一组新哈希，旧的永不删除。
 
 真实数据（同机、`target/` 清空后全新 `cargo build --workspace` 对比，全量 2 分 1 秒）：
 
@@ -382,8 +435,7 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
 | `build` | 0.31 GB | 1.41 GB | 4.5× |
 | **合计** | **2.82 GB** | **16.20 GB** | 5.7× |
 
-⇒ 每跑一轮 `clippy --all-targets` / `test --workspace` / `tauri dev` 都往里叠一层，
-**`incremental` 是涨得最凶的那个**。既然是叠加，`cargo clean` 就只是**救急**，
+⇒ 每跑一轮就往里叠一层。既然是叠加，`cargo clean` 就只是**救急**，
 日常必须有自动机制兜底。
 
 ### 现在的两道防线
@@ -396,15 +448,41 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
    代价：改 Rust 代码后重编更慢（全量约 2 分钟）；本项目日常改动大头在前端，
    走 Vite HMR 不碰这里，代价可接受。
 
-2. **`scripts/targetgc.py`，已挂在 `gate.ps1` 末尾**。超过 8 GiB 才动手，只回收
-   7 天没被动过的 `incremental/` 与 `deps/` 产物，且**保留 `.fingerprint`**
+2. **`scripts/targetgc.py`，已挂在 `gate.ps1` 末尾**。**保留 `.fingerprint`**
    （Cargo 判断要不要重编全靠它，删了会让整棵依赖树重编）。被文件锁住的跳过
    并计数，不报错。它**不参与 `$fail`**——磁盘占用不是代码质量，红了会让人
    误以为代码有问题。
+
+   ⚠⚠ **判据必须是 cargo 自己说的，不能是 mtime**（2026-10-16 实测打出来的）。
+   原来的实现是「每个包保留 mtime 最新的 3 个哈希，删其余的」，理由是
+   clippy / test / build 各自留一组、都要用。**它会误删**：按那套删掉 10.8 GiB
+   之后，紧接着 `cargo test --workspace` 从 **36.9s 变成 139.3s**。
+
+   错因值得记住：**cargo 命中缓存时不会 touch 已有的产物文件。**
+   一轮门禁里 `cargo test` 表面跑过，但多数产物是几天前编好、这次直接复用的，
+   mtime 依然很旧；而当天 clippy 产出的另一组哈希 mtime 很新。
+   ⇒ **「最新的」不等于「在用的」**。凡是要按时间/新旧做删除判据，
+   先问「这个时间戳到底代表什么」。
+
+   现在的做法：跑一次
+   `cargo test --workspace --all-targets --no-run --message-format=json`，
+   把 `compiler-artifact` 的 `filenames` 收成**活产物集合**，
+   集合之外且超过 `--min-age-hours` 的才是尾巴。**列举失败就一个都不删。**
+
+   ⚠ 只问**一条** plan：问三条（test/build/clippy）实测要 **80 秒**。
+     代价是 clippy 产物不在清单里、会被回收，下一轮 clippy 重跑一次（20.5s）。
+     配 24 小时冷却后，这笔账是划算的。
    ```bash
-   python scripts/targetgc.py --dry-run     # 只报告
-   python scripts/targetgc.py --threshold-gb 6 --age-days 3
+   python scripts/targetgc.py --dry-run   # 只报告，不动手（不受冷却限制）
+   python scripts/targetgc.py --force     # 无视冷却，立刻收一次
+   python scripts/targetgc.py --report    # 只出体积报告
    ```
+
+   ⚠ **「超过阈值却一件没扫到」必须自己喊**。原来只打
+   `swept 0 ... freed 0.0 B`，读起来和「一切正常」完全一样——而那正是
+   2026-10-16 现场的状态：17.1 GiB、阈值 8 GiB、扫到 **0** 个文件。
+   老实现的判据是「7 天没被动过」，而项目天天在构建，**每轮都扫不到东西**。
+   机制失效几个月没人发现，就是因为它失败时不说话。
 
 ### 仍然只有这两个操作会让占用「跳一下」
 

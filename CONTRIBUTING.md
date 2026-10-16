@@ -66,6 +66,22 @@ fix(感知): 切回会话后消息变少 —— 水位线住在引擎里
 > 不要只看退出码。2026-10-11 实测踩过：脚本只打印 `GATE_EXIT` 而不 `exit`，
 > 于是 `pwsh -File` 永远返回 0，一个带红门禁的提交就提交上去了。
 
+> ⚠ 上表是**清单，不是执行顺序**，也不是完整清单：`gate.ps1` 实际还会跑
+> `sheet pack in sync`（纸的源与生成物必须同步），并把 `pnpm lint` 与
+> `svelte-autofixer` 拆成两个 `Step`。2026-10-16 起脚本每轮都会打印**自己的分步耗时表**，
+> 那才是唯一准确的清单；判门禁范围时别数「九步」这个说法。
+
+### 内循环：改一行代码不必跑全门禁
+
+```powershell
+pwsh -NoProfile -File scripts\dev.ps1 help   # 动词清单
+```
+
+`dev.ps1` **不复制上面任何一条命令**，只转发给 `gate.ps1` 与 cargo/pnpm，
+所以这张表与 `gate.ps1` 仍然各自只有一处真相。
+完整门禁也能只跑一部分：`gate.ps1 -Skip 'deny,ui build'` / `-Only 'cargo,ui'`——
+但那是**部分门禁**，脚本会在结论旁边打 `GATE_SCOPE: PARTIAL`。
+
 ## 维护陷阱
 
 这几条每一条都真的让门禁红过，且症状都**不在日志里**。它们写在对应文件的行内

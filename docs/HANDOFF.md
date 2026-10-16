@@ -336,16 +336,22 @@ CSS 视口不变；`--headless=old` 也钳。
 ## 5. 本机怎么跑
 
 ```powershell
-# 一次跑完全部门禁（九步）
-# ⚠ 代理地址**是机器相关的**，别照抄历史记录里的那个。
-#    先问代理端口，或看 scripts\deny.ps1 里的默认值（它按
-#    CHATSERVANT_PROXY → HTTPS_PROXY → 内置局域网地址 的顺序取值）。
-$env:HTTPS_PROXY='http://<你的代理host>:<端口>'; $env:HTTP_PROXY=$env:HTTPS_PROXY
+# 一次跑完全部门禁
+# ⚠ 通篇说的「九步」是 CONTRIBUTING 那张表的计数（它把 lint+autofixer 并成一步、
+#   不含 mojibake / sheetpack 两个便宜的）。gate.ps1 实际执行的 Step 数是
+#   **10~11 个**，取决于 secret-scan 是否跳过（没设 CHATSERVANT_PROBE_KEY 就跳）。
+#   2026-10-16 起脚本会打印分步耗时表，那是唯一准确的清单。
 pwsh -NoProfile -File scripts\gate.ps1
+
+# 开发内循环：只跑其中几步（结论只覆盖跑过的步，脚本会打 GATE_SCOPE: PARTIAL）
+pwsh -NoProfile -File scripts\gate.ps1 -Skip 'deny,ui build'
 ```
 
-⚠ `cargo deny` 要联网拉 advisory-db，而 github.com 直连不通，
-**先把代理挂上**再跑完整门禁（`gate.ps1` 会继承环境变量）。
+⚠ `cargo deny` 要联网拉 advisory-db，但**本机直连 github.com 是通的**，
+不必先挂代理（2026-10-15 核实 `git ls-remote` ⇒ exit=0；
+2026-10-16 完整门禁实测：`cargo deny check` 直连 **11.9s 通过**）。
+`scripts\deny.ps1` 默认直连，只有设了 `CHATSERVANT_PROXY` / `HTTPS_PROXY`
+才走代理。**这一节原先写「直连不通、必须先挂代理」，是过期结论。**
 
 ⚠ **别只看门禁的退出码，要看它打印的那两行**
 （`GATE: ALL GREEN` / `GATE: FAILED`）。2026-10-11 实测：
