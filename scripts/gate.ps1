@@ -1,6 +1,19 @@
+# ⚠ 参数只在**前两行**之内、不带副作用：CI 与 AGENTS.md 里那句
+# `pwsh -NoProfile -File scripts/gate.ps1` 必须继续表示「九步全跑」。
+#
+# -Skip / -Only 是给**开发内循环**用的（2026-10-16 加）。加它们的理由是实测：
+# 一轮九步里 `cargo deny check` 要联网拉 advisory-db、`pnpm build` 要全量打包，
+# 改一个 .svelte 时这两步与改动完全无关，却各要几十秒。
+# 默认路径一个字节都没变，所以 CI / release 与文档里那句话仍然成立。
+param(
+  [string[]]$Skip = @(),
+  [string[]]$Only = @()
+)
+
 $ErrorActionPreference = "Continue"
 Set-Location $PSScriptRoot\..
 $fail = 0
+$stepTime = [ordered]@{}
 
 # 本机 target/ 在 E: 盘上，cargo 的增量编译目录偶尔会被另一个进程锁住
 # （os error 5 拒绝访问），clippy 会因此以 101 退出——那不是代码红。
@@ -10,9 +23,32 @@ $env:CARGO_INCREMENTAL = "0"
 function Step($name, $scriptblock) {
   Write-Output ""
   Write-Output "========== $name =========="
+
+  # 过滤：子串匹配、大小写不敏感（-Skip deny / -Skip 'ui build' 都认）。
+  if ($Only.Count -gt 0 -and -not ($Only | Where-Object { $name -like "*$_*" })) {
+    Write-Output ">>> $name SKIPPED（-Only 未选中）"
+    $global:LASTEXITCODE = 0   # 跳过绝不能留下上一个命令的退出码
+    return
+  }
+  if ($Skip.Count -gt 0 -and ($Skip | Where-Object { $name -like "*$_*" })) {
+    Write-Output ">>> $name SKIPPED（-Skip 命中）"
+    $global:LASTEXITCODE = 0
+    return
+  }
+
+  $sw = [Diagnostics.Stopwatch]::StartNew()
   & $scriptblock
-  if ($LASTEXITCODE -ne 0) { Write-Output ">>> $name FAILED (exit=$LASTEXITCODE)"; $script:fail = 1 }
-  else { Write-Output ">>> $name OK" }
+  # ⚠ 顺序有讲究：先存退出码再停表。反过来的话 Stop 之后再读
+  # $LASTEXITCODE 仍是对的，但一旦以后有人在这里插一条会改 $LASTEXITCODE
+  # 的命令，红绿就会读到别人的退出码。判据取自 step 29 那次「假绿」。
+  $code = $LASTEXITCODE
+  $sw.Stop()
+  $script:stepTime[$name] = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+
+  Write-Output (">>> {0} [{1:N1}s] (exit={2})" -f
+    $(if ($code -ne 0) { "$name FAILED" } else { "$name OK" }),
+    $script:stepTime[$name], $code)
+  if ($code -ne 0) { $script:fail = 1 }
 }
 
 # 编码损坏（U+FFFD）。这道排在最前面，因为它最便宜——
@@ -89,6 +125,31 @@ if ($LASTEXITCODE -ne 0) {
   Write-Output ">>> 这不是代码质量红，但请顺手修：uv 是否在 PATH、scripts\targetgc.py 是否存在"
 }
 $ErrorActionPreference = "Continue"
+
+# ---- 分步耗时（2026-10-16 加）---------------------------------
+#
+# 为什么加：**在没有数字之前，「哪一步慢」全是猜的**，而猜错的方向就是白花的时间。
+# 这个仓库已经因此白花过一轮：autofixer 被判定成瓶颈并改写成调本地二进制，
+# 改完实测才发现它只占 19s（11 个文件 × 1.7s），真正的耗时大头在 cargo 那三步。
+#
+# 排在 target gc **之后**、结论**之前**：磁盘回收不算门禁时间，
+# 而「这一轮慢在哪」必须在你读红绿之前就看得到。
+if ($stepTime.Count -gt 0) {
+  $total = 0.0
+  foreach ($k in $stepTime.Keys) { $total += $stepTime[$k] }
+  Write-Output "---------- timing (steps) ----------"
+  foreach ($k in ($stepTime.Keys | Sort-Object { $stepTime[$_] } -Descending)) {
+    Write-Output ("  {0,7:N1}s  {1}" -f $stepTime[$k], $k)
+  }
+  Write-Output ("  {0,7:N1}s  TOTAL（{1} 步）" -f $total, $stepTime.Count)
+}
+
+# ⚠ 带 -Skip / -Only 的运行**不是完整门禁**。这行必须紧挨着结论，
+# 否则「跳过 deny 之后全绿」会被读成「九步全绿」——那正是 2026-10-11
+# 踩过的同一个形状（局部结论被当成全局结论，还据此提交了）。
+if ($Skip.Count -gt 0 -or $Only.Count -gt 0) {
+  Write-Output "GATE_SCOPE: PARTIAL —— 跳过了部分步骤（-Skip $($Skip -join ',') / -Only $($Only -join ',')），结论只覆盖跑过的那几步"
+}
 
 if ($fail -eq 0) { Write-Output "GATE: ALL GREEN" } else { Write-Output "GATE: FAILED" }
 Write-Output "GATE_EXIT=$fail"

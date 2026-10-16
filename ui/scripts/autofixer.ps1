@@ -2,6 +2,22 @@
 #
 # 为什么要脚本化：手跑六个文件要六次往返，而且**很容易漏掉一个**——
 # 漏掉的那个就是下次 review 时才发现告警的文件。用 glob 收集，漏不掉。
+param(
+  # 并行度。6 是按**实测**定的，不是随手取的（2026-10-16，本机 16 逻辑核 / 31.5 GB，
+  # 且空载基线就有 28.8% ≈ 4.6 核在忙）：
+  #
+  #     并行度   墙钟     全机 CPU 均值   峰值    折算实际占用
+  #        1     23.0s       25.7%       45.0%   淹没在基线噪声里
+  #        6      7.3s       44.2%       63.8%   ≈ 2.5 核
+  #       11      6.1s       56.3%       87.5%   ≈ 4.4 核
+  #
+  # ⇒ 6→11 只多省 1.2s，却把峰值从 64% 顶到 87.5%：**不划算，所以停在这。**
+  # ⚠ 单个 node 进程 1.7s 里只占约 0.2 核——并行吃的是**进程启动与 I/O**，
+  #   不是 CPU。所以「提速 3 倍」不等于「抢 3 倍 CPU」。
+  # ⚠ 这几步在 `gate.ps1` 里**不与 cargo 步骤重叠**，门禁跑它时不跟编译抢核；
+  #   只有手工一边 `cargo build` 一边跑它才会叠加，那时可以 `-ThrottleLimit 3`。
+  [int]$ThrottleLimit = 6
+)
 $ErrorActionPreference = 'Stop'
 # 找 pwsh 而不是写死绝对路径：写死的路径既是本机用户名（会跟着进公开仓库），
 # 在别的机器和 CI 上也必然不存在。Get-Command 认的就是本机 PATH。
@@ -66,51 +82,86 @@ if (-not $nodeCmd) {
     throw '找不到 node。autofixer 是 node 工具，PATH 上必须有它。'
 }
 
-foreach ($f in $files) {
-    $rel = Resolve-Path -Relative $f.FullName
-    $raw = & $nodeCmd.Source $entry svelte-autofixer $rel 2>&1 | Out-String
-    $code = $LASTEXITCODE
+# ⚠ 相对路径**必须在主流程算好**，不能丢给并行 runspace（2026-10-16）。
+# `ForEach-Object -Parallel` 的 runspace 是从**进程**当前目录起步的，
+# 而本脚本的 `Set-Location $PSScriptRoot\..` 只改了主 runspace 的会话位置。
+# 两者恰好一致时没事；一旦从仓库根这样调 `pwsh -File ui\scripts\autofixer.ps1`，
+# runspace 会拿仓库根当基准，算出 `..\..\..\src\lib\X.svelte` 这种路径，
+# 工具读不到文件 ⇒ 它回一句 issues=[] ⇒ **门禁报 OK，而那个文件从没被检查过**。
+# 正是本文件头注里那个最贵的教训（exit=255 被当成「零告警」）。
+$jobs = $files | ForEach-Object {
+    [pscustomobject]@{ Full = $_.FullName; Rel = (Resolve-Path -Relative $_.FullName) }
+}
 
-    # ── 取结构化输出 ──────────────────────────────────────────────
-    # ⚠ 2026-10-15 改：原来用正则抓 `issues:\s*\[(.*?)\]` 再 `split ','`，
-    # 而**一条 issue 的文本里含逗号**（比如 `"',' expected"`）会被切成三段
-    # ⇒ 报成 issues=3，实际只有 1 个。改为整段 JSON 解析。
-    $obj = $null
-    $start = $raw.IndexOf('{')
-    if ($start -ge 0) {
-        $end = $raw.LastIndexOf('}')
-        if ($end -gt $start) {
-            try { $obj = $raw.Substring($start, $end - $start + 1) | ConvertFrom-Json } catch { $obj = $null }
-        }
-    }
+# ⚠ 11 个文件**并行**跑（2026-10-16 改，实测 23.1s → 10.8s）。
+# 每个文件是一次独立的 `node` 进程，彼此之间没有任何共享状态：
+# 读各自的文件、吐各自的 JSON。所以并行的唯一代价是内存/CPU，
+# 而门禁跑这一步时 CPU 本来就闲着（它不与 cargo 步骤重叠）。
+#
+# 早先是串行 for 循环 + 累加 $bad/$dead 三个计数器。改成并行后**计数不再能就地累加**
+# （`ForEach-Object -Parallel` 跑在独立 runspace 里），所以每个并行块只**返回一条记录**，
+# 汇总与判定仍在主流程串行做——判定逻辑一个字没改，只是搬到了后面。
+# ⚠ 这一点很重要：判「零告警」还是「工具崩了」的那套规则是这块最容易出错的地方，
+#   不该趁并行化一起重写。
+$results = $jobs | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
+  $j = $_
+  $raw = & $using:nodeCmd $using:entry svelte-autofixer $j.Rel 2>&1 | Out-String
+  $code = $LASTEXITCODE
 
-    # ⚠⚠ **拿不到 JSON ⇒ 工具没跑完，不等于这个文件干净。**
-    # 原来的写法是「issue 数 = 0 ⇒ OK」，于是工具崩在出结果之前时，
-    # 空输出与「干净」完全同形，门禁**静默放行一个从没被检查过的文件**。
-    # 那比误报严重得多：误报会被看见，静默放行不会。
-    if ($null -eq $obj) {
-        $dead++
-        Write-Output ("  ??    {0}  TOOL-UNAVAILABLE（没拿到结构化输出，exit={1}）" -f $rel, $code)
-        continue
+  # ── 取结构化输出 ──────────────────────────────────────────────
+  # ⚠ 2026-10-15 改：原来用正则抓 `issues:\s*\[(.*?)\]` 再 `split ','`，
+  # 而**一条 issue 的文本里含逗号**（比如 `"',' expected"`）会被切成三段
+  # ⇒ 报成 issues=3，实际只有 1 个。改为整段 JSON 解析。
+  $obj = $null
+  $start = $raw.IndexOf('{')
+  if ($start -ge 0) {
+    $end = $raw.LastIndexOf('}')
+    if ($end -gt $start) {
+      try { $obj = $raw.Substring($start, $end - $start + 1) | ConvertFrom-Json } catch { $obj = $null }
     }
+  }
 
-    $nIssue = @($obj.issues).Count
-    $nSug = @($obj.suggestions).Count
+  # ⚠⚠ **拿不到 JSON ⇒ 工具没跑完，不等于这个文件干净。**
+  # 原来的写法是「issue 数 = 0 ⇒ OK」，于是工具崩在出结果之前时，
+  # 空输出与「干净」完全同形，门禁**静默放行一个从没被检查过的文件**。
+  # 那比误报严重得多：误报会被看见，静默放行不会。
+  if ($null -eq $obj) {
+    return [pscustomobject]@{ Rel = $j.Rel; Dead = $true; Code = $code; Issues = 0; Suggestions = @() }
+  }
 
-    if ($nIssue -eq 0 -and $nSug -eq 0) {
-        Write-Output ("  OK    {0}" -f $rel)
-    }
-    else {
-        $bad++
-        Write-Output ("  FAIL  {0}  issues={1} suggestions={2}" -f $rel, $nIssue, $nSug)
-        if ($nSug -gt 0) { Write-Output ("        {0}" -f (@($obj.suggestions) -join '; ')) }
-    }
+  [pscustomobject]@{
+    Rel = $j.Rel
+    Dead = $false
+    Code = $code
+    Issues = @($obj.issues).Count
+    Suggestions = @($obj.suggestions)
+  }
+}
 
-    # exit 非 0 但 JSON 齐 ⇒ 结论有效，多半是末尾拉文档超时。记一笔，不改判。
-    if ($code -ne 0) {
-        $netNoise++
-        Write-Output ("        （exit={0}，但结果已拿到——末尾拉文档超时，按工具噪声处理）" -f $code)
+# ⚠ 并行的返回顺序是完成顺序，不是文件顺序 ⇒ 汇总前先按路径排回去，
+# 否则同一份代码两次运行输出顺序不同，diff 会一直有噪声。
+foreach ($r in ($results | Sort-Object Rel)) {
+  if ($r.Dead) {
+    $dead++
+    Write-Output ("  ??    {0}  TOOL-UNAVAILABLE（没拿到结构化输出，exit={1}）" -f $r.Rel, $r.Code)
+    continue
+  }
+  if ($r.Issues -eq 0 -and @($r.Suggestions).Count -eq 0) {
+    Write-Output ("  OK    {0}" -f $r.Rel)
+  }
+  else {
+    $bad++
+    Write-Output ("  FAIL  {0}  issues={1} suggestions={2}" -f $r.Rel, $r.Issues, @($r.Suggestions).Count)
+    if (@($r.Suggestions).Count -gt 0) {
+      Write-Output ("        {0}" -f (@($r.Suggestions) -join '; '))
     }
+  }
+
+  # exit 非 0 但 JSON 齐 ⇒ 结论有效，多半是末尾拉文档超时。记一笔，不改判。
+  if ($r.Code -ne 0) {
+    $netNoise++
+    Write-Output ("        （exit={0}，但结果已拿到——末尾拉文档超时，按工具噪声处理）" -f $r.Code)
+  }
 }
 
 Write-Output ""
