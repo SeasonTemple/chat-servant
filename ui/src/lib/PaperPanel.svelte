@@ -982,7 +982,7 @@
             -->
             <button
               type="button"
-              class={['cs-act', actVariant(i)]}
+              class={['cs-act', actVariant(i), i === 0 && 'cs-act-is-lead']}
               disabled={sending}
               onclick={() => void dispatchCandidate(c.id)}
               aria-label="{i === 0 ? '按这个候选' : `备选 ${i + 1}`}：{c.text}"
@@ -1007,36 +1007,8 @@
                   而被裁掉的恰好是**告诉用户当前在哪一档**的那一行。
                 ⚠ 所以记号尺寸与本条 `{#if}` 是**一对**，别单独动其中一个。
               -->
-              {#if i === 0}
-                <!--
-                  ⚠ `TICK_VIEW` 是 56×34，那是**档位选择器**那一行的尺寸——
-                  它独占一整行 72px 高。而这里纸条总高才 ~30px，
-                  原尺寸放进去会盖住整句话。
-                  ⇒ 缩到 **20×12**：够认出手绘的收放，又退回到批注的分量。
-                  viewBox 不变，轮廓数据一个字节没动。
-
-                  ⚠⚠ **20 而不是 26**：26px 的勾会让首选那行变高，
-                  而面板在 `Auto` 档只剩 5px 余量（见上面那段量测）。
-                  这类「宽度/高度差一点点就翻行或溢出」的耦合最阴险：
-                  **改记号尺寸必须重新量 `.cs-pick` 的 rect，两个档都要量。**
-
-                  ⚠ 红铅笔滤镜是**笔的一部分**，不是效果。少了 `url(#pencil)`
-                  它就是矢量而不是铅笔（§3.2：五层嵌套 + 羽化是一套，
-                  单层平涂边缘一刀切）。
-                -->
-                <span class="cs-act-mark">
-                  <svg
-                    class="cs-pencil-mark"
-                    viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}"
-                    width="20"
-                    height="12"
-                    aria-hidden="true"
-                    filter="url(#pencil)"
-                  >
-                    {#each TICK_NESTED as l (l.d)}<path d={l.d} fill-opacity={l.o} />{/each}
-                  </svg>
-                </span>
-              {/if}
+              <!-- ⚠ 勾已移到正文之后、百分比之下（2026-10-17，用户指出）。
+                见下面 `.cs-act-meta` 那一段：勾与百分比归右侧一列。 -->
               <!--
                 ⚠⚠ **「按这个 / 备选 N」标签整条删掉了**（2026-10-16，用户直接指出
                   「开头有什么必要加『备选X』的字」）。
@@ -1079,10 +1051,69 @@
                 要 3 行。若后面必须再压，**压这里的行高，不要压撕边**。
               -->
               <span class="cs-act-text">{c.text}</span>
-              <!-- ⚠ 只有一条候选时不显示概率：预设起草器恒给 100%，
-                那是「没有第二个选择」的算术结果，不是置信度。 -->
-              {#if allCandidates.length > 1}
-                <span class="cs-act-prob">{Math.round(c.probability * 100)}%</span>
+              <!--
+                ⚠ **勾与百分比归右侧一列：百分比在上、勾在下**（2026-10-17 改，用户原话
+                「候选的勾选你不该放到推荐百分比下面？」）。
+
+                改之前：勾**绝对定位在左上角** `left:-6px`，故意往撕边里探，
+                而百分比在正文行末 `margin-left: auto` 推到右边。
+                ⇒ 两个记号各占一头，左边那枚还压在撕口的渐变上，
+                首行因此挤了三个东西（勾 / 正文首字 / 百分比）。
+
+                改之后：右侧一列 `.cs-act-meta`，百分比在上、勾在下。
+                首行左边只剩正文，右边是「百分比 + 勾」这一组。
+
+                ⚠⚠ **勾仍然是绝对定位的**（`position: absolute` 挂在 `.cs-act-meta` 上），
+                **不进文档流、不占高度**。这是硬要求，不是偷懒：
+                票 44 量过 `.cs-pick` 的 rect，`Auto` 档档位格只剩 **5px 余量**，
+                而 `.cs-sheet` 是 `overflow: hidden` ⇒ 候选区一高就把档位行静默裁掉，
+                而被裁掉的恰好是「告诉用户当前在哪一档」的那一行。
+                ⇒ 让勾进流 = 给每条带勾的候选加 12px + gap，
+                **Auto 档三条全带勾时必然溢出**。
+                绝对定位 + `top: 100%` 让它挂在百分比下面，而**不推任何东西**。
+
+                ⚠ 外层的 `{#if}` 是 `i === 0 || allCandidates.length > 1`：
+                只有一条候选时概率不显示（预设起草器恒给 100%，那是算术结果不是置信度），
+                但**勾仍要显示**，所以这一列不能只跟着概率走。
+              -->
+              {#if i === 0 || allCandidates.length > 1}
+                <span class="cs-act-meta">
+                  <!-- ⚠ 只有一条候选时不显示概率：预设起草器恒给 100%，
+                    那是「没有第二个选择」的算术结果，不是置信度。 -->
+                  {#if allCandidates.length > 1}
+                    <span class="cs-act-prob">{Math.round(c.probability * 100)}%</span>
+                  {/if}
+                  {#if i === 0}
+                    <!--
+                      ⚠ `TICK_VIEW` 是 56×34，那是**档位选择器**那一行的尺寸——
+                      它独占一整行 72px 高。而这里纸条总高才 ~30px，
+                      原尺寸放进去会盖住整句话。
+                      ⇒ 缩到 **20×12**：够认出手绘的收放，又退回到批注的分量。
+                      viewBox 不变，轮廓数据一个字节没动。
+
+                      ⚠⚠ **20 而不是 26**：26px 的勾会让首选那行变高，
+                      而面板在 `Auto` 档只剩 5px 余量（见上面那段量测）。
+                      这类「宽度/高度差一点点就翻行或溢出」的耦合最阴险：
+                      **改记号尺寸必须重新量 `.cs-pick` 的 rect，两个档都要量。**
+
+                      ⚠ 红铅笔滤镜是**笔的一部分**，不是效果。少了 `url(#pencil)`
+                      它就是矢量而不是铅笔（§3.2：五层嵌套 + 羽化是一套，
+                      单层平涂边缘一刀切）。
+                    -->
+                    <span class="cs-act-mark">
+                      <svg
+                        class="cs-pencil-mark"
+                        viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}"
+                        width="20"
+                        height="12"
+                        aria-hidden="true"
+                        filter="url(#pencil)"
+                      >
+                        {#each TICK_NESTED as l (l.d)}<path d={l.d} fill-opacity={l.o} />{/each}
+                      </svg>
+                    </span>
+                  {/if}
+                </span>
               {/if}
             </button>
           {/each}
@@ -1857,8 +1888,10 @@
    *
    * ⚠ 用 `--cs-pencil-red`（红铅笔，蜡质发闷）而不是 `--cs-live`（警报红）：
    *   这一族变体就叫「红批」，而红批在实物上就是一支红铅笔。
-   * ⚠ `Auto` 档的正文走**墨色**，理由与 `.cs-act-lead .cs-act-text` 相同：
-   *   它同样是被勾中的那一条。 */
+   * ⚠ `Auto` 档的正文**分级**与别的档相同：首条墨色、其余铅笔灰。
+   *   实现靠 `.cs-act-is-lead`（不是靠 `cs-act-red` 本身）——
+   *   `Auto` 档**所有**候选都是 `cs-act-red`，那条 class 分不出首条。
+   *   勾的颜色仍是红的（`.cs-act-red .cs-act-mark`），与「墨色 / 红铅笔」两档对应。 */
   .cs-act-red {
     background: transparent;
     color: var(--cs-ink);
@@ -1888,18 +1921,49 @@
    *   探出去的部分落在 border 区域，而 border 里画的是撕口——
    *   墨笔压在撕口的渐变上，正是「这一句被批了」的手绘读法。
    *   若探得更多会盖住撕口的参差轮廓，那才毁，-6 是量过的安全值。
+   *
+   * ⚠⚠ **2026-10-17 改：这段「往左探进撕边」的读法已经不成立。**
+   *   用户看真机截图后指出「候选的勾选你不该放到推荐百分比下面？」——
+   *   勾现在挂在 `.cs-act-meta` 里、**百分比之下**（见 `.cs-act-meta`）。
+   *   所以 `left: -6px` / `top: 3px` 换成 `left: 50%` + `translateX(-50%)`
+   *   + `top: 100%`：**与百分比同一个中轴，排在它下面。**
+   *
+   *   保留的部分：仍然是**绝对定位**。不进流、不占高度——理由见
+   *   `.cs-act-meta` 那段（`Auto` 档档位格只剩 5px 余量）。
+   *   放弃的部分：不再往撕口里探、不再压在句子上。
    */
   .cs-act-mark {
     position: absolute;
-    /* ⚠ 绝对定位的坐标相对 `.cs-act` 的 **padding box**，
-     *   而 padding box 的顶就是 border 的内沿 —— 也就是**实心纸**的顶。 */
-    left: -6px;
-    top: 3px;
+    /* ⚠ 相对 `.cs-act-meta`（它是 `position: relative`），不再是 `.cs-act`。 */
+    left: 50%;
+    top: 100%;
+    transform: translateX(-50%);
+    /* 与百分比留一条缝，不贴着数字的下沿 */
+    margin-top: 2px;
     flex: none;
     align-self: flex-start;
-    /* 勾落在**首行的 x 高度**上，不是浮在条顶——
-     * 批注压在句子上才像「这一句被批了」。 */
     pointer-events: none;
+  }
+
+  /* 右侧一列：百分比在上、勾在下（2026-10-17，用户指定）。
+   *
+   * ⚠ **`position: relative` 是给 `.cs-act-mark` 当定位基准用的**——
+   * 勾 `top: 100%` 就是「这一列的底边」，于是它排在百分比之下，
+   * 而**这一列的高度仍然只有百分比那么高**（勾是绝对定位、不撑高）。
+   *
+   * ⚠⚠ **所以 `.cs-act-meta` 的高度与改动前 `.cs-act-prob` 单独存在时完全相同。**
+   * 这是硬要求：`auto` 档档位格只剩 5px 余量，`.cs-sheet` 又是
+   * `overflow: hidden`，候选区一旦长高就把档位行静默裁掉——
+   * 而被裁掉的恰好是「告诉用户当前在哪一档」的那一行。
+   * ⇒ 改这里之后**必须重量具**：`.cs-pick` 的 rect，两个档都量。
+   */
+  .cs-act-meta {
+    position: relative;
+    margin-left: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex: none;
   }
 
   .cs-pencil-mark {
@@ -1940,18 +2004,32 @@
   /* 首选正文转墨色。⚠ 只改 `color`，不改 `border-image`：
    *   勾用 `fill: currentColor`（见 `.cs-pencil-mark`），
    *   所以「墨色 / 红铅笔」两档的记号差异由这一处颜色连带给出，
-   *   不必再给记号单独设一次色 —— 一处说完，`.cs-act-red` 只改一个 token。 */
-  .cs-act-lead .cs-act-text {
+   *   不必再给记号单独设一次色 —— 一处说完，`.cs-act-red` 只改一个 token。
+   *
+   * ⚠⚠ **2026-10-17 修：选择器从 `.cs-act-lead` 换成显式的 `.cs-act-is-lead`。**
+   *   原来这条是 `.cs-act-lead .cs-act-text`，而 `actVariant()` 在 `Auto` 档
+   *   给**所有**候选返回 `cs-act-red` —— 首条**根本拿不到** `cs-act-lead`，
+   *   于是这条后代选择器**一条都匹配不上**。
+   *   往下掉到 `.cs-act-text { color: var(--cs-pencil) }`（自身声明压过继承），
+   *   ⇒ **`Auto` 档下首选正文是铅笔灰，与备选同色**，
+   *   「墨 = 你写下的 / 灰 = 机器认出来的」这条分工在 `Auto` 档**整组失效**。
+   *   4× 渲染实测肉眼可辨（票 44 复核）。
+   *
+   *   为什么不能改成 `.cs-act-red .cs-act-text`：那会把备选也染成墨色，
+   *   连「首选 vs 备选」的区分都没了。`Auto` 档真正要区分的是
+   *   **首条 vs 其余**，而那个信息只有 `i === 0` 有 —— 所以它必须显式进 class。 */
+  .cs-act-is-lead .cs-act-text {
     color: var(--cs-ink);
   }
 
   /* 概率：等宽数字，省得两位数跳来跳去。 */
   .cs-act-prob {
+    /* ⚠ `margin-left: auto` 已移走（2026-10-17）——右推整列的职责归 `.cs-act-meta`，
+     * 留在这儿会与外层的 `margin-left: auto` 叠成两段多余的自动边距。 */
     font-size: 12px;
     color: var(--cs-ink);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
-    margin-left: auto;
   }
 
   /* 回执。成功走墨色、失败走红——红留给「没发成」这个必须看见的结果。 */
