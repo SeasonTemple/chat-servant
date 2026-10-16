@@ -84,8 +84,32 @@ pub fn chroma(c: Rgb) -> i32 {
 
 const STEP: u32 = 4;
 
+// `exact_hist` 每被调一次记一笔账——只给测试用。
+//
+// 为什么是**线程局部**而不是全局静态：`cargo test` 默认多线程跑同一进程里的
+// 一堆测试，全局计数器会把**别的测试**的调用也算进来，守卫测试就会时红时绿。
+// 线程局部把账算在调用者自己这条线程上，结果与执行顺序无关。
+//
+// 这里用 `//` 而不是 `///`：宏调用上挂不了文档注释（clippy `unused doc comment`）。
+#[cfg(test)]
+thread_local! {
+    static EXACT_HIST_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 读走并清零 [`exact_hist`] 的调用次数。**只给测试用。**
+#[cfg(test)]
+pub(crate) fn take_exact_hist_calls() -> usize {
+    EXACT_HIST_CALLS.with(|n| n.replace(0))
+}
+
 /// 采样网格全量化，直接用精确色值，避免把相近色并成一个。
-fn exact_hist(frame: &Frame, r: Rect) -> HashMap<Rgb, usize> {
+///
+/// **建图要花钱**：它把整个矩形按 [`STEP`] 扫一遍，谁要拿同一块区域的多个
+/// 量（众数占比、众数颜色、色种数）就该只调它一次，剩下的量走 [`ratio_of`]
+/// 这类吃现成直方图的函数。见 [`crate::mask::judge_surface`]。
+pub(crate) fn exact_hist(frame: &Frame, r: Rect) -> HashMap<Rgb, usize> {
+    #[cfg(test)]
+    EXACT_HIST_CALLS.with(|n| n.set(n.get() + 1));
     let mut hist = HashMap::new();
     let x0 = r.x0.max(0) as u32;
     let y0 = r.y0.max(0) as u32;
@@ -113,16 +137,23 @@ pub fn dominant_color(frame: &Frame, r: Rect) -> Option<Rgb> {
         .map(|(c, _)| c)
 }
 
-/// 区域里众数颜色的占比。用来判断「这片区域是不是平的」。
+/// 从**现成的**直方图算众数占比——不碰 [`Frame`]，不读一个像素。
 ///
-/// 实测依据：气泡内部底色均匀，占比高；照片/头像区域颜色杂，占比低。
-pub fn dominant_ratio(frame: &Frame, r: Rect) -> f32 {
-    let hist = exact_hist(frame, r);
+/// [`exact_hist`] 要把整个矩形扫一遍，所以它只该在「这块区域第一次被量化」
+/// 时调一次；同一块区域的第二个、第三个量走这里。
+pub fn ratio_of(hist: &HashMap<Rgb, usize>) -> f32 {
     let total: usize = hist.values().sum();
     if total == 0 {
         return 0.0;
     }
     hist.values().copied().max().unwrap_or(0) as f32 / total as f32
+}
+
+/// 区域里众数颜色的占比。用来判断「这片区域是不是平的」。
+///
+/// 实测依据：气泡内部底色均匀，占比高；照片/头像区域颜色杂，占比低。
+pub fn dominant_ratio(frame: &Frame, r: Rect) -> f32 {
+    ratio_of(&exact_hist(frame, r))
 }
 
 /// 区域内所有像素的平均色。
