@@ -203,8 +203,46 @@ pub fn rec_input(frame: &Frame, box_: Rect, out_w: usize) -> Vec<f32> {
 /// 1. 二值化（`> [`DET_THRESH`]`）
 /// 2. 连通域标记（8 邻域）
 /// 3. 按面积与宽高筛掉噪点
-/// 4. 按 `DET_STRIDE` 反缩放回原图，并裁进画面
-pub fn det_boxes(prob: &[f32], pw: usize, ph: usize, src_w: usize, src_h: usize) -> Vec<Rect> {
+/// 4. 反缩放回原图，并裁进画面
+///
+/// ## 换算比例必须用 **det 输入**尺寸，不能用帧尺寸（2026-10-18 修）
+///
+/// 早先这里是 `src_w / pw` 与 `src_h / ph`。**实测证明那是错的**：
+///
+/// 帧 425x198 → [`det_size`] 补齐到 448x224 → 概率图实测就是 **448x224**
+/// （与 det 输入同尺寸，`xtask ocr --stats` 在 850x396 的帧上同样给出
+/// 概率图 864x416 = det 输入 864x416）。而 [`det_input`] 是**原样拷贝**：
+/// 补边只发生在右/下，左上角与帧逐像素对齐。
+///
+/// ⇒ 概率图像素与原图像素是 **1:1**，正确比例恒为 `det_w / pw`（此版本为 1.0），
+/// 用 `src_w / pw` 等于把补边的那部分也算进分母，于是**框朝原点缩**：
+///
+/// | 墨迹（帧 425x198） | 修复前框 y | 墨迹下沿 | 少盖 |
+/// |---|---|---|---|
+/// | 19..34  | 19..28 | 34 | −6 |
+/// | 42..58  | 42..50 | 58 | −8 |
+/// | 68..84  | 64..72 | 84 | −12 |
+/// | 123..138 | 113..122 | 138 | **−16** |
+/// | 149..158 | 135..144 | 158 | −14 |
+///
+/// 误差**随离原点的距离增大**，所以越靠下的行被削得越狠：末行 16px 的墨迹
+/// 整个下半个字都在框外，rec 拿到的是**被削掉下半截**的字，输出只能是乱码。
+///
+/// 去掉补齐后误差消失：把帧裁成 416x192（32 的倍数，det 输入不再补边），
+/// 同样的墨迹给出 21..31 / 48..56 / 73..81 / 127..138 / 153..163，
+/// 而把修复前的框乘以 `ph / src_h = 224/198` 得到 21.5..31.7 / 47.5..56.6 /
+/// 72.4..81.5 / 127.8..138.0 / 152.7..162.9——**逐行吻合到 1px 以内**。
+/// ⇒ 两条路（按 det 输入换算 / 让 det 不补边）数值上等价，选前者。
+#[allow(clippy::too_many_arguments)]
+pub fn det_boxes(
+    prob: &[f32],
+    pw: usize,
+    ph: usize,
+    det_w: usize,
+    det_h: usize,
+    src_w: usize,
+    src_h: usize,
+) -> Vec<Rect> {
     let n = pw * ph;
     // `prob` 长度不保证正好是 `n`（det 输出形状对不上时会有）。逐个
     // `get().unwrap_or(0.0)`：越界的当 0，也就是「不亮」，落在阈值下，
@@ -271,8 +309,12 @@ pub fn det_boxes(prob: &[f32], pw: usize, ph: usize, src_w: usize, src_h: usize)
             let dy = h as f64 * DET_UNCLIP_RATIO as f64 / len;
             // 反缩放回原图坐标。用四舍五入而不是截断：截断会让最右/最下
             // 的那一列像素永远落在框外。
-            let sx = src_w as f64 / pw as f64;
-            let sy = src_h as f64 / ph as f64;
+            //
+            // ⚠ 比例取 **det 输入**尺寸（`det_w/det_h`），不是帧尺寸。理由与
+            // 实测数字见本函数的文档：补边只加在右/下，概率图与原图左上角
+            // 对齐，用帧尺寸会把框朝原点缩，末行能少盖 16px 墨迹。
+            let sx = det_w as f64 / pw as f64;
+            let sy = det_h as f64 / ph as f64;
             let x0 = (((*mnx as f64) - dx) * sx).round() as i32;
             let y0 = (((*mny as f64) - dy) * sy).round() as i32;
             let x1 = (((*mxx as f64 + 1.0) + dx) * sx).round() as i32;
@@ -424,7 +466,7 @@ pub fn det_stats(frame: &Frame) -> Result<DetStats, PpError> {
         .take(pw * ph)
         .filter(|v| **v > DET_THRESH)
         .count();
-    let raw = det_boxes(&vals, pw, ph, fw, fh);
+    let raw = det_boxes(&vals, pw, ph, dw, dh, fw, fh);
     let merged = merge_into_lines(&raw);
     // 限流**在合并之后**——见 [`DET_MAX_BOXES`]。这里如实报出被丢掉多少行，
     // 因为「屏幕下半截没读到」这个故障在最终文本里完全看不出来。
@@ -883,7 +925,7 @@ pub fn recognize_with(
     let (pw, ph) = (shape[3], shape[2]);
     // 顺序：先合并成行，再按 [`DET_MAX_BOXES`] 限流。反过来就是拿行数预算
     // 去装单字框，屏幕下半截会被裁掉。见该常量的说明。
-    let mut boxes = merge_into_lines(&det_boxes(&vals, pw, ph, fw, fh));
+    let mut boxes = merge_into_lines(&det_boxes(&vals, pw, ph, dw, dh, fw, fh));
     if boxes.len() > DET_MAX_BOXES {
         tracing::warn!(
             lines = boxes.len(),
@@ -1668,7 +1710,7 @@ mod tests {
                 prob[y * w + x] = 0.9;
             }
         }
-        let boxes = det_boxes(&prob, w, h, w, h);
+        let boxes = det_boxes(&prob, w, h, w, h, w, h);
         assert_eq!(boxes.len(), 1, "应该正好一个框：{boxes:?}");
         assert_eq!(
             (boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1),
@@ -1701,7 +1743,7 @@ mod tests {
                 }
             }
         }
-        let boxes = det_boxes(&prob, pw, ph, pw, ph);
+        let boxes = det_boxes(&prob, pw, ph, pw, ph, pw, ph);
         assert_eq!(
             boxes.len(),
             100,
@@ -1723,7 +1765,10 @@ mod tests {
         prob[20 * w + 20] = 1.0;
         prob[21 * w + 20] = 1.0;
         prob[21 * w + 21] = 1.0; // 面积 4
-        assert!(det_boxes(&prob, w, h, w, h).is_empty(), "噪点没被滤掉");
+        assert!(
+            det_boxes(&prob, w, h, w, h, w, h).is_empty(),
+            "噪点没被滤掉"
+        );
     }
 
     /// **概率图比原图小的时候，框要换算回原图坐标。**
@@ -1745,7 +1790,7 @@ mod tests {
                 prob[y * pw + x] = 0.9;
             }
         }
-        let boxes = det_boxes(&prob, pw, ph, sw, sh);
+        let boxes = det_boxes(&prob, pw, ph, sw, sh, sw, sh);
         assert_eq!(boxes.len(), 1);
         let b = boxes[0];
         assert_eq!((b.x0, b.y0), (26, 26), "没放大回原图：{b:?}");
@@ -1910,6 +1955,109 @@ mod tests {
         let out = rec_input(&f, big, 16);
         assert_eq!(out.len(), 3 * REC_HEIGHT * 16);
         assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    /// **框必须盖住产生它的那片墨迹：补边不许把框朝原点缩。**
+    ///
+    /// 2026-10-18 实测（帧 425x198，det 输入补齐到 448x224）：框的**下沿**
+    /// 比墨迹下沿高出 6 / 8 / 12 / **16** / 14 px，误差随离原点的距离增大。
+    /// 末行 16px 高的墨迹整个下半截落在框外，rec 拿到的是被削掉下半截的
+    /// 字，输出只能是乱码。根因是换算比例错用了**帧**尺寸去对
+    /// **补齐后**的概率图，见 [`det_boxes`] 的文档。
+    ///
+    /// ## 判据为什么写「覆盖」而不是某个偏移值
+    ///
+    /// 「少盖 16px」是这台机器、这张图的**实测结果**，不是不变量：
+    /// 换个字号或换个帧尺寸数字就变了。所以这里断言的是不变量——
+    /// **框必须盖住那片亮区的全部行与列**，不管补了多少边。
+    /// 任何朝原点缩的换算都会让 `y1` 落到亮区下沿之上，当场红。
+    ///
+    /// ⚠ 这条**不要权重**（造的是概率图，不是跑模型），所以它在 CI 上
+    /// 真的会跑——本仓吃过两次「没权重就跳过，等于没守」的亏。
+    #[test]
+    fn det_boxes_cover_the_full_extent_of_the_ink_they_came_from() {
+        // 帧 400x200 → [`det_size`] 补齐到 416x224（右 +16、下 +24）。
+        let (src_w, src_h) = (400usize, 200usize);
+        let (det_w, det_h) = det_size(src_w as u32, src_h as u32);
+        assert_eq!(
+            (det_w, det_h),
+            (416, 224),
+            "前提变了：本条量的是「补边把框朝原点缩」，det_size 不再补边就量不到它"
+        );
+        // 概率图与 det 输入同尺寸——实测 det 输出就是这个形状（见 det_boxes）。
+        let (pw, ph) = (det_w, det_h);
+        // [`det_input`] 是原样拷贝、补边只在右/下 ⇒ 概率图第 y 行 = 原图第 y 行。
+        let (ink_x0, ink_y0, ink_x1, ink_y1) = (40usize, 150usize, 300usize, 162usize);
+        let mut prob = vec![0.0f32; pw * ph];
+        for y in ink_y0..ink_y1 {
+            for x in ink_x0..ink_x1 {
+                prob[y * pw + x] = 0.9;
+            }
+        }
+        let got = det_boxes(&prob, pw, ph, det_w, det_h, src_w, src_h);
+        assert_eq!(got.len(), 1, "应该正好一个框：{got:?}");
+        let b = got[0];
+        assert!(
+            b.y1 >= ink_y1 as i32,
+            "框的下沿 y1={} 在墨迹下沿 {ink_y1} **之上** —— 少盖 {} 行，\
+             rec 拿到的是被削掉下半截的字（实测末行能少盖 16px，输出直接成乱码）",
+            b.y1,
+            ink_y1 as i32 - b.y1
+        );
+        assert!(
+            b.y0 <= ink_y0 as i32,
+            "框的上沿 y0={} 在墨迹上沿 {ink_y0} 之下，顶部笔画被削掉",
+            b.y0
+        );
+        // 横向是同一个换算，同一个错。钉上它，免得只修一半。
+        assert!(
+            b.x1 >= ink_x1 as i32 && b.x0 <= ink_x0 as i32,
+            "横向没盖住墨迹 x{}..{}：{:?}",
+            ink_x0,
+            ink_x1,
+            b
+        );
+    }
+
+    /// **换算比例来自 `det_w / pw`，不是写死的 1:0。**
+    ///
+    /// 上一条钉的是「覆盖」，而这版权重恰好 `pw == det_w`，于是那条**分不清**
+    /// 「按 det 输入换算」与「假定概率图与原图 1:1」——两者对这版权重都成立。
+    /// 而 PP-OCR 的 det 内部有下采样，别的导出（例如概率图为 1/4）
+    /// 只有前者是对的。
+    ///
+    /// ONNX 声明 `coordinate_transformation_mode="asymmetric"` +
+    /// `nearest_mode="floor"`，tract 0.23.8 正是这么实现的
+    /// （`tract-core/src/ops/nn/resize.rs`：`Asymmetric => x_out / scale`，
+    /// 配 `Nearest::Floor`），所以 4 倍下采样是**精确对齐**的，
+    /// 夹具才能用整倍数拼出来——这是这条能成立的前提。
+    #[test]
+    fn the_det_to_source_scale_comes_from_the_det_input_size() {
+        let (src_w, src_h) = (40usize, 40usize);
+        let (det_w, det_h) = det_size(src_w as u32, src_h as u32);
+        assert_eq!(
+            (det_w, det_h),
+            (64, 64),
+            "前提变了：本条量的是 4 倍下采样的换算"
+        );
+        // 概率图只有 det 输入的 1/4（宽度、高度都整除，无插值歧义）。
+        let (pw, ph) = (det_w / 4, det_h / 4);
+        let mut prob = vec![0.0f32; pw * ph];
+        // 概率图第 4..=6 行 × 第 2..=8 列 ⇒ det 空间第 16..=27 行 × 第 8..=35 列。
+        for y in 4..=6usize {
+            for x in 2..=8usize {
+                prob[y * pw + x] = 0.9;
+            }
+        }
+        let got = det_boxes(&prob, pw, ph, det_w, det_h, src_w, src_h);
+        assert_eq!(got.len(), 1, "应该正好一个框：{got:?}");
+        let b = got[0];
+        assert!(
+            b.y0 <= 16 && b.y1 >= 28 && b.x0 <= 8 && b.x1 >= 36,
+            "4 倍下采样时框没落在 det 空间对应的原图区域（det 空间应为 \
+             y16..27 / x8..35 ⇒ 原图 y16..28 / x8..36）：{b:?}。\
+             比例写死成 1:1 就会停在下采样后的坐标上"
+        );
     }
 
     /// **权重不在时 `recognize` 返回 `None`，不是错误。**
