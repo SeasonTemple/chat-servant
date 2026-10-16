@@ -22,9 +22,10 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use chatservant_core::frame::{Frame, Rect};
+use tract_onnx::prelude::{RunnableModel, TypedFact, TypedOp};
 
 use crate::ocr::{OcrError, OcrLine, OcrText};
 use crate::ocr_pp::{self, BLANK, Plan, PpError};
@@ -524,6 +525,107 @@ fn argmax(row: &[f32]) -> (usize, f32) {
 // rec 宽度分桶
 // ────────────────────────────────────────────────────────────────────────
 
+/// 拿锁，**中毒了也照样把守卫捞回来**。
+///
+/// ## 为什么这几处恢复都是对的（逐处算过，别照抄）
+///
+/// - `BucketCache::buckets`：临界区里只有 `HashMap` 的
+///   `get`/`entry`/`retain`/`remove`。它们要么整体生效、要么在分配时直接
+///   abort，**不存在「改了一半」的中间态**，所以从毒里捞出来的 map 一定是完整的。
+/// - [`det_plan`] 的 slot：临界区里**有第三方代码**（tract 的 `load_det`），
+///   它 panic 是有可能的。但把新图写进去的 `*slot = Some(..)` 排在它**后面**，
+///   所以炸的时候 slot 里还是上一份**形状已校验过**的旧值，恢复同样安全。
+///
+/// 写成 `unwrap()` 的话，一次 panic 之后这个**共享**缓存的每一次访问都会 panic
+/// ——OCR 流水线整条挂死，而现场只看得到「OCR 不出字了」。
+///
+/// ## 哪天这里不再成立
+///
+/// 若有人往上面两段临界区里加了会 panic 的用户代码，或改成「先改一半再编译」，
+/// 恢复就变成危险的了。那时候该改成重建缓存，而不是继续 `into_inner()`。
+fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 一个宽度桶里存的东西。泛型 `P` 是「图」本身。
+///
+/// 对外仍然是 `Arc<P>`，所以并发命中同一个宽度时拿到的是**同一份**。
+enum Slot<P> {
+    /// 编好了。
+    Ready(Arc<P>),
+    /// 编失败。**故意不存错误本身**：`PpError` 不可克隆，而错误文本要显示在
+    /// 面板上，给后来者一个占位等于对它撒谎。只记「这个宽度编不出来」，
+    /// 让 [`get_or_compile`] 把这个键摘掉、下次重来。
+    Failed,
+}
+
+/// 取宽度 `w` 的图，没有就编一个。**编译器由调用方给。**
+///
+/// ## 为什么泛型，而不是在 [`BucketCache`] 里写死
+///
+/// 真 `load_rec` 要 15MB 权重才跑得动，而**没有权重的机器上也必须有并发守卫测试**
+/// （CI 与别人的机器就没有权重，那些测试会直接跳过，等于没守）。
+/// 把「怎么保证只编一次」抽成与图无关的函数，测试就能注入一个计数的桩，
+/// 守的仍然是**这一段同步逻辑**本身。`BucketCache::get` 是它的一个特化。
+///
+/// ## 并发下同一个宽度只编一次（2026-10-17，票 47）
+///
+/// 早先是「① 查锁 → 放锁 → ② 锁外编译 → ③ 再拿锁 → ④ 无条件 insert」的双重
+/// 检查：两个线程会**各编一遍**，而后编的那份直接覆盖先编的，白等一次。
+/// rec 编译是几十到几百毫秒、det 更慢，所以这不是「多几十毫秒」。
+///
+/// 现在锁只护住「取/建 cell」那一下，**编译发生在锁外**——所以不同宽度互不阻塞；
+/// 而同一个宽度后来的人 `get_or_init` 会**等**第一个人编完（`OnceLock` 的语义），
+/// 不会各编一遍。
+fn get_or_compile<P, E, F>(
+    buckets: &Mutex<HashMap<usize, Arc<OnceLock<Slot<P>>>>>,
+    max_buckets: usize,
+    w: usize,
+    compile: F,
+) -> Result<Arc<P>, E>
+where
+    F: Fn() -> Result<Arc<P>, E>,
+{
+    let cell = {
+        let mut m = lock_recover(buckets);
+        // 清一半而不是清空：清空会让下一个框又把整轮编一遍。
+        // 判据与早先一致——`len` 到顶、且这个键还不在表里，才清。
+        // 顺序是「先清后插」：于是本键一定在表里，不会被自己刚做的清理带走。
+        if !m.contains_key(&w) && m.len() >= max_buckets {
+            let keep: Vec<usize> = m.keys().copied().take(max_buckets / 2).collect();
+            m.retain(|k, _| keep.contains(k));
+        }
+        Arc::clone(m.entry(w).or_default())
+    };
+    match cell.get_or_init(|| match compile() {
+        Ok(p) => Slot::Ready(p),
+        Err(_) => Slot::Failed,
+    }) {
+        Slot::Ready(p) => Ok(Arc::clone(p)),
+        Slot::Failed => {
+            // **失败不留缓存**：把这个键摘掉，权重后来修好了还能重编。
+            // 只摘**同一个** cell——中途可能已经有别人为 `w` 建了新 cell，
+            // 摘掉新的那个会把人家正在等的编译结果连带作废。
+            let mut m = lock_recover(buckets);
+            if m.get(&w).is_some_and(|cur| Arc::ptr_eq(cur, &cell)) {
+                m.remove(&w);
+            }
+            drop(m);
+            // 再编一趟只为拿一个**真的**错误文本返回给调用方：
+            // `OnceLock` 填上就取不出来，后来者拿不到第一个人的 `Err`，
+            // 而这个文本是现场唯一能指出「哪个文件缺了」的东西。
+            // 顺带覆盖「权重刚被修好」——这一趟成功就直接返回图。
+            compile()
+        }
+    }
+}
+
+/// [`Plan`] 拆开的那一层。写出来是为了别把那一长串泛型重复三遍。
+type PlanBody = RunnableModel<TypedFact, Box<dyn TypedOp>>;
+
+/// 宽度 → 该宽度的 cell。**存 cell 而不是图**是并发修复的关键，见 [`get_or_compile`]。
+type Buckets = HashMap<usize, Arc<OnceLock<Slot<PlanBody>>>>;
+
 /// 按宽度缓存编译好的 rec 图。
 ///
 /// ## 为什么必须缓存
@@ -539,7 +641,7 @@ fn argmax(row: &[f32]) -> (usize, f32) {
 /// 真正该防的是无界增长，见 [`BucketCache::max_buckets`]。
 pub struct BucketCache {
     dir: PathBuf,
-    buckets: Mutex<HashMap<usize, Plan>>,
+    buckets: Mutex<Buckets>,
     /// 超过这个数就把最久没用的桶丢掉一半。
     max_buckets: usize,
 }
@@ -574,23 +676,21 @@ impl BucketCache {
     }
 
     /// 拿宽度 `w` 的可执行计划，没有就编一个。
+    ///
+    /// 「只编一次」的保证与桶上限都在 [`get_or_compile`] 里；这里只提供编译器。
     pub fn get(&self, w: usize) -> Result<Plan, PpError> {
-        if let Some(p) = self.buckets.lock().unwrap().get(&w) {
-            return Ok(Arc::clone(p));
-        }
-        let plan = ocr_pp::load_rec(&self.plan_path(), w)?;
-        let mut m = self.buckets.lock().unwrap();
-        if m.len() >= self.max_buckets && !m.contains_key(&w) {
-            // 清一半而不是清空：清空会让下一个框又把整轮编一遍。
-            let keep: Vec<usize> = m.keys().copied().take(self.max_buckets / 2).collect();
-            m.retain(|k, _| keep.contains(k));
-        }
-        m.insert(w, Arc::clone(&plan));
-        Ok(plan)
+        let path = self.plan_path();
+        get_or_compile(&self.buckets, self.max_buckets, w, || {
+            ocr_pp::load_rec(&path, w)
+        })
     }
 
+    /// 桶的个数。
+    ///
+    /// ⚠ 现在数的是 **cell**，含「正在编、还没编好」的那一个；早先数的是已编好的图。
+    /// 所以同一个 `len()` 在编译窗口内比早先大 1。`is_empty` 同理。
     pub fn len(&self) -> usize {
-        self.buckets.lock().unwrap().len()
+        lock_recover(&self.buckets).len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -614,7 +714,7 @@ fn det_plan_slot() -> &'static Mutex<Option<(usize, usize, Plan)>> {
 /// 缓存里那份旧的会被直接返回，接着 `run` 拿到一个形状不匹配的输入而报错，
 /// 于是又走「回落 WinRT」那条静默路径。
 pub fn det_plan(h: usize, w: usize) -> Result<Plan, PpError> {
-    let mut slot = det_plan_slot().lock().unwrap();
+    let mut slot = lock_recover(det_plan_slot());
     if let Some((ph, pw, p)) = slot.as_ref() {
         if *ph == h && *pw == w {
             return Ok(Arc::clone(p));
@@ -759,6 +859,7 @@ pub fn as_ocr_error(e: PpError) -> OcrError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// 造一张纯色帧。夹具只要能喂进预处理就行，**不要求真有字**——
     /// 真正的「字」要真跑模型才有，而那需要 15MB 权重。
@@ -797,6 +898,262 @@ mod tests {
             cache.get(320).is_ok(),
             "宽度 320 的 rec 编译失败 —— PP-OCR 会整轮回落 WinRT"
         );
+    }
+
+    /// 测试用的桶表：把「图」当成 `u32`。写出来是为了不写两遍那一长串泛型。
+    type StubBuckets = Arc<Mutex<HashMap<usize, Arc<OnceLock<Slot<u32>>>>>>;
+
+    /// 一个**不带权重**的桶表 + 一个计数的编译器桩。
+    ///
+    /// 图的类型用 `u32` 就够：`get_or_compile` 与图无关，守卫要验的是
+    /// **同步**，不是 tract。而真 `load_rec` 要 15MB 权重，本机就没装——
+    /// 用真图写这条测试的话，它在 CI 上会直接跳过，等于没守。
+    fn stub_buckets() -> (StubBuckets, Arc<AtomicUsize>) {
+        (
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicUsize::new(0)),
+        )
+    }
+
+    /// 一个成功的编译器桩。
+    ///
+    /// 错误类型钉死 `String`：编译器桩从不失败，`E` 让编译器去猜是猜不出来的
+    /// （`Result` 的错误位没有默认值）。
+    fn stub_ok(w: usize) -> impl Fn() -> Result<Arc<u32>, String> + Send + 'static {
+        move || Ok(Arc::new(w as u32))
+    }
+
+    /// 同上，顺带数一次调用。
+    fn stub_counting(
+        calls: Arc<AtomicUsize>,
+        w: usize,
+    ) -> impl Fn() -> Result<Arc<u32>, String> + Send + 'static {
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(w as u32))
+        }
+    }
+
+    /// **同一个宽度并发取，编译器只能被调一次。**
+    ///
+    /// 2026-10-17（票 47）：早先是「锁外编译 + 无条件 insert」的双重检查，
+    /// N 个线程各编一遍，后编的直接覆盖先编的——白等一次，而 rec 编译是
+    /// 几十到几百毫秒、det 更慢。
+    ///
+    /// 栅栏是这条**能不能响**的关键：没有它，N 个线程多半一个接一个跑完，
+    /// 谁也撞不上谁，于是这条测试**永远绿**。
+    #[test]
+    fn one_width_is_compiled_exactly_once_under_concurrency() {
+        const N: usize = 8;
+        const W: usize = 320;
+        let (buckets, calls) = stub_buckets();
+        let gate = Arc::new(std::sync::Barrier::new(N));
+        let t0 = std::time::Instant::now();
+        let hs: Vec<_> = (0..N)
+            .map(|_| {
+                let buckets = Arc::clone(&buckets);
+                let calls = Arc::clone(&calls);
+                let gate = Arc::clone(&gate);
+                std::thread::spawn(move || {
+                    gate.wait();
+                    let calls = Arc::clone(&calls);
+                    get_or_compile(&buckets, 32, W, move || -> Result<Arc<u32>, String> {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        // 拉长编译窗口，让后来的线程一定落在「正在编」里。
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        Ok(Arc::new(W as u32))
+                    })
+                    .expect("编译器桩不会失败")
+                })
+            })
+            .collect();
+        let got: Vec<_> = hs
+            .into_iter()
+            .map(|h| h.join().expect("取图线程炸了"))
+            .collect();
+        eprintln!(
+            "{N} 个线程并发取同一个宽度：耗时 {:?}，编译器被调 {} 次",
+            t0.elapsed(),
+            calls.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "同一个宽度编了 {} 遍 —— 双重检查的老形状回来了",
+            calls.load(Ordering::SeqCst)
+        );
+        // 只编一次还不足以说明大家拿到的是同一份：同一份也意味着**同一个 Arc**。
+        assert!(
+            got.windows(2).all(|p| Arc::ptr_eq(&p[0], &p[1])),
+            "同一个宽度的并发调用拿到了不同的 Arc —— 缓存被复制了"
+        );
+    }
+
+    /// **不同宽度并发取时互不阻塞。**
+    ///
+    /// 锁只护住「取/建 cell」那一下，编译在锁外，所以 A 在编译时 B 已经在编。
+    /// 判据取**同时在编的峰值**而不是耗时：耗时会被机器快慢带偏，
+    /// 而「两个 compile 重叠过」是结构性事实。
+    ///
+    /// 若换成票 47 的方案 1（持锁编译），这个峰值恒等于 1，本条立刻红。
+    #[test]
+    fn two_widths_compile_at_the_same_time() {
+        let (buckets, _) = stub_buckets();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let hs: Vec<_> = [320usize, 640]
+            .into_iter()
+            .map(|w| {
+                let buckets = Arc::clone(&buckets);
+                let gate = Arc::clone(&gate);
+                let compile = counting_compiler(Arc::clone(&live), Arc::clone(&peak), w);
+                std::thread::spawn(move || {
+                    gate.wait();
+                    get_or_compile(&buckets, 32, w, compile).expect("编译器桩不会失败")
+                })
+            })
+            .collect();
+        let mut got: Vec<_> = hs
+            .into_iter()
+            .map(|h| h.join().expect("取图线程炸了"))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![Arc::new(320u32), Arc::new(640u32)],
+            "宽度与图对不上"
+        );
+        assert!(
+            peak.load(Ordering::SeqCst) >= 2,
+            "两个宽度没有重叠编译（同时在编的峰值 = {}）—— 变成了持锁编译，\
+             一个宽度会把别的宽度整段堵住",
+            peak.load(Ordering::SeqCst)
+        );
+    }
+
+    /// 记下「同时在编」的峰值，并让编译花掉 200ms 以便观察重叠。
+    fn counting_compiler(
+        live: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        w: usize,
+    ) -> impl Fn() -> Result<Arc<u32>, String> + Send + 'static {
+        move || {
+            let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            live.fetch_sub(1, Ordering::SeqCst);
+            Ok(Arc::new(w as u32))
+        }
+    }
+
+    /// **桶到顶时清一半，且本键清不掉。**
+    ///
+    /// 4 个桶后再要一个新宽度 → 清到 2、再插本键 → 3。这与早先的
+    /// 「先编后插、插之前清」得到的数一致，行为不变。
+    #[test]
+    fn the_bucket_cap_drops_half_and_keeps_the_key_just_asked_for() {
+        const MAX: usize = 4;
+        let (buckets, calls) = stub_buckets();
+        for w in 1..=MAX {
+            get_or_compile(&buckets, MAX, w, stub_counting(Arc::clone(&calls), w))
+                .expect("编译器桩不会失败");
+        }
+        assert_eq!(lock_recover(&buckets).len(), MAX, "还没到上限就不该清");
+        get_or_compile(&buckets, MAX, MAX + 1, stub_ok(MAX + 1)).expect("编译器桩不会失败");
+        assert_eq!(
+            lock_recover(&buckets).len(),
+            MAX / 2 + 1,
+            "清一半再插本键，应当是 {}/2 + 1",
+            MAX
+        );
+        assert!(
+            lock_recover(&buckets).contains_key(&(MAX + 1)),
+            "刚要的键被自己刚做的清理带走了"
+        );
+        // 再要一次必须是命中，不能重编。
+        let before = calls.load(Ordering::SeqCst);
+        get_or_compile(&buckets, MAX, MAX + 1, stub_ok(MAX + 1)).expect("编译器桩不会失败");
+        assert_eq!(calls.load(Ordering::SeqCst), before, "同一个宽度被重编了");
+    }
+
+    /// **并发 + 清桶：不炸、结果不丢、桶数不超上限。**
+    ///
+    /// 清桶摘掉的 cell 可能正被别人 `get_or_init` 着——`Arc` 保证它活到最后
+    /// 一个使用者手里，所以顶多多白编一遍，**不会悬垂、不会 panic**。
+    /// `Arc` 是这里安全性的全部来源，所以这条钉的就是它。
+    ///
+    /// 已知且接受：清桶正好插在编译中间时，那个宽度可能被并行的另一个线程
+    /// **再编一遍**（新的 cell）。代价是一次重复编译，比悬垂小得多。
+    #[test]
+    fn eviction_under_concurrency_keeps_the_cache_consistent() {
+        const MAX: usize = 4;
+        const WIDTHS: usize = 12; // 宽度种类 > 上限，必然反复触发清桶
+        let (buckets, _) = stub_buckets();
+        let hs: Vec<_> = (0..16)
+            .map(|t| {
+                let buckets = Arc::clone(&buckets);
+                std::thread::spawn(move || {
+                    for i in 0..40usize {
+                        let w = (t * 7 + i) % WIDTHS;
+                        let v =
+                            get_or_compile(&buckets, MAX, w, stub_ok(w)).expect("编译器桩不会失败");
+                        assert_eq!(*v, w as u32, "宽度 {w} 拿到了别人的图");
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().expect("取图线程炸了");
+        }
+        let len = lock_recover(&buckets).len();
+        assert!(len <= MAX, "桶数 {len} 超过上限 {MAX} 了");
+    }
+
+    /// **一次 panic 之后这个缓存还能用，而不是此后每次访问都 panic。**
+    ///
+    /// `Mutex` 在持锁线程 panic 后会中毒，此后 `lock()` 一律返回 `Err`，
+    /// 而 `unwrap()` 直接 panic——所以早先那一串 `lock().unwrap()` 的意思是
+    /// 「**一次** panic 之后，OCR 流水线的每次取图都炸」。
+    /// `lock_recover` 把守卫捞回来，依据见它自己的注释（那两段临界区都不会
+    /// 留下半改状态，所以恢复出来的数据是完整的）。
+    #[test]
+    fn a_poisoned_lock_does_not_make_every_later_call_panic() {
+        let (buckets, calls) = stub_buckets();
+        let b2 = Arc::clone(&buckets);
+        let _ = std::thread::spawn(move || {
+            let _held = b2.lock().expect("第一次拿锁不会中毒");
+            panic!("故意在持锁时炸");
+        })
+        .join();
+        assert!(buckets.lock().is_err(), "前提不成立：那把锁居然没中毒");
+        // 中毒之后必须还能取图。
+        let p = get_or_compile(&buckets, 32, 320, stub_counting(Arc::clone(&calls), 1))
+            .expect("中毒之后取不到图");
+        assert_eq!(*p, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "中毒被当成了命中缓存");
+    }
+
+    /// **失败不留缓存：权重后来修好了还能起来。**
+    ///
+    /// 2026-10-17：`OnceLock` 一旦填上就取不出来，所以失败**不能**留在 cell 里
+    /// ——留了就等于「模型文件后来修好了也永远起不来」。
+    /// [`Slot::Failed`] 只记「编不出来」，[`get_or_compile`] 会把键摘掉。
+    #[test]
+    fn a_failed_compile_is_not_cached_forever() {
+        let (buckets, calls) = stub_buckets();
+        let e = get_or_compile(&buckets, 32, 320, || Err("权重不在".to_string()))
+            .expect_err("编译器桩失败时应当返回错误");
+        assert_eq!(e, "权重不在", "错误文本不能被占位糊弄——那是现场唯一的线索");
+        assert!(
+            !lock_recover(&buckets).contains_key(&320),
+            "失败的键还留在表里：权重修好之后再也起不来"
+        );
+        // 权重修好之后，同一个宽度再来一次：这次要编出来。
+        let p = get_or_compile(&buckets, 32, 320, stub_counting(Arc::clone(&calls), 7))
+            .expect("权重修好之后应该编得出来");
+        assert_eq!(*p, 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     /// **归一化常数必须逐字等于 PaddleOCR 的配置。**
