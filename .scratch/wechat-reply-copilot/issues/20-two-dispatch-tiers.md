@@ -164,6 +164,56 @@ if self.tier == Dispatch::Auto {
 
 自证会响：`disarm` 短路后 `changing_tier_disarms` FAILED。
 
+## ⚠ 2026-10-18：真机上会发两遍，而代码侧当时**看不出来**
+
+本票剩下的两条验收项都要真机，于是有人（agent）把能自动化的那几半变成守卫，
+结果**先把两条真机项的前提推翻了**。
+
+### 缺陷：`dispatch` 在发完之后把自己的防重记录擦了
+
+`dispatch` 的 `Auto` 分支过去是：`arm(c0)` 放行 → `deliver_send` 真按了回车
+→ **紧接着 `armed.disarm()` 清空本轮记录**。
+
+于是同一轮里再点同一条：`arm` 看到空表 ⇒ 放行 ⇒ **同一条真消息发了第二遍**。
+撤不回来，而触发它只需要连点两下。
+
+- 它那句注释「这一轮的防重记录已经用掉了，换候选要重新 arm」是**两段式时代的遗物**：
+  那时 `Arming` 记的是「已装填」，用完即弃是对的；2026-10-15 砍掉 `Confirm` 之后
+  `sent` 的语义变成「**本轮已发过**」，用完即弃就从「防重」变成了「自废武功」。
+- 这个函数自己给用户的回执写着「这条候选本轮已经发送过了，没有重复发」——
+  **说的和做的不一致**，而回执没人会去对着代码核。
+- 既有守卫 `the_same_candidate_cannot_be_sent_twice_in_one_round` 测的是
+  `Arming` **这个数据结构**，序列恰好写成 `arm → arm → disarm → arm`，
+  **和生产的 `arm → 发 → disarm` 长得不一样** ⇒ 数据结构没毛病，毛病在调用顺序。
+  又一次「复印件不是守卫」，这次复印的是**顺序**。
+
+**已修**：删掉那 6 行。记录该作废的地方是**改档**（`apply_tier`）与**换轮**
+（`arm` 自己比 ticks）；换候选不需要清，`sent` 存的是一整个列表。
+
+**守卫**：`sending_does_not_clear_the_record_it_just_wrote`
+（`commands.rs::send_path_guard_tests`）。三道断言各自验过会响：
+① 全仓 `disarm` 只允许三处（`apply_tier` / `auto_send` / `dispatch`）；
+② `dispatch` 里只许有 `Manual` 分支那一处；③ **从 `deliver_send` 那一行到
+`Auto` 分支 `return` 之间不许出现 `disarm(`**。
+
+⚠ ③ 的判据是「同一段里有没有」，**不是行号顺序**——第一版写成行号大小，
+当场把自己判红：`Manual` 那处合法的清记录在行号上本来就排在 `Auto` 的
+`deliver_send` 之后（`Auto` 已经 `return` 了，代码仍在同一个函数体里）。
+
+### 同一轮补齐的守卫（原来只写在注释里）
+
+| 守卫 | 守什么 | 替掉了什么 |
+|---|---|---|
+| `pressing_enter_has_exactly_one_caller` | 全仓按回车只有一处、只有 `fill_and_send` 调它 | 「代码侧已把按回车的调用点只有一处写成注释」（注释不是守卫） |
+| `only_two_doors_can_reach_the_enter_key` | 能走到回车的门恰好两扇，都在命令层里 | 同上 |
+| `no_manual_path_can_be_told_to_send` | `deliver` 唯一调用点实参必须是 `false` | 硬约束第 5 条最靠里的那一格 |
+| `the_only_way_to_change_the_tier_goes_through_apply_tier` | `TierCell::set` 全仓只许 `apply_tier` 一处调 | `changing_tier_disarms` 管不到生产入口走没走那条路 |
+| `sending_does_not_clear_the_record_it_just_wrote` | 见上 | 无 |
+
+8 条守卫逐条做过「临时改坏 → 跑 → 贴断言 → 还原」。
+`crates/core/src/dispatch.rs` **一个字没动**：`the_tier_set_is_exactly_two_and_named`
+那三条已经守住了「只有两档 / 没有中间态 / 升档只能由人触发」，再加一条是重复断言。
+
 ## 验收项
 
 ⚠ 下面两条是 2026-10-15 那轮留下的**新**未验项。
@@ -191,6 +241,11 @@ if self.tier == Dispatch::Auto {
       而这一轮没有获得放行。
       ✅ 会话身份闸那一半已实测：切到 `Auto` 后微信停在别的会话，
       面板显示「锁着别的对话，切回来才继续」、`candidates=0`、不动作。
+      ✅ **代码侧那一大半已变成机器守卫（2026-10-18）**：见上面那张表。
+      「`Auto` 不发第二次确认」这半条**不可自动化**——`Next` 没有带确认的变体
+      （编译期）、`Arming::arm` 首击放行、`dispatch` 的 `Auto` 分支一次到位，
+      没有可断言的接口；能验的是「人点一下它真的发出去了」那个**可见后果**，
+      那仍然要真机。**所以本项仍不勾。**
 - [x] `cargo test --workspace` 全绿，且**没有为了让测试过而删掉断言**
       —— 删掉的两个测试（`auto_failure_…`、`no_retry_happens_before_…`）
       是因为**它们守的边界在两档下不存在**，原文都搬进了注释
@@ -211,6 +266,12 @@ if self.tier == Dispatch::Auto {
       时 `disarm()`，所以改档后记录清空、记录不会跨档沿用；
       `changing_tier_disarms` 直接调 `apply_tier` 守着这条（含反面：
       档位没真变就不清）。**代码侧成立 ≠ 实测**，真机那一下仍未做
+      ⚠⚠ **2026-10-18：这条的真机前提原先是坏的，点了也证明不了它想证明的东西。**
+      当时 `dispatch` 在**发送那一下之后**就把防重记录清空了，所以
+      「切回 `Auto` 再点同一条会再发一次」**必然成立**——但成立的原因是
+      记录早就没了，**不是**「改档清了记录」。
+      ⇒ 缺陷已修（见上面 2026-10-18 那节），现在这条真机项
+      **第一次真的能验「改档 ⇒ 记录作废」**。仍未做。
 - [x] **同一条候选在同一轮里发不出去第二次**——2026-10-15 新增守卫。
       ⚠ 复核时发现原来的 `Arming` 只存**一个** `id`：发 c0 → 记 c0 →
       发 c1 → **覆盖掉 c0** → 这时再点 c0 就被当成没发过 ⇒ **同一条真消息

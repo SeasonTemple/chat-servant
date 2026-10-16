@@ -2113,6 +2113,189 @@ mod tests {
         }
     }
 
+    /// 砍掉第一个 `#[cfg(test)]` 之后的内容。
+    ///
+    /// 「只在测试里被构造过」正是票 21 的病根，所以这一组数的是
+    /// **运行时代码**里的构造点，测试里的不算。
+    fn strip_test_modules(text: &str) -> &str {
+        match text.find("#[cfg(test)]") {
+            Some(i) => &text[..i],
+            None => text,
+        }
+    }
+
+    /// **面板能渲染的每一态，都必须有运行时代码在产出它。**
+    ///
+    /// 票 21 的病就是这个形状：`Phase` 在它自己的测试里被构造过，
+    /// 而 `contract.rs` 在 2026-10-13 补进 `main.rs` 之前**一次都没被
+    /// 编译过**——于是「面板画得出来的三态」在真机上压根没有生产者，
+    /// 而 `?demo` 夹具手写了 `phase`，**两边看着一样**。
+    ///
+    /// 类型层已经保证「构造不出没有 `phase` 的 `Readout`」
+    /// （`#[serde(flatten)]` + 单一构造点）。这一条补的是上一层：
+    /// **枚举变体本身**必须有人在运行时真的造它。
+    /// 只在测试里构造出来的变体 = 真机上不可达的态，而门禁全绿。
+    #[test]
+    fn every_phase_the_panel_can_render_is_produced_by_runtime_code() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk_rs(&src, &mut files);
+
+        // 变体 → 判别键。键名与 `Phase::key()` 一一对应（下面先对齐再数）。
+        let variants = [
+            ("Phase::Read {", "read"),
+            ("Phase::Drafting {", "drafting"),
+            ("Phase::Drafted {", "drafted"),
+            ("Phase::Failed {", "failed"),
+        ];
+        let real: Vec<&str> = vec![
+            Phase::Read { messages: vec![] }.key(),
+            Phase::Drafting { messages: vec![] }.key(),
+            Phase::Drafted {
+                messages: vec![],
+                candidates: vec![],
+            }
+            .key(),
+            Phase::Failed {
+                messages: vec![],
+                error: "x".into(),
+            }
+            .key(),
+        ];
+        let listed: Vec<&str> = variants.iter().map(|(_, k)| *k).collect();
+        assert_eq!(
+            listed, real,
+            "这张表必须与 `Phase::key()` 一一对应：加了变体却忘了往里加，\
+             就会有一个态谁都不检查"
+        );
+
+        for (needle, key) in variants {
+            let mut hits = Vec::new();
+            for p in &files {
+                let Ok(text) = std::fs::read_to_string(p) else {
+                    continue;
+                };
+                for (n, line) in strip_test_modules(&text).lines().enumerate() {
+                    let t = line.trim();
+                    if t.starts_with("//") {
+                        continue;
+                    }
+                    if t.contains(needle) {
+                        hits.push(format!("{}:{}", p.display(), n + 1));
+                    }
+                }
+            }
+            assert!(
+                !hits.is_empty(),
+                "面板能渲染 `{key}`，而 Rust 的**运行时代码**里没有任何地方产出它：\
+                 这一态在真机上不可达，而这正是票 21 的原症状。\
+                 确认它是不是只活在 `#[cfg(test)]` 里就没再搬出来。"
+            );
+        }
+    }
+
+    /// **demo 夹具能画的态，恰好是 Rust 会发的态。**
+    ///
+    /// 票 21 写下的病是「演示页是绿的、真机是断的，两边看着一样」。
+    /// 这里**双向**锁：
+    /// · 夹具里多一个 Rust 永远不会发的 `phase` ⇒ 演示页在骗人
+    ///   （改界面时照着它调，真机上没有这一态）；
+    /// · Rust 多发一个夹具里没有的 `phase` ⇒ 真机上有一态从来没被
+    ///   人看过渲染。
+    #[test]
+    fn the_demo_fixtures_show_exactly_the_phases_the_machine_can_produce() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/demo");
+        let rd = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("读不到夹具目录 {}：{e}", dir.display()));
+        let mut seen = std::collections::BTreeSet::new();
+        let mut count = 0usize;
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).expect("夹具读不出来");
+            let v: serde_json::Value = serde_json::from_str(&text)
+                .unwrap_or_else(|err| panic!("{} 不是合法 JSON：{err}", p.display()));
+            let phase = v["phase"].as_str().unwrap_or_else(|| {
+                panic!(
+                    "{} 没有 `phase` 字段——面板会把它读成 undefined，\
+                     而这正是票 21 的症状在夹具上的复现",
+                    p.display()
+                )
+            });
+            seen.insert(phase.to_string());
+            count += 1;
+        }
+        assert!(count > 0, "夹具目录是空的，等于一个态都没验");
+        let real: std::collections::BTreeSet<String> = [
+            Phase::Read { messages: vec![] }.key(),
+            Phase::Drafting { messages: vec![] }.key(),
+            Phase::Drafted {
+                messages: vec![],
+                candidates: vec![],
+            }
+            .key(),
+            Phase::Failed {
+                messages: vec![],
+                error: "x".into(),
+            }
+            .key(),
+        ]
+        .iter()
+        .map(|k| (*k).to_string())
+        .collect();
+        assert_eq!(
+            seen, real,
+            "夹具的 `phase` 集合与 Rust 会发的对不上。\
+             多出来的那个在真机上不存在（演示页在骗人），\
+             少掉的那个没人验过渲染。"
+        );
+    }
+
+    /// **候选正文逐字进 JSON。**
+    ///
+    /// 票 21 剩下的验收项是「正文里真的出现那句回复」。这句话能被界面
+    /// 看到，中间要过一整段：候选 `text` → `snapshot` → `Readout`
+    /// → serde 摊平。前两段都有人守，最后这段（序列化）只在
+    /// `every_phase_shape_carries_its_own_discriminant` 里数了**条数**。
+    ///
+    /// ⚠ 判据钉的是「逐字到达」，不是某个字面量——起草器换模型、
+    /// 清洗规则改字，都不该让这里红。
+    #[test]
+    fn the_candidate_text_reaches_the_wire_verbatim() {
+        let s = scratch_with(1, 1);
+        let st = chatservant_reason::StageCalls::default();
+        let out = snapshot(
+            &s,
+            None,
+            Phase::Drafted {
+                messages: s.messages.clone(),
+                candidates: s.candidates.clone(),
+            },
+            4,
+            1,
+            st,
+            "起草好了",
+        );
+        let v = serde_json::to_value(&out).unwrap();
+        let first = &v["candidates"][0];
+        assert_eq!(
+            first["text"].as_str(),
+            Some(s.candidates[0].text.as_str()),
+            "候选正文没有逐字到达界面（会被当成空消息发出去的那一类）"
+        );
+        assert_eq!(
+            first["id"].as_str(),
+            Some(s.candidates[0].id.as_str()),
+            "候选 id 变了，防重与点击都对不上"
+        );
+        assert!(
+            first["probability"].is_number(),
+            "概率必须带过去：界面按它排序，而 Auto 档挑的是第一条"
+        );
+    }
+
     /// 左侧边栏宽度，**实测微信的值**。
     ///
     /// 夹具里它必须**非零**，否则 `frame.crop(anchor.chat)` 是恒等操作，
