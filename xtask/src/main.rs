@@ -92,6 +92,16 @@ enum Cmd {
         /// 还是只削掉了边缘」——两者修法不同。看一眼图就分得清。
         #[arg(long)]
         prob: Option<String>,
+        /// 跑几遍，把每一遍的耗时都打出来（默认 1）
+        ///
+        /// **为什么需要它**：单跑一次量的是**冷启动**——第一次调用要建
+        /// tract 会话、按那个形状编译图。而生产里 OCR 跑在**长驻进程**里，
+        /// 每一帧都是热调用，det 图按形状缓存、rec 图按宽度分桶复用。
+        /// ⇒ 「一次跑要多久」和「稳态一帧要多久」是两个数，
+        /// 而能不能踩进 `TICK = 1000ms` 看的是**后者**。
+        /// 报告里必须写清报的是哪一段（冷/热），不然这个数字没法比较。
+        #[arg(long, default_value_t = 1)]
+        repeat: u32,
     },
     /// 标定探针：逐行测出气泡底色、文字墨色与对比度。
     ///
@@ -218,13 +228,14 @@ fn main() -> Result<()> {
             scale,
             stats,
             prob,
+            repeat,
         } => {
             if let Some(spec) = prob {
                 probe_ocr_prob(&file, scale, &spec)
             } else if stats {
                 probe_ocr_stats(&file, scale)
             } else {
-                probe_ocr(&file, scale)
+                probe_ocr(&file, scale, repeat)
             }
         }
         Cmd::Measure { file } => probe_measure(file),
@@ -546,7 +557,11 @@ fn window_rect(hwnd_raw: isize) -> Result<(i32, i32, i32, i32)> {
 ///
 /// `--scale` 在 OCR **之前**最近邻放大，用来检验「字太小识别器不收」
 /// 这类假设——放大必须是最近邻，插值会把字形边缘抹掉，掩盖真实问题。
-fn probe_ocr(file: &Path, scale: u32) -> Result<()> {
+///
+/// `--repeat N` 跑 N 遍并把**每一遍**的耗时都打出来。生产里 OCR 在长驻
+/// 进程里跑，第一遍要建会话、按形状编译图，那是**冷启动**；
+/// 能不能踩进 `TICK`（`watch.rs`，1000ms）看的是**后面那几遍**。
+fn probe_ocr(file: &Path, scale: u32, repeat: u32) -> Result<()> {
     set_dpi_aware();
     let (w, h) = file_png_dims(file)?;
     let frame = load_frame(file, scale)?;
@@ -561,13 +576,40 @@ fn probe_ocr(file: &Path, scale: u32) -> Result<()> {
         frame.height()
     );
 
-    let t0 = std::time::Instant::now();
-    let ocr = chatservant_capture::ocr::recognize(&frame).map_err(|e| anyhow::anyhow!("{e}"))?;
-    println!(
-        "OCR {} ms  逐行 {} 行",
-        t0.elapsed().as_millis(),
-        ocr.lines.len()
-    );
+    // 跑 repeat 遍，全部结果按顺序留着，最后一遍的文本拿去打印。
+    // 少于一遍就当一遍——参数写 0 不该让探针什么都不干。
+    let rounds = repeat.max(1);
+    let mut ocr = None;
+    let mut ms: Vec<u128> = Vec::with_capacity(rounds as usize);
+    for i in 1..=rounds {
+        let t0 = std::time::Instant::now();
+        let got =
+            chatservant_capture::ocr::recognize(&frame).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let took = t0.elapsed().as_millis();
+        ms.push(took);
+        println!(
+            "第 {i}/{rounds} 遍：OCR {took} ms  逐行 {} 行",
+            got.lines.len()
+        );
+        ocr = Some(got);
+    }
+    let ocr = ocr.expect("rounds 至少 1，上面必然跑过一遍");
+
+    if rounds > 1 {
+        // 冷/热分开报。混在一起报一个平均数，看的人会以为那是热态。
+        let cold = ms[0];
+        let warm = &ms[1..];
+        let mut sorted = warm.to_vec();
+        sorted.sort_unstable();
+        let mid = sorted[sorted.len() / 2];
+        println!(
+            "冷启动 {cold} ms   稳态 min/中位/max = {}/{mid}/{} ms   （{} 遍热调用）",
+            sorted[0],
+            sorted[sorted.len() - 1],
+            warm.len()
+        );
+    }
+
     print_readability(&ocr);
 
     for (i, l) in ocr.lines.iter().enumerate() {
