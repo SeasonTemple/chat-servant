@@ -136,38 +136,94 @@ def first_opaque(px, x: int, thr: int) -> int:
 # 深度与两级 alpha 过渡**」。也就是说**暗色不承载任何信息**，
 # 撕边的形状完全由 alpha 轮廓决定 ⇒ 提亮暗部不损失撕口感。
 #
-# ## 做法
-# 把外圈（= 四条带 + 四个角，厚 `slice` 源 px）的像素向纸色插值，
-# **保留 alpha**——所以撕口的参差轮廓一点不变，只是不再变黑。
-# 中央的纸芯（`fill` 区）**一个像素都不动**。
-PAPER_RGB = (238.0, 220.0, 174.0)
+# ## 目标色：面板自己的纸，不是「另一张纸」
+# ⚠⚠ **这里原来写的是 `(238,220,174)`，量出来是个错的目标（2026-10-16 三轮）。**
+#   `PaperPanel.svelte` 的 `.cs-act` / `PanelSettings.svelte` 的 `.cs-btn-ink` /
+#   `.cs-btn-mini` 全用 `border-image: url('/strip.png') 32 fill / 16px / 0 stretch`，
+#   那个 **`fill`** 会把位图**中央 64×64 的纸芯**画进元素的内容盒。
+#   ⇒ 撕边纸条的「里面」是这张纸芯，「边缘」是外圈 32px 的撕口带，
+#     两者在同一张位图里，**用户一眼就能比出来**。
+#
+# 实测（出图逐像素，`strip.png` 128×128）：
+#
+# | 区 | RGB | R−B |
+# |---|---|---|
+# | 核心 `fill` 区 | (249.7, 236.4, 198.9) | 50.8 |
+# | 紧邻核心的外圈带 | (239.1, 221.7, 176.3) | 62.8 |
+# | 面板纸（同图实测） | (245.7, 230.4, 189.7) | 56.0 |
+#
+# 核心比紧邻它的外圈亮 **R +10.6 / B +22.6** —— 一条 1px 宽、色差 22 的硬台阶
+# 横在元素内侧 16px 处（`border-image` 把 32 源 px 的外圈压进 16 CSS px 带）。
+# 用户原话：「这个框什么意思呢？里面颜色也和边缘不一致？」
+# ⇒ 那不是撕边纸片，那是一个**贴了浅色底的框**。撕边材质在这条边上没成立。
+#
+# 两处一起改，缺一不可：
+# ① 目标色换成面板自己的 `--cs-paper`（`app.css` 第 84 行）。
+# ② **纸芯也要处理**——旧实现只动外圈，纸芯一个像素都不碰，
+#    于是两区各说各的。纸芯按「只搬均值、保留纸纹起伏」处理：
+#    实测纸芯 sd 为 R 1.84 / B 5.99、面板纸 sd 为 R 4.11 / B 8.77，
+#    全压平会让元素内芯比周围的纸更死。
+#
+# ⚠ `PANEL_RGB` 与 `app.css` 的 `--cs-paper` 是**同一个值的第二份拷贝**，
+#   本仓取不到 CSS 变量，只能各写一份。改一处必须改另一处。
+PANEL_RGB = (243.0, 230.0, 192.0)
 # 2026-10-16 二次调：0.3 → 0.12。
 # 0.3 那版把撕边带最暗的像素从 (155,120,56) 提到 (213,190,139)，
 # 渲染图那一行由 124.7 回到 185 —— **肉眼仍看得出是一条边**
 # （用户原话：「你这个图不也还有黑边在？只是没之前明显、淡了些」）。
 # ⇒ 暗度不是「压到看不见为止」，而是压到**撕口的绒毛还在、暗线读不出来**。
-# 0.12 时最暗像素约 (226,210,161)，与纸色 (238,220,174) 差 12 左右 ——
-# 合成到纸上约 5%，接近纸纹本身的起伏。
-DESHADE_KEEP = 0.12
+# 2026-10-16 三轮 0.12 → 0.08：目标色同时从 (238,220,174) 提到 (243,230,192)，
+# 变亮的 5 个单位会顺带把残留暗像素也提亮，所以 KEEP 要下调才等价。
+DESHADE_KEEP = 0.08
 
 
-def deshade(img: Image.Image, slice_: int) -> None:
-    """把外圈向纸色提亮，保住 alpha 轮廓。**就地修改**。"""
+def _core_mean(px, slice_: int, hi_x: int, hi_y: int) -> tuple[float, float, float]:
+    """纸芯（`fill` 区）里不透明像素的均值。"""
+    acc = [0.0, 0.0, 0.0]
+    n = 0
+    for y in range(slice_, hi_y - slice_ + 1):
+        for x in range(slice_, hi_x - slice_ + 1):
+            r, g, b, a = px[x, y]
+            if a < 250:
+                continue
+            acc[0] += r
+            acc[1] += g
+            acc[2] += b
+            n += 1
+    if n == 0:
+        return PANEL_RGB
+    return (acc[0] / n, acc[1] / n, acc[2] / n)
+
+
+def recolour(img: Image.Image, slice_: int) -> None:
+    """把整张位图的**不透明部分**搬到面板纸上，alpha 一个都不动。
+
+    两区用两支笔，因为它们承担的事不同：
+      外圈 = 撕口。暗墨不承载信息（见文件头），所以向纸色大幅收敛。
+      纸芯 = 纸。只是取自另一处纸样 ⇒ 只需要**搬均值**，纸纹起伏留着。
+    **就地修改**。
+    """
     px = img.load()
     w, h = img.size
     hi_x, hi_y = w - 1, h - 1
+    mean = _core_mean(px, slice_, hi_x, hi_y)
     for y in range(h):
         for x in range(w):
-            # 只处理外圈：中央 paper 芯（`fill` 区）保持原样
-            if slice_ <= x <= hi_x - slice_ and slice_ <= y <= hi_y - slice_:
-                continue
             r, g, b, a = px[x, y]
             if a == 0:
                 continue
+            if slice_ <= x <= hi_x - slice_ and slice_ <= y <= hi_y - slice_:
+                nr = PANEL_RGB[0] + (r - mean[0])
+                ng = PANEL_RGB[1] + (g - mean[1])
+                nb = PANEL_RGB[2] + (b - mean[2])
+            else:
+                nr = PANEL_RGB[0] + (r - PANEL_RGB[0]) * DESHADE_KEEP
+                ng = PANEL_RGB[1] + (g - PANEL_RGB[1]) * DESHADE_KEEP
+                nb = PANEL_RGB[2] + (b - PANEL_RGB[2]) * DESHADE_KEEP
             px[x, y] = (
-                int(round(PAPER_RGB[0] + (r - PAPER_RGB[0]) * DESHADE_KEEP)),
-                int(round(PAPER_RGB[1] + (g - PAPER_RGB[1]) * DESHADE_KEEP)),
-                int(round(PAPER_RGB[2] + (b - PAPER_RGB[2]) * DESHADE_KEEP)),
+                max(0, min(255, int(round(nr)))),
+                max(0, min(255, int(round(ng)))),
+                max(0, min(255, int(round(nb)))),
                 a,
             )
 
@@ -757,7 +813,7 @@ def build() -> None:
     p("  ⇒ ✅ 四条边的撕口形状都合格")
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    deshade(img, SLICE)
+    recolour(img, SLICE)
     img.save(OUT)
 
     p("")

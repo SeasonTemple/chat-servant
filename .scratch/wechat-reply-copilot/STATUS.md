@@ -30,7 +30,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `40-key-input-unreachable-when-unset.md` | 7/9 | ready-for-agent · **2026-10-15 真机发现并已修，待门禁与提交** | (票面没写 Blocked by) |
 | `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-agent · **2026-10-15 已量清三项，待做** | (票面没写 Blocked by) |
 | `44-candidate-action-row-is-button-geometry-on-prose.md` | 16/18 | 进行中 · **2026-10-16 四角与「读成方框」的根因已定位并修完；门禁全绿；两项复核仍未做** | (票面没写 Blocked by) |
-| `45-settings-screen-left-the-paper-family.md` | 23/24 | ready-for-human · **2026-10-16 第三轮：用户六条意见全部落地——按钮族统一撕边、设置页字体 9 档收到 5 档、说明不再无依无靠、撕边顶部黑边定位到源纸污斑并去暗；demo 夹具补上，两轮的盲区关闭；注释 emoji 全仓清理。真机仍未看过** | (票面没写 Blocked by) |
+| `45-settings-screen-left-the-paper-family.md` | 24/25 | ready-for-human · **2026-10-16 第四轮：用户指着 chip 问「这个框什么意思呢？里面颜色也和边缘不一致？」——定位到 `strip.png` 的 `fill` 纸芯与外圈之间有 B 差 22.6 的硬台阶（三轮里前两轮一直在调 `DESHADE_KEEP`，方向本来就错了），改目标色 + 纸芯搬均值后归零；alpha 逐像素零变化。真机仍未看过** | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
