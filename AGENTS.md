@@ -79,6 +79,14 @@ Rust 核心 + Tauri 2 外壳 + Svelte 5 前端，先打通微信单聊。
 
 三处 `#![forbid(unsafe_code)]` 是真的守住了，不是摆设。
 
+⚠ **2026-10-17 订正**：上面那句在当天之前是**假的**。实测 `rg 'forbid\(unsafe_code\)'
+crates/` **零命中**——三个 crate 一个属性都没有，「0 处 unsafe」靠的是**自觉**，
+没有任何编译期守卫。属性已补进 `core` / `perceive` / `reason` 的 `src/lib.rs`，
+并**验过会拦**（临时塞一个 `unsafe` 块进去，`error: usage of an 'unsafe' block`，
+exit=101）。
+⇒ **教训同「票面里的存在性断言」**：「实测为 0」与「写不进」差着一个编译期守卫，
+前者不推出后者。文档写「守住了」之前，先 `rg` 一次那个属性本身。
+
 ## Code style
 
 ⚠ **动 Rust 之前先读 `.agents/skills/rust-skills/SKILL.md`**（265 条规则的索引），
