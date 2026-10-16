@@ -30,7 +30,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `40-key-input-unreachable-when-unset.md` | 7/9 | ready-for-agent · **2026-10-15 真机发现并已修，待门禁与提交** | (票面没写 Blocked by) |
 | `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-agent · **2026-10-15 已量清三项，待做** | (票面没写 Blocked by) |
 | `44-candidate-action-row-is-button-geometry-on-prose.md` | 16/18 | 进行中 · **2026-10-16 四角与「读成方框」的根因已定位并修完；门禁全绿；两项复核仍未做** | (票面没写 Blocked by) |
-| `45-settings-screen-left-the-paper-family.md` | 24/25 | ready-for-human · **2026-10-16 第四轮：用户指着 chip 问「这个框什么意思呢？里面颜色也和边缘不一致？」——定位到 `strip.png` 的 `fill` 纸芯与外圈之间有 B 差 22.6 的硬台阶（三轮里前两轮一直在调 `DESHADE_KEEP`，方向本来就错了），改目标色 + 纸芯搬均值后归零；alpha 逐像素零变化。真机仍未看过** | (票面没写 Blocked by) |
+| `45-settings-screen-left-the-paper-family.md` | 24/25 | ready-for-human · **2026-10-16 第五轮：档位行红勾压住「只填入」——笔比字大 2.43 倍且与字同宽，长臂必然横扫整行读成「划掉」。加 `--ms`/`--mx` 两个旋钮（0.72 / 8px）后标签可读、勾仍盖在字上；结构冲突未解开，已列四档对照。真机仍未看过** | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
@@ -83,6 +83,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | 票 | Status 写的 | 机器点的 |
 |---|---|---|
 | `25-main-window-loads-deprecated-panel.md` | 5/5 | 4/4 |
+| `45-settings-screen-left-the-paper-family.md` | 72/8 | 24/25 |
 
 > 这些不是脚本猜的，是 Status 行里的 `N/M` 与实际勾选数量对不上。
 > **按本表的数字读进度**，别按 Status 读。
