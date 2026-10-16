@@ -29,12 +29,12 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 6/9 | ready-for-human · **2026-10-15 已定位并修掉两个真 bug，但路还选不了** | (票面没写 Blocked by) |
 | `40-key-input-unreachable-when-unset.md` | 8/9 | ready-for-human · **2026-10-16 修复合入并过门禁（`976735e`，此后每轮十步全绿）；只剩一项要真 key 的端到端，那项卡在你本机提供的 key 上** | (票面没写 Blocked by) |
 | `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-agent · **2026-10-15 已量清三项，待做** | (票面没写 Blocked by) |
-| `44-candidate-action-row-is-button-geometry-on-prose.md` | 16/18 | 进行中 · **2026-10-16 四角与「读成方框」的根因已定位并修完；门禁全绿；两项复核仍未做** | (票面没写 Blocked by) |
+| `44-candidate-action-row-is-button-geometry-on-prose.md` | 18/18 | 进行中 · **2026-10-16 四角与「读成方框」的根因已定位并修完；门禁全绿；两项复核仍未做** | (票面没写 Blocked by) |
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-16 第六轮：真机第一次真的上去了（380×560）。撕边顶边无黑边、撕边纸条读得出来——四轮 headless 的结论在真机成立；真机同时撞出新缺陷：`.cs-input` 描边实测 (212,218,221)、R−B = −9，是全面板唯一蓝多于红的颜色。齿轮底板那条没验完** | (票面没写 Blocked by) |
 | `46-judge-surface-rescans-the-same-rect-four-times.md` | 5/5 | ready-for-human · **2026-10-17 已改已验过门禁。本机（Windows + Rust 1.94.1）编得过， | (票面没写 Blocked by) |
 | `47-pp-ocr-plan-cache-has-a-recompile-race.md` | 5/5 | ready-for-human · **2026-10-17 已改已验过门禁。本机（Windows + Rust 1.94.1）编得过， | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
-| `49-pp-ocr-plan-cache-lifetime-and-det-lock.md` | 0/5 | ready-for-agent · **2026-10-17 票 47 做完后记档。两条都是票 47 的 | (票面没写 Blocked by) |
+| `49-pp-ocr-plan-cache-lifetime-and-det-lock.md` | 3/7 | ready-for-human · **2026-10-17 前半条已改已验过门禁（`det_plan` 编译不再持锁）**。 | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
