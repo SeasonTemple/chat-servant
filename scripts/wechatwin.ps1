@@ -27,7 +27,7 @@ Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match
 $rows = New-Object System.Collections.ArrayList
 $cb = [W+EnumProc]{
   param($h, $p)
-  # ⚠ 不能叫 `$pid`——PowerShell 的 `$PID` 是只读内置变量（当前进程 ID），
+  # 不能叫 `$pid`——PowerShell 的 `$PID` 是只读内置变量（当前进程 ID），
   #   在脚本块里遮蔽它会直接抛「无法覆盖变量 PID」。
   [uint32]$procId = 0
   [void][W]::GetWindowThreadProcessId($h, [ref]$procId)

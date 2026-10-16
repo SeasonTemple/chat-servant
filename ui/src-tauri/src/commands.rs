@@ -44,7 +44,7 @@ struct AppState {
     candidates: Vec<DraftCandidate>,
     /// 与观察循环**共用同一个格子**的设置句柄。
     ///
-    /// ⚠ 这里必须是 `start()` 建的**那一份**（clone），不能新造一个。
+    /// 这里必须是 `start()` 建的**那一份**（clone），不能新造一个。
     /// 新造的话设置写进了一个没人读的格子——界面显示「已设为 24」，
     /// 而模型那边永远还是 12。
     recent_n: RecentN,
@@ -68,7 +68,7 @@ struct AppState {
     armed: Arming,
     /// 程序**锁定并正在处理**的会话名。托盘的状态行读它。
     ///
-    /// ⚠ **不是「窗口里当前显示的那个」。** 那是 `locked_peer` 之外的事：
+    /// **不是「窗口里当前显示的那个」。** 那是 `locked_peer` 之外的事：
     /// 会话身份闸要求程序只对锁定会话动手，所以托盘首行要报的是
     /// 「我到底在替谁说话」。空串 = 还没认出来，那同样是不动手。
     peer: String,
@@ -120,10 +120,10 @@ struct AppState {
 /// · 换轮了（`ticks` 变了）——上一轮的候选已经不是这一轮的候选了；
 /// · 档位变了。
 ///
-/// ⚠⚠ **它只挡「同一条被重复发」，不表示「已装填」**（2026-10-15）。
+///**它只挡「同一条被重复发」，不表示「已装填」**（2026-10-15）。
 /// 砍掉两段式之后生产里只有一个调用点（`dispatch` 的 `Auto` 分支），
 /// 用法是「这一轮这条候选发过了没有？」
-/// ⚠ 文档跟着实现走之前，这里曾经写着「装填。返回 `false` 表示之前那次装填
+/// 文档跟着实现走之前，这里曾经写着「装填。返回 `false` 表示之前那次装填
 ///   已经作废」——而 `arm` 返回 `true` 的含义是**这条已经发过了、拒绝重发**。
 ///   一个把「拒绝」写成「放行」的注释，会让下一个人以为重发是被鼓励的。
 ///
@@ -147,11 +147,11 @@ impl Arming {
     /// **返回 `true` = 已经发过 ⇒ 拒绝重发。** 返回 `false` = 没发过，
     /// 调用方可以发（并且这一次发送被记下来了）。
     ///
-    /// ⚠ **它在发送被尝试之前就记下了。** 所以像「窗口句柄拿不到」这种
+    /// **它在发送被尝试之前就记下了。** 所以像「窗口句柄拿不到」这种
     ///   发送根本没起步的失败，也会把这一轮的位置占掉 ⇒ 用户得等下一轮。
     ///   这是故意的：占错了只是多点一次，放过了就是重复发一条真消息。
     ///
-    /// ⚠ 「宁可让用户多点一次，也不要把上一轮的记录挪到这一轮的候选上」
+    /// 「宁可让用户多点一次，也不要把上一轮的记录挪到这一轮的候选上」
     /// ——这条仍然成立，只是主语从「确认」换成了「已发」。
     fn arm(&mut self, id: &str, ticks: u64) -> bool {
         if self.ticks != ticks {
@@ -247,13 +247,13 @@ pub struct DispatchReply {
 
 #[tauri::command]
 pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
-    // ⚠ **这里曾经收一个 `app: AppHandle`，只为 `app.emit(ARMED, …)`。**
+    // **这里曾经收一个 `app: AppHandle`，只为 `app.emit(ARMED, …)`。**
     //   2026-10-15 砍掉两段式之后那次 emit 就没有存在理由了（`armed`
     //   的语义从「已装填」变成「本轮已发过」，而前端至今没有监听者——
     //   见 `contract.rs` 的 `KNOWN_UNLISTENED`）。留着它就是留一个
     //   只为不存在的功能存在的参数，`-D warnings` 会先把它喊出来。
     //
-    // ⚠ **动作先解析，再谈别的。**（票 26）
+    // **动作先解析，再谈别的。**（票 26）
     //
     // `action` 从 IPC 过来是 `String`，任何字符串都能到这一行。以前这里是
     // `action == "confirm"` 的字符串比较——拼错、传空、传中文，全都悄悄
@@ -271,7 +271,7 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
         }
     };
 
-    // ⚠ **夹具模式下绝不投递。**
+    // **夹具模式下绝不投递。**
     //
     // 夹具模式是给「没有微信可用时改界面」用的，可它拿到的是**真微信的帧**。
     // 这时候按「确认发送」会把内容打进**一个真的对话里**——
@@ -291,7 +291,7 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
         };
     }
 
-    // ⚠ **档位从 Rust 自己的格子读，不看前端传什么。**
+    // **档位从 Rust 自己的格子读，不看前端传什么。**
     // 早先的签名收一个 `tier: String` 并直接采信——那等于把「这条消息
     // 会不会真的发出去」交给一个前端可以随便改的字符串。
     let tier = with_state(|s| s.tier.get())
@@ -301,7 +301,7 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
     let mut d = Dispatcher::new();
     d.set_tier(tier);
 
-    // ⚠ `Auto` 档：**点一下就填入并发送，没有第二次确认**（2026-10-15 决定，
+    // `Auto` 档：**点一下就填入并发送，没有第二次确认**（2026-10-15 决定，
     // 砍掉的是 `Confirm`）。所以这里**没有装填分支**；`Arming` 在 `Auto` 档上
     // 不再表示「人已装填过一次，等他再点」，而只挡「同一条被重复发」。
     let ticks = with_state(|s| s.watcher.latest())
@@ -327,7 +327,7 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
             }
         };
         if already {
-            // ⚠ 防重：同一条候选、同一轮里已经发过一次 ⇒ 不许再发一遍。
+            // 防重：同一条候选、同一轮里已经发过一次 ⇒ 不许再发一遍。
             // 重复发送撤不回来，所以这里直接拒绝而不是「再发一次看看」。
             return DispatchReply {
                 outcome: "NotSent",
@@ -335,7 +335,7 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
                 next_hint: None,
             };
         }
-        // ⚠⚠ **这是整个代码库里唯一会把消息真的发出去的地方。**
+        //**这是整个代码库里唯一会把消息真的发出去的地方。**
         // `sends_for_real` 把条件穷举成一句话；`debug_assert` 让
         // 「哪天有人改了上面的分支条件」当场炸，而不是等发错一条消息。
         debug_assert!(
@@ -349,7 +349,7 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
                 next_hint: None,
             };
         };
-        // ⚠ 填入 + 发送**一步做完**。
+        // 填入 + 发送**一步做完**。
         //
         // 这里必须用 `deliver_send`（填了再按回车），**不能**用老的
         // `send_only`（只按回车、不写字）——那个路径成立的前提是
@@ -371,7 +371,7 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
     }
 
     // 改档就清掉防重记录：上一档的记录不能带到下一档。
-    // ⚠ 放在这里而不是 `set_tier` 里：`set_tier` 是命令层的入口，
+    // 放在这里而不是 `set_tier` 里：`set_tier` 是命令层的入口，
     // 而这里保证「**任何一次投递动作**之前，防重状态都是干净的」。
     if let Ok(mut g) = STATE.lock()
         && let Some(s) = g.as_mut()
@@ -379,19 +379,19 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
         s.armed.disarm();
     }
 
-    // ⚠ 走到这里只有一种可能：**tier == Manual**。
+    // 走到这里只有一种可能：**tier == Manual**。
     //
     // `Auto` 在上面那个分支里已经 return 了（填入并发送）。
     // 所以这一行的 `send` 恒为 `false`，而且**恒为 false 是对的**。
     //
-    // ⚠⚠ 别把它「简化」成 `deliver(&candidate_id)` 或加个可变参数——
+    //别把它「简化」成 `deliver(&candidate_id)` 或加个可变参数——
     // 这个 `false` 是硬约束第 5 条的落点之一。两档之下，
     // **整个代码库里按下回车的地方只剩一处**：`inject::fill_and_send`
     // 末尾的 `press_enter`，而它**只被 `deliver_send` 调**——
     // 也就是只被上面那个 `Auto` 分支调。少一个条件就多一条
     // 「不问就发出去」的路。
     //
-    // ⚠ 2026-10-15 之前这里写的是 `inject::send_only`。那个函数已经删了，
+    // 2026-10-15 之前这里写的是 `inject::send_only`。那个函数已经删了，
     // 因为砍掉两段式之后它失去了存在理由：它的全部价值是「上一步装填过了，
     // 这一步只补一个回车」，而 `Auto` 档没有上一步。它只剩注释不改，
     // 下一个读的人会以为它是当前路径。
@@ -408,7 +408,7 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
 
 /// 档位 → **枚举 id**（`"Manual"` / `"Auto"`）。**IPC 契约用这个。**
 ///
-/// ⚠ 这里和 `tier_name` 是**两回事**，2026-10-10 实测踩过：
+/// 这里和 `tier_name` 是**两回事**，2026-10-10 实测踩过：
 /// 早先 `get_tier` / `set_tier` 直接返回 `tier_name`（中文「仅填入」），
 /// 而前端 `types.ts` 的契约是 `type Tier = 'Manual' | 'Auto'`。
 /// 于是 `TIER_NAME[tier]` 是 `undefined` → 面板头部档位名**整格空白**，
@@ -436,7 +436,7 @@ pub fn get_tier() -> String {
 ///
 /// ## 方向：只会更严，绝不放松
 ///
-/// 这条只让**重复发送更难发生**，不打开任何新路径。⚠ 硬约束第 5 条的
+/// 这条只让**重复发送更难发生**，不打开任何新路径。硬约束第 5 条的
 /// 档位集合没动，动的只是「防重记录在什么时候作废」。
 ///
 /// ## 为什么抽成独立函数
@@ -446,14 +446,14 @@ pub fn get_tier() -> String {
 /// ⇒ 把「档位格 + 防重记录」这一小块单独拿出来，测试才能**真的走一遍
 /// `set_tier` 跑的那段代码**。
 ///
-/// ⚠ 第一版的测试是在测试里**复刻**了这段判断，于是把这里的
+/// 第一版的测试是在测试里**复刻**了这段判断，于是把这里的
 ///   `disarm` 短路掉（`if before != after && false`）测试**照样全绿**——
 ///   **复印件不是守卫**。
 fn apply_tier(tier: &crate::watch::TierCell, armed: &mut Arming, d: Dispatch) -> String {
-    // ⚠ `TierCell::set` 不告诉你是「从 A 变到 B」还是「本来就是 B」——
+    // `TierCell::set` 不告诉你是「从 A 变到 B」还是「本来就是 B」——
     //   所以「是否真的变了」只能**先读后写**再比。
     //
-    //   ⚠ 比的是 **`set` 的返回值**而不是传进去的 `d`。今天是同一个值
+    //   比的是 **`set` 的返回值**而不是传进去的 `d`。今天是同一个值
     //   （`set` 原样返回入参），但若哪天 `set` 加了夹取，比 `d` 就会在
     //   「请求变了、生效值没变」时**误清防重记录**。比返回值对那种情况免疫。
     let before = tier.get();
@@ -469,10 +469,10 @@ fn apply_tier(tier: &crate::watch::TierCell, armed: &mut Arming, d: Dispatch) ->
 pub fn set_tier(tier: String) -> String {
     // 认不出来的一律当 Manual。**不许因为解析失败就升档。**
     let d = parse_tier(&tier);
-    // ⚠⚠ **改档必须清空防重记录**（原理由与漏出来的路见 `apply_tier` 的
+    //**改档必须清空防重记录**（原理由与漏出来的路见 `apply_tier` 的
     //   文档与测试 `changing_tier_disarms`）。这条以前只活在注释里。
     let real = with_state(|s| apply_tier(&s.tier, &mut s.armed, d)).unwrap_or("Manual".into());
-    // ⭐ 在 `with_state` **之后**刷——锁已经放掉了，这里再拿就是死锁。
+    // 在 `with_state` **之后**刷——锁已经放掉了，这里再拿就是死锁。
     // 档位变了，托盘首行和图标状态必须跟着变：面板看不见的时候，
     // 它是唯一告诉用户「开着自动」的地方。
     refresh_tray();
@@ -484,7 +484,7 @@ pub fn set_tier(tier: String) -> String {
 fn parse_tier(raw: &str) -> Dispatch {
     match raw {
         "Auto" => Dispatch::Auto,
-        // ⚠ **两处历史值都落进这一支 ⇒ 读成 Manual**（最低档）：
+        // **两处历史值都落进这一支 ⇒ 读成 Manual**（最低档）：
         //
         // ① `"Confirm"`——2026-10-15 之前那一档的名字。本机 prefs 里
         //    **很可能还存着这个值**，解析不到就必须回落。
@@ -501,9 +501,9 @@ fn parse_tier(raw: &str) -> Dispatch {
 /// 抽成纯函数是为了让测试能**穷举全部组合**——写在 `dispatch` 里的话，
 /// 「能不能发出去」只能靠人读分支顺序，读错一次就是发错一条真消息。
 ///
-/// ⚠ 2026-10-15 起条件从三个减到两个：`Confirm` 档取消后
+/// 2026-10-15 起条件从三个减到两个：`Confirm` 档取消后
 /// 「已装填过」不再是独立条件（`Auto` 一步到位，没有上一步）。
-/// ⚠ **注意这里成立的那一档就是不问就发的那一档**——
+/// **注意这里成立的那一档就是不问就发的那一档**——
 ///   砍掉 `Confirm` 正是拆掉了「发送前再问一次」那道闸。
 fn sends_for_real(tier: Dispatch, act: Action) -> bool {
     matches!((tier, act), (Dispatch::Auto, Action::Confirm))
@@ -553,7 +553,7 @@ fn find_wechat() -> Option<windows::Win32::Foundation::HWND> {
 /// 界面承诺的是整个产品里**最危险的那个能力**，代码却根本没实现。
 ///
 /// 现在由调用方把「这一轮到底该不该发」算成 [`send`] 传进来。
-/// ⚠ 2026-10-15 之后**所有调用点传的都是 `false`**：
+/// 2026-10-15 之后**所有调用点传的都是 `false`**：
 ///   `Manual` 档只填入；`Auto` 档走的是 [`deliver_send`]，不走这里。
 ///   这个 `false` 是「默认档下程序不替人说话」这条约束的落点。
 ///
@@ -568,7 +568,7 @@ fn deliver(candidate_id: &str, send: bool) -> DeliveryReceipt {
     // 取不到正文就**不注入**。拿占位文本去注入等于把一句假话送进
     // 别人的聊天框，那比不送严重得多。
     //
-    // ⚠ 早先的报错写「正文还没接起草层（ticket 10）」——ticket 10 早做完了，
+    // 早先的报错写「正文还没接起草层（ticket 10）」——ticket 10 早做完了，
     // 起草层是接好的。真正的失败原因是**这个 id 不在当前快照里**：
     // 对方又发了新消息、readout 已经推进到新一轮，旧候选就没了。
     // 报错要指向真实原因，否则会把人引到完全错误的方向。
@@ -595,7 +595,7 @@ fn deliver(candidate_id: &str, send: bool) -> DeliveryReceipt {
 /// **输入框里根本没有字**，按回车等于在空输入框上发一条空消息，
 /// 而回执会写「已送达」。
 ///
-/// ⚠ 所以这里必须走 `fill_and_send`（填了再按回车），
+/// 所以这里必须走 `fill_and_send`（填了再按回车），
 /// **不能**沿用 `send_only`。这是个静默失败：不报错、回执说成功、
 /// 而对方的聊天窗口里出现一条空白。
 ///
@@ -610,7 +610,7 @@ fn deliver_send(hwnd: windows::Win32::Foundation::HWND, candidate_id: &str) -> D
             "候选 {candidate_id} 已不在当前这轮的候选里（对方又发了新消息，候选被换掉了）。重新等一轮。"
         ));
     };
-    // ⚠ 拿不到正文就**不注入**——见 [`deliver`] 里同一段的理由：
+    // 拿不到正文就**不注入**——见 [`deliver`] 里同一段的理由：
     // 往别人的聊天框里送一句占位假话，比不送严重得多。
     chatservant_capture::inject::fill_and_send(&text, hwnd)
 }
@@ -628,13 +628,13 @@ fn deliver_send(hwnd: windows::Win32::Foundation::HWND, candidate_id: &str) -> D
 ///
 /// ## 护栏在哪
 ///
-/// ⚠ **这里不做任何判断。** 「该不该自动发」全部在
+/// **这里不做任何判断。** 「该不该自动发」全部在
 /// [`crate::watch`] 的 [`AutoGate`] 里，纯函数 + 穷举测试。
 /// 这里只负责「既然决定发了，那就发」——
 /// 判断与执行分成两处，是为了**判断可以被测穷尽**，
 /// 而执行不行（它要真按回车）。
 pub fn auto_send(candidate_id: &str) -> Result<DeliveryReceipt, String> {
-    // ⚠ 防重记录必须在这里更新，而不是只在循环里记：
+    // 防重记录必须在这里更新，而不是只在循环里记：
     //   循环记的那份在 `Scratch` 里，而这个函数才是真正按下回车的地方。
     //   两处各记一份会漏——比如循环记了、这里发送前失败了。
     if let Ok(mut g) = STATE.lock()
@@ -692,7 +692,7 @@ fn receipt_detail(tier: Dispatch, receipt: &DeliveryReceipt, next: &Next) -> Str
 
 /// 候选正文。**从观察循环的快照里按 id 取。**
 ///
-/// ⚠ 取不到就返回 `None`，`deliver` 随后报「没接起草层」——
+/// 取不到就返回 `None`，`deliver` 随后报「没接起草层」——
 /// **绝不拿占位文本去注入**。往别人的聊天框里送一句假话，
 /// 比不送严重得多。
 fn candidate_text(id: &str) -> Option<String> {
@@ -707,7 +707,7 @@ fn candidate_text(id: &str) -> Option<String> {
 
 /// 把某个隐藏的**辅助**窗口挪到屏幕内并显示。
 ///
-/// ⚠ 现在只有 `debug` 一个调用方，注释里原来那句「三个窗口共用一条路径」
+/// 现在只有 `debug` 一个调用方，注释里原来那句「三个窗口共用一条路径」
 /// 已经不成立了——**因为剩下两个窗口的行为并不一样**：
 ///
 /// - 主面板**不能挪**。它停在用户放的位置（`show_panel` 只 show + 聚焦）。
@@ -788,7 +788,7 @@ pub fn get_close_behavior(app: AppHandle) -> CloseBehavior {
 /// 写「关闭时」。前端设置页调它。
 #[tauri::command]
 pub fn set_close_behavior(app: AppHandle, behavior: CloseBehavior) -> Result<(), String> {
-    // ⭐ **先验证落点存不存在，再写。**
+    // **先验证落点存不存在，再写。**
     // 选了「收进托盘」却没有托盘 = 一个没有落点的动作 = 用户把面板
     // 收走之后它就变成了看不见的僵尸。所以这一档必须在托盘可用时才成立。
     if behavior == CloseBehavior::Tray && !tray_usable() {
@@ -866,7 +866,7 @@ impl Default for MarkShape {
 
 /// 读「档位标记形状」。
 ///
-/// ⚠ **这一条走落盘，绝不走 `watch.rs` 的 `TierCell`。**
+/// **这一条走落盘，绝不走 `watch.rs` 的 `TierCell`。**
 /// 档位不落盘是产品硬约束（发送档默认最低、会话结束自动回落到 `Manual`）；
 /// 标记形状是外观偏好，用户重启后期望它还在。两者性质不同，混在一起就
 /// 会出现「档位的生命周期污染外观偏好」或者反过来。
@@ -998,12 +998,12 @@ pub fn show_panel(app: AppHandle) -> Result<(), String> {
 /// 菜单里点「退出」和面板上点 × 都走这里，**共用同一条路径**——
 /// 两处能写错的地方越少越好。
 ///
-/// ⚠ 不做二次确认：`Confirm` 档开着时退出可能留下半句没发出去。拦它的
+/// 不做二次确认：`Confirm` 档开着时退出可能留下半句没发出去。拦它的
 /// 地方在**别处** —— 纸底标着当前档位，托盘图标在「会发出去」的档位下带红点，
 /// 菜单首行写着「小周 · 确认后发」。用户是看得见的，不该在点下去
 /// 的那一瞬间才拦住他。
 ///
-/// ⚠ 2026-10-14 更正：这段原先通篇说的是 `Auto` 档（顶边 / 托盘红点 /
+/// 2026-10-14 更正：这段原先通篇说的是 `Auto` 档（顶边 / 托盘红点 /
 /// 「小周 · 自动发送」）。`Auto` 已于 2026-10-13 整档取消，档位也搬到了纸底，
 /// 于是它举的三个例子里有两个指向的机制**当时就已经不对了**。
 /// 保留「不做二次确认」这个结论，但理由要挂在**现在唯一会发出去的那档**上。
@@ -1039,7 +1039,7 @@ pub fn refresh_tray() {
 
 /// 托盘 tooltip：应用名 + 当前档位。
 ///
-/// ⚠ 「副驾 · chat-servant」这个前缀**只有这一处**。早先 `build_tray` 写死
+/// 「副驾 · chat-servant」这个前缀**只有这一处**。早先 `build_tray` 写死
 /// 了一遍、`refresh_tray` 又用状态行整体盖掉一遍，于是名字在两处各活一份。
 pub fn tray_tooltip() -> String {
     format!("{} · {}", APP_NAME, tray_status_line())
@@ -1050,7 +1050,7 @@ const APP_NAME: &str = "副驾 · chat-servant";
 
 /// 托盘图标。`live` 为真时右下角盖一颗红点。
 ///
-/// ⚠ **图标必须显式给**（实测 2026-10-10）：`TrayIconBuilder::with_id(...)`
+/// **图标必须显式给**（实测 2026-10-10）：`TrayIconBuilder::with_id(...)`
 /// 不像 `new(app)` 那样自动取应用图标，`bundle.icon` 只喂安装包不喂窗口，
 /// 两头都没有 → 条目在、图标空，而日志照样打「托盘图标已就绪」。
 /// 图编进二进制（`include_bytes!`），不依赖运行期资源路径。
@@ -1066,7 +1066,7 @@ const APP_NAME: &str = "副驾 · chat-servant";
 /// - `Manual` → 无点。程序只填入，不会自己发。
 /// - `Auto` → 红点。程序**会不问就发出去**。
 ///
-/// ⚠ 两档之下红点不再有歧义：只有一个会发出去的档。
+/// 两档之下红点不再有歧义：只有一个会发出去的档。
 /// 三档时代 `Auto` 与 `Confirm` 都带点，看图分不出「要人确认」和「不问就发」。
 pub fn tray_icon(live: bool) -> tauri::Result<tauri::image::Image<'static>> {
     use std::sync::OnceLock;
@@ -1092,10 +1092,10 @@ pub fn tray_icon(live: bool) -> tauri::Result<tauri::image::Image<'static>> {
 
 /// 在 RGBA 缓冲右下角盖一颗实心红点（行主序，4 字节/像素）。
 ///
-/// ⚠ 就地改，**不改尺寸**——托盘那边按图标原始尺寸建资源，
+/// 就地改，**不改尺寸**——托盘那边按图标原始尺寸建资源，
 /// 尺寸一变就要重建整个托盘图标。
 fn stamp_live_dot(px: &mut [u8], w: u32, h: u32) {
-    // ⚠ 半径与圆心是**量出来的，不是随手取的**（2026-10-10 实测，
+    // 半径与圆心是**量出来的，不是随手取的**（2026-10-10 实测，
     // 2026-10-13 换图标后重量一次）。
     //
     // 【2026-10-10】旧图标（Tauri 脚手架默认的绿色气泡）里气泡占 x 9..22 / y 8..23。
@@ -1130,11 +1130,11 @@ fn stamp_live_dot(px: &mut [u8], w: u32, h: u32) {
 
 /// 托盘状态：**只报档位**。
 ///
-/// ⚠ 菜单里**不再摆这行字**了（用户 2026-10-10：「顶部非要显示个文字行？
+/// 菜单里**不再摆这行字**了（用户 2026-10-10：「顶部非要显示个文字行？
 /// 很好看？很有设计感？」）。一个灰的、点不动的首行是 Windows 托盘的老套路，
 /// 不是设计——而且它让菜单凭空多高一行。它现在只喂 tooltip。
 ///
-/// ⚠ **会话名不进托盘**（同上，用户判断 + 本机像素实测）。
+/// **会话名不进托盘**（同上，用户判断 + 本机像素实测）。
 ///
 /// - 用户看到托盘菜单时，**上下文里根本有那个会话**——菜单是从那个
 ///   聊天窗口旁边的托盘点开的。菜单上再写一遍名字不回答任何问题。
@@ -1153,7 +1153,7 @@ pub fn tray_status_line() -> String {
 /// 状态行的纯逻辑，单独抽出来是为了能测——`STATE` 是进程级全局，
 /// 测试去动它会跟别的用例互相踩。
 ///
-/// ⚠ 空档位**不能变成空字符串**。宁可退回最低档 `Manual`。
+/// 空档位**不能变成空字符串**。宁可退回最低档 `Manual`。
 fn tray_status_line_from(tier: &str) -> String {
     let t = tier.trim();
     if t.is_empty() {
@@ -1168,7 +1168,7 @@ fn tray_status_line_from(tier: &str) -> String {
 pub fn build_tray_menu(app: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
     let mb = MenuBuilder::new(app);
-    // ⚠ **任何一项建不起来就让整个菜单失败，不降级。**（2026-10-10 本机实测修正）
+    // **任何一项建不起来就让整个菜单失败，不降级。**（2026-10-10 本机实测修正）
     //
     // 原来每项都写着 `.build().unwrap_or_else(|_| sep())`——
     // 建失败的菜单项被换成一条**分隔线**。那个降级方向是反的：
@@ -1187,7 +1187,7 @@ pub fn build_tray_menu(app: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>,
     // `Result<Menu<Wry>, tauri::Error>`，套 `Ok(...?)` 是多余的
     // （clippy::needless_question_mark，2026-10-10 门禁实测）。
     mb
-        // ⚠ **首行没有状态文字行**（2026-10-10，用户要求删掉）。
+        // **首行没有状态文字行**（2026-10-10，用户要求删掉）。
         //
         // 原来是 `MenuItemBuilder::with_id("status", …).enabled(false)`
         // —— 一行灰的、点不动的文字 + 一条分隔线。它是 Windows 托盘的老套路，
@@ -1198,7 +1198,7 @@ pub fn build_tray_menu(app: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>,
         .item(&MenuItemBuilder::with_id("settings", "打开设置").build(app)?)
         .item(&MenuItemBuilder::with_id("debug", "识别画布").build(app)?)
         .separator()
-        // ⚠ **「退出」上没有加速键，这是量出来的，不是忘了**（2026-10-10 实测）。
+        // **「退出」上没有加速键，这是量出来的，不是忘了**（2026-10-10 实测）。
         //
         // 原来挂着 `CmdOrCtrl+Q`。Win32 只要**任何一项**带加速键，就给整份
         // 菜单预留一整列右对齐的空白，所有项都得给它让位——本机像素实测：
@@ -1217,7 +1217,7 @@ pub fn build_tray_menu(app: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>,
 
 /// 当前档位的中文名。
 ///
-/// ⚠ **复用 `get_tier` 那条路径**（`with_state` + `tier_name`），不自己
+/// **复用 `get_tier` 那条路径**（`with_state` + `tier_name`），不自己
 /// 再解析一遍。读锁拿不到就按最低档 `Manual` —— **绝不能猜一个更宽松的值**。
 fn current_tier_cn() -> String {
     tier_name(current_tier())
@@ -1225,7 +1225,7 @@ fn current_tier_cn() -> String {
 
 /// 当前档位。读锁拿不到就按最低档 `Manual` —— **绝不能猜一个更宽松的值**。
 ///
-/// ⚠ `pub` 是给观察循环用的：`watch.rs` 的自动发送判据要读同一个格子，
+/// `pub` 是给观察循环用的：`watch.rs` 的自动发送判据要读同一个格子，
 ///   两边各读一份就会分叉，而分叉方向永远是「多发」。
 pub fn current_tier() -> Dispatch {
     with_state(|s| s.tier.get()).unwrap_or(Dispatch::Manual)
@@ -1233,11 +1233,11 @@ pub fn current_tier() -> Dispatch {
 
 /// 当前这一档**会不会真的把消息发出去**。
 ///
-/// ⚠ 名字里没有「自动」二字是有意的：这个函数回答的是
+/// 名字里没有「自动」二字是有意的：这个函数回答的是
 /// 「程序会不会把话发出去」，托盘红点靠它——
 /// **面板看不见的时候，程序到底会不会替我说话。**
 ///
-/// ⚠ 2026-10-15 之后，`Auto` 档**就是**「不问就发」的那一档
+/// 2026-10-15 之后，`Auto` 档**就是**「不问就发」的那一档
 /// （`Confirm` 被砍掉，那道二次确认的闸随之拆掉）。
 /// 所以这里两者合二为一：会发 = 会不问就发。
 /// `Manual` 仍然只填入，红点不亮。
@@ -1250,12 +1250,12 @@ pub fn tier_can_send() -> bool {
 /// 换供应商只需在这里加一项，**不用重配整个应用**——设置页按这个列表
 /// 渲染，每个供应商在**每一组**里的 key 独立存在凭据管理器里。
 ///
-/// ⚠ `custom` 在里面，但**它不是一家供应商**：它是「自己填端点」那个动作。
+/// `custom` 在里面，但**它不是一家供应商**：它是「自己填端点」那个动作。
 /// 它收下的时候走的是 [`Route::custom`]（带校验），预设则走
 /// [`Route::preset`]（端点定死，用户填什么都不采纳）——
 /// 「给预设换一个地址」在语义上就是自定义，所以这里**不**允许。
 ///
-/// ⚠ 这张表是**白名单**：`save_setting` / `forget_key` / `set_route` 都在
+/// 这张表是**白名单**：`save_setting` / `forget_key` / `set_route` 都在
 /// 它上面挡未知值。放行的后果是「拼错的名字看起来存上了，其实没有」。
 pub const PROVIDERS: &[&str] = &[
     "openai",
@@ -1336,7 +1336,7 @@ pub struct GroupView {
 /// 出站代理。
 #[derive(Serialize)]
 pub struct ProxyView {
-    /// 空串 = 直连。⚠ 这是**地址**，界面上原样回显。
+    /// 空串 = 直连。这是**地址**，界面上原样回显。
     pub url: String,
     /// 这条地址会不会被显示在日志里。恒为 true——脱敏由 `redact` 负责，
     /// 界面上要如实告诉用户「日志里会被抹掉凭据段」。
@@ -1398,7 +1398,7 @@ pub struct ModelView {
 
 /// 切模型。**立即生效，不用重启**——推理器每一次发请求都重读那个格子。
 ///
-/// ⚠ 拒收的口径分两种，见 [`Provider::accepts_model`]：实测过的几家
+/// 拒收的口径分两种，见 [`Provider::accepts_model`]：实测过的几家
 /// 拒收清单外的名字；没有核实过清单的那几家（本机与自定义）只挡空串。
 #[tauri::command]
 pub fn set_model(group: String, model: String) -> Result<ModelView, String> {
@@ -1539,7 +1539,7 @@ fn provider_view(group: ModelGroup, id: &str) -> ProviderView {
 ///
 /// **立即生效，不用重启**：这一格被推理器每次发请求重读。
 ///
-/// ⚠ 预设**不接受**用户填的端点——「给预设换一个地址」在语义上就是自定义。
+/// 预设**不接受**用户填的端点——「给预设换一个地址」在语义上就是自定义。
 ///   放行的话界面上会同时显示「厂商 = OpenAI」和一个完全不同的地址，
 ///   而那一行字就成了假话。
 #[tauri::command]
@@ -1555,7 +1555,7 @@ pub fn set_route(
         .flatten()
         .ok_or_else(no_transport_note)?;
     models.cell(g).set_route(route);
-    // ⚠ 回包是**读回来的真实状态**（含另一组是不是与我同路），
+    // 回包是**读回来的真实状态**（含另一组是不是与我同路），
     // 而不是把传进去的三项原样弹回去——界面必须显示程序认定的那个。
     Ok(group_view(g, Some(&models)))
 }
@@ -1575,7 +1575,7 @@ fn route_from_input(
             PROVIDERS.join(" / ")
         )
     })?;
-    // ⚠ `from_key` 认得的**别名**（`glm` → zhipu、`tongyi` → qwen）不在白名单里，
+    // `from_key` 认得的**别名**（`glm` → zhipu、`tongyi` → qwen）不在白名单里，
     //   所以在这里再核一次短名。别名的存在是为了命令行与日志可读，
     //   而配置这一格只认白名单上的那一个拼法。
     if !PROVIDERS.contains(&p.key()) {
@@ -1603,7 +1603,7 @@ pub fn get_proxy() -> Result<ProxyView, String> {
 
 /// 写代理。**空串 = 不走代理。**
 ///
-/// ⚠ **一次设置，两组都生效**——代理是网络层的属性，不是任何一家的属性。
+/// **一次设置，两组都生效**——代理是网络层的属性，不是任何一家的属性。
 ///   重复填两遍就迟早有两份不一样的，而「一组走代理、一组不走」是个
 ///   没人主动想要的状态。
 #[tauri::command]
@@ -1701,7 +1701,7 @@ pub struct BudgetView {
     pub visible: bool,
     /// 供应商的固定底账。预算低于它就**无解**，界面要如实说。
     pub provider_base: u32,
-    /// ⚠ **这个底账核实过没有。** 端点可换之后「第三方模型」这个词不再准确，
+    /// **这个底账核实过没有。** 端点可换之后「第三方模型」这个词不再准确，
     ///   而没核实过的数字**必须能在界面上说出来**——否则用户会照着一个
     ///   编出来的数估自己的账单。
     pub provider_base_verified: bool,
@@ -1717,7 +1717,7 @@ fn budget_view(budget: u32, provider: &chatservant_reason::Provider) -> BudgetVi
     // 底账是**随模型变**的：gpt-4o-mini 是 2833，Claude 的 patch 计费是 0。
     // 这里如实反映当前 provider，界面据此显示「预算不够」的警告。
     //
-    // ⚠ **只有 OpenAI 那一项是核实过的数字。** 其余各家（MiniMax 之外
+    // **只有 OpenAI 那一项是核实过的数字。** 其余各家（MiniMax 之外
     // 新加的云端与本机、以及自定义端点）我们没有权威数字：端点可换之后，
     // 「第三方模型」这个词已经不准了，同一个端点可能是任何人的服务。
     // 拿不到数字时**不许编一个**——编出来的预算会让用户以为花了那个数。
@@ -1734,7 +1734,7 @@ fn budget_view(budget: u32, provider: &chatservant_reason::Provider) -> BudgetVi
         // 于是 gpt-4o-mini 上滑块永远到不了它的底账 2833，
         // 图片功能在默认模型上完全不可用而界面看不出来。
         max: budget_ceiling(provider),
-        // ⚠ **这里不能写死 true。**
+        // **这里不能写死 true。**
         // 早先的版本恒返回 true，理由是「模型 B 多模态，图随文本进 B」——
         // 但图片链路**根本没接进观察循环**，一张图也出不去。
         // 那正是同一段注释里批评的「调了没反应的控制项」，自己却犯了一遍。
@@ -1754,7 +1754,7 @@ pub fn get_images_out() -> Result<bool, String> {
 
 /// 改图片外发总闸。
 ///
-/// ⚠ **这是个危险开关**，而且端点可换之后**更危险**：
+/// **这是个危险开关**，而且端点可换之后**更危险**：
 ///
 /// 1. 对方发来的图片区域会被裁出、缩放、base64 编码，然后发出去。
 ///    媒体检测的准确率尚未在真实帧上完整验证，所以这里**只允许显式开启**，
@@ -1829,7 +1829,7 @@ pub fn forget_key(group: String, provider: String) -> Result<(), String> {
 /// 测连通性。**只回「通不通」**，不回任何响应体——
 /// 上游的错误正文可能带 key。
 ///
-/// ⚠ 测的是**这一组当前这一路**，包括用户自己填的端点。所以它同时
+/// 测的是**这一组当前这一路**，包括用户自己填的端点。所以它同时
 /// 是「自定义端点填对没有」的那一次验证——而界面上不会说它是另一样东西。
 #[tauri::command]
 pub fn probe_key(group: String) -> Result<bool, String> {
@@ -1839,7 +1839,7 @@ pub fn probe_key(group: String) -> Result<bool, String> {
         return Err(secret::missing_hint(g, route.provider().key()));
     };
     let proxy = with_state(|s| s.proxy.get()).flatten();
-    // ⚠ 探针走 `GET {base_url}models`，不调模型：不产生 token、不花钱。
+    // 探针走 `GET {base_url}models`，不调模型：不产生 token、不花钱。
     // 协议层归 genai 之后，这条 GET 是**唯一**一处没外包出去的网络调用，
     // 因为 genai 的 `WebClient` 是私有的、而 `models` 不是任何适配器的操作。
     // 代理与聊天那条路**同一个** `reqwest::Proxy::all`，别写第二套。
@@ -1896,7 +1896,7 @@ pub fn start(app: &AppHandle) {
         .spawn(move || {
             // 去重指纹是 **(ticks, 阶段)**，不是单独的 ticks。
             //
-            // ⚠ 少一半会出事：观察循环一轮里会推**两帧**——先「读到消息、
+            // 少一半会出事：观察循环一轮里会推**两帧**——先「读到消息、
             // 正在起草」，再「起草完成」。这两帧的 `ticks` 相同，
             // 只比 `ticks` 的话第二帧（真正有候选的那帧）会被当成重复吃掉，
             // 界面永远停在「正在起草」。
@@ -1910,7 +1910,7 @@ pub fn start(app: &AppHandle) {
                 {
                     last = Some((out.ticks, out.phase.key()));
 
-                    // ⭐ **先把锁释放，再刷托盘。**
+                    // **先把锁释放，再刷托盘。**
                     // `refresh_tray` 要读 `STATE` 拿档位和会话名，
                     // 在锁里调它就是自己等自己 —— 直接死锁。
                     let mut peer_changed = false;
@@ -1930,7 +1930,7 @@ pub fn start(app: &AppHandle) {
                         // 2015 edition 的写法，2018 之后不解析（E0433）。
                         refresh_tray();
                     }
-                    // ⚠ **不要吞掉 emit 的错误。**
+                    // **不要吞掉 emit 的错误。**
                     //
                     // 早先这里写的是 `let _ = app2.emit(...)`，于是序列化失败
                     // （字段里有 serde 编不出来的东西）时：日志照打「emit
@@ -1984,7 +1984,7 @@ const LOCKED_PEER: &str = "小号";
 /// 判断那一段走**决策组**，起草与排序走**回复组**——这是用户要的两组
 /// （票 43）。合并成一个推理器就表达不了「视觉/判断走 A、文字走 B」。
 ///
-/// ⚠ **决策组没单独配 key 时，它与回复组是同一路。**
+/// **决策组没单独配 key 时，它与回复组是同一路。**
 ///   这是有意的默认：绝大多数用户只有一把 key，逼他配两把只会让人
 ///   第一步就卡住。界面上用 `shared_with_other` **明说**这件事，
 ///   而一旦在这一组填了自己的 key / 选了别的端点，两边立刻分开。
@@ -1994,7 +1994,7 @@ const LOCKED_PEER: &str = "小号";
 /// `Box<dyn Reasoner>` 吃掉了，从外面拿不回来。命令层要改模型与端点
 /// 就必须拿到**同一个**格子，所以在这里一并交出去。
 ///
-/// ⚠ **不落盘**：这两组配置与代理都只在内存里，与 `recent_n` / 预算
+/// **不落盘**：这两组配置与代理都只在内存里，与 `recent_n` / 预算
 ///   那一批设置同生命周期。重启后回到预设默认——凭据本身在凭据管理器里，
 ///   但「走哪一家」要重新选。持久化不在本票范围内。
 fn build_loop_config() -> (
@@ -2019,7 +2019,7 @@ fn build_loop_config() -> (
             // 模型格子**先建一份**，推理器和命令层各拿一个 clone ——
             // 两边指的是同一格，所以设置页改完下一次生成就用新的。
             let model = ModelCell::new(route);
-            // ⚠ **起不起得来传输不是「配好了」的同义词。** genai 那条路要起一个
+            // **起不起得来传输不是「配好了」的同义词。** genai 那条路要起一个
             // tokio runtime，那是真会失败的一步。失败就**退回预置传输**，
             // 不能让整个面板起不来——而预置候选每条都带自曝标记，
             // 用户不会把它当成模型输出。
@@ -2054,14 +2054,14 @@ fn build_loop_config() -> (
         .unwrap_or_else(|| decision_cell.clone());
 
     let transport_ready = llm.is_some();
-    // ⚠ 计数要**覆盖三段全部**：「静默期零调用」那条硬约束断言的就是
+    // 计数要**覆盖三段全部**：「静默期零调用」那条硬约束断言的就是
     // `calls()`，所以任何一段走了预置传输都要被如实计入（它本来就不发请求）。
     let reasoner: Box<dyn chatservant_reason::Reasoner + Send> = match (&decision_owned, &llm) {
         (Some((d, _)), Some((l, _))) => Box::new(SplitReasoner {
             decision: d.clone(),
             llm: l.clone(),
         }),
-        // ⚠ **至少要有回复组**，否则整个程序没有真实传输。
+        // **至少要有回复组**，否则整个程序没有真实传输。
         (Some((d, _)), None) => Box::new(d.clone()),
         (None, Some((l, _))) => Box::new(l.clone()),
         (None, None) => Box::new(PresetReasoner),
@@ -2087,10 +2087,10 @@ fn build_loop_config() -> (
             relock: crate::watch::Relock::new(),
             provider,
         },
-        // ⚠ **没有真实传输就没有模型格子。** 返回 `None` 而不是造一个：
+        // **没有真实传输就没有模型格子。** 返回 `None` 而不是造一个：
         // 造一个的话设置页会列出一堆「可选模型」，而点下去什么也不会发生
         // ——那正是这个项目一直在删的「调了没反应的控制项」。
-        // ⚠ 但 key 输入框**仍然要显示**（见 `group_view`），
+        // 但 key 输入框**仍然要显示**（见 `group_view`），
         //   因为没配 key 正是用户来这一页的原因。
         transport_ready.then_some(groups),
         proxy,
@@ -2105,7 +2105,7 @@ fn build_loop_config() -> (
 /// 唯一一个「读上下文、输出几十个字」的，起草与排序是「照着口吻写」的那两段——
 /// 前者换便宜的模型省一大截钱，后者换好的模型提质量。
 ///
-/// ⚠ 图片跟着**起草**走（`ctx.images` 在 draft 那次请求里），所以
+/// 图片跟着**起草**走（`ctx.images` 在 draft 那次请求里），所以
 ///   **图片外发走的是回复组**，而图片的视觉计费规则也按回复组取。
 ///
 /// ## 计数怎么合
@@ -2269,7 +2269,7 @@ mod budget_ceiling_tests {
 
     /// **换了一条候选，不会把前一条的防重记录一起带走。**
     ///
-    /// ⚠ 这条在 2026-10-15 之前是**不成立**的，而它曾经的写法（单槽）
+    /// 这条在 2026-10-15 之前是**不成立**的，而它曾经的写法（单槽）
     ///   恰好绕过了它：`id` 只存一条，发 c1 时顺手覆盖掉 c0，再点 c0
     ///   就当成没发过 ⇒ **同一条真消息发了第二遍**。
     ///   重复发撤不回来，所以这里守的是「记一整个列表」那个改动。
@@ -2297,15 +2297,15 @@ mod budget_ceiling_tests {
     /// 「已经发过」而拒绝。人以为程序坏了，其实记录早该在改档那下清掉。
     /// 今天它拦下的是一次重复发送——同一个洞，只是后果换了个方向。
     ///
-    /// ⚠ 这条**直接调 `apply_tier`**——那正是 `set_tier` 跑的那段代码。
+    /// 这条**直接调 `apply_tier`**——那正是 `set_tier` 跑的那段代码。
     ///   第一版的测试是在测试里**复刻**了判断，于是把 `set_tier` 里的
     ///   `disarm` 短路成 `if changed && false`，测试**照样 71 条全绿**——
     ///   **复印件不是守卫**。抽 `apply_tier` 就是为了让测试能碰到真代码。
     ///
-    /// ⚠ 仍然只到「改档 → 记录作废」这一层：真机上连着 `STATE`、
+    /// 仍然只到「改档 → 记录作废」这一层：真机上连着 `STATE`、
     ///   `inject::fill_and_send` 的回执一起验，是票 20 剩的那一项。
     ///
-    /// ⚠ 原先这里还有一条 `tier_changed_only_when_the_tier_actually_differs`，
+    /// 原先这里还有一条 `tier_changed_only_when_the_tier_actually_differs`，
     ///   测的是「`tier_changed(before, d)` 是否等于 `before != d`」——
     ///   而 `tier_changed` **随后被内联进 `apply_tier` 了**，测试就悬空成
     ///   「一个函数存在、但没有任何守卫」的假断言。它守的那件事
@@ -2333,7 +2333,7 @@ mod budget_ceiling_tests {
         apply_tier(&tier, &mut armed, Dispatch::Auto);
         assert!(!armed.arm("c0", 10), "切回同一档不该把上一份记录复活");
 
-        // ⚠ 反过来也要成立：**档位没真的变就不该作废**。
+        // 反过来也要成立：**档位没真的变就不该作废**。
         //   否则每按一次「设为自动发送」就把本轮记录抹掉，
         //   同一条候选会被反复放行——那正好是这条测试要挡的重复发送。
         let mut b = Arming::default();
@@ -2345,10 +2345,10 @@ mod budget_ceiling_tests {
 
     /// **解析失败一律落到最低档，且不动防重记录。**
     ///
-    /// ⚠ 这条不是废话：`set_tier` 是前端唯一能改档的入口，而前端传什么
+    /// 这条不是废话：`set_tier` 是前端唯一能改档的入口，而前端传什么
     ///   本来就不可信。
     ///
-    /// ⚠⚠ **本机 prefs 里很可能还存着 `"Confirm"`** —— 那是 2026-10-15
+    ///**本机 prefs 里很可能还存着 `"Confirm"`** —— 那是 2026-10-15
     ///   之前那一档的名字。它落进 `parse_tier` 的 `_` 分支 ⇒ 读成 **Manual**。
     ///   这个回落方向是**安全的那一侧**：宁可退回「只填入」，
     ///   也不要因为一个认不出的字符串就把程序静默升到「自动发送」。
@@ -2360,7 +2360,7 @@ mod budget_ceiling_tests {
         assert_eq!(parse_tier("Confirm"), Dispatch::Manual);
         assert_eq!(parse_tier("nonsense"), Dispatch::Manual);
         assert_eq!(parse_tier(""), Dispatch::Manual);
-        // ⚠ 而现役的两个 id 都必须解析得出来。
+        // 而现役的两个 id 都必须解析得出来。
         assert_eq!(parse_tier("Auto"), Dispatch::Auto);
         assert_eq!(parse_tier("Manual"), Dispatch::Manual);
 
@@ -2374,11 +2374,11 @@ mod budget_ceiling_tests {
 
     /// **穷举：除了「Auto 档 + confirm 动作」，没有第二条能发出去的路。**
     ///
-    /// ⚠ 硬约束第 5 条的守门测试。2026-10-13 之前这个判断写死在 `dispatch`
+    /// 硬约束第 5 条的守门测试。2026-10-13 之前这个判断写死在 `dispatch`
     ///   的分支里，靠人读顺序保证；早先它就错过一次——`action` 是 `String`，
     ///   拼错的动作会静悄悄落进「只填入」那条路。
     ///
-    /// ⚠⚠ **2026-10-15 条件从三个减到两个**：`Confirm` 档取消之后
+    ///**2026-10-15 条件从三个减到两个**：`Confirm` 档取消之后
     ///   「已装填过」不再是独立条件（`Auto` 一步到位，没有上一步）。
     ///   所以**能发出去的那个组合，恰恰就是「不问就发」的那个组合**——
     ///   这正是被砍掉的那道闸，见 `dispatch.rs` 里
@@ -2414,7 +2414,7 @@ mod budget_ceiling_tests {
 
     /// **停下时同一句话只说一遍**；真的还有下一步动作时才接「下一步」。
     ///
-    /// ⚠ `Next::Halt { reason }` 的 `reason` 就是 `receipt.explain()` 本身
+    /// `Next::Halt { reason }` 的 `reason` 就是 `receipt.explain()` 本身
     /// （`Dispatcher::next` 原样透传），所以「回执 + 下一步」两段拼起来
     /// 在**大多数回执上**都会重复一次。真机量出来的是：
     /// 「…没有发出去，要发你自己按回车｜下一步：停下等人工：…没有发出去…」
@@ -2467,7 +2467,7 @@ mod budget_ceiling_tests {
     /// 会话名仍然完整显示在面板头部；这里只是**不复述**。
     #[test]
     fn the_status_line_is_exactly_the_tier_and_nothing_else() {
-        // ⚠ 只列**现役的两档**。「确认后发」是 2026-10-15 砍掉的那一档，
+        // 只列**现役的两档**。「确认后发」是 2026-10-15 砍掉的那一档，
         //   留着它会让人以为面板上还有第三档。
         for tier in ["只填入", "自动发送"] {
             let line = tray_status_line_from(tier);
@@ -2509,14 +2509,14 @@ mod budget_ceiling_tests {
         }
     }
 
-    /// ⚠ **被砍掉的 `Confirm` 必须解析成最低档，而不是崩、也不是升档。**
+    /// **被砍掉的 `Confirm` 必须解析成最低档，而不是崩、也不是升档。**
     ///
     /// 2026-10-15 `Confirm` 整档取消（`Auto` 请回来），而**旧 prefs 与旧前端
     /// 还会发 `"Confirm"` 过来**（本机就极可能存着这个值）。
     /// 这时正确的回应是**落到 `Manual`**：用户原本处在「填入后还要再点一次」
     /// 那一档，程序一升级就变成「只填入」，这是**降权**，方向是对的。
     ///
-    /// ⚠ 与 `"Auto"` 正好相反：`"Auto"` 现在是**现役**档，必须解析成 `Auto`
+    /// 与 `"Auto"` 正好相反：`"Auto"` 现在是**现役**档，必须解析成 `Auto`
     ///   而不是回落——见 `parse_tier`。这条测试守的是「别把两个方向搞反」，
     ///   而搞反的后果正好是静默升档。
     #[test]
@@ -2524,7 +2524,7 @@ mod budget_ceiling_tests {
         assert_eq!(parse_tier("Confirm"), Dispatch::Manual);
         // 中文名同样不许蒙混过关——旧的「确认后发」也不再是合法输入。
         assert_eq!(parse_tier("确认后发"), Dispatch::Manual);
-        // ⚠ 而现役的 `"Auto"` 必须**不能**回落。
+        // 而现役的 `"Auto"` 必须**不能**回落。
         assert_eq!(parse_tier("Auto"), Dispatch::Auto);
     }
 
@@ -2533,7 +2533,7 @@ mod budget_ceiling_tests {
     /// 面板刚起来、状态还读不到时会传空串过来；那里不能报错弹红字，
     /// 更不能猜一个更宽松的值。
     ///
-    /// ⚠ 列表里那些中文名（`只填入` / `自动发送`）**永远不该被解析成功**——
+    /// 列表里那些中文名（`只填入` / `自动发送`）**永远不该被解析成功**——
     ///   `parse_tier` 只认 IPC 契约里的枚举 id。中文是给人看的，
     ///   前端传过来就说明它拿错了字段，这时回落比猜一个更好。
     #[test]
@@ -2571,7 +2571,7 @@ mod budget_ceiling_tests {
 
     /// **托盘红点必须落在角落，且绝不压到图标本体上。**
     ///
-    /// ⚠ 红点现在表示「**这一档会发出去**」（`Confirm`）而不是旧的
+    /// 红点现在表示「**这一档会发出去**」（`Confirm`）而不是旧的
     /// `Auto`。它要回答的问题是「面板看不见时程序会不会把话发出去」，
     /// 而这个问题在两档之下依然成立。
     ///
@@ -2579,7 +2579,7 @@ mod budget_ceiling_tests {
     /// 判据是「红点盖到的像素」与「底图里的**笔迹**」不相交，
     /// 不是钉死某个坐标（圆心/半径是实现细节）。
     ///
-    /// ⚠ **「笔迹」按当前图标定义成饱和红，不是「亮」（2026-10-13 换图标时改的）。**
+    /// **「笔迹」按当前图标定义成饱和红，不是「亮」（2026-10-13 换图标时改的）。**
     /// 旧判据是 `rgb 之和 > 150`，配的注释是「深色圆底不算 logo，绿色气泡算」
     /// ——那只对 Tauri 脚手架默认图标成立：那时**亮的是标记、暗的是底**。
     /// 换成「撕边纸 + 红勾」之后正好翻过来：亮的是**纸（本体）**，红的才是**勾（标记）**。
@@ -2626,7 +2626,7 @@ mod budget_ceiling_tests {
             red.len()
         );
 
-        // ⚠ 底图上这里本来就是**笔迹的一部分**，被红点盖掉就等于毁了图标。
+        // 底图上这里本来就是**笔迹的一部分**，被红点盖掉就等于毁了图标。
         // 当前的标记是饱和红的勾；奶白纸与深色底都不算笔迹。
         for (x, y, before) in &red {
             let covers_ink = before[3] > 32

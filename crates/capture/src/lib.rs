@@ -1,6 +1,6 @@
 //! 窗口发现与 Windows Graphics Capture。只认识 HWND，不认识任何聊天软件语义。
 
-// ⚠ **`missing_docs` 在这个 crate 上不适用。**
+// **`missing_docs` 在这个 crate 上不适用。**
 //
 // 工作区的 lint 策略里有 `missing_docs = "warn"`，而 `gate.ps1` 跑的是
 // `clippy -- -D warnings`，于是它在这个 crate 上会变成 75 条 error——

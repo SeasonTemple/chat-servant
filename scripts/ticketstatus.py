@@ -34,12 +34,23 @@ ISSUES = ROOT / ".scratch" / "wechat-reply-copilot" / "issues"
 OUT = ROOT / ".scratch" / "wechat-reply-copilot" / "STATUS.md"
 
 DONE = ("done", "已修", "已定位", "销账", "验完")
-OPEN = ("ready-for-human", "in-progress", "needs-triage", "部分 done")
+# 分类的**权威判据是 Status 行 `·` 之前那一段（triage 标签）**，不是散文里的词。
+# 下面是**前缀**匹配（不是等值）：不少票的标签后面直接跟括号说明，
+# 例如 `done（2026-10-07 实机复核…）`，等值匹配会全部落空。
+OPEN_LABELS = (
+    "needs-triage",
+    "needs-info",
+    "ready-for-agent",
+    "ready-for-human",
+    "in-progress",
+    "进行中",
+)
+CLOSED_LABELS = ("done", "部分 done", "wontfix", "销账")
 
 BOX_X = re.compile(r"(?m)^\s*-\s*\[x\]")
 BOX_O = re.compile(r"(?m)^\s*-\s*\[ \]")
 STATUS = re.compile(r"(?m)^\*\*Status:\*\*\s*(.+)$")
-# Status 行里手写的「N/M」。⚠ 它自己也会漂（票 25 写 5/5，机器点出来 4/4），
+# Status 行里手写的「N/M」。它自己也会漂（票 25 写 5/5，机器点出来 4/4），
 # 所以脚本要把它抓出来，而不是照抄。
 STATUS_NUM = re.compile(r"(\d+)\s*/\s*(\d+)")
 BLOCKED = re.compile(r"(?m)^\*\*Blocked by:\*\*\s*(.+)$")
@@ -63,6 +74,7 @@ def collect() -> list[dict[str, str]]:
             {
                 "file": path.name,
                 "status": status,
+                "label": label_of(status),
                 "done": done,
                 "open": open_,
                 "drift": drift,
@@ -73,13 +85,40 @@ def collect() -> list[dict[str, str]]:
     return rows
 
 
+def label_of(status: str) -> str:
+    """Status 行里 `·` **之前**的那一段——它才是权威的，后面是散文。
+
+    ⚠⚠ 为什么必须切出标签（2026-10-16 修的真缺陷）：
+    旧实现拿整行做子串匹配，于是票 44 的
+    「进行中 · …根因**已定位**并修完…两项复核**仍未做**」
+    命中了 DONE 里的「已定位」，被判成已收，被归进
+    「已收但留着说明项（**不是欠的活**）」——
+    **一张自己写着「仍未做」的票，被生成器标成不欠活。**
+    这正是本脚本存在的目的（`AGENTS.md`：现状必须是机器生成的）
+    被自己破坏掉。
+
+    ⇒ 标签优先于散文。看到「已修」就收工，是拿措辞当状态。
+    """
+    return status.split("·")[0].strip().lower()
+
+
 def is_done(row: dict[str, str]) -> bool:
-    """已收 = 状态写着已收，**或者**一项未勾都没有。
+    """已收 = 标签写着已收，**或者**一项未勾都没有。
 
     ⚠ 两个口径都单用会错：票 25 的 Status 写「✅ 冷启动已验完」但不含
     `done` 字样（按关键字判会漏），反过来有些 Status 写 done 却留着
     条件项未勾（那属于「已收但留说明项」，不是未收）。
+
+    ⚠ 标签优先于关键字：标签若在 `OPEN_LABELS` 里，就**一律未收**，
+    哪怕散文里写着「已定位」「已修完」——理由见 `label_of` 的注释。
+    反过来标签是 `done` / `部分 done` / `wontfix` 的一律已收，
+    不再让散文里的某个词把它推翻。
     """
+    if row["label"].startswith(OPEN_LABELS):
+        return False
+    if row["label"].startswith(CLOSED_LABELS):
+        return True
+    # 标签不认识（老票写的是散文，例如「冷启动已验完」），才回退到关键字。
     return any(k in row["status"] for k in DONE) or row["open"] == "0"
 
 
@@ -106,6 +145,11 @@ def render(rows: list[dict[str, str]]) -> str:
         "**条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。",
         "反过来，Status 行是**手写**的，会漂——2026-10-15 一晚之间就有三张票的",
         "Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**",
+        "",
+        "ℹ **分类看的是 Status 行 `·` 之前那个 triage 标签，不是散文**。",
+        "「已定位」「已修完」这类词出现在说明里**不代表这张票已收**——",
+        "曾经票 44 写着「进行中 …两项复核仍未做」，却被说明里的「已定位」",
+        "判成「不是欠的活」。措辞不是状态，标签才是。",
         "",
         "## 一、未收的票（这里就是要干的活）",
         "",

@@ -78,7 +78,7 @@ enum Cmd {
         scale: u32,
         /// 只量 det 的框粒度与行组装，不打印识别文本
         ///
-        /// ⚠ **这是「识别成一堆单字框」的定位工具。** 最终文本分不出
+        /// **这是「识别成一堆单字框」的定位工具。** 最终文本分不出
         /// 是 det 的锅、rec 的锅、还是压根没走到 PP-OCR（回落 WinRT）——
         /// 2026-10-15 那次就是在错的层上调参数。框数/框高/框宽是唯一
         /// 能把层分开的量。
@@ -88,7 +88,7 @@ enum Cmd {
         ///
         /// 坐标是**原图像素**。例：`--prob 280:320:120:230`
         ///
-        /// ⚠ 框统计只说得出「框比字矮」，答不出「概率图整体弱、
+        /// 框统计只说得出「框比字矮」，答不出「概率图整体弱、
         /// 还是只削掉了边缘」——两者修法不同。看一眼图就分得清。
         #[arg(long)]
         prob: Option<String>,
@@ -272,7 +272,7 @@ fn probe_focus(app: &str) -> Result<()> {
     let hwnd = windows::Win32::Foundation::HWND(hit.hwnd_raw as *mut core::ffi::c_void);
     let focused = chatservant_capture::inject::focus(hwnd).is_ok();
 
-    // ⚠ **判据是「遮挡有没有解除」，不是「有没有变成前台」。**
+    // **判据是「遮挡有没有解除」，不是「有没有变成前台」。**
     //
     // 早先只用 SetForegroundWindow，然后拿「前台窗口是不是它」当结果，
     // 于是报了「未成功」。那是个**验错了指标的错误**：
@@ -577,7 +577,7 @@ fn probe_ocr(file: &Path, scale: u32) -> Result<()> {
             l.height(),
             l.text
         );
-        // ⚠ **逐词间隙**。行文本里那个空格到底该不该有，只有间隙能回答：
+        // **逐词间隙**。行文本里那个空格到底该不该有，只有间隙能回答：
         // 中文被逐字切开时「古 文 山」是假空格，而真正的空格间隙是字高的
         // 几倍。凭印象调阈值会来回摇摆——实测就是「B0」被插成「B 0」。
         // 打印出来直接看数。
@@ -620,7 +620,7 @@ fn probe_ocr(file: &Path, scale: u32) -> Result<()> {
 /// 一句正常中文一行 8~15 个字；一行 1 个 token、或者空格占到字符的两成，
 /// 就说明行组装把句子切碎了。
 ///
-/// ⚬ 两种引擎的 token 口径不同：**WinRT** 逐词给 `words`（中文会逐字切开），
+/// 两种引擎的 token 口径不同：**WinRT** 逐词给 `words`（中文会逐字切开），
 /// **PP-OCR** 一个框就是一行、只给 `text`。所以有 `words` 就按它数，
 /// 没有就按字符数。
 fn print_readability(ocr: &chatservant_capture::ocr::OcrText) {
@@ -673,7 +673,7 @@ fn print_readability(ocr: &chatservant_capture::ocr::OcrText) {
 /// 而当时在调 det 的后处理参数——白调。判据只能是**中间量**：
 /// det 输入尺寸、概率图尺寸、二值化前景像素、连通域框数与框的宽高分布。
 ///
-/// ⚠ 印的是几何量，**不印识别文本**——`target/probe/` 下的帧可能含真实
+/// 印的是几何量，**不印识别文本**——`target/probe/` 下的帧可能含真实
 /// 聊天内容，而这份输出是要给人看、也可能被贴进票据的。
 fn probe_ocr_stats(file: &Path, scale: u32) -> Result<()> {
     set_dpi_aware();
@@ -819,7 +819,7 @@ fn pct(sorted: &[i32], q: f64) -> i32 {
 
 /// 读一张 PNG 成帧，`--scale` 先做最近邻放大。
 ///
-/// ⚠ 放大必须是最近邻，插值会把字形边缘抹掉，掩盖真实问题。
+/// 放大必须是最近邻，插值会把字形边缘抹掉，掩盖真实问题。
 fn load_frame(file: &Path, scale: u32) -> Result<chatservant_capture::Frame> {
     let img = image::open(file)
         .with_context(|| format!("打开 PNG 失败：{}", file.display()))?
@@ -905,7 +905,7 @@ fn probe_threads(n: u32) -> Result<()> {
 
     /// 数**本进程**当前的线程。
     ///
-    /// ⚠ `CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)` 的 pid 传 0 是
+    /// `CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)` 的 pid 传 0 是
     /// **全系统**所有线程——本机轻松七千多。必须再按
     /// `th32OwnerProcessID` 过滤，否则会把整台机器的增长算到自己头上。
     fn threads() -> u32 {
@@ -1253,7 +1253,7 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
     );
 
     println!();
-    // ⚠ `y` 这一列是 2026-10-14 加的。之前这张表只有「依据」没有「位置」，
+    // `y` 这一列是 2026-10-14 加的。之前这张表只有「依据」没有「位置」，
     //   于是「为什么 `conversation_name` 返回 None」根本没法从输出里判断——
     //   `header_h` 的过滤是**按 y 做的**，不看位置就只能猜。
     //   坐标是**面板局部**（`r.anchor.chat` 裁出来的那块），不是窗口坐标。
@@ -1285,7 +1285,7 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
     }
 
     println!();
-    // ⚠ 2026-10-14 票 31：这里原先打的是
+    // 2026-10-14 票 31：这里原先打的是
     //   「会话名判据上界 header_h = 80」与「指纹带子 header_top..+40」，
     //   两个**写死的常量**，而且注释自己都承认「两者不是同一个带子」。
     //   现在头部位置由 `discover` 推出来，两者统一吃同一个推导结果。
@@ -1310,7 +1310,7 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
     // 只认**推导出的头部行**里的 Header。判据见 `conversation_name` 的说明：
     // 实机上它曾把一个时间戳认成会话名。
     //
-    // ⚠ 上界从写死的 `HEADER_NAME_H_PX = 80` 改成 `discover` 推出来的行底。
+    // 上界从写死的 `HEADER_NAME_H_PX = 80` 改成 `discover` 推出来的行底。
     //   那个 80 是第三次修复留下的（票 30），同样属于「猜坐标」。
     let name_upper = head.map_or(r.anchor.chat.y0, |rect| rect.y1);
     match chatservant_perceive::conversation_name(&r.attributions, name_upper) {
@@ -1320,7 +1320,7 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
 
     // ── 会话名到底住在哪（2026-10-14 诊断，票 30）────────────────────
     //
-    // ⚠ 2026-10-14 票 31：这段原先是票 30 的探索脚手架——「会话名住哪」，
+    // 2026-10-14 票 31：这段原先是票 30 的探索脚手架——「会话名住哪」，
     //   里面裁了**三个写死的矩形**（窗口标题栏 `0..header_top`、
     //   「消息区顶部 40px」、以及一份手抄的 `HEAD_BAND_H = 40`），
     //   外加一次反色对照。它们回答的是「猜的三个位置哪个对」，
@@ -1371,7 +1371,7 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
                         }
                     }
 
-                    // ⚠ 深色主题下要不要反色：Windows OCR 在「浅底深字」上
+                    // 深色主题下要不要反色：Windows OCR 在「浅底深字」上
                     //   表现好、在「深底浅字」上常常整段读不出来（票 30 实测）。
                     //   同一块反色后再 OCR 一次，直接对照。
                     let w = view.width();
@@ -1415,7 +1415,7 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
     // （`HeaderPrint::discover`），不依赖 OCR 认得准——
     // 所以就算上面那串字是错的，闸照样认得出人。
     //
-    // ⚠ 2026-10-14 票 31：原先这里**手拼**了
+    // 2026-10-14 票 31：原先这里**手拼**了
     //   `header_top..header_top+40` 的矩形，还在**已裁过**的 `pane` 上取，
     //   两处都错（坐标写死 + 坐标系不匹配）。现在复用上面已经算好的
     //   `discovered`（同一帧只推一次），与 `watch.rs` 的接缝完全一致。
@@ -1788,7 +1788,7 @@ fn probe_frame(
 
     let t0 = std::time::Instant::now();
     let frame = match method {
-        // ⚠ **默认走 `wgc` crate 那条，不是 windows-capture。**
+        // **默认走 `wgc` crate 那条，不是 windows-capture。**
         //
         // `windows-capture` 2.0.1 在本机对所有窗口一律失败（会话送来
         // 第一帧之前就关闭），是 ADR-0004 里记着的已知问题。产品默认路径

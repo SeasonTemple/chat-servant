@@ -61,10 +61,24 @@
   <body>
     <div id="host">
       <pre id="out">booting</pre>
+      <pre id="verdict">…</pre>
       <div id="frames"></div>
     </div>
     <script>
-      const STATES = ['drafted', 'auto', 'sent'];
+      const STATES = [
+        { key: 'drafted', url: '/panel/?demo=1&state=drafted' },
+        { key: 'auto', url: '/panel/?demo=1&state=auto' },
+        { key: 'sent', url: '/panel/?demo=1&state=sent' },
+        // 2026-10-16 加：设置态。它和主面板共用一张纸（§1 第 2 条反转后），
+        // 所以**必须一起量** —— 只看主面板会漏掉「纸没画满元素框」这类问题，
+        // 而它在设置屏上最明显（冷灰铺满时被盖住，改回纸族后整条露出来）。
+        { key: 'settings', url: '/panel/?demo=1&state=drafted&settings=1' },
+        // 2026-10-16 加：5 条候选（复核夹具，不在八态里）。
+        //   ⚠ 它是**唯一能把档位行挤出纸**的样本 —— 出图目测发现的，
+        //     而目测只敢信「东西不见了」，不敢信「差多少」。
+        //   ⇒ 必须进量具，`tier.bottom` vs `sheet.bottom` 才有数。
+        { key: 'many', url: '/panel/?demo=1&state=many' },
+      ];
 
       /** 量一个 iframe 文档里的几何。 */
       function measure(doc) {
@@ -100,11 +114,111 @@
         });
         const a = doc.querySelector('.cs-actions');
         const acs = a ? doc.defaultView.getComputedStyle(a) : null;
+        const sheet = doc.querySelector('.cs-sheet');
+        const scs = sheet ? doc.defaultView.getComputedStyle(sheet) : null;
         return {
           sheet: one('.cs-sheet'),
+          // ⚠ **红铅笔滤镜在不在**（2026-10-16 加）。
+          //   `SegSlider` 的选中态勾写的是 `filter="url(#pencil)"`，
+          //   而 `#pencil` 定义在 `PaperPanel.svelte` 的 `<defs>` 里 ——
+          //   设置屏能画出来**只因为**设置屏是 PaperPanel 渲染的。
+          //   这层耦合坏了不会报错：勾会照画，只是从「铅笔」退化成「矢量」。
+          //   ⇒ 必须有一项能量它，量到 MISSING 就是断链。
+          pencil_defs: doc.getElementById('pencil') ? 'ok' : 'MISSING',
+          // ⚠ 纸画到哪里 vs 元素框到哪（2026-10-16 加）
+          //   判据：`background-size` 若是 `100% 100%`，纸就该拉满元素框；
+          //   若元素框比内容还矮，那**溢出到框外的内容会落在透明区上**，
+          //   在 Tauri 透明窗口里就是「一块没画」。
+          sheet_bg: scs
+            ? {
+                image: (scs.backgroundImage || '').slice(0, 60),
+                size: scs.backgroundSize,
+                color: scs.backgroundColor,
+                overflow: scs.overflow,
+              }
+            : null,
+          tier: one('.cs-tier'),
+          set: one('.cs-set'),
+          set_overflow: (() => {
+            const el = doc.querySelector('.cs-set');
+            if (!el) return null;
+            return {
+              scrollH: el.scrollHeight,
+              clientH: el.clientHeight,
+              gutter: el.offsetWidth - el.clientWidth,
+              // ⚠ 与 `pick_clipped` 同一条病根：内容不能画到纸外。
+              //   纸底 = 560 × (512/560) = 512（见 `pick_clipped` 处的推导）。
+              bottom: +el.getBoundingClientRect().bottom.toFixed(1),
+              paperBottom: 512,
+              over: +(el.getBoundingClientRect().bottom - 512).toFixed(1),
+            };
+          })(),
           topbar: one('.cs-topbar'),
           draft: one('.cs-draft'),
           actions: one('.cs-actions'),
+          // ⚠ 候选区自己的滚动状态（票 44，2026-10-16 加）。
+          //   之前这里只量了 `set_overflow`（设置屏），候选区溢出**没有任何判据** ——
+          //   而档位行被裁正是从这个溢出里长出来的。
+          //   `mask` 也要量：光有 `data-more` 属性不算数，
+          //   得证明那条 CSS 真的落到计算样式上了（属性 → 规则的链路会断）。
+          actions_roll: (() => {
+            if (!a) return null;
+            return {
+              scrollH: a.scrollHeight,
+              clientH: a.clientHeight,
+              scrollTop: +a.scrollTop.toFixed(1),
+              below: +(a.scrollHeight - a.scrollTop - a.clientHeight).toFixed(1),
+              more: a.dataset.more ?? null,
+              // ⚠ 槽宽 = 滚动条实际吃掉的横向空间。原生是 15px，
+              //   纸族处理过的是 6px。量到 15 就说明样式没落到这个容器上
+              //   （2026-10-16：规则原先只写在 `.cs-set`，主面板漏了）。
+              gutter: a.offsetWidth - a.clientWidth,
+              mask: (acs.maskImage || acs.webkitMaskImage || 'none').slice(0, 44),
+            };
+          })(),
+          // ⚠⚠ **判据的参照物必须是「纸」，不是「元素框」**（2026-10-16 改）。
+          //
+          //   上一版拿 `sheet.bottom - paddingBottom`（= 540）当限值，报 `clipped:false`。
+          //   而 `.cs-sheet` 是 380×560 的**窗口盒**，纸只占它的上面一段：
+          //   `probe-sheet.svg` 实测 —— 画布 380×560，纸 `width=348 height=512`
+          //   且 `translate(16,0)`，所以**纸底在 y=512，下面 48px 是留给
+          //   `sheetDrop` 落影的透明带**。
+          //   ⇒ 纸底 = top + height × (512/560) = top + height × 0.914286。
+          //   540 那条限值**错了 28px**，于是「档位名骑在撕口上」被判成正常。
+          //
+          //   ⚠ 这两个分数是从 SVG 手抄的。**重新生成 probe-sheet.svg 就必须同步改这里**，
+          //   改法：`width`/`height`/`translate` 三个数除以 viewBox 的宽高。
+          pick_clipped: (() => {
+            const pk = doc.querySelector('.cs-pick');
+            if (!pk || !sheet) return null;
+            const PAPER_BOTTOM = 512 / 560;
+            const PAPER_RIGHT = 364 / 380;
+            const pr = pk.getBoundingClientRect();
+            const sr = sheet.getBoundingClientRect();
+            const limit = sr.top + sr.height * PAPER_BOTTOM;
+            return {
+              bottom: +pr.bottom.toFixed(1),
+              paperBottom: +limit.toFixed(1),
+              over: +(pr.bottom - limit).toFixed(1),
+              clipped: pr.bottom > limit + 0.5,
+              // 纸的右沿：档位格也不该横向出纸
+              right: +pr.right.toFixed(1),
+              paperRight: +(sr.left + sr.width * PAPER_RIGHT).toFixed(1),
+            };
+          })(),
+          // ⚠ 红铅笔勾的真实位置（2026-10-16 加）。
+          //   `.cs-pick` 那段注释里「勾的底边比槽底低 10px」是推导值，
+          //   推导的前提（纸底 = 560）已经错了 ⇒ 位置必须量，不能推。
+          marks: [...doc.querySelectorAll('.cs-pick .cs-markbox')].map((el) => {
+            const r = el.getBoundingClientRect();
+            const svg = el.querySelector('svg');
+            const sr = svg ? svg.getBoundingClientRect() : null;
+            return {
+              box: [+r.top.toFixed(1), +r.bottom.toFixed(1)],
+              svg: sr ? [+sr.top.toFixed(1), +sr.bottom.toFixed(1)] : null,
+              view: svg ? svg.getAttribute('viewBox') : null,
+            };
+          }),
           warn: one('.cs-act-warn'),
           note: one('.cs-act-note'),
           picks: [...doc.querySelectorAll('.cs-pick')].map((el) => {
@@ -131,9 +245,77 @@
       }
 
       const out = document.getElementById('out');
+      const verdict = document.getElementById('verdict');
       const host = document.getElementById('frames');
       const results = {};
       let done = 0;
+
+      /**
+       * 判据汇总：**只输出通过/失败**，不输出读数（2026-10-16 加）。
+       *
+       * ## 为什么要有这一层
+       * 读数块已经有一万多字，而复核时真正要回答的问题只有六个「有没有破」。
+       * 把判据写成代码还有一个更重要的作用：**它必须能因为判据本身写错而失败**。
+       * `pick_clipped` 第一版拿「元素底 540」当限值，报了 `clipped:false`，
+       * 而那张图上档位名明摆着骑在纸外 —— 判据自己骗了自己。
+       * 写成 `PAPER_BOTTOM = 512`（来自 `probe-sheet.svg` 的实测）之后，
+       * 它才对上了出图。
+       *
+       * ⚠ 每条判据后面都写了**判据本身的依据**。
+       *   依据变了必须改这里，不要只改读数块。
+       */
+      function judge(r) {
+        const lines = [];
+        const add = (ok, name, detail) =>
+          lines.push(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
+
+        for (const [k, s] of Object.entries(r)) {
+          if (s.error) {
+            add(false, `${k}: 载入`, s.error);
+            continue;
+          }
+          // ① 档位格底必须在纸内。依据：probe-sheet.svg 纸高 512 / 画布 560。
+          if (s.pick_clipped) {
+            add(
+              !s.pick_clipped.clipped,
+              `${k}: 档位格不出纸`,
+              `底 ${s.pick_clipped.bottom} vs 纸底 ${s.pick_clipped.paperBottom}`,
+            );
+            // ② 红铅笔勾的尾巴也必须在纸内 —— 档位格在纸上不代表勾在纸上。
+            const mk = (s.marks || [])[0];
+            if (mk && mk.svg) {
+              add(mk.svg[1] <= 512, `${k}: 红勾不出纸`, `勾底 ${mk.svg[1]} vs 512`);
+            }
+          }
+          // ③ 设置屏这一列也不能画到纸外（与 ① 同一个病根）。
+          if (s.set_overflow) {
+            add(s.set_overflow.over <= 0, `${k}: 设置列不出纸`, `底 ${s.set_overflow.bottom}`);
+          }
+          // ④ 滚动条被接管。依据：原生 15px，纸族 6px。
+          if (s.actions_roll) {
+            add(s.actions_roll.gutter === 6, `${k}: 候选区滚动条`, `槽宽 ${s.actions_roll.gutter}`);
+          }
+          if (s.set_overflow) {
+            add(s.set_overflow.gutter === 6, `${k}: 设置区滚动条`, `槽宽 ${s.set_overflow.gutter}`);
+          }
+          // ⑤ 溢出时底部渐隐必须真的落到计算样式上（属性 → CSS 的链路会断）。
+          if (s.actions_roll) {
+            add(
+              s.actions_roll.below <= 1 ||
+                String(s.actions_roll.mask).startsWith('linear-gradient'),
+              `${k}: 溢出渐隐`,
+              `below=${s.actions_roll.below} mask=${s.actions_roll.mask.slice(0, 18)}`,
+            );
+          }
+          // ⑥ 红铅笔滤镜在（设置屏的勾跨组件引用它，断了不会报错）。
+          add(s.pencil_defs === 'ok', `${k}: #pencil 滤镜`, s.pencil_defs);
+        }
+        const failed = lines.filter((l) => l.startsWith('FAIL')).length;
+        lines.unshift(
+          failed === 0 ? `ALL GREEN（${lines.length} 条判据）` : `FAILED ${failed}/${lines.length}`,
+        );
+        return lines.join('\n');
+      }
 
       /**
        * ⚠ **轮询等元素出现，不能用固定帧数**（第一版踩到）。
@@ -164,19 +346,25 @@
 
       for (const st of STATES) {
         const f = document.createElement('iframe');
-        f.src = `/panel/?demo=1&state=${st}`;
+        f.src = st.url;
         host.appendChild(f);
         (async () => {
-          await waitFor(() => f.contentDocument && f.contentDocument.querySelector('.cs-act'));
+          await waitFor(
+            () =>
+              f.contentDocument &&
+              (f.contentDocument.querySelector('.cs-act') ||
+                f.contentDocument.querySelector('.cs-set')),
+          );
           // 再等两帧，让字体度量与 GSAP 补间落定
           await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
           try {
-            results[st] = measure(f.contentDocument);
+            results[st.key] = measure(f.contentDocument);
           } catch (e) {
-            results[st] = { error: String(e) };
+            results[st.key] = { error: String(e) };
           }
           if (++done === STATES.length) {
             out.textContent = JSON.stringify(results, null, 1);
+            verdict.textContent = judge(results);
             document.title = 'READY';
           }
         })();

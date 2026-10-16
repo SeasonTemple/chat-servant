@@ -258,7 +258,7 @@ fn send_inputs(inputs: &mut [INPUT]) -> Result<(), String> {
     }
     // SAFETY: inputs 是调用方（chord_events / 	ype_unicode）构造好的、
     // 长度与 cbSize 描述一致的结构数组，指针有效覆盖整个调用。
-    // ⚠ SendInput 会**读**这块内存并把事件投到当前前台窗口——
+    // SendInput 会**读**这块内存并把事件投到当前前台窗口——
     //   调用方已通过 ocus(target) 确认目标在前台（见 ill_input_box）。
     let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
     if sent as usize == inputs.len() {
@@ -311,7 +311,7 @@ pub fn paste() -> Result<(), String> {
 ///
 /// 两次点击之间的 5 秒里人根本来不及改任何东西——第一份还没看完。
 ///
-/// ⚠ 这条也解释了为什么 [`DeliveryReceipt::Filled`] 不能重放：
+/// 这条也解释了为什么 [`DeliveryReceipt::Filled`] 不能重放：
 /// 停下等人在这里不是保守，是**唯一正确**的做法。
 pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
     // 第一步：写剪贴板并**回读校验**。
@@ -340,7 +340,7 @@ pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
 
     // 第三步：Ctrl+V。
     if let Err(e) = paste() {
-        // ⚠ 焦点已经抢到了，**可能**在重试期间用户已经粘贴了。
+        // 焦点已经抢到了，**可能**在重试期间用户已经粘贴了。
         // 但 Ctrl+V 只有一发：失败就是没发出去，可以重放。
         return DeliveryReceipt::Failed(format!("发送 Ctrl+V 失败：{e}"));
     }
@@ -349,7 +349,7 @@ pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
     // 真正的确认是「输入框里出现了这段文本」，那需要 OCR 目标区域，
     // 是 ticket 16 的调试窗口。这里如实说明**没有**拿到那种证据。
     //
-    // ⚠ 2026-10-15：这段循环以前决定回执——读到相等就报 `PossiblySent`，
+    // 2026-10-15：这段循环以前决定回执——读到相等就报 `PossiblySent`，
     // 超时报 `TimedOut`。那两次都在**撒谎**，因为本函数从头到尾没按过回车：
     // 它连「发出去」这个动作都没做，哪来的「可能已经发出去了」。
     // 现在回读只做诊断，不决定回执；理由见 [`DeliveryReceipt::Filled`]。
@@ -365,7 +365,7 @@ pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
         match got {
             Ok(got) if got == text => {
                 // 旁证成立：指令发出后剪贴板一直没被换掉。
-                // ⚠ 它**不能**报 Sent——「确定送达」需要看到聊天区里那条消息，
+                // 它**不能**报 Sent——「确定送达」需要看到聊天区里那条消息，
                 // 而本函数连回车都没按，离那条还差得远。
                 return DeliveryReceipt::Filled;
             }
@@ -378,7 +378,7 @@ pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
     // 回读超时**不改变回执**：`paste()` 返回 `Ok` 已经说明指令进了目标进程的
     // 输入队列，而「没按回车」是比回读强得多的证据。
     //
-    // ⚠ 早先这里报 `TimedOut`，而那一句「按『可能已发送』对待」
+    // 早先这里报 `TimedOut`，而那一句「按『可能已发送』对待」
     // 会让「仅填入」档的界面对一件确定没发生的事拉警报。
     // 证据弱要如实记在日志里，但不能拿它去改一个本来正确的事实。
     tracing::warn!(reason = %last_err, "回读无旁证，按已填入对待（未按回车，确定没发）");
@@ -523,7 +523,7 @@ pub fn press_enter() -> Result<(), String> {
 /// 而撒谎的回执会让上层以为不必再做回读。拿不到更高档的回执不是缺陷，
 /// 是**证据能力的边界**，如实标出来。
 ///
-/// ⚠ 「可以按回车了」这个判据用的是 [`DeliveryReceipt::Filled`]，
+/// 「可以按回车了」这个判据用的是 [`DeliveryReceipt::Filled`]，
 /// 不是 `PossiblySent`。2026-10-15 之前用的是后者，而那正是假警报的源头：
 /// 一个「可能已经发出去了」被当成「装填成功、可以继续」的内部信号，
 /// 于是同一句撒谎既出现在界面上，又成了发送路径的前置条件。
@@ -578,7 +578,7 @@ mod tests {
             .collect()
     }
 
-    /// ⚠ **Ctrl+V 必须是和弦，不是两次独立按键。**
+    /// **Ctrl+V 必须是和弦，不是两次独立按键。**
     ///
     /// 早先 `send_keys` 对每个键各发「按下+抬起」，于是实际序列是
     /// `Ctrl↓ Ctrl↑ V↓ V↑`——Ctrl 在 V 之前就松开了，**粘贴从未发生**，

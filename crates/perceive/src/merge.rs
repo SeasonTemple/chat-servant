@@ -12,7 +12,7 @@ use crate::attribute::{Attribution, NoiseClass, Speaker};
 ///
 /// `Serialize` 是因为 UI 要渲染它——**但归并仍然只在 Rust 侧**。
 ///
-/// ## ⚠ 字段名是**契约**，不是随手起的
+/// ## 字段名是**契约**，不是随手起的
 ///
 /// 界面按 `{#each messages as m (m.id)}` 做 keyed 渲染，并显示 `m.evidence`。
 /// 这个结构**少一个字段，界面就整块空白**——而且后端日志一切正常：
@@ -53,7 +53,7 @@ fn message_id(speaker: Speaker, text: &str) -> String {
 
 /// 同一说话人的两行之间，间距小于「较高那行的行高」就并成一条。
 ///
-/// ⚠ **尚未实测**：手头这帧微信里的气泡都是单行，没测到多行气泡的真实间距。
+/// **尚未实测**：手头这帧微信里的气泡都是单行，没测到多行气泡的真实间距。
 /// 取值偏保守——宁可少并（多切几条），也不要跨气泡粘连。
 /// 拿到有换行气泡的帧后要回来重标。
 pub const MERGE_GAP_RATIO: f32 = 1.0;
@@ -135,7 +135,7 @@ pub fn merge_into_stream(prev: &[Message], new: &[Message]) -> Vec<Message> {
     if out.len() > MESSAGE_WINDOW {
         out.drain(..out.len() - MESSAGE_WINDOW);
     }
-    // ⚠ **id 必须在这份列表内部唯一。**
+    // **id 必须在这份列表内部唯一。**
     //
     // 去重只看最近 [`DEDUP_TAIL`] 条，所以「同样一句话隔很久又说一遍」
     // 会合法地共存两条，而它们的 `message_id` 是一样的。
@@ -166,7 +166,7 @@ pub fn merge_into_stream(prev: &[Message], new: &[Message]) -> Vec<Message> {
 ///
 /// ## `header_h`：只看标题栏那条带子
 ///
-/// ⚠ 这一条是**实测逼出来的**：实机日志里 `peer` 认成了 `22 ： 22`
+/// 这一条是**实测逼出来的**：实机日志里 `peer` 认成了 `22 ： 22`
 /// ——一个**时间戳**。原因是调用方传进来的 `attrs` 来自**增量 ROI**，
 /// 而 ROI 被水位线从下往上裁，标题栏常常根本不在里面；剩下几行里
 /// 恰好有一行被归成 Header，就被当成了会话名。

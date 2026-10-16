@@ -28,7 +28,7 @@
 //! 所以这个症状的正确解读是：**capture item 被系统 Closed 了**，
 //! 不是「帧还没来」，也不是 COM 初始化或消息循环有问题。
 //!
-//! ⚠ **别把它当成「环境失效」的证据。** 曾据此推断「两个实现同病，
+//! **别把它当成「环境失效」的证据。** 曾据此推断「两个实现同病，
 //! 所以是环境问题」，并一路追到窗口选择上，全错。真正的原因是
 //! `cargo xtask probe frame` 的默认方法指向 `windows-capture` 那条
 //! 已知不工作的路——同一个窗口、同一台机器，换 `wgc` crate 立刻正常
@@ -183,7 +183,7 @@ impl Worker {
             // SAFETY: 四个参数全是立即值，不传任何指针。
             // `PostThreadMessageW(tid, WM_QUIT, …)` 把等待中的消息循环叫醒；
             // 它不会投递别的消息，也不会解引用任何东西。
-            // ⚠ 只发给**自己那条**工作线程（`tid` 来自 `GetCurrentThreadId`
+            // 只发给**自己那条**工作线程（`tid` 来自 `GetCurrentThreadId`
             //   记下的同一个线程），不会影响系统里其它线程。
             unsafe {
                 let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
@@ -258,7 +258,7 @@ fn run_worker(jobs: mpsc::Receiver<Job>, tid_cell: std::sync::Arc<std::sync::Mut
                 stale = 0;
             }
             _ => {
-                // ⚠ `next()` 返回 `None` **不等于**会话死了。
+                // `next()` 返回 `None` **不等于**会话死了。
                 //
                 // WGC 只在画面变化时送帧，静态窗口下它就一直阻塞；
                 // 而被人投 WM_QUIT 叫醒同样返回 `None`。两者都会走到这里。

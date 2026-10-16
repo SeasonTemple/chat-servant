@@ -4,7 +4,7 @@
 # 「没有输出」和「扫描器坏了」在屏幕上长得一模一样。
 # 必须先证明它**抓得到**，再信它的「没抓到」。
 #
-# ⚠ 下面 $Fake 是**故意的假 key**，用于验证扫描器会拒绝它。
+# 下面 $Fake 是**故意的假 key**，用于验证扫描器会拒绝它。
 #   .githooks/pre-commit 会拦下这一行，豁免靠本行的标记。
 # secret-scan: allow
 param([string]$Fake = 'sk-xtaskscan0000probe000000000')

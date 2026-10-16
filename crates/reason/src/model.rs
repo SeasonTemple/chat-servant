@@ -104,7 +104,7 @@ impl DraftSet {
 /// 排序失败 ≠ 判断失败 ≠ 起草失败：它们的降级路径完全不同，
 /// 混成一个 `generate()` 就没法单独测「某一段挂了会怎样」。
 ///
-/// ⚠ 要能装进 `Box<dyn Reasoner>`（换真实传输时用得上），
+/// 要能装进 `Box<dyn Reasoner>`（换真实传输时用得上），
 /// 所以 trait 必须是**对象安全**的：方法只收 `&mut self` 与具体类型，
 /// 不带泛型参数、不返回 `Self`。
 pub trait Reasoner {

@@ -85,7 +85,7 @@ pub fn capture(hwnd_raw: isize) -> Result<chatservant_core::frame::Frame, PrintW
         }
 
         // SAFETY: `mem_dc`/`bitmap` 都是刚拿到且已判有效的句柄。
-        // ⚠ 与 `region::capture` 同样**故意不恢复旧位图**：
+        // 与 `region::capture` 同样**故意不恢复旧位图**：
         //   DC 是「用完就删」的一次性资源。
         unsafe {
             let _old = SelectObject(mem_dc, bitmap.into());
@@ -140,7 +140,7 @@ unsafe fn read_rgb(
     // `biWidth: w` → 每行 `w*4`；请求 `h` 行 → 共 `w*h*4`。
     // `bgra` 恰好分配 `w*h*4`，不多不少。
     //
-    // ⚠ 这里 `biHeight` 取**正数**（`region::capture` 取负数）：两次的
+    // 这里 `biHeight` 取**正数**（`region::capture` 取负数）：两次的
     //   `BITMAPINFO` 写法不一致是有意的——本函数靠 `bgra` 分配与
     //   `CreateCompatibleBitmap(window_dc, 0, 0)` 的实际尺寸对齐，
     //   方向对不上只会画面翻转，不是安全问题。

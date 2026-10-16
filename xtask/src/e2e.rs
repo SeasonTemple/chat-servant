@@ -342,7 +342,7 @@ pub fn run<R: Reasoner + ?Sized, I: Injector, B: Readback>(
     passed.push(Stage::Anchor);
 
     // ── 4 OCR ──
-    // ⚠ **必须走 `read_lines`，不能自己裁一块再调 OCR。**
+    // **必须走 `read_lines`，不能自己裁一块再调 OCR。**
     // 这里原本复制了一份「裁剪 + OCR」，产品管线改了它不跟着改，
     // 于是探针测的还是已经不存在的旧路——诊断命令证明不了任何事。
     // 和 `probe frame` 默认路径指向坏实现是同一类病。
@@ -438,7 +438,7 @@ pub fn run<R: Reasoner + ?Sized, I: Injector, B: Readback>(
 
     if !inject {
         // 只跑到起草。`--dry-run` 用它：不碰用户的输入框。
-        // ⚠ 此刻**没有注入、也没有回读**——报告里不许出现「回读相等」。
+        // 此刻**没有注入、也没有回读**——报告里不许出现「回读相等」。
         return Ok(ChainOutput {
             anchor,
             messages,
@@ -628,7 +628,7 @@ mod tests {
         assert!(r >= SIMILARITY_OK, "错一个字就只有 {r:.2}，会误报失败");
     }
 
-    /// ⚠ **这条是整段回读逻辑的底线**：空输入框不能被判成「投递成功」。
+    /// **这条是整段回读逻辑的底线**：空输入框不能被判成「投递成功」。
     ///
     /// 实测（2026-10-07）：微信输入框为空时，OCR 只读出 `0` 和「发送」。
     /// 若判据写成「回读剪贴板 == 注入内容」就**恒等**，空输入框照样通过——

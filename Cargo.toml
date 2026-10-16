@@ -37,7 +37,7 @@ future-incompatible = "warn"
 missing_docs = "warn"
 # 每个 `unsafe` 块必须带 `// Safety:` 说明为什么安全。
 #
-# ⚠ 这里**不用** `unsafe_code = "forbid"`。它做不到想要的效果：
+# 这里**不用** `unsafe_code = "forbid"`。它做不到想要的效果：
 # Cargo **不允许**同一个 package 既写 `lints.workspace = true` 继承工作区、
 # 又用 `[lints.rust]` 覆盖其中一项——报 "cannot override workspace.lints in lints"。
 # 也就是说「三个纯 crate forbid、capture 不 forbid」在 manifest 层面
@@ -50,7 +50,7 @@ missing_docs = "warn"
 # 每处 `unsafe` 都必须写清楚为什么安全，这比"另外三个 crate 全面禁止"
 # 更有价值：它管住了**唯一真正有 unsafe 的地方**。
 #
-# ⚠ 这两条是 **clippy** 的 lint、不是 rustc 的，必须带 `clippy::` 前缀，
+# 这两条是 **clippy** 的 lint、不是 rustc 的，必须带 `clippy::` 前缀，
 # 而且必须写在下面的 `[workspace.lints.clippy]` 段里。
 # 写成裸名字 cargo 会报 "lint name is deprecated and may not have an effect"。
 
@@ -122,7 +122,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # 而这份程序是**单机、离线、零 token** 的——多一个运行时就是多一个装不上的理由。
 #
 # 许可证 MIT OR Apache-2.0（`cargo info` 核实过），符合 ADR-0003 的门槛。
-# ⚠ 模型权重（RapidOCR，PP-OCRv4 的 ONNX 导出）约 16MB，**不提交进仓库**，
+# 模型权重（RapidOCR，PP-OCRv4 的 ONNX 导出）约 16MB，**不提交进仓库**，
 # 运行时从 `%APPDATA%\dev.chatservant.app\models\` 读；没放就退回
 # `Windows.Media.Ocr`，而不是启动失败。
 tract-onnx = "0.23"
@@ -153,7 +153,7 @@ strip = true
 # 但不再携带完整类型与变量信息。`0` 会把行号表也砍掉，断点直接失效——
 # 那等于把调试能力换成了空间，不划算。
 #
-# ⚠ 用 `-D warnings` 的门禁跑不到这里；`debug` 不影响正确性，
+# 用 `-D warnings` 的门禁跑不到这里；`debug` 不影响正确性，
 # 只影响产物大小和调试体验，所以它不属于 lint 策略那一层。
 [profile.dev]
 debug = 1
@@ -178,7 +178,7 @@ debug = 1
 # 本项目的日常改动大头在前端（`.svelte` / `.css` 走 Vite HMR，不碰这里），
 # Rust 侧改动频率低，这个代价可以接受。
 #
-# ⚠ 改 `[profile.*]` 任何一项都会让**整份产物重编、旧的一整套整体留下**。
+# 改 `[profile.*]` 任何一项都会让**整份产物重编、旧的一整套整体留下**。
 #    所以改这一行之前先 `cargo clean --profile dev`，否则 target 会短暂翻倍。
 incremental = false
 

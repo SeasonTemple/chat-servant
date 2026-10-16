@@ -1,6 +1,6 @@
 # 票据勾选状态审计。
 #
-# ⚠ **为什么不能用 Select-String**（2026-10-13 实测翻车）：
+# **为什么不能用 Select-String**（2026-10-13 实测翻车）：
 #   同一份命令，早先报「票 20 = 0 已勾 / 14 未勾」，而文件正文里明明有 16 个
 #   `[x]`。用 PS 的 `Select-String -Encoding UTF8` 走一遍仍不可靠——它的
 #   路径/编码处理在中文文件名 + 连字符混合时给过假数字。
@@ -19,7 +19,7 @@ foreach ($f in Get-ChildItem $dir -Filter *.md | Sort-Object Name) {
     $t = [IO.File]::ReadAllText($f.FullName)
     $done = ([regex]::Matches($t, '(?m)^\s*- \[x\]')).Count
     $todo = ([regex]::Matches($t, '(?m)^\s*- \[ \]')).Count
-    # 「⛔ 未验」是本仓约定的「做不了，只能留给本机」的标记。
+    # 「未验」是本仓约定的「做不了，只能留给本机」的标记。
     $blocked = ([regex]::Matches($t, '⛔')).Count
     $rows += [pscustomobject]@{
         票      = $f.BaseName

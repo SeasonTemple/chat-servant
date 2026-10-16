@@ -68,12 +68,12 @@ impl MockUpstream {
         let sink = seen.clone();
 
         let handle = std::thread::spawn(move || {
-            // ⚠ 非阻塞 accept + 死线：测试要是根本没发请求（比如上一条断言就红了），
+            // 非阻塞 accept + 死线：测试要是根本没发请求（比如上一条断言就红了），
             // 阻塞的 accept 会把这个线程永远挂住，然后整条测试卡到 CI 超时。
             // 拿不到请求时**安静退出**比卡死好。
             listener.set_nonblocking(true).expect("能设成非阻塞");
             let deadline = Instant::now() + Duration::from_secs(20);
-            // ⚠ **必须用索引循环，不能写 `for reply in replies`。**
+            // **必须用索引循环，不能写 `for reply in replies`。**
             //
             // `for reply in replies` 是**按值移动**的，所以循环体里一句
             // `continue` 会把那条回复**消费掉**。而「这一次连接没读出完整
@@ -156,7 +156,7 @@ fn accept_before(listener: &TcpListener, deadline: Instant) -> Option<std::net::
 
 /// 从字节流里剥出一个完整请求。读不满就返回 `None`（**不猜**）。
 ///
-/// ⚠ 瞬时读失败**要重试到死线**，不能一次就放弃。
+/// 瞬时读失败**要重试到死线**，不能一次就放弃。
 ///   原来这里是 `stream.read(&mut byte).ok()?` —— 一个读超时就把整个函数
 ///   变成 `None`，于是一次抖动被放大成「回复队列错位一位」这种看着毫不
 ///   相关的后果（见 `MockUpstream::new` 里的注释）。
@@ -232,7 +232,7 @@ fn read_request(stream: &mut std::net::TcpStream, deadline: Instant) -> Option<S
 
 /// 组一个 HTTP/1.1 响应。
 ///
-/// ⚠ **`Connection: close` 不是可选的**：不开的话 reqwest 会复用连接，
+/// **`Connection: close` 不是可选的**：不开的话 reqwest 会复用连接，
 /// 于是「一次请求一次 accept」的模型在第二次就错位——服务端在等一个新连接，
 /// 客户端在同一个连接上等第二个响应，测试挂在超时上而不是挂在断言上。
 fn render(status: u16, body: &str) -> Vec<u8> {
@@ -278,7 +278,7 @@ mod tests {
     /// 这里用「连上就关、一个字节不发」稳定触发 `read_request` 返回 `None`，
     /// 不靠撞概率。
     ///
-    /// ⚠ **只给一条回复**：修好之后 mock 服务完这一条就收工，
+    /// **只给一条回复**：修好之后 mock 服务完这一条就收工，
     /// 不会为「第二条回复」空等到 20 秒死线（`Drop` 里的 join 没有超时）。
     ///
     /// 副作用是**报错形态**和别的用例不一样：把修复掐掉后，这条用例报的是

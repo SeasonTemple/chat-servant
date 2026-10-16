@@ -91,8 +91,8 @@ import sys
 import time
 from pathlib import Path
 
-# ⚠⚠ **必须自己把 stdout 钉成 UTF-8**（2026-10-16 实测踩到）。
-# 本机控制台代码页是 936(GBK)，而这个脚本的提示里有 `⇒`、`⚠` 这类
+#**必须自己把 stdout 钉成 UTF-8**（2026-10-16 实测踩到）。
+# 本机控制台代码页是 936(GBK)，而这个脚本的提示里有 `⇒`、`` 这类
 # GBK 编不出来的字符 —— Python 3.7+ 的 `print` 会在**写到一半时**抛
 # `UnicodeEncodeError: 'gbk' codec can't encode character '⇨'`，
 # 于是脚本 exit 1，而门禁那一步只参与磁盘维护、不参与 $fail。
@@ -303,7 +303,7 @@ def main():
             print(f">>> {deps_dir} not found; nothing swept")
             return 0
         # 判据的唯一来源：cargo 自己说它要用哪些产物。
-        # ⚠ 门禁运行时 `$env:CARGO_INCREMENTAL=0`，而计划列举要跑 cargo，
+        # 门禁运行时 `$env:CARGO_INCREMENTAL=0`，而计划列举要跑 cargo，
         #   环境必须一致，否则列举出来的产物集与实际使用的不符——那就会误删。
         live = live_artifacts()
         if not live:
@@ -315,7 +315,7 @@ def main():
             deps_dir, live, a.min_age_hours, a.dry_run)
 
     after = dir_size(base)
-    # ⚠ dry-run 下目录大小当然不变，所以「省了多少」只能取扫描时累加的字节数。
+    # dry-run 下目录大小当然不变，所以「省了多少」只能取扫描时累加的字节数。
     #   早先写成 `before - after`，于是 dry-run 永远报 `would free 0.0 B`——
     #   一条**永远显示「什么都不省」**的报告，比没有报告更糟。
     freed = counted if a.dry_run else before - after
@@ -328,7 +328,7 @@ def main():
               f"个既不在用、又超过 {a.min_age_hours}h 的（skipped {skipped} locked）；"
               f"{verb} {human(freed)}")
 
-    # ⚠⚠ **超了阈值却一件没扫到，必须自己喊。**
+    #**超了阈值却一件没扫到，必须自己喊。**
     # 原来这里只打 `swept 0 ... freed 0.0 B`，读起来和「一切正常」完全一样——
     # 而那正是 2026-10-16 实测到的状态：17.1 GiB、阈值 8 GiB、扫到 0 个文件。
     # 机制失效几个月没人发现，就是因为它失败时不说话。

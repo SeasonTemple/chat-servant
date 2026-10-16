@@ -7,7 +7,7 @@
 # -Encoding UTF8` 做机械替换，UTF-8 被按 ANSI 读回再写——字符已经丢了，
 # 事后无法从文件里还原。
 #
-# ⚠ **只扫项目自己的目录，不扫 git ls-files 的全量。**
+# **只扫项目自己的目录，不扫 git ls-files 的全量。**
 # `.agents/` `.claude/` `.minimax/` `.zcode/` 是 CLI 为别的运行时装的，四份
 # 共 3150 个文件；`git ls-files` 全量逐个 ReadAllText 要几十秒，而那里由
 # `skills-lock.json` 管版本，改内容不是本仓库该做的事。
@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
 $ext = '\.(rs|svelte|ts|js|md|json|toml|ps1|py|css|html|yml|yaml)$'
-# ⚠ `ui\scripts` 必须在这里（2026-10-13 补）。原先只有 `ui\src`，
+# `ui\scripts` 必须在这里（2026-10-13 补）。原先只有 `ui\src`，
 #   而 `ui/scripts/` 恰好是**中文注释最密的地方**——量具脚本
 #   （`sheetprobe.ps1` / `pencilgen.py` / `icongen.py`）每一条都在解释
 #   「为什么这么量」，全是长句中文，最经不起编码往返。

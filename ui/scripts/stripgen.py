@@ -55,7 +55,10 @@ from PIL import Image
 HERE = Path(__file__).resolve().parent.parent  # ui/
 SRC = HERE / "static" / "probe-sheet.png"
 OUT = HERE / "static" / "strip.png"
-REPORT = Path("target/probe/stripgen-report.txt")
+# ⚠ 报告写到**仓库根**的 target/probe/，不是相对当前目录 ——
+#   相对路径时从 `ui/` 跑会落成 `ui/target/probe/`，
+#   于是多出一个 gitignore 没覆盖的目录，且与其它证据图分家。
+REPORT = HERE.parent / "target" / "probe" / "stripgen-report.txt"
 
 # 九宫格每边多少源 px（源图 @2x）。
 # ⚠⚠ **这个数被实测钉死**：必须 ≥ 撕边最深处的内缩（实测 27 源 px），
@@ -76,6 +79,11 @@ SRC_W, SRC_H = 760, 1120
 # 断言用 —— 源位图哪天被换了而这个数对不上，必须当场报错而不是静默出坏图。
 EXPECT_MIN_INSET = 10   # 顶边最浅处（x=304 处实测 12，取 10 留余量）
 EXPECT_MAX_INSET = 30   # 顶边最深处（实测 27）
+
+# ⚠⚠ **撕口「深度跨度」的下限**（源 px）。判据必须是跨度而不是取值种数 ——
+#   理由与 `_straightscan.py` 的实测写在 `slice_top` 上面那段。
+#   4 源 px = 2 CSS px 的起伏，是「读起来还像撕」的下限量。
+MIN_SPAN = 4
 
 L: list[str] = []
 p = L.append
@@ -105,6 +113,56 @@ def first_opaque(px, x: int, thr: int) -> int:
         if px[x, y][3] >= thr:
             return y
     return -1
+
+
+# ── 去暗（2026-10-16 加）───────────────────────────────────────────────
+#
+# ## 要解决的是「每条撕边顶部都浮出一条黑线」
+# 用户 2026-10-16 的原话：「全部上面都多一个黑边意义何在？」
+# 那条线横贯每一张撕边纸条的顶部（`.cs-btn-mini` / `.cs-btn-ink` / `.cs-act`
+# 都一样），**它不是投影，也不是 alpha 渐变**。
+#
+# ## 证据（本仓库 `static/strip.png`，逐行量最暗像素）
+#   源 y=14  最暗 (217,197,152) a=254
+#   源 y=16  最暗 (158,123, 56) a=255   ← 不透明的深棕
+#   源 y=17  最暗 (155,120, 56) a=255
+#   源 y=18  最暗 (140,108, 52) a=255
+#   正常纸色 (238,220,174)
+# 也就是说撕边带里**画着一圈不透明的深色像素**，它们来自面板位图上
+# 撕口两侧那圈本来就有的暗纤维 —— 裁的时候被原样搬了进来。
+#
+# ## 为什么可以放心去暗（不是把质感擦掉）
+# 本文件自己的开头就写着：「真撕口的可辨识度**几乎全部来自那 6~13 CSS px 的
+# 深度与两级 alpha 过渡**」。也就是说**暗色不承载任何信息**，
+# 撕边的形状完全由 alpha 轮廓决定 ⇒ 提亮暗部不损失撕口感。
+#
+# ## 做法
+# 把外圈（= 四条带 + 四个角，厚 `slice` 源 px）的像素向纸色插值，
+# **保留 alpha**——所以撕口的参差轮廓一点不变，只是不再变黑。
+# 中央的纸芯（`fill` 区）**一个像素都不动**。
+PAPER_RGB = (238.0, 220.0, 174.0)
+DESHADE_KEEP = 0.3  # 保留多少比例的暗度：0 = 全部拉成纸色，1 = 原样
+
+
+def deshade(img: Image.Image, slice_: int) -> None:
+    """把外圈向纸色提亮，保住 alpha 轮廓。**就地修改**。"""
+    px = img.load()
+    w, h = img.size
+    hi_x, hi_y = w - 1, h - 1
+    for y in range(h):
+        for x in range(w):
+            # 只处理外圈：中央 paper 芯（`fill` 区）保持原样
+            if slice_ <= x <= hi_x - slice_ and slice_ <= y <= hi_y - slice_:
+                continue
+            r, g, b, a = px[x, y]
+            if a == 0:
+                continue
+            px[x, y] = (
+                int(round(PAPER_RGB[0] + (r - PAPER_RGB[0]) * DESHADE_KEEP)),
+                int(round(PAPER_RGB[1] + (g - PAPER_RGB[1]) * DESHADE_KEEP)),
+                int(round(PAPER_RGB[2] + (b - PAPER_RGB[2]) * DESHADE_KEEP)),
+                a,
+            )
 
 
 def build() -> None:
@@ -234,23 +292,117 @@ def build() -> None:
     # ⚠ **不许用 `transpose` 造底边/右边**：翻转后沿边方向反了，
     #   角上按 `CORNER_AT` 取样就会取到另一端 —— 而那一端正好是纸的角，
     #   撕口深达 24~52 源 px，超出 band ⇒ 角整块透明。
+    # ⚠⚠⚠ **沿边取哪一段，必须按「参差度」挑，不能取正中间。**
+    #
+    # 第一版四条边都取 `SRC_W // 2` 那一段（纸的正中间），而自检里
+    # 「渐变列 / 硬跳列」全绿看着没问题，**结果底边渲染出来是一条直线**。
+    # 出图后用 `_straightscan.py` 量到（面板截图 @2x，裁掉页面外框）：
+    #     底边  y=630/749/868（每条候选的下沿）横线段长 **224px**、最深 47
+    #     右边  x=682（每条候选的右沿）竖线段长 **155px**、最深 34
+    #
+    # 根因是**样本选得平**，不是裁剪做得平：
+    #   纸的撕口深度**逐点变化**，而正中间那 128px 恰好是平台段 ——
+    #     底边 27~29（跨度 **2** 源 px = 1 CSS px）
+    #     右边 14~18（跨度 **4** 源 px = 2 CSS px）
+    #   1~2 CSS px 的起伏在屏幕上就是一条直线，与画一条线无异。
+    #
+    # ⚠⚠ **「有渐变 / 有硬跳」这条判据抓不住它。** 平台段的渐变列照样很多
+    #   （底边 63/64），「深度取值 ≥3 种」也照样过（27/28/29 三种）——
+    #   它只在**相邻两点差 1** 时完全失效。
+    #   ⇒ 判据必须是**跨度**，不是取值种数。
+    #
+    # 同一张纸的其它窗口（`_tearwindow2.py` 实测，约束：深度 ≤ 30，
+    # 保证带内每列都还留着纸；SPAN=128 源 px）：
+    #     边    正中间（原来）        最参差窗口（起点/深度/跨度）
+    #     顶    x=316  14~20  跨度 6   x=606  12~29  跨度 17
+    #     底    x=316  27~29  跨度 2   x=185  19~30  跨度 11
+    #     左    y=496  11~21  跨度 10   y=24    7~30  跨度 23
+    #     右    y=496  14~18  跨度 4   y=855   4~27  跨度 23
+    # ⇒ 跨度提高 3~6 倍。折成 CSS px：底边从 ±0.5 到 **±2.75**，
+    #   左右从 ±2 到 **±5.75**。
+    #
+    # ⚠ **仍然是裁自面板自己的位图**，一个像素都没合成 ——
+    #   变的只是「取哪一段」，一致性依旧靠同源维持。
+    DEPTH_CAP = band - 2   # 深度上限：超出则该列在带内**一片纸都没有**
+
+    # 每条边选中的窗口起点（源 px）。`pick_window` 惰性填，之后的
+    # 「逐字节相同」自检要拿它重新 crop 一次源图来比。
+    win: dict[str, int] = {}
+
+    def edge_depths(name: str) -> list[int]:
+        """整条边逐点的撕口深度（从画布外沿算起）。"""
+        out: list[int] = []
+        if name == "top":
+            for x in range(SRC_W):
+                out.append(next((y for y in range(SRC_H)
+                                 if px[x, y][3] >= thr), -1))
+        elif name == "bottom":
+            for x in range(SRC_W):
+                y = next((y for y in range(SRC_H - 1, -1, -1)
+                          if px[x, y][3] >= thr), -1)
+                out.append(SRC_H - 1 - y if y >= 0 else -1)
+        elif name == "left":
+            for y in range(SRC_H):
+                out.append(next((x for x in range(SRC_W)
+                                 if px[x, y][3] >= thr), -1))
+        else:
+            for y in range(SRC_H):
+                x = next((x for x in range(SRC_W - 1, -1, -1)
+                          if px[x, y][3] >= thr), -1)
+                out.append(SRC_W - 1 - x if x >= 0 else -1)
+        return out
+
+    def pick_window(name: str) -> int:
+        """在整条边上滑窗，返回**中段跨度最大**的窗口起点。
+
+        ⚠⚠ **优化目标必须取中段那 `SIDE - 2 * corner` 列，不是全宽。**
+        两端的 `corner` 列会被角瓦片**整个盖掉**（见 `build_corner`），
+        它们不参与渲染 —— 拿全宽的跨度去选窗口，会选到一个
+        「两端很参差、中段是平台」的窗口：
+        实测右边就是这样，选中窗口全宽跨度 23，
+        而真正会被渲染出来的中段 `[32, 96)` 只有 **12~14（跨度 2）**。
+        ⇒ **量具与被测对象看的是不同的东西**，这类错必须从量具侧修。
+        """
+        ds = edge_depths(name)
+        lo, hi = corner, SIDE - corner
+        best: tuple[int, int] | None = None   # (中段跨度, 起点)
+        for s in range(0, len(ds) - SIDE + 1):
+            w = ds[s:s + SIDE]
+            if min(w) < 0 or max(w) > DEPTH_CAP:
+                continue          # 有整列没纸，或深到吃穿带子
+            mid = w[lo:hi]
+            span = max(mid) - min(mid)
+            if best is None or span > best[0]:
+                best = (span, s)
+        if best is None or best[0] < MIN_SPAN:
+            sys.exit(
+                f"{name} 边找不到中段跨度 ≥ {MIN_SPAN} 的合格窗口 —— "
+                f"要么这张纸的撕口整体太平（源位图换了？），"
+                f"要么 DEPTH_CAP={DEPTH_CAP} 卡得太紧。先跑 "
+                f"`ui/scripts/_tearwindow2.py` 看实际分布。"
+            )
+        p(f"  {name}边 取样窗口 起点 {best[1]}（源 px）"
+          f"中段跨度 {best[0]} 源 px = ±{best[0] / 4:.2f} CSS px")
+        win[name] = best[1]
+        return best[1]
+
     def slice_top(im: Image.Image) -> Image.Image:
-        cx = SRC_W // 2
-        return im.crop((cx - SIDE // 2, 0, cx - SIDE // 2 + SIDE, band))
+        cx = win["top"] if "top" in win else pick_window("top")
+        return im.crop((cx, 0, cx + SIDE, band))
 
     def slice_bot(im: Image.Image) -> Image.Image:
-        cx = SRC_W // 2
+        cx = win["bottom"] if "bottom" in win else pick_window("bottom")
         # ⚠ 底边的「边沿」在**下**：从下往上取 band 像素
-        return im.crop((cx - SIDE // 2, SRC_H - band, cx - SIDE // 2 + SIDE, SRC_H))
+        return im.crop((cx, SRC_H - band, cx + SIDE, SRC_H))
 
     def slice_left(im: Image.Image) -> Image.Image:
-        cy = SRC_H // 2
+        cy = win["left"] if "left" in win else pick_window("left")
         # ⚠ 竖边带的 (x, y) = (厚度, 沿边) ⇒ 输出尺寸 band × SIDE
-        return im.crop((0, cy - SIDE // 2, band, cy - SIDE // 2 + SIDE))
+        return im.crop((0, cy, band, cy + SIDE))
 
     def slice_right(im: Image.Image) -> Image.Image:
-        cy = SRC_H // 2
-        return im.crop((SRC_W - band, cy - SIDE // 2, SRC_W, cy - SIDE // 2 + SIDE))
+        cy = win["right"] if "right" in win else pick_window("right")
+        return im.crop((SRC_W - band, cy, SRC_W, cy + SIDE))
 
     top_mid = slice_top(paper)
     bot_mid = slice_bot(paper)
@@ -291,63 +443,67 @@ def build() -> None:
     #   角区本来就该被咬掉一块，`min` 会让两边的深撕口在角上叠成更深的透明。
     #   那是**对**的。可一旦角上的透明超过 `band`，那一小块就会在
     #   渲染时退化成「边上一个方缺口」—— 而那比缺角更难看。
-    #   ⇒ 角上**限制最深不超过 `band - 6`**：宁可角浅一点，
-    #     也不要角上出现「穿透」的方洞。
-    CORNER_AT = corner
-    CORNER_MAX_DEPTH = band - 6   # 角上最多咬到这里，再深就成方洞了
+    # ⚠⚠⚠ **踩坑五轮才收敛，第 ⑤ 轮才发现病根。**
+    #
+    #   ① 从纸的外角切 ⇒ 角整块透明（见上面的 895 / 1022 实测）
+    #   ② 从带的端头取 ⇒ 端头就是角，角已被撕得很深
+    #   ③ `transpose` 造底边/右边 ⇒ 沿边方向反了，取到另一端
+    #   ④ 加 `flip_x/flip_y` 想把带子转回来 ⇒ **两个 flip 都是反的**
+    #   ⑤ 现在的做法：**不翻转**，直接按「拼好之后那张图的坐标」取样
+    #
+    #   ④ 的病根值得单独记：`slice_*` 四条带子**在图里的朝向本来就不一致** ——
+    #     顶带 row 0 = 外沿、底带 row 0 = **内侧**；
+    #     左边带 col 0 = 外沿、右边带 col 0 = **内侧**。
+    #   而角瓦片贴在图上时，它自己的 `(0, 0)` **永远是最外侧那个角**。
+    #   ⇒ 一旦拿 flip 去「把带子转回来」，就得在两处分别记反/记正，
+    #     极易只改对一处；而**只改错一处的后果，面积自检看不见**（见自检一节）。
+    #
+    #   带子在图里的朝向**已经是对的**（`img.paste` 的位置就是证明），
+    #   所以按图坐标取样天然正确，不需要任何翻转。
+    CORNER_AT = corner  # 沿边方向的取样位置（中段，避开带子端头）
 
-    def build_corner(
-        hb: Image.Image, vb: Image.Image, flip_x: bool, flip_y: bool
-    ) -> Image.Image:
-        """hb 横边带（SIDE 沿边 × band 厚）；vb 竖边带（band 厚 × SIDE 沿边）。"""
+    def build_corner(hb: Image.Image, vb: Image.Image) -> Image.Image:
+        """由一条横边带与一条竖边带求交，得到一块角瓦片。
+
+        ## 两个带子的**分量顺序不同**
+
+        - `hb` 横边带形状 `(SIDE 沿边, band 厚度)` ⇒ `getpixel((沿边, 厚度))`
+        - `vb` 竖边带形状 `(band 厚度, SIDE 沿边)` ⇒ `getpixel((厚度, 沿边))`
+
+        ## 角瓦片里两个「厚度」各是什么
+
+        角瓦片的 `(x, y)` 里：
+
+        - **x = 离图左边外沿的距离** ⇒ 竖边那侧厚度取 **x**
+        - **y = 离图上边外沿的距离** ⇒ 横边那侧厚度取 **y**
+
+        两者都**直接当索引用**，因为四条带子被 paste 进图里时朝向已经对了：
+        `top_mid` / `bot_mid` 的 row `y` 正好落在图的 row `y`，
+        `left_mid` / `right_mid` 的 col `x` 正好落在图的 col `x`。
+        沿边方向一律取 `CORNER_AT`（中段，避开带子端头）。
+
+        ⚠⚠ **上一版传 `flip_x/flip_y`，而两个都是反的。**
+        症状完全对得上实测：四个角的不透明比例裂成 27/22 与 6/5 两档，
+        底角因为 `flip_y` 上下颠倒，纸跑到了外沿。
+        ⇒ **注释说「已修」不算修过，要看自检的数。**
+        """
         out = Image.new("RGBA", (corner, corner))
         op = out.load()
         for y in range(corner):
+            h = hb.getpixel((CORNER_AT, y))      # 横边：厚度 = y
             for x in range(corner):
-                h = hb.getpixel(
-                    (CORNER_AT + (corner - 1 - x if flip_x else x),
-                     corner - 1 - y if flip_y else y)
-                )
-                # ⚠ 竖边带的分量顺序与横边**相反**：
-                #   横边 (沿边, 厚度)，竖边 (厚度, 沿边)。
-                #   这一版之前两次都栽在这里 —— 写对了 flip 逻辑，
-                #   却把两个带当成同样的分量顺序，于是竖边那侧恒为 0。
-                v = vb.getpixel(
-                    (corner - 1 - y if flip_y else y,
-                     CORNER_AT + (corner - 1 - x if flip_x else x))
-                )
-                op[x, y] = (h[0], h[1], h[2], min(h[3], v[3]))
+                v = vb.getpixel((x, CORNER_AT))  # 竖边：厚度 = x
+                # alpha 取两边较小（角上被咬深是设计），
+                # 而**颜色取更不透明的那一侧** —— 角区内部属于哪条边更贴近，
+                # 用 min(alpha) 只约束透明度，RGB 该跟「更实」的那边走。
+                src = v if v[3] >= h[3] else h
+                op[x, y] = (src[0], src[1], src[2], min(h[3], v[3]))
         return out
 
-    tl = build_corner(top_mid, left_mid, False, False)
-    tr = build_corner(top_mid, right_mid, True, False)
-    bl = build_corner(bot_mid, left_mid, False, True)
-    br = build_corner(bot_mid, right_mid, True, True)
-
-    # ⚠ **角上不让它穿透。** 把角区里比 `CORNER_MAX_DEPTH` 更深的部分
-    #   补成实心纸 —— 代价是角不那么「咬」，换来的是
-    #   渲染时不会在边上留下一个方缺口。
-    # ⚠ 这么做算「合成像素」吗：**算，而且是明说的**。
-    #   本文件开头的原则是「四条边不合成任何像素」，
-    #   而这一处是例外：角是四边之外的第五个部件，
-    #   它的正确形态取决于渲染时的 `stretch` 接缝，光靠采样给不出来。
-    #   宁可一处有据可查的补齐，也不要一个说不清的方洞。
-    for cimg in (tl, tr, bl, br):
-        cp = cimg.load()
-        for y in range(corner):
-            for x in range(corner):
-                a = cp[x, y][3]
-                if a > 0 and a < 40 and (x + y) > CORNER_MAX_DEPTH:
-                    # 太深 ⇒ 用同一行里最近的不透明像素补
-                    for k in range(corner - 1, -1, -1):
-                        if k <= CORNER_MAX_DEPTH and cp[x, k][3] >= 245:
-                            cp[x, y] = (*cp[x, k][:3], 254)
-                            break
-
-    tl = build_corner(top_mid, left_mid, False, False)
-    tr = build_corner(top_mid, right_mid, True, False)
-    bl = build_corner(bot_mid, left_mid, False, True)
-    br = build_corner(bot_mid, right_mid, True, True)
+    tl = build_corner(top_mid, left_mid)
+    tr = build_corner(top_mid, right_mid)
+    bl = build_corner(bot_mid, left_mid)
+    br = build_corner(bot_mid, right_mid)
 
     # 先贴四条中段（条状），**再**贴四角盖住它们的端头。
     # ⚠ 顺序反了会被中段把角上撕口的参差盖掉 —— 那正是接缝露硬边的地方。
@@ -420,10 +576,7 @@ def build() -> None:
         #   而那些列在**面板自己的位图上本来就没有渐变**
         #   （撕口有的地方纤维整根崩掉，直接从透明跳到实心）。
         #   ⇒ 那是真撕口的正常形态，被我判成了缺陷。
-        #   判据改成：带内**整体**必须既有渐变列也有硬边列
-        #   （全渐变 = 被 LANCZOS 平滑过；全硬边 = 没撕口）。
         n = hi_i - lo_i
-        p(f"    渐变列 {ramp_cols}/{n}   硬跳列 {hard_cols}/{n}")
         # ⚠⚠ **没有绝对阈值** —— 每条边的「齐」程度不同，
         #   而那条基准是**面板自己的边**（`_tearprobe.py` 实测）：
         #     顶边内缩 12~25（众数 21）  起伏明显
@@ -431,19 +584,32 @@ def build() -> None:
         #     **底边内缩 20~31（众数 28）  面板自己就很齐**
         #   ⇒ 「渐变列 63/64」对底边是**面板同款**，不是缺陷。
         #   上一版用 `> 0.95` 判死，于是把底边判成「均匀的斜坡」。
-        #   ⇒ 这里只拦**真正平滑掉**的那一种：
-        #     深度取值 ≤ 2 种（完全齐）或渐变列 == n（连硬跳都没有）。
         # ⚠ `uniq` 必须在这里重算 —— 它在调用方算的，
         #   而 `check()` 拿不到那个作用域（第一版直接引用报
         #   `TypeError: '<=' not supported between 'list' and 'int'`，
         #   脚本崩在自检里，报告还留在上一轮 ⇒ 看到的是**旧结论**）。
-        uniq = len({d for d in prof_first if d >= 0})
-        if uniq <= 2:
-            p(f"    ❌ 深度只有 {uniq} 种取值 —— 完全齐平，那是直线不是撕口")
+        good = [d for d in prof_first if d >= 0]
+        uniq = len(set(good))
+        span = max(good) - min(good)
+        # ⚠⚠⚠ **判据是「跨度」，不是「取值种数」。**
+        #   底边原来那段的深度是 27/28/29 —— 三种取值、渐变列 63/64，
+        #   「取值 ≥3 种」全过，可它**跨度只有 2 源 px（1 CSS px）**，
+        #   渲染出来就是一条直线（`_straightscan.py` 实测横线段长 224px）。
+        #   ⇒ 相邻两点只差 1 时，「种数」这条判据完全失效。
+        if uniq <= 2 or span < MIN_SPAN:
+            p(f"    ❌ 深度跨度只有 {span} 源 px（{uniq} 种取值）—— "
+              f"那是直线不是撕口（判据：跨度 ≥ {MIN_SPAN} 源 px）")
             ok = False
-        if ramp_cols == n and hard_cols == 0:
-            p(f"    ❌ 没有一处硬跳 —— 撕口被平滑掉了")
-            ok = False
+        # ⚠⚠ **「没有一处硬跳」这条判据已删除（2026-10-16）。**
+        #   它要拦的是 LANCZOS 把撕口抹平，而**当前管线里根本没有 resize** ——
+        #   `slice_*` 四个 crop 一个像素都不缩放（下面那条逐字节判据在盯着）。
+        #   ⇒ 「被平滑掉了」已经是结构上不可能发生的事。
+        #   留着它的代价是实测出来的：左边中段 `渐变列 64/64 硬跳列 0/64`
+        #   被判成「平滑掉了」—— 而那**正是一段真撕口的正常形态**
+        #   （纤维整根都在渐变里，没有一根是崩断的）。
+        #   ⇒ 渐变/硬跳只作为**特征读数**打印，不再当判据。
+        p(f"    渐变列 {ramp_cols}/{n}   硬跳列 {hard_cols}/{n}"
+          f"（特征读数，不是判据）")
         return ok
 
     px_s = img.load()
@@ -452,6 +618,8 @@ def build() -> None:
     p(f"   判据：撕口不许缺席 / 中间不许插空 / 渐变不许断 / 深度要起伏")
     p(f"   ⚠ 角区不查 —— 角上两道撕口相交，本来就是最深的透明区")
     all_ok = True
+    # ⚠ 每条边**自己**的撕口深度区间 —— 角的判据要用它做基准。
+    depth_range: dict[str, tuple[int, int]] = {}
     for name, axis in (("顶边", "top"), ("底边", "bottom"),
                        ("左边", "left"), ("右边", "right")):
         mid = range(band, SIDE - band)
@@ -461,38 +629,117 @@ def build() -> None:
         ]
         depths = [d for d in prof_first if d >= 0]
         uniq = sorted(set(depths))
+        depth_range[name] = (min(depths), max(depths))
         p(f"  {name} 中段: 撕口起点 {min(depths)}~{max(depths)} 源 px，"
           f"{len(uniq)} 种取值")
         if not check(name, axis, prof_first):
             all_ok = False
 
-    # 角：**只查「不能整块穿透」**（第四轮才收敛的判据）。
-    # ⚠⚠ 前三轮都在这里判错，两次方向各错一次：
+    # ── 自检：**四条带必须与源图逐字节相同** ───────────────────────
+    #
+    # ⚠⚠⚠ 本文件开头那句「本文件不合成任何像素」，原先只是一句**印出来的声明**，
+    #   没有任何东西在验证它 —— 而它恰好是本文件存在的全部理由。
+    #   历史上有过 `resize(..., LANCZOS)`、有过后续版本手工补角，
+    #   两次都破坏过它，而两次自检都是绿的。
+    #
+    # ⇒ 把它变成**可执行的判据**：把每条带的中段（两端 `corner` 列会被角瓦片
+    #   盖掉，不参与）与源图重新 crop 一次逐字节比。
+    #   只要有人再引入任何 resize / 重采样 / 合成，这里立刻红。
+    p("")
+    p("── 自检：四条带的中段必须与源图**逐字节相同**（未合成任何像素）")
+    lo_c, hi_c = corner, SIDE - corner
+    for name, band_img, box in (
+        ("顶边", top_mid, (win["top"], 0, win["top"] + SIDE, band)),
+        ("底边", bot_mid, (win["bottom"], SRC_H - band,
+                           win["bottom"] + SIDE, SRC_H)),
+        ("左边", left_mid, (0, win["left"], band, win["left"] + SIDE)),
+        ("右边", right_mid, (SRC_W - band, win["right"], SRC_W,
+                             win["right"] + SIDE)),
+    ):
+        same = band_img.crop((lo_c, 0, hi_c, band)) == paper.crop(box).crop(
+            (lo_c, 0, hi_c, band)
+        )
+        p(f"  {name}: {'✅ 逐字节相同' if same else '❌ 与源图不一致 —— 有像素被改过'}")
+        if not same:
+            all_ok = False
+
+    # 角：**查「纸落在哪一角」，不是查「有多少纸」。**
+    #
+    # ⚠⚠⚠ 前四轮都在这里判错，第五轮才想通判据该怎么写：
     #   ① 沿对角线查 ⇒ 对角线是两边最深处相交处，整条都透明 ⇒ 误判
     #   ② 沿边沿那一行查 ⇒ 边沿本来就该透明 ⇒ 误判
     #   ③ 沿「离边沿 4 px」切面查「要爬到实心」
     #      ⇒ 角区被 `min` 咬深是**设计**，而 corner 只有 32px，
     #         咬到 20px 就已经是「角上缺一块」⇒ 判据与设计对撞。
-    # ⇒ 真正要拦的只有一种：**角区整块透明**（那会让纸片四角消失，
-    #   渲染成一个方缺口）。
+    #   ④ 查「不透明像素 ≥ 45%」⇒ **几何上不可能达到**：
+    #      不透明区恒为 `{x ≥ 深度x} ∩ {y ≥ 深度y}`，
+    #      而四条边实测深度 11~29（band 只有 32），
+    #      算下来就是 5%~30%，顶角与底角**天生就在两档**。
+    #      （实测 27 / 22 / 6 / 5 四值正是这个区间的两端，不是缺陷。）
+    #   ⑤ 更糟的是 ④ **对「翻反了」完全免疫**：
+    #      翻转只把不透明矩形挪到角的**另一侧**，面积一模一样。
+    #      ⇒ 第 ④ 轮里右上/左下/右下三个角正好反了，面积自检却全绿。
+    #
+    # ⇒ 真正要查的只有**位置**，两条：
+    #   A. 紧邻纸芯的那个角点 `(corner-1, corner-1)` 必须不透明
+    #      —— 角必须与纸芯连成一体，否则渲染时接缝裂开。
+    #   B. 沿两条「紧邻纸芯的行列」各量一次撕口深度，
+    #      必须落在**该边自己中段实测的深度区间**内（±2）。
+    #      这一条同时拦掉「取样轴用错」「取到纸的外角」「角整块透明」。
+    #
+    # ⚠ B 为什么够用：`cpx[x, corner-1]` 的 alpha 恒等于竖边带在厚度 x 处的
+    #   alpha（横边带在 row `corner-1` 处是内侧、恒 254），
+    #   所以量到的就是**该边自己中段量过的同一种量**。
+    # ⚠⚠⚠ **量具自身的坐标假设也踩过一次坑。**
+    #   第一版这五条判据全写对了，却统一按「角瓦片的 (corner-1, corner-1)」
+    #   当作紧邻纸芯的角点 —— 而四个瓦片贴到图上的**朝向各不相同**：
+    #     左上瓦片在内侧的是 (31,31)，右上是 (0,31)，左下 (31,0)，右下 (0,0)。
+    #   ⇒ 三个角因此报「与纸芯没连上」，而它们其实是好的。
+    #   教训与判据 ④ 同族：**量具抄的是「基线朝向」，被测对象有 4 种朝向。**
+    #   ⇒ 下面全部按**图坐标**量，并显式把「从最外侧往里数」列成表。
     p("")
-    p("── 自检：四角只需「不整块穿透」（角被咬掉是设计）")
-    for cn, (ox, oy) in {
-        "左上": (0, 0),
-        "右上": (SIDE - 1, 0),
-        "左下": (0, SIDE - 1),
-        "右下": (SIDE - 1, SIDE - 1),
-    }.items():
-        opaque = sum(
-            1 for y in range(corner) for x in range(corner)
-            if px_s[ox + (x if ox == 0 else -x),
-                    oy + (y if oy == 0 else -y)][3] >= 245
-        )
-        ratio = opaque / (corner * corner)
-        ok = ratio >= 0.45
-        p(f"  {cn}: 不透明像素 {opaque}/{corner * corner} = {ratio:.0%}  "
-          f"{'✅' if ok else '❌ 角区几乎全透明 —— 渲染会出方缺口'}")
-        if not ok:
+    p("── 自检：四角的纸必须落在**紧邻纸芯的那一角**（查位置，不查面积）")
+    TOL = 2
+    for cn, (ox, oy) in (
+        ("左上", (0, 0)),
+        ("右上", (SIDE - corner, 0)),
+        ("左下", (0, SIDE - corner)),
+        ("右下", (SIDE - corner, SIDE - corner)),
+    ):
+        h_edge = "顶边" if oy == 0 else "底边"
+        v_edge = "左边" if ox == 0 else "右边"
+        # 从角上**最外侧**那一列/行往里数 ⇒ 两边的刻度方向统一了
+        cols = [ox + k for k in range(corner)]
+        rows = [oy + k for k in range(corner)]
+        if ox != 0:
+            cols.reverse()
+        if oy != 0:
+            rows.reverse()
+        inner_row = rows[-1]      # 紧邻纸芯的那一行
+        inner_col = cols[-1]      # 紧邻纸芯的那一列
+        inner = px_s[inner_col, inner_row][3]
+        d_v = next((k for k, c in enumerate(cols)
+                    if px_s[c, inner_row][3] >= 200), -1)
+        d_h = next((k for k, r in enumerate(rows)
+                    if px_s[inner_col, r][3] >= 200), -1)
+        lo_v, hi_v = depth_range[v_edge]
+        lo_h, hi_h = depth_range[h_edge]
+        opaque = sum(1 for r in rows for c in cols
+                     if px_s[c, r][3] >= 245)
+        bad: list[str] = []
+        if inner < 245:
+            bad.append(f"紧邻纸芯的角点 alpha={inner}，角与纸芯**没连上**")
+        if not (lo_v - TOL <= d_v <= hi_v + TOL):
+            bad.append(f"{v_edge}侧深度 {d_v} 不在 {lo_v}~{hi_v}±{TOL} 内")
+        if not (lo_h - TOL <= d_h <= hi_h + TOL):
+            bad.append(f"{h_edge}侧深度 {d_h} 不在 {lo_h}~{hi_h}±{TOL} 内")
+        p(f"  {cn}: 不透明 {opaque}/{corner * corner} = {opaque / (corner * corner):.0%}"
+          f"（仅供参照，不是判据）  {v_edge}深 {d_v}[{lo_v}~{hi_v}]"
+          f"  {h_edge}深 {d_h}[{lo_h}~{hi_h}]  "
+          f"{'✅' if not bad else '❌ ' + bad[0]}")
+        for extra in bad[1:]:
+            p(f"       ❌ {extra}")
+        if bad:
             all_ok = False
 
     if not all_ok:
@@ -503,6 +750,7 @@ def build() -> None:
     p("  ⇒ ✅ 四条边的撕口形状都合格")
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
+    deshade(img, SLICE)
     img.save(OUT)
 
     p("")

@@ -33,7 +33,7 @@ tract-onnx.workspace = true
 [lints]
 workspace = true
 #
-# ⚠ **这里不 forbid unsafe。** 2026-10-10 实测：本 crate 有 51 处
+# **这里不 forbid unsafe。** 2026-10-10 实测：本 crate 有 51 处
 # `unsafe`——`SendInput`、`OpenClipboard`、COM 激活，全是 Win32 FFI，
 # 绕不开。所以工作区级别的 `unsafe_code = "forbid"` 只能加在
 # core / perceive / reason 那三个纯逻辑 crate 上。
