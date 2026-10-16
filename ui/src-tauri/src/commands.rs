@@ -120,12 +120,19 @@ struct AppState {
 /// · 换轮了（`ticks` 变了）——上一轮的候选已经不是这一轮的候选了；
 /// · 档位变了。
 ///
-///**它只挡「同一条被重复发」，不表示「已装填」**（2026-10-15）。
+///## 它只挡「同一条被重复发」，不表示「已装填」**（2026-10-15）。
 /// 砍掉两段式之后生产里只有一个调用点（`dispatch` 的 `Auto` 分支），
 /// 用法是「这一轮这条候选发过了没有？」
 /// 文档跟着实现走之前，这里曾经写着「装填。返回 `false` 表示之前那次装填
 ///   已经作废」——而 `arm` 返回 `true` 的含义是**这条已经发过了、拒绝重发**。
 ///   一个把「拒绝」写成「放行」的注释，会让下一个人以为重发是被鼓励的。
+///
+/// ⚠ **「发出去了」曾经被当成第三种失效条件，那一行代码已删（2026-10-18）。**
+///   本节一直只列了上面两条，而 `dispatch` 的 `Auto` 分支却在发完之后
+///   多清了一次——那是**两段式时代的遗物**（那时记的是「已装填」，用完即弃）。
+///   语义换成「本轮已发过」之后，「发完就擦」= 同一条真消息发两遍。
+///   ⇒ **本节这两条就是全部**，别再加第三种。守卫见
+///   `send_path_guard_tests::sending_does_not_clear_the_record_it_just_wrote`。
 ///
 /// ## 为什么记的是「一整个列表」而不是「最近那一条」
 ///
@@ -356,12 +363,24 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
         // 「上一步已经装填过了」，而 `Auto` 档**没有上一步**。
         // 用错会得到「回执说发成功了，输入框里其实什么都没有」。
         let receipt = deliver_send(hwnd, &candidate_id);
-        if let Ok(mut g) = STATE.lock()
-            && let Some(s) = g.as_mut()
-        {
-            // 这一轮的防重记录已经用掉了，换候选要重新 arm。
-            s.armed.disarm();
-        }
+        //**这里原来紧跟着一句 `armed.disarm()`，2026-10-18 删掉了。**
+        //
+        // `arm` 在**发送被尝试之前**就把 `candidate_id` 记进了本轮
+        //（就是上面算 `already` 那一段）。发完立刻清掉，等于自己把刚写下的
+        // 记录擦掉：同一轮里再点同一条，`arm` 看到空表 ⇒ 放行 ⇒
+        // **同一条真消息发了第二遍**。而这个函数自己给用户的回执写着
+        // 「这条候选本轮已经发送过了，没有重复发」——说的和做的不一致。
+        //
+        // 它那句注释「这一轮的防重记录已经用掉了，换候选要重新 arm」
+        // 是**两段式时代的遗物**：那时 `Arming` 记的是「已装填」，
+        // 用完即弃是对的；2026-10-15 砍掉 `Confirm` 之后 `sent` 的语义
+        // 变成「本轮已发过」，用完即弃就从「防重」变成了「自废武功」。
+        //
+        // 换候选本来也不需要清：`sent` 存的是**一整个列表**，
+        // `arm(c1)` 只看 c1 在不在里面（`dedupe_survives_switching_to_another_candidate`）。
+        // 该作废的地方是**改档**（`apply_tier`）与**换轮**（`arm` 自己比 ticks）。
+        //
+        // 守卫：`send_path_guard_tests::sending_does_not_clear_the_record_it_just_wrote`。
         let next = d.next(receipt.clone(), 0);
         return DispatchReply {
             outcome: outcome_name(&receipt),
@@ -2752,5 +2771,401 @@ mod mark_shape_tests {
         assert_eq!(MarkShape::default(), MarkShape::Tick);
         // 连落盘那一行一起钉住，避免默认值与 `mark_shape_str` 同侧漂移。
         assert_eq!(mark_shape_str(MarkShape::default()), "tick");
+    }
+}
+
+/// 「回车是唯一的不可逆动作」——全仓穷举它的门。
+///
+/// ## 为什么要有这一组（票 20 剩下的验收项）
+///
+/// 那条未勾项原文是「真机上除 `Auto` 档外没有任何路径会发出去」。
+/// 当时判它不可自动化，理由是要人在真机上点一遍——**但那条推理只对
+/// 可见后果成立，对代码结构不成立**：
+///
+/// · 「哪些代码会按下回车」可以数完：`inject::press_enter` 是全仓唯一
+///   发送 `VK_RETURN` 的地方，它 `pub`，所以任何 crate 都能调它；
+/// · 「谁能走到那个按键」也可以数完：`fill_and_send` 只在 `deliver_send`
+///   一扇门后面，而 `deliver_send` 只有两个调用者，都在 `Auto` 上。
+///
+/// ⇒ 这一组把前两件事钉死。**第三件仍然只能由人看**：那句话有没有
+/// 出现在对方的聊天窗口里，机器验不了。
+///
+/// ## 为什么不数「发送」而数「按回车」
+///
+/// 因为回车是**唯一**不可撤销的动作（填进去的字可以删，发出去的消息不能）。
+/// 数它比数函数调用更接近要守的不变量：任何将来新增的发送路径，
+/// 只要最后要按回车，就一定落进这几条断言里。
+#[cfg(test)]
+mod send_path_guard_tests {
+    use super::*;
+
+    /// 一个被数出来的调用点。
+    #[derive(Debug)]
+    struct Hit {
+        /// 相对工作区根的路径——断言消息里要能直接点开。
+        file: String,
+        line: usize,
+        /// 所在函数。**这才是断言的主体**：「在哪个文件」不够，
+        /// 「在不在 `deliver_send` 里」才是。
+        func: String,
+        /// 那一行的代码（已去缩进）。判据要看实参时用。
+        text: String,
+    }
+
+    impl std::fmt::Display for Hit {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{}:{}（{}）{}",
+                self.file, self.line, self.func, self.text
+            )
+        }
+    }
+
+    /// 工作区根。`ui/src-tauri` 往上两层。
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("ui/src-tauri 必须嵌在工作区里两层之内")
+            .to_path_buf()
+    }
+
+    /// 要数的目录：三个 crate 的 `src` + 界面外壳的 `src`。
+    ///
+    /// ⚠ **不数 `target/` / `.scratch/` / `examples/`。** 那些不是产品代码，
+    /// 数进去会让「全仓穷举」这句话失去意义——尤其 `examples/` 里那份
+    /// 被替代的 Python 参考实现，它有自己的一套注入逻辑。
+    fn source_roots() -> Vec<std::path::PathBuf> {
+        let root = repo_root();
+        let mut v = vec![
+            root.join("crates"),
+            root.join("xtask").join("src"),
+            root.join("ui").join("src-tauri").join("src"),
+        ];
+        v.retain(|p| p.is_dir());
+        v
+    }
+
+    /// 砍掉第一个 `#[cfg(test)]` 之后的内容。**测试里的调用不是产品路径。**
+    ///
+    /// 三个 crate 的 `src/lib.rs` 与外壳的 `main.rs` 都是「生产代码在前、
+    /// 测试模块在后」，所以从第一个 `#[cfg(test)]` 切是对的。
+    fn production(text: &str) -> &str {
+        match text.find("#[cfg(test)]") {
+            Some(i) => &text[..i],
+            None => text,
+        }
+    }
+
+    fn rs_files(dir: &std::path::Path, acc: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                rs_files(&p, acc);
+            } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                acc.push(p);
+            }
+        }
+    }
+
+    /// 第 `idx` 行**往上**最近的那个函数名。
+    ///
+    /// ⚠ 必须同时认行首的 `fn x(` 与 `pub fn x(`：只认带空格的
+    /// `" fn "` 会漏掉本文件里所有**私有**函数（`deliver`、
+    /// `deliver_send`、`apply_tier` 都是裸 `fn`），于是它们会被算到
+    /// 上一个 `pub fn` 头上——守卫会以一个错的名字红，指向错的地方。
+    fn enclosing_fn(lines: &[&str], idx: usize) -> String {
+        for l in lines[..=idx].iter().rev() {
+            let t = l.trim();
+            if t.ends_with('{') && (t.starts_with("fn ") || t.contains(" fn ")) {
+                let head = t.trim_end_matches('{');
+                let after = head.rsplit(" fn ").next().unwrap_or(head);
+                let name = after.strip_prefix("fn ").unwrap_or(after);
+                return name.split('(').next().unwrap_or(name).trim().to_string();
+            }
+        }
+        "<不在任何函数里>".to_string()
+    }
+
+    /// **生产代码里 `symbol(` 出现在哪些行。**
+    ///
+    /// 三个过滤缺一不可，少一个结论就会反过来：
+    /// · `#[cfg(test)]` 之后的不算——测试里的调用不是产品路径；
+    /// · **注释行不算**——本文件里到处写着「`fill_and_send` 只被
+    ///   `deliver_send` 调」，把说明当调用点，这条守卫会自己把自己判红；
+    /// · `fn symbol(` 那一行是定义，不是调用。
+    fn call_sites(symbol: &str) -> Vec<Hit> {
+        let root = repo_root();
+        let mut files = Vec::new();
+        for d in source_roots() {
+            rs_files(&d, &mut files);
+        }
+        let needle = format!("{symbol}(");
+        let mut out = Vec::new();
+        for p in &files {
+            let Ok(text) = std::fs::read_to_string(p) else {
+                continue;
+            };
+            let lines: Vec<&str> = production(&text).lines().collect();
+            for (n, line) in lines.iter().enumerate() {
+                let t = line.trim();
+                if t.starts_with("//") || !t.contains(&needle) {
+                    continue;
+                }
+                if t.contains(&format!("fn {symbol}(")) {
+                    continue;
+                }
+                out.push(Hit {
+                    file: p.strip_prefix(&root).unwrap_or(p).display().to_string(),
+                    line: n + 1,
+                    func: enclosing_fn(&lines, n),
+                    text: t.to_string(),
+                });
+            }
+        }
+        out.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+        out
+    }
+
+    /// 某个工作区相对路径的**生产代码**逐行。找不到就当场炸——
+    /// 「找不到」在这里等于「守卫悄悄什么都没查」。
+    fn production_lines(rel: &str) -> Vec<String> {
+        let p = repo_root().join(rel);
+        let text =
+            std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("读不到 {}：{e}", p.display()));
+        production(&text).lines().map(str::to_string).collect()
+    }
+
+    /// **按回车只有一处、只有一个人调它。**
+    ///
+    /// `press_enter` 是全仓唯一发送 `VK_RETURN` 的地方，而它是 `pub`——
+    /// 也就是说**任何 crate 都能调它**。这条守卫的作用是让「多一扇门」
+    /// 当场红，而不是等人把消息发进真人的窗口里才发现。
+    #[test]
+    fn pressing_enter_has_exactly_one_caller() {
+        let sites = call_sites("press_enter");
+        assert_eq!(
+            sites.len(),
+            1,
+            "按回车只允许一个调用点（`inject::fill_and_send` 里那一处），现在有：\n{}",
+            sites
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert_eq!(
+            sites[0].func, "fill_and_send",
+            "按回车的人必须是 `fill_and_send`，现在是「{}」——{sites:?}",
+            sites[0].func
+        );
+    }
+
+    /// **能走到回车的门恰好两扇，且都在命令层里。**
+    ///
+    /// `fill_and_send` 是全仓唯一会按回车的公开入口，它的调用点必须在
+    /// `deliver_send` 里；而 `deliver_send` 的调用点只能在 `dispatch`
+    /// （`Auto` 档点候选）与 `auto_send`（观察循环自动发）里——这两个都
+    /// 是 `Auto` 档专属的路径，见 `AutoGate::may_auto_send`。
+    ///
+    /// ⚠ **`deliver` 里那处「按 `send` 分支」今天进不去**：它唯一的调用点
+    /// 传的是 `false`（下一条守卫钉的就是这个实参）。这里仍然把它列进
+    /// 「两扇门」，是因为**如实描述现状**：门在那儿，钥匙没插。
+    /// 谁哪天把那个 `false` 改成 `true`，下一条守卫会当场红——
+    /// 这比删掉分支更早发现「有人打开了 Manual 的发送开关」。
+    #[test]
+    fn only_two_doors_can_reach_the_enter_key() {
+        let senders = call_sites("fill_and_send");
+        let mut doors: Vec<String> = senders.iter().map(|h| h.func.clone()).collect();
+        doors.sort();
+        assert_eq!(
+            doors,
+            vec!["deliver".to_string(), "deliver_send".to_string()],
+            "能按回车的门必须恰好是 `deliver`（当前不可达）与 `deliver_send`（Auto 专用），现在有：\n{}",
+            senders
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert!(
+            senders
+                .iter()
+                .all(|h| h.file.replace('\\', "/") == "ui/src-tauri/src/commands.rs"),
+            "按回车的调用点跑到了命令层之外：{senders:?}"
+        );
+
+        let callers = call_sites("deliver_send");
+        let mut who: Vec<String> = callers.iter().map(|h| h.func.clone()).collect();
+        who.sort();
+        assert_eq!(
+            who,
+            vec!["auto_send".to_string(), "dispatch".to_string()],
+            "`deliver_send` 只能被 `dispatch`（Auto 档点候选）与 `auto_send`（自动发送）调，现在有：{callers:?}"
+        );
+    }
+
+    /// **`Manual` 那条路拿不到「按回车」的开关。**
+    ///
+    /// `deliver` 有个 `send: bool` 参数，它**唯一**的调用点传的是 `false`。
+    /// 这是硬约束第 5 条「默认档下程序不替人说话」在代码里最靠里的那一格，
+    /// 也是票 20 那条验收项能自动化的一多半。
+    ///
+    /// ⚠ 钉实参看起来像钉实现细节，这里要区分一下：可变的不是「参数长什么样」，
+    /// 而是**这个实参是不是 `false`**。改成 `true` 意味着 `Manual` 档
+    /// 第一次点击就把消息发进真人的窗口——那是安全模型的实质变更，
+    /// 必须在票与 `docs/设计规范.md` 上留下痕迹，而不是顺手改掉。
+    #[test]
+    fn no_manual_path_can_be_told_to_send() {
+        let sites = call_sites("deliver");
+        assert_eq!(
+            sites.len(),
+            1,
+            "`deliver` 只该有一个调用点（`dispatch` 里的 Manual 分支），现在有：{sites:?}"
+        );
+        assert_eq!(sites[0].func, "dispatch", "调用点在 {}", sites[0].func);
+        assert!(
+            sites[0].text.contains(", false)"),
+            "Manual 路径必须传 `send = false`（`Manual` 只填入、不回车），实际那一行是：{}",
+            sites[0].text
+        );
+    }
+
+    /// **改档只经过 `apply_tier` 一条路。**
+    ///
+    /// `changing_tier_disarms` 直接调 `apply_tier`，守的是「改档清防重记录」
+    /// 那段逻辑本身。但**生产上的改档入口是不是真的走了那条路**，它管不着：
+    /// 哪天有人把 `set_tier` 改成直接写档位格子，那条守卫照样全绿，
+    /// 而「改档 ⇒ 记录作废」已经悄悄失效。
+    ///
+    /// 这正是票 20 记的「复印件不是守卫」的下一层：**连接线本身也要被数**。
+    /// 判据落在 `TierCell::set` 的调用点上——它是全仓唯一能改档的动作。
+    #[test]
+    fn the_only_way_to_change_the_tier_goes_through_apply_tier() {
+        let sites = call_sites("tier.set");
+        assert_eq!(
+            sites.len(),
+            1,
+            "`TierCell::set` 只允许 `apply_tier` 一处调用（改档必须清防重记录），现在有：{sites:?}"
+        );
+        assert_eq!(
+            sites[0].func, "apply_tier",
+            "改档必须经过 `apply_tier`，现在写在 {} 里——{sites:?}",
+            sites[0].func
+        );
+    }
+
+    /// **发完消息不许擦掉自己刚写下的防重记录。**（2026-10-18 补这条守卫）
+    ///
+    /// 这条守的是一个**已经真发出去过**的缺陷。`dispatch` 的 `Auto` 分支
+    /// 过去长这样：`arm(c0)` 放行 → `deliver_send` 真的按了回车 →
+    /// 紧接着 `armed.disarm()` 把本轮记录清空。于是同一轮里再点同一条，
+    /// `arm` 看到空表又放行 ⇒ **同一条真消息发出第二遍**，撤不回来。
+    ///
+    /// 为什么既有守卫没抓到：`the_same_candidate_cannot_be_sent_twice_in_one_round`
+    /// 测的是 `Arming` **这个数据结构**本身，序列恰好写成
+    /// `arm → arm → disarm → arm`，**和生产的 `arm → 发 → disarm` 长得不一样**。
+    /// 数据结构没毛病，毛病在**谁在什么时候调它**——
+    /// 又一次「复印件不是守卫」，这次复印的是调用顺序。
+    ///
+    /// 所以判据是**「从按回车那一行到 `Auto` 分支 `return` 之间不许出现 `disarm(`」**。
+    ///
+    /// ⚠ 第一版写成「`dispatch` 里那处 `disarm` 的行号必须小于 `deliver_send` 的」，
+    ///   结果**当场把自己判红**——`Manual` 分支那处合法的「装填前清干净」
+    ///   在行号上本来就排在 `Auto` 分支的 `deliver_send` **之后**
+    ///   （`Auto` 已经 `return` 了，代码上仍在同一个函数体里）。
+    ///   ⇒ 行号顺序在这里**不是**判据，「同一段里有没有」才是。
+    #[test]
+    fn sending_does_not_clear_the_record_it_just_wrote() {
+        let arms = call_sites("disarm");
+        let mut where_: Vec<String> = arms.iter().map(|h| h.func.clone()).collect();
+        where_.sort();
+        assert_eq!(
+            where_,
+            vec![
+                "apply_tier".to_string(),
+                "auto_send".to_string(),
+                "dispatch".to_string()
+            ],
+            "清防重记录只允许三处：改档（`apply_tier`）、自动发送前（`auto_send`）、\
+             `Manual` 装填前（`dispatch`）。多出来的每一处都要单独说清楚为什么，\
+             现在有：\n{}",
+            arms.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        let in_dispatch: Vec<&Hit> = arms.iter().filter(|h| h.func == "dispatch").collect();
+        assert_eq!(
+            in_dispatch.len(),
+            1,
+            "`dispatch` 里只该有 `Manual` 分支那一处清记录，现在有 {} 处：{in_dispatch:?}",
+            in_dispatch.len()
+        );
+
+        // `dispatch` 的生产代码，从按回车那一行到 `Auto` 分支返回为止。
+        let lines = production_lines("ui/src-tauri/src/commands.rs");
+        let send_at = lines
+            .iter()
+            .position(|l| l.contains("deliver_send(hwnd, &candidate_id)"))
+            .expect("`dispatch` 里那行 `deliver_send` 不见了——发送路径被挪走了");
+        let ret_at = lines[send_at..]
+            .iter()
+            .position(|l| l.trim_start().starts_with("return DispatchReply"))
+            .map(|i| send_at + i)
+            .expect("`Auto` 分支末尾的 `return DispatchReply` 不见了");
+        for (i, l) in lines.iter().enumerate().take(ret_at).skip(send_at) {
+            //**注释行不算**：这段窗口里就摆着我自己那段解释「这里原来有一句
+            // 清记录」的注释，不跳过它这条守卫会把自己判红——
+            // 与 `call_sites` 里「注释行不算」是同一条纪律。
+            if l.trim_start().starts_with("//") {
+                continue;
+            }
+            assert!(
+                !l.contains("disarm("),
+                "`dispatch` 在发完消息（:{}）之后又清了一次防重记录（:{} `{}`）——\
+                 同一轮里再点同一条就会被放行，同一条真消息发两遍。\
+                 `arm` 记的是「本轮已发过」，发完就擦等于自废武功。",
+                send_at + 1,
+                i + 1,
+                l.trim()
+            );
+        }
+    }
+
+    /// **预置候选必须自称预置，而且一次网络请求都不许发。**
+    ///
+    /// 票 21 剩下的验收项之一是「起草完成后正文里真的出现那句回复」。
+    /// 没配 key 时正文里出现的就是这一条，所以它也是**唯一**一条
+    /// 无凭据情况下会打进真人输入框的文本。两条不变量：
+    ///
+    /// · **文本自曝**——它会被原样填进别人的聊天框，用户必须一眼看出
+    ///   这不是模型说的话（`probability: 1.0` 只是排序用的自评，不是真实性）；
+    /// · **零调用**——面板会把调用次数显示给用户，预置路径报 0 才是实话。
+    #[test]
+    fn the_preset_fallback_says_it_is_not_a_model_draft_and_calls_nothing() {
+        let ctx = TurnContext {
+            messages: vec!["对方：今晚有空吗".into()],
+            ..TurnContext::default()
+        };
+        let mut r = PresetReasoner;
+        let turn = chatservant_reason::turn(&mut r, &ctx).expect("预置起草器必须给出候选");
+        assert_eq!(turn.draft.calls, 0, "预置路径不许报任何模型调用");
+        assert!(
+            !turn.draft.candidates.is_empty(),
+            "预置路径也必须给出候选，否则面板正文是空的"
+        );
+        for c in &turn.draft.candidates {
+            assert!(
+                c.text.contains("预置候选") && c.text.contains("不是模型输出"),
+                "预置候选必须自曝不是模型输出，实际会被填进输入框的是：{}",
+                c.text
+            );
+        }
     }
 }
