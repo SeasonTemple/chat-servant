@@ -619,6 +619,19 @@
       否则它会再次变成一个只能靠读代码判断的盲区。
   -->
   {#if DEMO}
+    <!--
+      滑块放在**第一屏**。2026-10-16 改完「灰轨 + 墨点」之后它落在
+      两组模型配置下面，出图只到「示例：数值滑块」那个标签就被纸底切掉 ——
+      **看不见等于没改**。这正是本节开头写的那条教训（新增控件形态必须
+      同时加进 demo 夹具，并且要放在纸够得着的位置）的第二次犯。
+    -->
+    <div>
+      <span class="cs-label">示例：数值滑块</span>
+      <div class="cs-slider">
+        <input type="range" min="1" max="40" value="12" aria-label="示例数值" />
+        <output>12 条</output>
+      </div>
+    </div>
     {#each DEMO_GROUPS as g (g.name)}
       <section class="cs-group">
         <div class="cs-prov-head">
@@ -1488,22 +1501,37 @@
     background: transparent;
   }
 
-  /* 轨道 = 一道墨线，与按钮族的 1px 描边同一支笔。 */
+  /* 轨道 = **铅笔灰**，不是墨。
+   *
+   * 依据是这一套色板自己的分工（app.css 文件头）：**墨 = 你写下的，
+   * 灰 = 机器认出来的**。轨道是「可以走的那条路」——还没写；
+   * 而拇指是「你把它放在哪」——那是你写的。
+   * ⇒ 灰轨 + 墨点，而不是同一种颜色画两个东西。
+   * 原来轨与点都是 `--cs-ink` 纯墨，14px 的实心黑点在暖黄纸上比同一屏
+   * 任何东西都重，而它表达的只是「一个数值」。**量级与它代表的风险不匹配**
+   * （与票 44 否掉「首选=实墨」是同一条理由）。 */
   .cs-slider input[type='range']::-webkit-slider-runnable-track {
     height: 1px;
-    background: var(--cs-ink);
+    /* 轨道要**明显退到背景**，但不能退成冷灰蓝。
+     * 三个候选都实测过：`--cs-ink`(20,26,31) 太黑、`--cs-pencil-2`(66,80,89)
+     * 只淡一点点、仍读成一条深灰线；`--cs-rule`(211,218,221) 又太淡而且是冷色，
+     * 与暖黄纸不同源。
+     * ⇒ 铅笔灰与纸对半调，得到一个**暖调中灰**，与纸同源。 */
+    background: color-mix(in srgb, var(--cs-pencil) 52%, var(--cs-paper));
   }
 
-  /* 拇指 = 墨点。`margin-top` 把它压回轨道中线
-   * （track 1px、thumb 14px ⇒ 上移 (14-1)/2 = 6.5，取 6px + 半像素视觉余量）。 */
+  /* 拇指 = 墨点，外加一圈纸色环，让它从轨道上**浮起来**而不是嵌进去。
+   * `margin-top` 把它压回轨道中线
+   * （track 1px、thumb 13px ⇒ 上移 (13-1)/2 = 6，取 6px）。 */
   .cs-slider input[type='range']::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 14px;
-    height: 14px;
+    width: 13px;
+    height: 13px;
     margin-top: -6px;
     border-radius: 50%;
     background: var(--cs-ink);
+    box-shadow: 0 0 0 2px var(--cs-paper);
     cursor: pointer;
   }
 
@@ -1592,11 +1620,16 @@
     font-weight: 600;
   }
 
-  /* 徽标是**状态**，不是句子 ⇒ 单独一档 10.4px，比正文还小一档。 */
+  /* 徽标是**状态**，不是句子 ⇒ 单独一档 10.4px，比正文还小一档。
+   *
+   * 圆角从 999px（药丸）改成 **2px**：药丸是 Web 控件语汇，
+   * 在这一屏里与撕边纸条、墨线、铅笔灰都不是一族。
+   * 2px 是「一张小纸片」的最小圆角——撕边的毛边本来就是方的，
+   * 药丸却把它整个圆掉，等于说「这不是纸」。 */
   .cs-badge {
     font-size: 10.4px;
     padding: 0.1rem 0.4rem;
-    border-radius: 999px;
+    border-radius: 2px;
     overflow-wrap: anywhere;
   }
 
@@ -1639,9 +1672,19 @@
     font-family: ui-monospace, 'Cascadia Mono', monospace;
     color: var(--cs-ink);
     /* 底色**完全不透明**（见 app.css 的注释）：透明窗口的分层合成会
-     * 整层丢掉它，这里照面板的纸底走，不学独立窗口那套暗底。 */
+     * 整层丢掉它，这里照面板的纸底走，不学独立窗口那套暗底。
+     *
+     * 2026-10-16 试过把它提到 `--cs-paper-raised`（字条那档，比纸亮一），
+     * **出图后退回**：实测底色 `(250,242,214)` 而纸是 `(238,220,176)` ——
+     * 色相都是暖的，但输入槽的 R−B 只有 36、纸是 62，
+     * 也就是它**更淡更亮、更少黄**，在一张黄纸上直接读成「一块白板」。
+     * ⇒ 输入槽与纸**同色**（「纸上划出的一道槽」），
+     * 「能往里写」这件事交给描边与光标，不交给底色。
+     * 描边同时从 `--cs-rule-strong` 退到 `--cs-rule`：
+     * 撕边按钮已经不用描边了，这一格再用最重的那支墨线，
+     * 于是输入框成了全屏唯一还在喊「这是 Web 输入框」的东西。 */
     background: var(--cs-paper);
-    border: 1px solid var(--cs-rule-strong);
+    border: 1px solid var(--cs-rule);
     /* ⚠ 原来是硬编码的 `7px` —— 它**不对应任何一个 token**
      *   （`--cs-radius` 是 8px、`--cs-radius-sm` 是 5px），是 Web 默认圆角
      *   抄下来后随手改的数。同一屏的 `.cs-btn` 用的是 `--cs-radius-sm`，
