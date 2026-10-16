@@ -4,6 +4,10 @@
 //! 输入是 [`Frame`] + 一行 OCR 的几何，输出是每行一个 [`Attribution`]，
 //! **连同判定依据**——依据可追，认错了才能一眼看出是哪一步的锅。
 
+// 见 `crates/core/src/lib.rs` 同一条注释：AGENTS.md 声称这里 forbid(unsafe_code)，
+// 实际全仓都没有这个属性。「实测 0 处」不等于「写不进」，2026-10-17 补上守卫。
+#![forbid(unsafe_code)]
+
 pub mod attribute;
 pub mod fixture;
 pub mod identity;
