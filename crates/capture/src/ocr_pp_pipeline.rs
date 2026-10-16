@@ -21,6 +21,7 @@
 //! 写反了会得到一整段空白，**而且它不报错**。
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
@@ -529,12 +530,13 @@ fn argmax(row: &[f32]) -> (usize, f32) {
 ///
 /// ## 为什么这几处恢复都是对的（逐处算过，别照抄）
 ///
-/// - `BucketCache::buckets`：临界区里只有 `HashMap` 的
+/// - [`BucketCache::buckets`]：临界区里只有 `HashMap` 的
 ///   `get`/`entry`/`retain`/`remove`。它们要么整体生效、要么在分配时直接
 ///   abort，**不存在「改了一半」的中间态**，所以从毒里捞出来的 map 一定是完整的。
-/// - [`det_plan`] 的 slot：临界区里**有第三方代码**（tract 的 `load_det`），
-///   它 panic 是有可能的。但把新图写进去的 `*slot = Some(..)` 排在它**后面**，
-///   所以炸的时候 slot 里还是上一份**形状已校验过**的旧值，恢复同样安全。
+/// - [`DetSlots`] 的 cells：同上，临界区里也只有 `HashMap` 操作。
+///   ⚠ 它**曾经**不是这样：早先的 [`det_plan`] 把 tract 的 `load_det`
+///   （十几秒级）放在锁内，而那是第三方代码、panic 有可能（票 49）。
+///   把编译挪到锁外之后这一段退回纯数据结构操作，恢复的依据重新成立。
 ///
 /// 写成 `unwrap()` 的话，一次 panic 之后这个**共享**缓存的每一次访问都会 panic
 /// ——OCR 流水线整条挂死，而现场只看得到「OCR 不出字了」。
@@ -559,31 +561,38 @@ enum Slot<P> {
     Failed,
 }
 
-/// 取宽度 `w` 的图，没有就编一个。**编译器由调用方给。**
+/// 取键 `k` 的图，没有就编一个。**编译器由调用方给。**
 ///
 /// ## 为什么泛型，而不是在 [`BucketCache`] 里写死
 ///
 /// 真 `load_rec` 要 15MB 权重才跑得动，而**没有权重的机器上也必须有并发守卫测试**
 /// （CI 与别人的机器就没有权重，那些测试会直接跳过，等于没守）。
 /// 把「怎么保证只编一次」抽成与图无关的函数，测试就能注入一个计数的桩，
-/// 守的仍然是**这一段同步逻辑**本身。`BucketCache::get` 是它的一个特化。
+/// 守的仍然是**这一段同步逻辑**本身。`BucketCache::get` 与 [`DetSlots::get`]
+/// 是它的两个特化。
 ///
-/// ## 并发下同一个宽度只编一次（2026-10-17，票 47）
+/// ## 键 `K` 也是泛型：rec 用宽度，det 用 `(h, w)`
+///
+/// 容量 `max_buckets` 与「只保留哪几个」由调用方给，所以**两张表共用这一段**，
+/// 也共用同一批守卫测试（`Slot`、`lock_recover`、失败处理都只有一份实现）。
+///
+/// ## 并发下同一个键只编一次（2026-10-17，票 47）
 ///
 /// 早先是「① 查锁 → 放锁 → ② 锁外编译 → ③ 再拿锁 → ④ 无条件 insert」的双重
 /// 检查：两个线程会**各编一遍**，而后编的那份直接覆盖先编的，白等一次。
 /// rec 编译是几十到几百毫秒、det 更慢，所以这不是「多几十毫秒」。
 ///
-/// 现在锁只护住「取/建 cell」那一下，**编译发生在锁外**——所以不同宽度互不阻塞；
-/// 而同一个宽度后来的人 `get_or_init` 会**等**第一个人编完（`OnceLock` 的语义），
+/// 现在锁只护住「取/建 cell」那一下，**编译发生在锁外**——所以不同键互不阻塞；
+/// 而同一个键后来的人 `get_or_init` 会**等**第一个人编完（`OnceLock` 的语义），
 /// 不会各编一遍。
-fn get_or_compile<P, E, F>(
-    buckets: &Mutex<HashMap<usize, Arc<OnceLock<Slot<P>>>>>,
+fn get_or_compile<K, P, E, F>(
+    buckets: &Mutex<HashMap<K, Arc<OnceLock<Slot<P>>>>>,
     max_buckets: usize,
-    w: usize,
+    k: K,
     compile: F,
 ) -> Result<Arc<P>, E>
 where
+    K: Eq + Hash + Copy,
     F: Fn() -> Result<Arc<P>, E>,
 {
     let cell = {
@@ -591,11 +600,11 @@ where
         // 清一半而不是清空：清空会让下一个框又把整轮编一遍。
         // 判据与早先一致——`len` 到顶、且这个键还不在表里，才清。
         // 顺序是「先清后插」：于是本键一定在表里，不会被自己刚做的清理带走。
-        if !m.contains_key(&w) && m.len() >= max_buckets {
-            let keep: Vec<usize> = m.keys().copied().take(max_buckets / 2).collect();
-            m.retain(|k, _| keep.contains(k));
+        if !m.contains_key(&k) && m.len() >= max_buckets {
+            let keep: Vec<K> = m.keys().copied().take(max_buckets / 2).collect();
+            m.retain(|key, _| keep.contains(key));
         }
-        Arc::clone(m.entry(w).or_default())
+        Arc::clone(m.entry(k).or_default())
     };
     match cell.get_or_init(|| match compile() {
         Ok(p) => Slot::Ready(p),
@@ -604,11 +613,11 @@ where
         Slot::Ready(p) => Ok(Arc::clone(p)),
         Slot::Failed => {
             // **失败不留缓存**：把这个键摘掉，权重后来修好了还能重编。
-            // 只摘**同一个** cell——中途可能已经有别人为 `w` 建了新 cell，
+            // 只摘**同一个** cell——中途可能已经有别人为 `k` 建了新 cell，
             // 摘掉新的那个会把人家正在等的编译结果连带作废。
             let mut m = lock_recover(buckets);
-            if m.get(&w).is_some_and(|cur| Arc::ptr_eq(cur, &cell)) {
-                m.remove(&w);
+            if m.get(&k).is_some_and(|cur| Arc::ptr_eq(cur, &cell)) {
+                m.remove(&k);
             }
             drop(m);
             // 再编一趟只为拿一个**真的**错误文本返回给调用方：
@@ -698,14 +707,95 @@ impl BucketCache {
     }
 }
 
-static DET_PLAN: OnceLock<Mutex<Option<(usize, usize, Plan)>>> = OnceLock::new();
+/// det 的形状键。**两个分量都要**：少一个就会拿错形状的图，
+/// 而 `run` 拿到形状不匹配的输入只会报错，于是整轮回落 WinRT。
+type DetKey = (usize, usize);
 
-fn det_plan_slot() -> &'static Mutex<Option<(usize, usize, Plan)>> {
-    DET_PLAN.get_or_init(|| Mutex::new(None))
+/// det 槽里的东西：形状 → cell。**存 cell 而不是图**，见 [`get_or_compile`]。
+type DetCells<P> = HashMap<DetKey, Arc<OnceLock<Slot<P>>>>;
+
+/// det **只缓存一份**。
+///
+/// 这个 1 是**有意的**：det 的输入尺寸随帧变，而一帧只跑一次，
+/// 缓存多份反而占内存。⚠ 调大它就是「按形状分桶」——那会**改变内存占用**，
+/// 属设计决定、需要人拍板（票 49 第 1 条）。
+/// 所以它写在 [`DetSlots::new`] 里而不是各调用点，顺带让守卫测试能把
+/// 「容量仍然是 1」钉住。
+///
+/// 容量 1 走 [`get_or_compile`] 的清桶分支时 `max_buckets / 2 == 0`，
+/// 也就是全清——于是表里永远只有**最后一个被请求**的形状，
+/// 与早先 `*slot = Some(..)` 的语义一致。
+const DET_SLOT_CAP: usize = 1;
+
+/// det 的槽。容量写死在类型里（[`DET_SLOT_CAP`]），
+/// 所以调用点没法顺手把它变成按形状分桶。
+struct DetSlots<P> {
+    max: usize,
+    cells: Mutex<DetCells<P>>,
 }
 
-/// det 图的缓存。**只缓存一份**——det 的输入尺寸随帧变，编一个几十毫秒，
-/// 而一帧只跑一次，缓存收益不大；缓存多份反而占内存。
+impl<P> DetSlots<P> {
+    /// 新槽。容量恒为 [`DET_SLOT_CAP`]。
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// 取形状 `key` 的图，没有就编一个。**编译器由调用方给**——
+    /// 真 `load_det` 要权重文件，而没有权重的机器上也必须有并发守卫测试
+    /// （票 47 的教训：无权重时那些测试直接跳过，等于没守）。
+    ///
+    /// 锁只护住「取/建 cell」那一下，**编译在锁外**：
+    /// 不同形状各编各的、互不阻塞；同形状后来的人 `get_or_init` 会等
+    /// 第一个人编完，不会各编一遍。
+    ///
+    /// ⚠ 编译失败会**再编一趟**，只为拿到真的错误文本（[`get_or_compile`]）。
+    /// 对 det 来说代价可控：权重不在时 `load_det` 在打开文件时就失败，
+    /// 是毫秒级；**成功**才是十几秒级。
+    fn get<E, F>(&self, key: DetKey, compile: F) -> Result<Arc<P>, E>
+    where
+        F: Fn() -> Result<Arc<P>, E>,
+    {
+        get_or_compile(&self.cells, self.max, key, compile)
+    }
+
+    /// 槽里现在驻留几个 cell。**只给守卫测试看**（容量不变式）。
+    #[cfg(test)]
+    fn cell_count(&self) -> usize {
+        lock_recover(&self.cells).len()
+    }
+}
+
+/// 容量恒为 [`DET_SLOT_CAP`]。抽成 `Default` 是为了不给
+/// `DetSlots::new` 留一条「容量由调用方给」的口子。
+impl<P> Default for DetSlots<P> {
+    fn default() -> Self {
+        Self {
+            max: DET_SLOT_CAP,
+            cells: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+static DET_PLAN: OnceLock<DetSlots<PlanBody>> = OnceLock::new();
+
+fn det_plan_slot() -> &'static DetSlots<PlanBody> {
+    DET_PLAN.get_or_init(DetSlots::new)
+}
+
+/// det 图的缓存。**只缓存一份**——det 的输入尺寸随帧变，一帧只跑一次，
+/// 缓存收益不大；缓存多份反而占内存。编译本身是**秒级**的
+/// （十几秒量级，见 [`BucketCache::plan_path`] 里记的现场实测），
+/// 所以「只编一次」这件事必须守住。
+///
+/// ## 编译期间**不持锁**（2026-10-17，票 49）
+///
+/// 早先是「拿锁 → 查命中 → **在锁内** `load_det` → 才写回」：det 编译是
+/// 十几秒级，于是这整段时间里所有别的 det 调用者都在等这把锁。
+/// 现在编译发生在 [`DetSlots::get`] 的锁外，不同形状各编各的。
+///
+/// ⚠ **容量没变**，仍然只留一份（[`DET_SLOT_CAP`]）。
+/// 并发请求**不同**形状时，在编的图会短暂地超过一份——那是「不互相堵」
+/// 的直接代价，编完之后驻留的仍然只有最后被请求的那一份。
 ///
 /// ## 缓存必须按形状校验（2026-10-15 修）
 ///
@@ -714,15 +804,9 @@ fn det_plan_slot() -> &'static Mutex<Option<(usize, usize, Plan)>> {
 /// 缓存里那份旧的会被直接返回，接着 `run` 拿到一个形状不匹配的输入而报错，
 /// 于是又走「回落 WinRT」那条静默路径。
 pub fn det_plan(h: usize, w: usize) -> Result<Plan, PpError> {
-    let mut slot = lock_recover(det_plan_slot());
-    if let Some((ph, pw, p)) = slot.as_ref() {
-        if *ph == h && *pw == w {
-            return Ok(Arc::clone(p));
-        }
-    }
-    let p = ocr_pp::load_det(&ocr_pp::models_dir().join(DET_MODEL), h, w)?;
-    *slot = Some((h, w, Arc::clone(&p)));
-    Ok(p)
+    det_plan_slot().get((h, w), || {
+        ocr_pp::load_det(&ocr_pp::models_dir().join(DET_MODEL), h, w)
+    })
 }
 
 /// 权重目录里有 det 模型吗。**「没装」是判定，不是错误。**
@@ -1247,6 +1331,260 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&a, &b),
             "换了 det 输入形状却拿到同一张缓存的图 —— 窗口改尺寸后必然失败回落"
+        );
+    }
+
+    /// 形状 → 可比较的标签。让调用方能断言「我拿到的是**自己那个形状**的图」。
+    ///
+    /// 缓存串味是这个改动最危险的失败模式：拿到别的形状的图**不会 panic**，
+    /// 只会让 `run` 因输入形状不符而报错，于是整轮回落 WinRT——
+    /// 症状与「没装权重」一模一样，现场分不出来。
+    fn det_tag(key: DetKey) -> u32 {
+        (key.0 * 100_000 + key.1) as u32
+    }
+
+    /// det 守卫的编译器桩：数调用次数、记「同时在编」的峰值，
+    /// 并让编译花掉 `window_ms` 以便观察重叠。
+    ///
+    /// 桩返回的**不是** `PlanBody` 而是 `u32`：真 `load_det` 要权重文件，
+    /// 本机没装、CI 也没有——拿真图写这些测试等于永远跳过，等于没守
+    /// （票 47 的教训）。要验的是**同步**，不是 tract。
+    fn det_stub_compiler(
+        key: DetKey,
+        calls: Arc<AtomicUsize>,
+        live: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        window_ms: u64,
+    ) -> impl Fn() -> Result<Arc<u32>, String> + Send + 'static {
+        let tag = det_tag(key);
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(window_ms));
+            live.fetch_sub(1, Ordering::SeqCst);
+            Ok(Arc::new(tag))
+        }
+    }
+
+    /// **det 编译期间不持锁：不同形状并发时同时在编的峰值 ≥ 2。**
+    ///
+    /// 2026-10-17（票 49）：早先是「拿锁 → 查命中 → **在锁内** `load_det`
+    /// → 才写回」，而 det 编译是十几秒级 ⇒ 整段时间里所有别的 det 调用者
+    /// 都在等这把锁。拖一下窗口尺寸就会换形状，于是「改窗口大小」
+    /// 能把整条 OCR 流水线堵住十几秒。
+    ///
+    /// 判据取**同时在编的峰值**而不是耗时：耗时会被机器快慢带偏，
+    /// 而「两个编译重叠过」是结构性事实。把 `DetSlots::get` 改回持锁编译，
+    /// 这个峰值恒等于 1，本条立刻红（变红验证见票 49 的交付报告）。
+    #[test]
+    fn det_shapes_compile_concurrently_instead_of_queueing_on_the_lock() {
+        const SHAPES: [DetKey; 2] = [(32, 64), (64, 128)];
+        let slots = Arc::new(DetSlots::<u32>::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(std::sync::Barrier::new(SHAPES.len()));
+        let t0 = std::time::Instant::now();
+        let hs: Vec<_> = SHAPES
+            .iter()
+            .map(|&key| {
+                let slots = Arc::clone(&slots);
+                let gate = Arc::clone(&gate);
+                let compile = det_stub_compiler(
+                    key,
+                    Arc::clone(&calls),
+                    Arc::clone(&live),
+                    Arc::clone(&peak),
+                    200,
+                );
+                std::thread::spawn(move || {
+                    gate.wait();
+                    slots.get(key, compile).expect("编译器桩不会失败")
+                })
+            })
+            .collect();
+        let got: Vec<_> = hs
+            .into_iter()
+            .map(|h| h.join().expect("取图线程炸了"))
+            .collect();
+        for (&key, p) in SHAPES.iter().zip(&got) {
+            assert_eq!(**p, det_tag(key), "形状 {key:?} 拿到了别的形状的图");
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            SHAPES.len(),
+            "两个形状各编一次：少了就是复用了错的图，多了就是重复编译"
+        );
+        let peak_n = peak.load(Ordering::SeqCst);
+        eprintln!(
+            "两个不同形状并发取 det 图（桩编译 200ms/次）：耗时 {:?}，同时在编的峰值 = {}",
+            t0.elapsed(),
+            peak_n
+        );
+        assert!(
+            peak_n >= 2,
+            "两个形状没有重叠编译（同时在编的峰值 = {peak_n}）—— 还是持锁编译，\
+             一个形状会把别的形状整段堵住"
+        );
+        assert!(
+            slots.cell_count() <= DET_SLOT_CAP,
+            "驻留了 {} 份，超过上限 {}",
+            slots.cell_count(),
+            DET_SLOT_CAP
+        );
+    }
+
+    /// **同一个形状并发请求仍然只编一次。**
+    ///
+    /// 这是「编译搬出锁」的对价：**只编一次不再由那把锁保证**，
+    /// 而是由 `OnceLock` 的 `get_or_init` 保证。所以这条守的是另一半——
+    /// 换成「锁外编译 + 无条件写回」（票 47 的老形状）它就红，
+    /// 而换成持锁编译它仍然绿（那种形状由上面那条守）。
+    ///
+    /// 栅栏是它能不能响的关键：没有它，N 个线程多半一个接一个跑完，
+    /// 谁也撞不上谁，于是这条**永远绿**。
+    #[test]
+    fn one_det_shape_is_compiled_exactly_once_under_concurrency() {
+        const N: usize = 8;
+        const KEY: DetKey = (32, 64);
+        let slots = Arc::new(DetSlots::<u32>::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(std::sync::Barrier::new(N));
+        let hs: Vec<_> = (0..N)
+            .map(|_| {
+                let slots = Arc::clone(&slots);
+                let gate = Arc::clone(&gate);
+                let compile = det_stub_compiler(
+                    KEY,
+                    Arc::clone(&calls),
+                    Arc::clone(&live),
+                    Arc::clone(&peak),
+                    50,
+                );
+                std::thread::spawn(move || {
+                    gate.wait();
+                    slots.get(KEY, compile).expect("编译器桩不会失败")
+                })
+            })
+            .collect();
+        let got: Vec<_> = hs
+            .into_iter()
+            .map(|h| h.join().expect("取图线程炸了"))
+            .collect();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "同一个形状编了 {} 遍 —— 「锁外编译 + 无条件写回」的老形状回来了",
+            calls.load(Ordering::SeqCst)
+        );
+        // 只编一次还不够：同一份也意味着**同一个 Arc**。
+        assert!(
+            got.windows(2).all(|p| Arc::ptr_eq(&p[0], &p[1])),
+            "同一个形状的并发调用拿到了不同的 Arc —— 缓存被复制了"
+        );
+        assert!(
+            slots.cell_count() <= DET_SLOT_CAP,
+            "驻留了 {} 份，超过上限 {}",
+            slots.cell_count(),
+            DET_SLOT_CAP
+        );
+    }
+
+    /// **仍然只留一份：换形状就要重编，容量不因为这次改动而上升。**
+    ///
+    /// 票 49 把「按形状分桶」明确划成**需要人拍的设计决定**（会改变内存占用），
+    /// 所以本票只修「编译期间不持锁」。这条钉的就是那条边界：
+    /// 六个不同形状走一遍，槽里仍然只有一份；老形状再要一次是**重编**
+    /// 而不是命中缓存。
+    #[test]
+    fn the_det_slot_still_keeps_only_one_shape() {
+        assert_eq!(
+            DET_SLOT_CAP, 1,
+            "把上限调大就是「按形状分桶」，那是需要人拍的设计决定（票 49）"
+        );
+        let slots = DetSlots::<u32>::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        for i in 1..=6usize {
+            let key = (32 * i, 64 * i);
+            let compile = det_stub_compiler(
+                key,
+                Arc::clone(&calls),
+                Arc::clone(&live),
+                Arc::clone(&peak),
+                0,
+            );
+            let p = slots.get(key, compile).expect("编译器桩不会失败");
+            assert_eq!(*p, det_tag(key), "形状 {key:?} 拿到了别的形状的图");
+            assert_eq!(
+                slots.cell_count(),
+                1,
+                "第 {i} 个形状之后驻留了 {} 份",
+                slots.cell_count()
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 6, "每换一个形状就该重编一次");
+        // 只留最后那一份：上一个形状再要一次是重编，不是命中缓存。
+        let old = (32 * 5, 64 * 5);
+        let compile = det_stub_compiler(
+            old,
+            Arc::clone(&calls),
+            Arc::clone(&live),
+            Arc::clone(&peak),
+            0,
+        );
+        let p = slots.get(old, compile).expect("编译器桩不会失败");
+        assert_eq!(*p, det_tag(old));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            7,
+            "老形状还留在缓存里 —— 驻留的不止一份"
+        );
+    }
+
+    /// **并发换形状：谁都不会拿到别人的图，容量也不越界。**
+    ///
+    /// 容量 1 + 编译在锁外 ⇒ 并发的不同形状会互相把对方的 cell 从表里挤掉。
+    /// `Arc` 保证被挤掉的 cell 活到最后一个使用者手里，所以不会悬垂；
+    /// 代价只是「某个形状可能被并行的另一个线程**再编一遍**」——
+    /// 与 rec 那条清桶守卫是同一个已知且接受的代价。
+    /// 真正危险的不是重复编译，而是**拿错形状的图**，那条钉在这里。
+    #[test]
+    fn concurrent_det_shape_churn_never_serves_the_wrong_plan() {
+        const SHAPES: usize = 5;
+        let slots = Arc::new(DetSlots::<u32>::new());
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let hs: Vec<_> = (0..16)
+            .map(|t| {
+                let slots = Arc::clone(&slots);
+                let live = Arc::clone(&live);
+                let peak = Arc::clone(&peak);
+                std::thread::spawn(move || {
+                    for i in 0..20usize {
+                        let k = (t * 7 + i) % SHAPES + 1;
+                        let key = (32 * k, 64 * k);
+                        let calls = Arc::new(AtomicUsize::new(0));
+                        let compile =
+                            det_stub_compiler(key, calls, Arc::clone(&live), Arc::clone(&peak), 0);
+                        let p = slots.get(key, compile).expect("编译器桩不会失败");
+                        assert_eq!(*p, det_tag(key), "形状 {key:?} 拿到了别的形状的图");
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().expect("取图线程炸了");
+        }
+        assert!(
+            slots.cell_count() <= DET_SLOT_CAP,
+            "驻留了 {} 份，超过上限 {}",
+            slots.cell_count(),
+            DET_SLOT_CAP
         );
     }
 
