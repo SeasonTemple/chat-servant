@@ -945,6 +945,34 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// **碰全局 [`DET_PLAN`] 的测试必须先拿这把锁。**
+    ///
+    /// `DET_PLAN` 是**容量 1 的单槽**（[`DET_SLOT_CAP`]），而本 crate 的
+    /// 测试默认多线程跑。今天有两条测试会走到那个全局：
+    ///
+    /// · `a_different_det_shape_gets_its_own_plan` —— 断言「同形状第二次
+    ///   调用命中缓存」（`Arc::ptr_eq`）；
+    /// · `an_existing_det_file_is_detected` —— 内部 `recognize_in` 会按它
+    ///   自己那一帧的形状调一次 `det_plan`。
+    ///
+    /// 两条并行时后者会把单槽换掉，前者的第二次调用于是变成重编 ⇒ 红。
+    /// **实测**：单跑绿，与同模块其他测试一起跑红，机器越忙越容易输给它。
+    /// 所以这条不是「偶发环境问题」，是单槽缓存与并行测试的固有冲突。
+    ///
+    /// ⚠ 这把锁**只是测试之间的约定，不是产品不变量**。产品里
+    /// `det_plan` 由观察循环单线程串行调用（每帧新建 `BucketCache`，
+    /// 按宽度分组跑），本来就抢不到什么——**不要**拿它去论证
+    /// 「det 缓存有并发问题」，那个问题 2026-10-17 已经单独修过了。
+    static DET_GLOBAL: Mutex<()> = Mutex::new(());
+
+    /// 拿全局 det 槽的测试期独占权。
+    ///
+    /// 用 [`lock_recover`] 而不是 `unwrap()`：一把测试锁中毒不该让
+    /// **另一条**测试跟着炸——那条测的是完全无关的东西。
+    fn det_global_guard() -> std::sync::MutexGuard<'static, ()> {
+        lock_recover(&DET_GLOBAL)
+    }
+
     /// 造一张纯色帧。夹具只要能喂进预处理就行，**不要求真有字**——
     /// 真正的「字」要真跑模型才有，而那需要 15MB 权重。
     fn flat(w: u32, h: u32, v: u8) -> Frame {
@@ -1313,6 +1341,9 @@ mod tests {
     ///
     /// 只缓存一份，所以顺序有意义：先验同形状命中缓存，
     /// 再验换形状会重编。反过来测会误判——缓存被换形状的那次挤掉了。
+    ///
+    /// ⚠ 而「同形状命中缓存」这个断言**只能整条跑**：`det_plan` 是全局单槽，
+    /// 别的测试碰一下就没了。所以这里拿 [`DET_GLOBAL`]——见它的说明。
     #[test]
     fn a_different_det_shape_gets_its_own_plan() {
         let dir = ocr_pp::models_dir();
@@ -1320,6 +1351,7 @@ mod tests {
             eprintln!("跳过：{} 下没有 det 权重", dir.display());
             return;
         }
+        let _serialized = det_global_guard();
         let a = det_plan(32, 64).expect("32x64 编不出来");
         let a2 = det_plan(32, 64).expect("32x64 重编失败");
         assert!(
@@ -1902,12 +1934,17 @@ mod tests {
     }
 
     /// 真的装了权重的机器上，`det_file_present` 要能认出它。
+    ///
+    /// ⚠ 它内部的 `recognize_in` 会按这一帧的形状调一次 `det_plan`，
+    /// 那是要动全局单槽的 ⇒ 必须拿 [`DET_GLOBAL`]，否则会把
+    /// `a_different_det_shape_gets_its_own_plan` 的「同形状命中缓存」挤掉。
     #[test]
     fn an_existing_det_file_is_detected() {
         let dir = ocr_pp::models_dir();
         if !det_file_present(&dir) {
             return; // 本机没下权重，跳过而不是假装通过
         }
+        let _serialized = det_global_guard();
         let f = flat(32, 32, 128);
         assert!(
             recognize_in(&dir, &f).is_some(),
