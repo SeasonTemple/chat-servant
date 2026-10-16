@@ -14,7 +14,7 @@
 //! 于是一句 `http://alice:hunter2@proxy.internal:8080 连不上`
 //! 会被那个只认 `sk-` 的弱版原样放行——**代理口令进日志**。
 //!
-//! ⚠ 这不是「重复代码不好看」，是**两条能力不同的旁路**：
+//! 这不是「重复代码不好看」，是**两条能力不同的旁路**：
 //! 强的那份再强，只要调用方挑了弱的那份就等于没有。
 //! ⇒ 纯字符串逻辑收在这里，两边都调同一份，别再分叉。
 //!
@@ -62,10 +62,10 @@ fn mask_sk_shaped(text: &str) -> String {
 /// 1. **用户名密码段**：`https://user:pass@host/v1/`（代理几乎都长这样）
 /// 2. **查询参数里的 token**：`…/v1/?access_token=…&model=…`
 ///
-/// ⚠ URL 本身**要留着**——它是不含凭据时判断「是哪家、哪个端点」的唯一线索，
+/// URL 本身**要留着**——它是不含凭据时判断「是哪家、哪个端点」的唯一线索，
 /// 抹掉等于让报错失去排查价值。所以只抹凭据那一段。
 ///
-/// ⚠ 宁可多抹：`user:pass@` 整段换成掩码是可接受的。
+/// 宁可多抹：`user:pass@` 整段换成掩码是可接受的。
 fn mask_url_credentials(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let bytes: Vec<char> = text.chars().collect();
@@ -100,7 +100,7 @@ fn mask_url_credentials(text: &str) -> String {
             if let Some(at_rel) = bytes[scheme_start..seg_end].iter().rposition(|c| *c == '@') {
                 let cred_end = scheme_start + at_rel;
                 out.extend(bytes[i..scheme_start].iter());
-                // ⚠ **凭据段要跳过而不是推进去**。写反的话 MASK 会被插在
+                // **凭据段要跳过而不是推进去**。写反的话 MASK 会被插在
                 // 凭据**后面**，看起来像掩了码、其实原文还在——测试当场抓到。
                 out.push_str(MASK);
                 out.push('@');

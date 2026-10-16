@@ -13,7 +13,7 @@
 //! 能跑通的是：读模型、按指定尺寸编译成可执行计划、跑 det 拿到 `[1,1,H,W]`
 //! 概率图、CTC 解码出文本。
 //!
-//! ⚠ **本机还没有权重**，所以「真帧上的识别准确率」仍未验证——
+//! **本机还没有权重**，所以「真帧上的识别准确率」仍未验证——
 //! 缺的是 `%APPDATA%\dev.chatservant.app\models\` 下的三个文件，
 //! 以及一次真机对照（同一帧两条路各读一遍，比对结果）。
 //!
@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use tract_onnx::prelude::*;
-// ⚠ `Factoid` **不在** `tract_onnx::prelude` 里：prelude 只带了
+// `Factoid` **不在** `tract_onnx::prelude` 里：prelude 只带了
 // `InferenceFact` / `InferenceModel` / `*ModelExt` 加 `tract_core::prelude`，
 // 形状维度那一套（`concretize`）藏在 `tract_hir::infer` 下面。
 use tract_onnx::tract_hir::infer::Factoid;
@@ -67,7 +67,7 @@ pub struct IoSpec {
 
 #[derive(Debug, thiserror::Error)]
 pub enum PpError {
-    // ⚠ 这条消息是**用户看得见**的（会经 `reason` 显示在面板上），
+    // 这条消息是**用户看得见**的（会经 `reason` 显示在面板上），
     // 所以它必须自足：给出目录与环境变量，而不是指向某篇文档的某一节——
     // 文档会被重写，而引用会静默失效。
     #[error(
@@ -105,7 +105,7 @@ pub fn models_dir() -> PathBuf {
 /// 只读形状，不跑推理。给探针和排查用——形状对不上时要能在**不**跑推理的
 /// 情况下就知道差在哪。
 ///
-/// ## ⚠ 只有**输入**维可信，输出维读不出来（2026-10-10 实测，三次踩坑）
+/// ## 只有**输入**维可信，输出维读不出来（2026-10-10 实测，三次踩坑）
 ///
 /// - **`model_for_path` 给的模型没推导过。** 输入维来自 ONNX 里写死的
 ///   `value_info`，读得到；输出维要靠推导。
@@ -130,7 +130,7 @@ pub fn model_io(path: &Path) -> Result<IoSpec, PpError> {
             name: path.display().to_string(),
             msg: e.to_string(),
         })?;
-    // ⚠ **推导失败不当作致命错误。** det 里有 `Resize`（带动态 scale），
+    // **推导失败不当作致命错误。** det 里有 `Resize`（带动态 scale），
     // `analyse` 在它上面会失败——而我们要的只是「ONNX 里**声明**了什么」，
     // 那部分本来就在输入的 `value_info` 里，不依赖推导。推导只是为了
     // 顺带看看输出维（实测：**看也看不到**），所以失败了没什么可丢的。
@@ -148,7 +148,7 @@ pub fn model_io(path: &Path) -> Result<IoSpec, PpError> {
             .map(|d| d.concretize().and_then(|td| td.as_i64()).unwrap_or(-1))
             .collect()
     };
-    // ⚠ `input_outlets()` 给的是 `TVec`，**不能按 `Vec<OutletId>` 去声明形参**——
+    // `input_outlets()` 给的是 `TVec`，**不能按 `Vec<OutletId>` 去声明形参**——
     // 实测那样写 clippy 会报 needless borrow，改成 `.map(outlets)` 才过。
     let outlets = |os: &[OutletId]| -> Vec<Vec<i64>> {
         os.iter()
@@ -175,7 +175,7 @@ pub fn model_io(path: &Path) -> Result<IoSpec, PpError> {
 
 /// 编译 det 模型，**输入形状由调用方定**。
 ///
-/// ⚠ 形状不是猜的：PP-OCRv4 的 det 是动态 H/W 的，不给具体形状就会
+/// 形状不是猜的：PP-OCRv4 的 det 是动态 H/W 的，不给具体形状就会
 /// 留下一堆泛型算子。定形状时必须**按 32 的倍数取整**——网络里有 8 次
 /// 步长 2 的下采样，总下采样倍数是 32。
 pub fn load_det(path: &Path, h: usize, w: usize) -> Result<Plan, PpError> {
@@ -197,7 +197,7 @@ pub fn load_det(path: &Path, h: usize, w: usize) -> Result<Plan, PpError> {
 
 /// 编译 rec 模型。
 ///
-/// ⚠ **宽度每次不同都要重编。** rec 是全动态的，而 tract 的形状是编译期
+/// **宽度每次不同都要重编。** rec 是全动态的，而 tract 的形状是编译期
 /// 决定的——所以「每个文本框的宽度都不一样」意味着「每个框编译一次」。
 /// 那是几十到几百毫秒的量级，**不能对每个框都这么做**。
 ///
@@ -225,7 +225,7 @@ pub fn load_rec(path: &Path, w: usize) -> Result<Plan, PpError> {
 /// 展平成一维是故意的：det/rec 后处理都要按下标走，二维以上各自
 /// reshape 的方式不一样，留在调用点写更清楚。
 ///
-/// ⚠ `TValue` 是 `Arc<Tensor>` 的 newtype，靠 `Deref` 才拿得到 Tensor 的方法。
+/// `TValue` 是 `Arc<Tensor>` 的 newtype，靠 `Deref` 才拿得到 Tensor 的方法。
 /// `Tensor::as_slice` 在 0.23.8 里**不存在**——取数要走 `view().as_slice()`，
 /// 它自带 dtype 校验：输出万一不是 f32 会**报错**，而不是默默按字节重解释
 /// 出一堆垃圾数值。前提是存储是连续 plain RAM，而计划跑出来的输出一定是。
@@ -249,7 +249,7 @@ pub fn run(plan: &Plan, input: Tensor, stage: &str) -> Result<(Vec<f32>, Vec<usi
 
 /// 词典。**索引 0 是 CTC blank，不在文件里。**
 ///
-/// ⚠ 文件每行是一个字符/符号，但 Windows 上下载的权重每行带尾随 `\r`。
+/// 文件每行是一个字符/符号，但 Windows 上下载的权重每行带尾随 `\r`。
 /// 不剥掉的话最后一个类会变成 `"字\r"`，识别出来末尾挂一个回车符——
 /// **症状是每个词末尾多一个不可见字符**，而且在任何编辑器里都看不见。
 pub fn chars() -> Result<Arc<Vec<String>>, PpError> {
@@ -315,7 +315,7 @@ mod tests {
 
     /// **det 的输入是 `[1,3,H,W]`——模型里全是动态维。**
     ///
-    /// ⚠ 2026-10-10 **实测**：`[-1, 3, -1, -1]`，**batch 也是动态的**。
+    /// 2026-10-10 **实测**：`[-1, 3, -1, -1]`，**batch 也是动态的**。
     /// 写断言时我按惯例先假定 batch 固定 1，被实测打回。
     /// `[1,3,H,W]` 那个具体形状是**我们给的**（[`det_fact`]），不是模型的。
     #[test]
@@ -330,14 +330,14 @@ mod tests {
              batch/H/W 都是动态的，由 `det_fact` 按图算出来",
             spec.inputs[0]
         );
-        // ⚠ `analyse` 在 det 上会失败（里面有带动态 scale 的 `Resize`），
+        // `analyse` 在 det 上会失败（里面有带动态 scale 的 `Resize`），
         // 所以输出维拿不到——见 `model_io` 的说明。det 的输出形状由
         // `the_det_plan_runs_on_a_flat_image` **真跑一次**证明为 `[1,1,H,W]`。
     }
 
     /// **rec 是全动态 `[1,3,H,W]`——**不是**固定高 48。
     ///
-    /// ⚠ 这条断言 2026-10-10 **实测推翻过原来的假设**。写它的时候我以为
+    /// 这条断言 2026-10-10 **实测推翻过原来的假设**。写它的时候我以为
     /// `ch_PP-OCRv4_rec_mobile.onnx` 的输入高固定 48（那是 PaddleOCR
     /// `RecImageGenerator` 的行为，属于**数据增强侧**），实测 `model_io`
     /// 报的是 `[-1, 3, -1, -1]`——**四个维全是动态的**，模型自己不管尺寸。
@@ -372,7 +372,7 @@ mod tests {
         let buf = vec![0.0f32; 3 * h * w];
         let input = Tensor::from_shape(&[1, 3, h, w], &buf).expect("造 rec 输入失败");
         let (vals, shape) = run(&plan, input, "rec").expect("rec 推理失败");
-        // ⚠ ⚠ **实测出来是 `[1, T, 6625]`，不是 `[1, 6625, T]`。**
+        // **实测出来是 `[1, T, 6625]`，不是 `[1, 6625, T]`。**
         // 2026-10-10 本机真跑 64px 宽的空白图得到 `[1, 8, 6625]`：
         // **类在最后一维**，时间步在中间维。写这条断言时我先入为主按
         // PaddleOCR 训练侧的布局想成 `[1, 6625, T]`，被实测打回。

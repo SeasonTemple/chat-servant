@@ -5,15 +5,16 @@ param(
   [int]$Height = 760,
   [int]$Wait = 20000,
   [int]$Scale = 2,
+  [int]$TimeoutSec = 60,
   [switch]$ShowScrollbars
 )
 
-# ⚠ 量具自检 1：Chrome 会把窗口宽度**钳到最小 500px**，而 --screenshot 输出的
+# 量具自检 1：Chrome 会把窗口宽度**钳到最小 500px**，而 --screenshot 输出的
 #   宽度仍等于 --window-size。所以「截图尺寸对」**不能**证明「布局宽度对」。
 #   本面板内部被 cs-demo-frame 钉死 380px，与视口无关，故此处只当出图用，
 #   任何尺寸结论都必须另找独立量法。
 #
-# ⚠⚠ 量具自检 2：**`--virtual-time-budget` 会截到补间的中间帧**（票 37 定位）。
+#量具自检 2：**`--virtual-time-budget` 会截到补间的中间帧**（票 37 定位）。
 #   本项目用 GSAP 做「滑过去」这类动画，而虚拟时间**不保证**在 rAF 补间
 #   跑完之前就到期。实测：同一页面的分段控件指示块，
 #     budget 4000 / 15000 / 40000 → 量到的宽 44 / 44 / 54 px（目标 61px）
@@ -27,6 +28,18 @@ param(
 $ErrorActionPreference = 'Stop'
 $chrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 if (-not (Test-Path $chrome)) { throw "chrome not found" }
+
+# **输出路径必须先绝对化**（2026-10-16 加）。
+#   原脚本把相对路径原样交给 Chrome，而 Chrome 解析相对路径的基准是它自己的
+#   工作目录，不是调用者的 —— 于是文件可能落在别处，而脚本在原地查不到，
+#   报「no screenshot produced」，**看起来像 Chrome 抽风**。
+if (-not [IO.Path]::IsPathRooted($OutPng)) {
+  $OutPng = [IO.Path]::GetFullPath((Join-Path (Get-Location).Path $OutPng))
+}
+$outDir = Split-Path -Parent $OutPng
+if ($outDir -and -not (Test-Path $outDir)) {
+  New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+}
 
 $profileDir = Join-Path $env:TEMP ("shot-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
@@ -44,17 +57,51 @@ $chromeArgs = @(
   $Url
 )
 
-# ⚠ 量具自检 3：`--hide-scrollbars` 原本**写死**在这里，于是本脚本
+# 量具自检 3：`--hide-scrollbars` 原本**写死**在这里，于是本脚本
 #   结构上就**截不出任何滚动条**——而「滚动条有没有按设计渲染」
 #   恰恰是要量的东西（票 42 的验收项就写着「实测确实渲染出来」）。
 #   ⇒ 改成开关：默认仍隐藏（面板出图要的就是画面本身），
 #     要量滚动条时显式 `-ShowScrollbars`。
-#   ⚠ 漏掉这个开关时的症状极具误导性：图出得来、布局全对，
+#   漏掉这个开关时的症状极具误导性：图出得来、布局全对，
 #     只是右边永远没有滚动条，于是被读成「CSS 写了但没生效」。
 if (-not $ShowScrollbars) { $chromeArgs = @('--hide-scrollbars') + $chromeArgs }
 
 & $chrome @chromeArgs 2>&1 | Out-Null
 $code = $LASTEXITCODE
-if (-not (Test-Path $OutPng)) { throw "no screenshot produced (exit=$code)" }
+
+#**必须等文件落盘**（2026-10-16 实测，这是「no screenshot produced」的真凶）。
+#
+#   Chrome 155 在 `--headless=new` 下**父进程立刻返回**（实测 `$LASTEXITCODE`
+#   甚至是**空的**），真正写图的是它 detach 出去的那个子进程。
+#   而下面这行原来紧跟着就查文件 ⇒ 文件还没写 ⇒ 报「没出图」。
+#
+#   实测本机 **2 秒**后文件就在了。所以这不是「偶发抽风」——
+#   它是**每一次都失败**，只是失败得太快，看起来像 flaky。
+#   票 44 里那句「shoturl.ps1 连续三次 no screenshot produced」就是这么来的，
+#     当时归因为「浏览器抽风」，**归因错了**。别再照着那条猜。
+#
+#   判据：轮询到文件出现且**大小不再变化**（避免读到写了一半的图）。
+$sw = [Diagnostics.Stopwatch]::StartNew()
+$lastSize = -1
+$stable = 0
+while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+  if (Test-Path $OutPng) {
+    $size = (Get-Item $OutPng).Length
+    if ($size -gt 0 -and $size -eq $lastSize) {
+      $stable++
+      if ($stable -ge 2) { break }   # 连续两次同大小 = 写完了
+    }
+    else { $stable = 0 }
+    $lastSize = $size
+  }
+  Start-Sleep -Milliseconds 400
+}
+$sw.Stop()
+
+if (-not (Test-Path $OutPng)) {
+  # 失败时**把 Chrome 的 stderr 打出来**：原来这里 `| Out-Null` 把它整个吞了，
+  #   于是「工具没跑成」与「工具跑了但没出图」两件事长得一模一样。
+  throw "no screenshot produced after $([math]::Round($sw.Elapsed.TotalSeconds,1))s (timeout=${TimeoutSec}s, chrome exit='$code')"
+}
 $img = Get-Item $OutPng
-"$($img.FullName) | $($img.Length) bytes | exit=$code"
+"$($img.FullName) | $($img.Length) bytes | chrome exit='$code' | 等待 $([math]::Round($sw.Elapsed.TotalSeconds,1))s"

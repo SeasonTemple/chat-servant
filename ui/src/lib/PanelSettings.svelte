@@ -19,15 +19,15 @@
   所以是**一列分节 + 整列滚动**：节与节之间靠留白和字号分组，
   和主面板是同一条排版语言。
 
-  ## 材质：配色跟着面板走，但**整张纸会被换掉**
+  ## 材质：**与主面板同族**（2026-10-16 反转）
 
   ⚠ 独立设置窗口用的是 `--cs-surface`（中性白）。搬进来之后**不能跟着换**：
   在同一个窗口里铺一块白底会留下一道接缝——那正是这个项目一直在删的东西。
-  底色改走 `--cs-paper`（#EDF0F1，中性），字条用 `--cs-paper-raised`。
 
-  ⚠ 但也别读成「设置页还是那张撕口纸」：父级
-  `.cs-sheet[data-settings='true']` 会把纸纹**整张撤掉**，
-  这是设计规范 §1「纸面是配置界面唯一的敌人」定的，是有意的材质切换。
+  ⚠ 反转前还有第二层：这一屏把整张撕口纸撤掉、铺 `--cs-paper` 冷灰
+  （设计规范 §1「纸面是配置界面唯一的敌人」）。**那一条也作废了**，
+  理由见下面 `<style>` 开头那段。现在这一屏直接坐在同一张纸上，
+  字条用 `--cs-paper-raised`——同样指向纸族。
 
   语义没变的部分保持不变：红仍然只给不可逆（删 key、图片外发那句警示），
   机器读出来的数仍然走等宽。
@@ -545,6 +545,28 @@
       await refresh();
     })();
   });
+
+  /**
+   * demo 夹具：模型配置两组（模板里 `{:else if DEMO}` 那段渲染它）。
+   *
+   * 形状与真实分支同构，刻意覆盖**四种按钮形态**：已配置组有 `primary`
+   * 厂牌 chip + 「换一把 / 测连通 / 删除」，未配置组直接给输入框 + `primary` 保存。
+   * 不含真实 key、不发任何 IPC。
+   */
+  const DEMO_GROUPS = [
+    {
+      name: '主模型',
+      configured: true,
+      providers: ['anthropic', 'openai'],
+      hint: '存进 Windows 凭据管理器，面板里读不到明文。',
+    },
+    {
+      name: '备用模型',
+      configured: false,
+      providers: ['deepseek', 'ollama'],
+      hint: '自定义端点：协议与厂商解耦，填 base_url 即可。',
+    },
+  ];
 </script>
 
 <!--
@@ -558,10 +580,80 @@
     早先是挂在「发送档位」下面那一行，只有走过那一节的人才看得到，
     而「图片」「上下文」两节的改动同样立刻生效。
   -->
-  <p class="cs-lead">全部改完立刻生效，不用重启面板。</p>
-
   <!-- ══ 发送档位 ══ -->
   <h2 class="cs-h2">发送档位</h2>
+
+  <!--
+    「改完不用重启」这句原先是**屏顶独占一行**：左边没有控件、右边没有分节，
+    它不属于任何东西，读起来像一行飘着的脚注。
+    用户 2026-10-16 原话：「为何说明要单独一行？」
+
+    ⇒ 挪到**第一节标题之下**，并给左边线（与 `TierSwitch` 的后果说明同一支），
+      让它明确挂在「发送档位」这一节下面。
+      档位是安全相关、也最需要先知道「改了立刻生效」的那一项，
+      所以放这里不是就近，是**该被看见的位置**。
+  -->
+  <p class="cs-lead">全部改完立刻生效，不用重启面板。</p>
+
+  <!--
+    demo 夹具（2026-10-16 加），**只在演示模式渲染**，真实运行时不存在。
+
+    **为什么必须有**：这一屏的按钮族（`.cs-btn-mini` 及其 `primary` /
+    `danger` / `disabled` 四种形态）原先在演示模式下**整节不渲染**——
+    只留一句「演示模式没有后端，这里不列模型配置。」
+    于是任何对按钮的改动都**看不见**，只能盲改。
+    用户 2026-10-16 的原话：「而不是拿之前的设计敷衍」——
+    而「看不见」正是敷衍的温床：我上一轮就改了这族却出不了图。
+
+    **为什么放在第一屏顶部而不是它在真实布局里的位置**：
+    设置屏比那张纸高（`.cs-set` 要滚动），模型配置节在很下面，
+    出图截不到 ⇒ 盲区会以另一种形式回来。
+    demo 只用于**排版评审**，顺序不同不影响评审；
+    真实运行时的顺序不受影响（`{#if DEMO}` 包住整段）。
+
+    它**不做任何 IPC、不含真实 key**，按钮点了只是没反应。
+    形状与真实分支同构：一组「已配置」（徽标 + 三颗按钮）、
+    一组「未配置」（直接给输入框）。
+
+    ⚠ 别把它当成「简化版」。以后**新增按钮形态就要往这里加一份**，
+      否则它会再次变成一个只能靠读代码判断的盲区。
+  -->
+  {#if DEMO}
+    {#each DEMO_GROUPS as g (g.name)}
+      <section class="cs-group">
+        <div class="cs-prov-head">
+          <span class="cs-group-name">{g.name}</span>
+          <span class="cs-badge {g.configured ? 'ok' : 'miss'}">
+            {g.configured ? '已配置' : '未配置'}
+          </span>
+        </div>
+        <p class="cs-hint">{g.hint}</p>
+        <div class="cs-chips">
+          {#each g.providers as p (p)}
+            <button class="cs-btn cs-btn-mini primary">{p}</button>
+          {/each}
+        </div>
+        {#if g.configured}
+          <div class="cs-actions">
+            <button class="cs-btn cs-btn-mini">换一把</button>
+            <button class="cs-btn cs-btn-mini">测连通</button>
+            <button class="cs-btn cs-btn-mini danger">删除</button>
+          </div>
+        {:else}
+          <div class="cs-form">
+            <input
+              class="cs-input"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="粘贴 key"
+            />
+            <button class="cs-btn cs-btn-mini primary">保存</button>
+          </div>
+        {/if}
+      </section>
+    {/each}
+  {/if}
   <TierSwitch bind:tier onchange={changeTier} />
   {#if tierNote}
     <p class="cs-fail" role="alert">{tierNote}</p>
@@ -1022,22 +1114,25 @@
       <p class="cs-note" role="status">{proxyNote}</p>
     {/if}
   {:else}
-    <p class="cs-note">{DEMO ? '演示模式没有后端，这里不列模型配置。' : '正在读设置…'}</p>
+    <p class="cs-note">正在读设置…</p>
   {/if}
 </div>
 
 <style>
   /* ══════════════════════════════════════════════════════════════
-     这一屏是**同一块面板的另一种显示**，配色仍走纸面板那套 token。
+     这一屏与主面板**同族**：同一张纸、同一套墨与红铅笔（2026-10-16 反转）。
 
-     ⚠ 但底色**不是那张撕口纸**：`.cs-sheet[data-settings='true']`
-     在父级就把纸整张换成了 `--cs-paper`（#EDF0F1，中性）。
-     那是设计规范 §1「纸面是配置界面唯一的敌人」定的，理由与
-     「为什么换材质就是一句提示」写在 `PaperPanel.svelte` 那条注释里。
+     ⚠ 反转前这里铺的是 `--cs-paper` 的冷灰 #EDF0F1，整张撕口纸被父级
+     `.cs-sheet[data-settings='true']` 撤掉。两条理由让它作废：
+     ① 同一窗口里一半纸一半冷白，统一感断掉；
+     ② `--cs-ink` / `--cs-pencil` 的对比度是按暖黄纸重算的，
+        放冷灰上等于按 A 纸的合格线用 B 纸。
 
-     ⚠ 真正被禁掉的是**独立设置窗口时代的 `--cs-surface`**（中性白，
-       #FAFAF9）：在同一窗口里铺一块白底会留下一道接缝。字条用
-       `--cs-paper-raised`——材质词汇与主面板一致。
+     ⇒ 三支 `--cs-paper*` 现在都指向纸族（见 `app.css` 2026-10-16 的注释），
+       字条仍用 `--cs-paper-raised`——材质词汇与主面板一致。
+
+     ⚠ 独立设置窗口时代的 `--cs-surface`（中性白 #FAFAF9）仍然禁掉：
+       在同一窗口里铺一块白底会留下一道接缝，而接缝正是这项目一直在删的。
      ══════════════════════════════════════════════════════════════ */
 
   .cs-set {
@@ -1049,79 +1144,109 @@
     gap: 0.45rem;
     padding: 0 14px 16px;
 
-    /* ⚠ 滚动条是这一屏**最后一块 Web 默认外观**（票 42，2026-10-15）。
-     *   系统那条滚动条会带自己的立体凹槽与箭头，在纸面上就是一块贴上去的
-     *   异物 —— 与其余控件「1px 墨描边」的语言完全不搭。
+    /* 行高在这里**设一次**，不靠每个选择器各写一个。
      *
-     *   两套属性都要写，缺一不可：
-     *     · `scrollbar-width` / `scrollbar-color` 是**标准**属性，Firefox 走它；
-     *     · `::-webkit-scrollbar` 是 Chromium 的。WebView2 是 Chromium，
-     *       所以真正生效的是下面那段 `::-webkit-scrollbar`。
-     *   ⚠ 只写标准属性在 WebView2 里**不生效**（非 `auto` 的 `scrollbar-width`
-     *   在 Blink 里被忽略），反过来只写 `::-webkit` 则在 Firefox 里失效。
+     * 2026-10-16 实测：这一屏原先有 14 个选择器**根本没写 `line-height`**，
+     * 吃的是浏览器默认 `normal` —— 而 `normal` 是「按字体算的」，
+     * 不是某个数，于是**每一个选择器的实际行高都不同**，而且没人知道是多少。
+     * 另有三处各写一个数（1.45 / 1.5 / 1.55）。
      *
-     *   底槽透明：槽画出来会在纸上留一条比 `--cs-rule` 更重的痕，
-     *   而这一屏本来就没有「装饰性横线」这个语言（分节全靠留白，见 `.cs-h2`）。 */
-    scrollbar-width: thin;
-    scrollbar-color: var(--cs-ink-2) transparent;
+     * ⇒ 统一 1.5 写在这里一次，全屏继承。
+     *   下方少数选择器仍显式写着同一个值，是为了让它们**自解释**；
+     *   数值必须与这里一致，改一处就要改另一处。 */
+    line-height: 1.5;
+
+    /* ⚠⚠ **`margin-bottom: 28px`**（2026-10-16，与主面板档位行同一个病根）。
+     *
+     *   `.cs-sheet` 的内容盒底是 540，而**纸底在 512**
+     *   （`probe-sheet.svg`：画布 560，纸 `height=512` 且 `translate(16,0)`，
+     *    下面 48px 是 `sheetDrop` 的落影余量）。
+     *   ⇒ 这一列原来有 **28px 画在纸外的透明区上**。
+     *   在 Tauri 透明窗口里那不是「空白」，是**字浮在桌面上**。
+     *
+     *   出图证据：`set-after3` 那张，滚到底时最后一行
+     *   「演示模式没有后台，这里不列模型配置。」整行落在纸边之下。
+     *
+     *   ⚠ 这条与主面板「档位名骑在撕口上」是**同一个错误**：
+     *     两处都把「元素底 560」当成了「纸底」。
+     *   ⇒ `budget.html` 的 `set_overflow` 现在也报 `bottom` 与 `paperBottom`。
+     */
+    margin-bottom: 28px;
+
+    /* ⚠ **滚动条的样子不在这里**（2026-10-16 提到 `app.css`）。
+     *
+     *   这一屏原先是全项目**唯一**样式过的滚动容器，而同一天主面板的
+     *   候选区也变成了滚动容器（票 44）却没人把那三行搬过来 ——
+     *   于是那边亮出一条带 ▲▼ 箭头的原生滚动条。
+     *   用户原话：「滚动条也是，你就这么喜欢黑色/原生样式？」
+     *
+     *   ⇒ 病根是「做法允许忘」，所以收进全局（`app.css` 的 `button` 之后），
+     *   与 `.cs-actions` 一起管。判据：槽宽 6px 而非原生 15px，
+     *   由 `budget.html` 量 `offsetWidth - clientWidth`。 */
   }
 
-  .cs-set::-webkit-scrollbar {
-    width: 6px;
-  }
-
-  .cs-set::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  /* 滑块用**墨**，不用红、不用蓝（§5.4 同一条：状态色不兼职导航色）。
-   * 常态压到铅笔档与墨之间，悬停才给足墨 —— 滚动条是「需要时才注意到」的东西。 */
-  .cs-set::-webkit-scrollbar-thumb {
-    background: color-mix(in srgb, var(--cs-ink-2) 42%, transparent);
-    /* 纸是直角（app.css 的 --cs-radius 注释）。滚动条滑块不属于「字条」，
-     * 也不属于「可点的按钮」，所以不给药丸圆角，给 1px 刚好收住边。 */
-    border-radius: 1px;
-  }
-
-  .cs-set::-webkit-scrollbar-thumb:hover {
-    background: var(--cs-ink-2);
-  }
-
+  /* 「改完不用重启」这句。左边线是它**依附于某一节**的标记——
+   * 原先它在屏顶独占一行，两边都没有东西，读成一节浮着的脚注。
+   * 与 `TierSwitch` 的 `.cs-hint` 用同一支左边线：凡是解释「这一节会发生什么」
+   * 的句子都长这样，不解释的就别加线。 */
   .cs-lead {
-    margin: 0 0 2px;
+    margin: 0.1rem 0 0.15rem;
     font-size: 11.5px;
     color: var(--cs-pencil);
+    padding-left: 0.55rem;
+    border-left: 2px solid var(--cs-rule);
+    overflow-wrap: anywhere;
   }
 
   /* ── 分节标题 ────────────────────────────────────────────────
    *
    * 分组全靠**留白和字号**，不画分隔线 —— 和主面板同一条排版语言。
    * 上边距比一般间距大一倍，就是这一屏唯一的分组手段。 */
+  /* ── 字号阶梯（2026-10-16 收敛）───────────────────────────────
+   *
+   * 用户原话：「设置页的字体不统一？」——实测确认不统一，而且不是错觉：
+   * 收敛前这一屏有 **9 个 font-size**（10.4 / 10.88 / 11.2 / 11.5 / 11.52 /
+   * 12 / 12.48 / 12.5 / 12.8 px）、**4 个 line-height**（默认 normal、1.45、
+   * 1.5、1.55）、**3 个 font-weight**（400 / 600 / 700）。
+   * 其中 11.5 与 11.52 差 0.02px、12.48 与 12.5 差 0.02px ——
+   * **肉眼绝无分别，却各自写着**，这正是「不统一」的真正来源：
+   * 不是差得多，是**没有一档是共用的**。
+   *
+   * ⇒ 收成 5 档，每一档都有多个元素共用：
+   *     12.8px  分组标题
+   *     12.5px  小节标题 / 字段标签 / 供应商名 / 「打开」按钮
+   *     12px    数值读数（滑块右侧的 30s / 90s）
+   *     11.5px  说明正文 / 指引 / 错误 / 小按钮 / 输入框
+   *     10.4px  徽标（badge）——唯一一档，因为它标的是**状态**不是句子
+   *
+   * 行高统一 **1.5**：原先说明类三处各写一个（1.45 / 1.5 / 1.55），
+   * 而 14 个选择器根本没写、吃的是浏览器默认 `normal`——
+   * `normal` 随字体不同而不同，等于**每个选择器的行高都不确定**。
+   *
+   * 字重只剩 **400 / 600**：700 原本只有 `.cs-group-name` 一处，
+   * 是同屏唯一的孤例，已并入 600。 */
   .cs-h2 {
     margin: 0.85rem 0 0;
-    font-size: 12.5px;
+    font-size: 12.8px;
     font-weight: 600;
     color: var(--cs-ink);
   }
 
   .cs-label {
-    font-size: 0.78rem;
+    font-size: 12.5px;
     font-weight: 600;
     color: var(--cs-ink);
   }
 
-  /* ── 说明文字 ────────────────────────────────────────────────
-   *
-   * ⚠ 正文用**铅笔档**（6.22 : 1），不是标注档（3.81 : 1）。
+  /* 说明文字：正文用**铅笔档**（6.22 : 1），不是标注档（3.81 : 1）。
    * 这些句子是要人读的，读不清等于没说。 */
   .cs-note {
     margin: 0;
-    font-size: 0.7rem;
-    /* 1.45 而不是 1.6（2026-10-10 实测反馈：说明喧宾夺主）。
-       说明行距一大，它在那一屏里的**占位**就跟着变大——字号明明最小，
-       视觉重量却是按行数×行距算的。1.6 在 11px 上是 18px 一行，
-       一段三行的话就是 54px，比一个开关还高。 */
-    line-height: 1.45;
+    font-size: 11.5px;
+    /* 行距一大的代价是**占位**：字号明明最小，视觉重量却按行数×行距算。
+     * 11.5px × 1.5 = 17.25px 一行，一段三行就是 51.75px，比一个开关还高。
+     * （这里原先是 0.7rem + 1.45，2026-10-16 随字号阶梯一并归到 11.5 / 1.5。） */
+    line-height: 1.5;
     color: var(--cs-pencil);
     white-space: pre-line;
     /* 一整段说明文字不该横跨整个面板 —— 窄屏上回行本来就密，
@@ -1137,8 +1262,8 @@
 
   .cs-hint {
     margin: 0.25rem 0 0;
-    font-size: 0.68rem;
-    line-height: 1.55;
+    font-size: 11.5px;
+    line-height: 1.5;
     color: var(--cs-pencil);
     /* 指引可能有换行，要原样显示 */
     white-space: pre-line;
@@ -1148,8 +1273,8 @@
   .cs-fail {
     margin: 0;
     padding: 0.4rem 0.5rem;
-    font-size: 0.7rem;
-    line-height: 1.55;
+    font-size: 11.5px;
+    line-height: 1.5;
     border-radius: var(--cs-radius-sm);
     /* 失败方向偏保守的一段话，用极淡的红底托一下。 */
     background: color-mix(in srgb, var(--cs-live) 12%, transparent);
@@ -1183,55 +1308,151 @@
     cursor: not-allowed;
   }
 
-  /* 有边框的那批（含 `.danger` 与 `.primary`）：只换线型，底色文字都不动。 */
+  /* 有边框的那批（含 `.danger` 与 `.primary`）：只换线型，底色文字都不动。
+   *
+   * 2026-10-16 **这条已随撕边作废**：`.cs-btn-mini` 改用 `border-image` 之后，
+   * `border-style` 画不出来（与 `.cs-btn-ink:disabled` 记的是同一件事）。
+   * 禁用表现在统一走「收掉投影 + 铅笔灰」，见下面 `.cs-btn-mini:disabled`。 */
   .cs-btn-mini:disabled {
-    border-style: dashed;
+    cursor: not-allowed;
+    /* 禁用读成「一片没落在纸上的纸」——与 `.cs-btn-ink:disabled` 同一条。
+     * 不用透明底：WebView2 分层合成会把整层低 alpha 整层不绘制，那会让按钮
+     * **整个消失**。所以只动影与字色。 */
+    color: var(--cs-pencil-2);
+    filter: none;
   }
 
-  /* ⚠ `.cs-btn-ink` 是本屏**唯一没有边框**的按钮（墨底药丸），
-   *   所以 `border-style: dashed` 对它**完全不生效** —— 不能只写一条规则
-   *   就以为全屏覆盖了。按 debug 页的先例改用「换底色」，
-   *   底色与文字同步互换，两者都保持高对比。 */
-  .cs-btn-ink:disabled {
-    background: var(--cs-paper-sunken);
-    color: var(--cs-ink);
-  }
+  /* ⚠ 原先这里有一条 `.cs-btn-ink:disabled` 用「换底色」表达禁用
+   *   （`background: var(--cs-paper)` + 文字转墨色），**已于 2026-10-16 删除**。
+   *
+   *   它是**实心墨底**时代的做法：没有底色可换时，就换成纸色。
+   *   现在这颗按钮是撕边纸条 —— 纸由 `border-image … fill` 给，
+   *   `background` 画在它下面，`background-color` 已经不是它的表面，
+   *   换它等于换一张画在撕口下面的纸，读不出来。
+   *   ⇒ 禁用改用**收掉投影**（与主面板 `.cs-act:disabled` 同一条），
+   *   新规则在下面 `.cs-btn-ink` 那段之后。
+   *
+   *   ⚠ 当年那条注释里「纸族上红铅笔没有余量」的实测（红 4.56:1）
+   *     依然成立，只是它守护的对象已经不存在了 —— 纯黑底没了。 */
 
-  /* 图片外发总闸。它是这一屏唯一的危险开关，也是**唯一一处实心**——
-   * 主面板里「墨底」是当场的主动作，这里照用同一档墨，不引入新颜色。 */
+  /* 图片外发总闸。⚠⚠ **从「实心墨底药丸」改成撕边纸条**（2026-10-16）。
+   *
+   *  ## 为什么它是全屏最后一块纯黑
+   * `background: var(--cs-ink)` 是一块**纯黑实心块 + 反白字**。
+   * 用户 2026-10-16 的原话：「为何还有这种纯黑的0设计按钮存在？」
+   * ——「0 设计」说得准确：它没有任何材质、没有笔、没有撕口，
+   * 就是浏览器按钮换了个颜色。同一屏其余控件都已经是纸，
+   * 只有这一颗还停在 Web 上。
+   *
+   *  ## 为什么不是「换个浅色底」
+   * 改底色只是把黑块换成灰块，**载体仍然是色块**。
+   * 而票 44 已经在主面板上判过一次：候选动作行用实心色块，
+   * 读出来就是「按钮」，不是「从这张纸上撕下来的一片」。
+   * ⇒ 这里直接用同一套撕边（`.cs-act` 的 `border-image` / `strip.png`），
+   * 同一个材质源、同一套参数，不是「类似风格」。
+   *
+   *  ## 为什么它仍然可以是「开关」
+   * 撕边说的是「这是一片纸」，不规定它是「做什么的」。
+   * 开/关由**字**说（「打开」/「关闭」），不由颜色说 ——
+   * 红在这套色板里只给不可逆（app.css 文件头），而这一项恰恰**可逆**。
+   */
   .cs-btn-ink {
     align-self: flex-start;
+    position: relative;
+    margin: -8px 0;
     padding: 7px 18px;
     font-size: 12.5px;
-    background: var(--cs-ink);
-    color: var(--cs-paper-raised);
+    color: var(--cs-ink);
+    /* 抬起 / 压回是 transform，得自己有 transition；
+     * `.cs-btn` 里那三条（background / color / opacity）在撕边之后已经
+     * 没有可过渡的对象了 —— 纸条不变色、不换底。 */
+    transition:
+      transform var(--cs-dur-fast) var(--cs-ease),
+      filter var(--cs-dur-fast) var(--cs-ease);
+    /* ⚠ 与 `.cs-act` 逐项一致：同一张 `strip.png`、同一套 slice / width。
+     *   写 16px 是因为撕口的纸芯最早只在内缩 ~5.5 CSS px 处（`stripgen.py`
+     *   实测最浅一档），再薄就会啃进纸。**这一对是一套，别单独改一个。** */
+    border: 16px solid transparent;
+    border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
+    /* 投影跟着 alpha 走：`box-shadow` 画的是边框盒，
+     * 撕口的透明区会漏出它的直边，在纸上就是一圈生硬的方框
+     * （票 44 实测：同一列 x=203 连续暗 185~205，邻列 198/227）。
+     *
+     * 2026-10-16 用户红框指出「顶部为何要有这条黑边」，实测同主面板：
+     * `drop-shadow(0 2px 3px …)` 的核覆盖 `[-1.5, +3.5]`，**越进元素内侧
+     * 0.5px**，那半份影子从半透明撕口底下透出来 ⇒ 上沿浮出一条直线。
+     * ⇒ 判据是 `dy ≥ blur/2`，不靠"看着还行"。 */
+    filter: drop-shadow(0 3px 6px rgb(24 18 10 / 0.2));
   }
 
   .cs-btn-ink:hover:not(:disabled) {
-    background: var(--cs-ink-2);
+    color: var(--cs-ink-2);
+    transform: translateY(-1px);
+    filter: drop-shadow(0 6px 11px rgb(24 18 10 / 0.28));
   }
 
-  /* key 卡片里的三颗小按钮。**同高 30px**：它们是同一级控件，
-   * 两种规格意味着用户点之前得先判断「这颗算不算主要控件」。 */
+  .cs-btn-ink:active:not(:disabled) {
+    transform: translateY(1px);
+    filter: drop-shadow(0 2px 4px rgb(24 18 10 / 0.14));
+  }
+
+  /* ⚠ 禁用态读成「一片没有落在纸上的纸」——收掉投影，
+   *   与主面板 `.cs-act:disabled` 同一条（那里记着为什么不能用虚线边框：
+   *   `border-image` 一生效，`border-style` 就画不出来）。
+   *   ⚠ 不能用透明底：WebView2 分层合成会把整层 `rgb(... / 低alpha)` 整层
+   *   不绘制（app.css `--cs-paper` 的注释，2026-10-07 实测），
+   *   那会让按钮**整个消失**。所以只动 filter。 */
+  .cs-btn-ink:disabled {
+    color: var(--cs-pencil-2);
+    filter: none;
+  }
+
+  /* key 卡片里的小按钮。**与 `.cs-btn-ink` 逐项同源**：同一张 `strip.png`、
+   * 同一套 slice / width、同一条「核不上沿」判据（见 `.cs-btn-ink` 那段的实测）。
+   *
+   * 2026-10-16 用户原话：「让你参考档位是指像现在打开按钮这样去做**风格统一的
+   * 按钮样式**，而不是拿之前的设计敷衍。」⇒ 这一族原来还是 `1px solid` 描边，
+   * 与刚改好的「打开」并排时就是两个时代的东西。
+   *
+   * 代价是**变高**：撕边上下各 16px，30px 的按钮变成约 61px。这是照着用户
+   * 指定的方向换材质必然的尺寸变化，不是顺手调出来的。
+   * `16px` 与 `32` 都与 `.cs-btn-ink` 逐字绑定，别单独改一个。 */
   .cs-btn-mini {
     padding: 6px 11px;
-    font-size: 0.72rem;
-    border: 1px solid var(--cs-rule-strong);
-    background: transparent;
+    font-size: 11.5px;
     white-space: nowrap;
+    border: 16px solid transparent;
+    border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
+    /* 影子随 alpha 走（同 `.cs-act`）：`box-shadow` 画边框盒，会从撕口的透明区
+     * 漏出矩形直边。`dy ≥ blur/2` ⇒ 高斯核不越进元素内侧，顶部不会浮出黑边。 */
+    filter: drop-shadow(0 2px 4px rgb(24 18 10 / 0.16));
+    transition:
+      filter var(--cs-dur-fast) var(--cs-ease),
+      transform var(--cs-dur-fast) var(--cs-ease);
   }
 
-  .cs-btn-mini:hover:not(:disabled) {
-    background: rgb(20 26 31 / 6%);
+  /* 悬停 / 聚焦：**拿起来**——与主面板 `.cs-act` 同一个动作，只是抬 1px
+   * （小按钮抬 2px 会顶到相邻行）。键盘 Tab 到这里也走同一条。 */
+  .cs-btn-mini:hover:not(:disabled),
+  .cs-btn-mini:focus-visible {
+    transform: translateY(-1px);
+    filter: drop-shadow(0 5px 9px rgb(24 18 10 / 0.24));
   }
 
+  /* 按下：**压回纸面**。抬起与按下必须成对，否则反馈只剩「换了个底色」——
+   * 而这片纸不会变色。 */
+  .cs-btn-mini:active:not(:disabled) {
+    transform: translateY(1px);
+    filter: drop-shadow(0 1px 2px rgb(24 18 10 / 0.12));
+  }
+
+  /* 撕边之后**「主要 / 危险」只能靠字色说**：`border-image` 一生效，
+   * `border-color` 就不再被画出来（`.cs-btn-ink` 的禁用态注释记着同一件事）。 */
   .cs-btn-mini.primary {
-    border-color: color-mix(in srgb, var(--cs-live) 55%, transparent);
     color: var(--cs-live);
   }
 
   .cs-btn-mini.danger {
-    border-color: color-mix(in srgb, var(--cs-live) 40%, transparent);
     color: var(--cs-live);
   }
 
@@ -1296,7 +1517,7 @@
     min-width: 5.2rem;
     /* 机器读出来的数 → 等宽，和主面板的分工一致。 */
     font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
-    font-size: 0.75rem;
+    font-size: 12px;
     font-weight: 600;
     color: var(--cs-ink);
     /* UA 默认把 output 渲染得像超链接，蓝色 + 下划线。去掉。 */
@@ -1316,18 +1537,19 @@
    * 换句话说：**两组 = 两张字条**，这是这一屏已经有的语言，
    * 不为「两组」另发明一套。
    */
+  /* 两组之间靠**留白 + 标题**分开，与主面板同一条排版语言
+   * （`.cs-h2` 的注释：「分组全靠留白和字号，不画分隔线」）。
+   * 这里原先还给每组套了 1px 描边 + 圆角 + 抬升底色 ——
+   * 那是「卡片」，是另一套材质语言，而且它把里面已经是撕边纸条的按钮
+   * 又关进一个描边盒子里，等于同一个控件上了两层框。 */
   .cs-group {
-    padding: 0.5rem 0.6rem;
-    border: 1px solid var(--cs-rule);
-    border-radius: var(--cs-radius-sm);
-    background: var(--cs-paper-raised);
+    padding: 0;
   }
 
-  /* 两组之间要**看得见地分开**——它们是两份互不影响的配置，
-   * 挤在一起会被读成一张卡的上下两段。用留白 + 一条细则，
-   * 不加第二条重描边（这一屏每组的边框已经是一道了）。 */
+  /* 组间距要**看得见地分开**：它们是两份互不影响的配置，
+   * 挤在一起会被读成一张卡的上下两段。 */
   .cs-group + .cs-group {
-    margin-top: 0.5rem;
+    margin-top: 0.9rem;
   }
 
   .cs-group-head {
@@ -1337,9 +1559,12 @@
     gap: 0.5rem;
   }
 
+  /* 分组标题。这一屏的标题档是 **12.8px / 600**，与 `.cs-h2` 同值；
+   * 原来它独自写 `0.8rem`（12.8px）却配 **700** —— 全屏唯一的第三档字重，
+   * 一个标题比同屏其它所有 600 的东西都重，读起来像另一个层级的东西。 */
   .cs-group-name {
-    font-size: 0.8rem;
-    font-weight: 700;
+    font-size: 12.8px;
+    font-weight: 600;
   }
 
   /* 厂商选择：九项在 380px 的面板里**换行排**，不做分段控件
@@ -1363,12 +1588,13 @@
   }
 
   .cs-prov-name {
-    font-size: 0.78rem;
+    font-size: 12.5px;
     font-weight: 600;
   }
 
+  /* 徽标是**状态**，不是句子 ⇒ 单独一档 10.4px，比正文还小一档。 */
   .cs-badge {
-    font-size: 0.65rem;
+    font-size: 10.4px;
     padding: 0.1rem 0.4rem;
     border-radius: 999px;
     overflow-wrap: anywhere;
@@ -1409,7 +1635,7 @@
     flex: 1 1 auto;
     min-width: 0;
     padding: 0.35rem 0.45rem;
-    font-size: 0.72rem;
+    font-size: 11.5px;
     font-family: ui-monospace, 'Cascadia Mono', monospace;
     color: var(--cs-ink);
     /* 底色**完全不透明**（见 app.css 的注释）：透明窗口的分层合成会
@@ -1440,7 +1666,7 @@
   /* ── 危险开关下面那一句红。**只有这一句是红的。** ───────────── */
   .cs-warn-on {
     margin: 0.25rem 0 0;
-    font-size: 0.72rem;
+    font-size: 11.5px;
     font-weight: 600;
     line-height: 1.5;
     color: var(--cs-live);

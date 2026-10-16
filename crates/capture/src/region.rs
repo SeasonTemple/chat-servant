@@ -117,7 +117,7 @@ pub fn capture(hwnd_raw: isize) -> Result<chatservant_core::frame::Frame, Region
         }
 
         // SAFETY: `mem_dc` 与 `bitmap` 都是刚拿到且已判有效的句柄。
-        // ⚠ 这里**故意不恢复旧位图**（`DeleteDC` 会连带释放它选的位图）——
+        // 这里**故意不恢复旧位图**（`DeleteDC` 会连带释放它选的位图）——
         //   那会把 DC 原来选的默认位图一起删掉，属于已知的 GDI 坑，
         //   所以本函数的 DC 是「用完就删」的一次性资源。
         unsafe {
@@ -143,7 +143,7 @@ pub fn capture(hwnd_raw: isize) -> Result<chatservant_core::frame::Frame, Region
             };
 
             // 三句清理都与上面取得它们的调用成对。
-            // ⚠ **顺序不能换**：`DeleteDC` 会连带删掉 DC 选中的位图，
+            // **顺序不能换**：`DeleteDC` 会连带删掉 DC 选中的位图，
             //   所以位图必须先单独 `DeleteObject` 一次，否则漏一个 GDI 对象。
             let _ = DeleteObject(bitmap.into());
             let _ = DeleteDC(mem_dc);
@@ -221,7 +221,7 @@ pub fn occlusion_samples(hwnd_raw: isize) -> Vec<(i32, i32)> {
 /// 它排在遮挡检查**前面**就是为此：被藏起来的窗口在屏幕坐标上仍然占位，
 /// `WindowFromPoint` 命中的是它自己，遮挡检查会说「没被挡」。
 ///
-/// ⚠ **本机实测它是 false**，而 WGC 仍然失败——所以它是**候选原因之一**，
+/// **本机实测它是 false**，而 WGC 仍然失败——所以它是**候选原因之一**，
 /// 不是已确认的原因。别把它当成对当前故障的诊断结论。
 pub fn is_cloaked(hwnd_raw: isize) -> bool {
     use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
@@ -279,7 +279,7 @@ pub fn why_wgc_unreadable(hwnd_raw: isize) -> Option<String> {
 /// 存在的理由：区域抓屏失败时，错误信息只有「抓帧失败」四个字，
 /// 用户看不出是自己把窗口压在别的窗口底下了。这句提示比重试一千次有用。
 ///
-/// ## ⚠ **它不适用于 WGC**
+/// ## **它不适用于 WGC**
 ///
 /// 遮挡对区域抓屏是致命的，但 **WGC 恰恰就是为抓被遮挡窗口设计的**。
 /// 拿它当 WGC 的前置判据，会让**只要有任何东西盖住目标窗口就直接失败**，

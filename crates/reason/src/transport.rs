@@ -51,11 +51,11 @@
 //! key 从参数进来，**只交给 genai 的 `AuthResolver`**。它不会进日志、
 //! 不进错误信息、不进任何 struct 的 `Debug` 输出。
 //!
-//! ⚠ **genai 的错误 `Display` 不能直接用**：`Error::ChatResponseGeneration`
+//! **genai 的错误 `Display` 不能直接用**：`Error::ChatResponseGeneration`
 //! 会把**整个请求体**印出来，而请求体里有用户的聊天内容。
 //! 所以所有 genai 错误一律过 [`brief`]，它只取诊断要用的那几个字段。
 //!
-//! ⚠ [`redact`] 挡的是 **key 形状**（`sk-` 开头的 token）。
+//! [`redact`] 挡的是 **key 形状**（`sk-` 开头的 token）。
 //! **端点与代理地址里的凭据**（`user:pass@`、`?access_token=`）由
 //! `ui/src-tauri/src/secret.rs` 的 `redact` 负责——同一个函数，
 //! 两边的调用点都在各自模块的对外文本上。
@@ -175,7 +175,7 @@ impl Protocol {
 
     /// genai 适配器。**必须显式给，不许把模型名字符串直接丢给 genai。**
     ///
-    /// ⚠ **这是个真会咬人的默认值**：genai 靠模型名前缀猜适配器
+    /// **这是个真会咬人的默认值**：genai 靠模型名前缀猜适配器
     /// （`gpt*` → OpenAI、`claude*` → Anthropic、**其余一律 → Ollama**）。
     /// 我们的模型叫 `abab6.5s-chat`，不带前缀，于是它会**静默落到 Ollama**，
     /// 打到 `http://localhost:11434` 去——症状是「配置成功、一调用就 404」。
@@ -199,7 +199,7 @@ impl Protocol {
         if self.is_openai_compatible() {
             return o;
         }
-        // ⚠ 只给 Anthropic 封顶。早先手写协议时也只有它带 `max_tokens`，
+        // 只给 Anthropic 封顶。早先手写协议时也只有它带 `max_tokens`，
         // 沿用同样的口径：这一家的**接口**要求必须给，别家给不给是可选的。
         // 顺带把输出长度卡住——三段要的输出都是几十到几百字。
         o.with_max_tokens(256)
@@ -207,7 +207,7 @@ impl Protocol {
 
     /// 探测端点需要的头。
     ///
-    /// ⚠ **只有探测走这里。** 聊天请求的鉴权头由 genai 的适配器生成
+    /// **只有探测走这里。** 聊天请求的鉴权头由 genai 的适配器生成
     /// （`Authorization: Bearer` / `x-api-key` + `anthropic-version`），
     /// 那一段不归我们写——它正是这次外包出去的东西。
     pub fn probe_headers(self, api_key: &str) -> Vec<(String, String)> {
@@ -223,7 +223,7 @@ impl Protocol {
 
 /// 一家模型服务。**「预设」那一类**：自带端点、模型名与协议。
 ///
-/// ## ⚠ 端点常量的来源（2026-10-15，票 43）
+/// ## 端点常量的来源（2026-10-15，票 43）
 ///
 /// 这个文件原先只有三家，且三家的端点都是**本机实测过**的。
 /// 新增的这几家**没有在本机实测**——加它们的那天没有网络、也没有任何一家的
@@ -246,7 +246,7 @@ pub enum Provider {
     /// MiniMax，走 **OpenAI 兼容**接口（实测 `abab6.5s-chat` 在
     /// `https://api.minimaxi.com/v1/chat/completions` 返回 HTTP 200 并正常回话）。
     ///
-    /// ## ⚠ 这里**不用** genai 的 `AdapterKind::MiniMax`
+    /// ## 这里**不用** genai 的 `AdapterKind::MiniMax`
     ///
     /// genai 自带一个 MiniMax 适配器，而它是 **Anthropic 兼容**协议、
     /// 打的是 `https://api.minimax.io/anthropic/v1/`——**跟我们实测能通的
@@ -263,13 +263,13 @@ pub enum Provider {
     /// 阿里通义千问（DashScope / 百炼）。OpenAI 兼容协议。
     ///
     /// 端点来源：阿里云百炼的「OpenAI 兼容」接入文档。
-    /// ⚠ 注意路径是 `compatible-mode/v1/`，**不是** `v1/`——
+    /// 注意路径是 `compatible-mode/v1/`，**不是** `v1/`——
     /// 少这一段就是 404。**未在本机实测。**
     Qwen,
     /// 智谱 GLM（BigModel）。OpenAI 兼容协议。
     ///
     /// 端点来源：智谱开放平台的「OpenAI SDK 兼容」文档。
-    /// ⚠ 路径是 `api/paas/v4/`，版本号是 `v4` 而非 `v1`。**未在本机实测。**
+    /// 路径是 `api/paas/v4/`，版本号是 `v4` 而非 `v1`。**未在本机实测。**
     Zhipu,
     /// 本机 Ollama。**走它的 OpenAI 兼容接口**（`/v1`）。
     ///
@@ -374,7 +374,7 @@ impl Provider {
     /// **预置假传输**——界面上每条候选都标着「预置」，但那意味着
     /// 用户配好的 key 根本没被用上，而界面没有任何地方说这件事。
     ///
-    /// ⚠ 抄文档端点的那几家（见文件头）**只给通用写法**：它们的变量名
+    /// 抄文档端点的那几家（见文件头）**只给通用写法**：它们的变量名
     /// 我们没有核实过，而一个**猜错的变量名**比没有更糟——它会让用户
     /// 以为自己配好了，而程序读的是另一个地方。
     ///
@@ -434,7 +434,7 @@ impl Provider {
         Some(match self {
             Self::OpenAi => "https://api.openai.com/v1/",
             Self::Anthropic => "https://api.anthropic.com/v1/",
-            // ⚠ 中国区端点。genai 自带的 MiniMax 适配器指向 api.minimax.io，
+            // 中国区端点。genai 自带的 MiniMax 适配器指向 api.minimax.io，
             // 那是另一家、另一种协议，见上面 `MiniMax` 的文档。
             Self::MiniMax => "https://api.minimaxi.com/v1/",
             // ↓↓↓ 以下三家的端点抄自官方文档，**未在本机实测**。见文件头。
@@ -460,10 +460,10 @@ impl Provider {
 
     /// 这一家**能用的模型清单**。设置页从这里取选项。
     ///
-    /// ⚠ **实测过的三家非常短**（各一个）：填一个没验过的名字，表现会是
+    /// **实测过的三家非常短**（各一个）：填一个没验过的名字，表现会是
     /// 「设置成功、一调用就 404」，比明确不支持更难查。
     ///
-    /// ⚠ **本地两个与 `Custom` 是空的**：模型名由用户自己装了什么决定，
+    /// **本地两个与 `Custom` 是空的**：模型名由用户自己装了什么决定，
     /// 我们无从列举。空清单**不是没做完**，是「没有权威清单可抄」。
     pub fn models(self) -> &'static [&'static str] {
         match self {
@@ -502,7 +502,7 @@ impl Provider {
     /// - **其余各家**：我们没有核实过的清单，**拒收任何非空名字都是装的**——
     ///   那只会让本地模型和自定义端点一个都用不了。所以这里只挡空串。
     ///
-    /// ⚠ 代价是诚实的：没核实的那几家，真填错了仍然是 404。
+    /// 代价是诚实的：没核实的那几家，真填错了仍然是 404。
     /// 那正是界面必须标「未核实」的原因。
     pub fn accepts_model(self, model: &str) -> bool {
         let m = model.trim();
@@ -568,7 +568,7 @@ impl Route {
     /// 查询参数**保留**（`?access_token=…` 这类端点是真实存在的），
     /// 片段**丢掉**（`#…` 不会发给服务器，留着只会让日志里的地址变形）。
     ///
-    /// ## ⚠ 端点会把请求带去用户指定的任意地址
+    /// ## 端点会把请求带去用户指定的任意地址
     ///
     /// 这一格连同 key 一起决定了「对方的聊天内容发到哪儿」。
     /// 所以：**界面上必须明说「请求会发到这里」**，而错误文本一律过
@@ -578,7 +578,7 @@ impl Route {
         if raw.is_empty() {
             return Err("端点不能为空".to_string());
         }
-        // ⚠ **先按用户写的字面判「有没有主机」，再交给 URL 解析器。**
+        // **先按用户写的字面判「有没有主机」，再交给 URL 解析器。**
         //
         // 顺序反了会踩一个很贵的坑：URL 解析器把 `https:///v1` **解析成功**，
         // 并把 `v1` 认成主机名、归一化成 `https://v1/`。那是把用户的 key
@@ -604,7 +604,7 @@ impl Route {
         }
         let mut path = u.path().to_string();
         if !path.ends_with('/') {
-            // ⚠ 少了这一个斜杠，`/v1` 会在 join 时被吃掉，见上面那段。
+            // 少了这一个斜杠，`/v1` 会在 join 时被吃掉，见上面那段。
             path.push('/');
         }
         u.set_path(&path);
@@ -626,7 +626,7 @@ impl Route {
         self.protocol
     }
 
-    /// 真实生效的端点（已归一化）。⚠ 会出现在日志里，**必须过 [`redact`]**。
+    /// 真实生效的端点（已归一化）。会出现在日志里，**必须过 [`redact`]**。
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -682,7 +682,7 @@ impl Route {
 /// 症状是「设置成功、一调用就 404」，而那个 404 会被 `brief` 归类成
 /// 「网络层/上游失败」，用户完全看不出是自己刚选了个不存在的模型。
 /// 在**写入这一格**的时候拒掉，是唯一能让这件事当场可见的地方。
-/// ⚠ 但口径按 [`Provider::measured`] 分两种，见 [`Provider::accepts_model`]：
+/// 但口径按 [`Provider::measured`] 分两种，见 [`Provider::accepts_model`]：
 /// 没有核实过清单的那几家只挡空串，硬拒会让人一个模型都用不了。
 #[derive(Clone)]
 pub struct ModelCell(Arc<RwLock<(Route, String)>>);
@@ -806,7 +806,7 @@ impl ProxyCell {
     /// 那一个对象，所以「能不能装上」在**存进去之前**就该知道，
     /// 而不是等到发第一条请求时才发现填错了。
     ///
-    /// ⚠ 地址常带 `user:pass@`，所以它**必须过 [`redact`]** 才能进日志或
+    /// 地址常带 `user:pass@`，所以它**必须过 [`redact`]** 才能进日志或
     /// 报错文本——`secret.rs` 那边已覆盖这一形状。
     pub fn set(&self, url: &str) -> Result<Option<String>, String> {
         let t = url.trim();
@@ -814,7 +814,7 @@ impl ProxyCell {
             *self.0.write().expect("锁") = None;
             return Ok(None);
         }
-        // ⚠ **`Proxy::all` 自己不够严**（本机实测：它把「这不是地址」也收下，
+        // **`Proxy::all` 自己不够严**（本机实测：它把「这不是地址」也收下，
         //   当成一个不带 scheme 的主机）。所以先自己判 scheme 与主机 ——
         //   存进去的必须是「出网时真的能用」的那种地址。
         let u = reqwest::Url::parse(t).map_err(|_| "这不像一个网址".to_string())?;
@@ -862,7 +862,7 @@ pub struct HttpReasoner {
     proxy: ProxyCell,
     /// 按代理缓存的协议层客户端。**它的鉴权头、请求体、响应解析全由它负责。**
     clients: std::sync::Arc<std::sync::Mutex<ClientSlot>>,
-    /// ⚠ **key 只有这一份副本**，而且它是 [`std::sync::Arc`] 包着的——
+    /// **key 只有这一份副本**，而且它是 [`std::sync::Arc`] 包着的——
     /// 建 client 时的 `AuthResolver` 闭包捕获的是**同一个** `Arc`，
     /// 不是又一份 `String`。换代理要重建 client、闭包要重新捕获，
     /// 这才让它留在这个结构里。早先它是「构造完就移进 genai、结构里不留」，
@@ -901,7 +901,7 @@ impl std::fmt::Debug for HttpReasoner {
         f.debug_struct("HttpReasoner")
             .field("provider", &route.provider())
             .field("protocol", &route.protocol())
-            // ⚠ 端点里可能带 `user:pass@` 或 `?token=`。**照打不误**是错的，
+            // 端点里可能带 `user:pass@` 或 `?token=`。**照打不误**是错的，
             // 而打整条 URL 会让人看不出是哪个端点——所以只打 host。
             .field("endpoint", &redact(route.base_url()))
             .field("model", &self.route.get())
@@ -923,7 +923,7 @@ impl HttpReasoner {
     /// 失败时调用方（设置层）能做的正确动作是**退回预置传输**，
     /// 不是让整个面板起不来。
     ///
-    /// ⚠ `Custom` 没有预设端点，所以它在这里**一定失败**——
+    /// `Custom` 没有预设端点，所以它在这里**一定失败**——
     ///   它只能经 [`HttpReasoner::with_route`] 装。
     pub fn new(provider: Provider, api_key: String) -> Result<Self, String> {
         let route = Route::preset(provider)?;
@@ -962,7 +962,7 @@ impl HttpReasoner {
 
     /// 把端点指到别处。**只给测试用**（对着 [`crate::mock_upstream`]）。
     ///
-    /// ⚠ 它是 `#[cfg(test)]`：产品路径上的自定义端点走
+    /// 它是 `#[cfg(test)]`：产品路径上的自定义端点走
     ///   [`HttpReasoner::with_config`] + [`Route::custom`]+[`ModelCell::set_route`]，
     ///   那一格是**设置页能写到的**（有校验、有界面说明、有 redact）。
     ///   而这里这个构造**绕过校验直接吃一个字符串**，在生产构建里不该存在。
@@ -1016,7 +1016,7 @@ impl HttpReasoner {
             .with_timeout(REQUEST_TIMEOUT)
             .with_connect_timeout(CONNECT_TIMEOUT);
         if let Some(url) = &proxy {
-            // ⚠ **复用 reqwest 已有的 `Proxy::all`**，不要自己实现 CONNECT。
+            // **复用 reqwest 已有的 `Proxy::all`**，不要自己实现 CONNECT。
             //   代理地址常带 `user:pass@`，它自己会处理认证。
             web = web
                 .with_all_proxy_url(url)
@@ -1082,7 +1082,7 @@ impl HttpReasoner {
     ) -> Result<String, String> {
         let req = build_request(system, user, images);
         let route = self.route.route();
-        // ⚠ **空模型名不许发出去。** 本机推理与自定义端点没有默认清单，
+        // **空模型名不许发出去。** 本机推理与自定义端点没有默认清单，
         // 格子里就可能是空的，而 `ModelIden::new(_, "")` 出去只会换一个
         // 更难懂的 404。这里当场说清楚「还没选模型」。
         let name = self.route.get();
@@ -1103,7 +1103,7 @@ impl HttpReasoner {
             Stage::Rank => self.rank_calls.set(self.rank_calls.get() + 1),
         }
         let opts = route.protocol().chat_options();
-        // ⚠ **这里就是 async → sync 那道桥。** 对外（`Reasoner`）仍然是同步的。
+        // **这里就是 async → sync 那道桥。** 对外（`Reasoner`）仍然是同步的。
         let resp = self
             .rt
             .block_on(client.exec_chat(model, req, Some(&opts)))
@@ -1388,7 +1388,7 @@ fn brief_web(e: &genai::webc::Error) -> String {
 /// 所以这里**只**这一个 GET 用了 `reqwest` 直接发——版本与 genai 内部
 /// 那条一致，依赖树里不新增任何 crate。
 ///
-/// ## ⚠ 自定义端点也走这一条
+/// ## 自定义端点也走这一条
 ///
 /// 所以「测试连通」测的是**当前这一路**（含用户自己填的地址），不是某家
 /// 预设。地址里带的凭据由 [`redact`] 处理，见 [`Route::custom`]。
@@ -1430,7 +1430,7 @@ fn probe_at(
         let mut builder = reqwest::Client::builder()
             .timeout(timeout)
             .connect_timeout(CONNECT_TIMEOUT);
-        // ⚠ 与聊天那条路**同一个** `reqwest::Proxy::all`，
+        // 与聊天那条路**同一个** `reqwest::Proxy::all`，
         // 别在这里另写一套代理逻辑——两套不一致的症状是
         // 「聊天走代理、测连通不走」，而用户看不出该信哪个。
         if let Some(p) = &proxy {
@@ -1450,7 +1450,7 @@ fn probe_at(
             .await
             .map_err(|e| redact(&format!("网络层失败：{e}")))?;
         let status = resp.status();
-        // ⚠ 失败时**先读正文再拼错误**：`reqwest` 的 `status()` 之后
+        // 失败时**先读正文再拼错误**：`reqwest` 的 `status()` 之后
         // 拿不到 body 了，所以顺序不能反。
         let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -1489,7 +1489,7 @@ pub fn strip_code_fence(raw: &str) -> String {
 
 /// 抹掉 key。**任何对外文本都要过这里。**
 ///
-/// ⚠ **2026-10-15 不再自己实现了**。这里原来有一份只认 `sk-` / `sk-ant-`
+/// **2026-10-15 不再自己实现了**。这里原来有一份只认 `sk-` / `sk-ant-`
 /// 的弱版，而**自定义端点与代理的报错全走这里**
 /// （`ProxyCell::set` / `build_client` / `probe_route` 三处）⇒
 /// 一个带 `user:pass@` 的代理地址填错时，口令会被原样放进日志。
@@ -1498,7 +1498,7 @@ pub fn strip_code_fence(raw: &str) -> String {
 /// 本 crate 够不着——于是同一件「脱敏」的事被写了两遍，
 /// 且两遍能力不同（`reason` 这份连 URL 里的凭据都不认）。
 ///
-/// ⚠ 两条**能力不同**的旁路等于没有脱敏：强的那份再强，
+/// 两条**能力不同**的旁路等于没有脱敏：强的那份再强，
 /// 调用方挑了弱的那份就白做。
 /// ⇒ 纯字符串的那部分收到 [`chatservant_core::redact`]，两边调同一份。
 /// 本 crate 拿不到「已登记的 key 值」那一路（那需要凭据管理器），
@@ -1625,7 +1625,7 @@ mod tests {
     /// ② **污染**。判断问的是「对方想干什么」，模型看到样本就可能理解成
     ///    「用户之前是怎么回的」，拿它去反推意图——那是凭空多的一条推理路径。
     ///
-    /// ⚠ 断言的**形状变了**：早先读的是我们自己拼的请求体，
+    /// 断言的**形状变了**：早先读的是我们自己拼的请求体，
     /// 现在读的是**真的发出去的字节**。性质没变，证据更硬。
     #[test]
     fn voice_samples_reach_the_draft_but_not_the_judge() {
@@ -1639,7 +1639,7 @@ mod tests {
         crate::turn(&mut r, &ctx).expect("推理成功");
 
         let seen = up.seen();
-        // ⚠ **先断条数，再断内容。**
+        // **先断条数，再断内容。**
         //
         // 少了这两行，一次「少记了一个请求」会以最误导人的形式冒出来：
         // `seen[0]` 变成起草那一次，于是下面那条断言报「判断请求带了口吻样本」——
@@ -1870,7 +1870,7 @@ mod tests {
 
     /// **代理与自定义端点的报错必须抹掉 URL 里的凭据**（票 43 第 ③ 条）。
     ///
-    /// ⚠ 这条守的是 2026-10-15 修掉的那个破口：本 crate 的 `redact`
+    /// 这条守的是 2026-10-15 修掉的那个破口：本 crate 的 `redact`
     ///   原来只认 `sk-` / `sk-ant-`，而**代理地址的报错全走这里**
     ///   （`ProxyCell::set` / `build_client` / `probe_route`），
     ///   于是一句「代理连不上」会把 `alice:hunter2` 原样带进日志。
@@ -1931,7 +1931,7 @@ mod tests {
 
     /// 探测**真的**只发一个 GET 到 `/v1/models`，而且带对鉴权头。
     ///
-    /// ⚠ 这是**真的 socket**，不是假 `Http`：早先那条断言只能证明
+    /// 这是**真的 socket**，不是假 `Http`：早先那条断言只能证明
     /// 「我们调了自己的函数，参数长这样」，证明不了「线上真发了这个」。
     #[test]
     fn probing_over_a_real_socket_sends_one_get_to_models() {
@@ -1956,7 +1956,7 @@ mod tests {
 
     /// **探测的错误里不能有 key。** 上游的错误正文可能带上刚发的 header。
     ///
-    /// ⚠ 这次是真的：假上游**把 key 原样写回错误正文**，
+    /// 这次是真的：假上游**把 key 原样写回错误正文**，
     /// 模拟最坏情况，而错误是从真的响应里读出来的。
     #[test]
     fn a_probe_error_never_contains_the_key() {
@@ -1997,7 +1997,7 @@ mod tests {
     /// 症状是「设置成功、一调用就 404」，而 404 会被归类成上游失败，
     /// 用户完全看不出是自己选了个不存在的模型。
     ///
-    /// ⚠ 而界线是 [`Provider::measured`]，不是「有没有列清单」：
+    /// 而界线是 [`Provider::measured`]，不是「有没有列清单」：
     ///   本地两个与自定义**列不出**清单，对它们硬拒 = 一个模型都用不了。
     #[test]
     fn only_measured_providers_reject_unlisted_models() {
@@ -2071,7 +2071,7 @@ mod tests {
             Provider::Anthropic.preset_base_url(),
             Some("https://api.anthropic.com/v1/")
         );
-        // ⚠ 中国区端点。genai 自带的 MiniMax 适配器指向 api.minimax.io，
+        // 中国区端点。genai 自带的 MiniMax 适配器指向 api.minimax.io，
         // 那是另一家、另一种协议，见 `Provider::MiniMax` 的文档。
         assert_eq!(
             Provider::MiniMax.preset_base_url(),
@@ -2106,7 +2106,7 @@ mod tests {
 
     /// 自定义端点的坏形状**当场拒**，不给兜底。
     ///
-    /// ⚠ 重点是 `https:///v1`：URL 解析器**解析成功**并把它归一化成
+    /// 重点是 `https:///v1`：URL 解析器**解析成功**并把它归一化成
     /// `https://v1/`，也就是把用户没写过的域名当成主机——那会把 key
     /// 和聊天内容发到一个陌生地址去。所以判「有没有主机」要按**字面**判。
     #[test]
@@ -2138,13 +2138,13 @@ mod tests {
     /// **产品路径真的能走到自定义端点**：这不是 `with_endpoint`（测试专用），
     /// 而是设置页写得到的那条路——`Route::custom` + 共用的格子。
     ///
-    /// ⚠ 断言的是**真的发出去的字节**：路径必须是回环端口上那个 `/v1/`。
+    /// 断言的是**真的发出去的字节**：路径必须是回环端口上那个 `/v1/`。
     /// 走 `with_endpoint` 的那些测试证明不了这一条，因为那条路生产构建里
     /// 根本不存在。
     #[test]
     fn the_product_path_reaches_a_custom_endpoint() {
         let up = upstream(three_replies());
-        // ⚠ **故意少给一个结尾斜杠**：`http://…/v1` 而不是 `…/v1/`。
+        // **故意少给一个结尾斜杠**：`http://…/v1` 而不是 `…/v1/`。
         //   产品路径上的归一化就在这一行生效——而少了它，genai 拼出来的
         //   是 `/chat/completions`，下面那条路径断言当场就红。
         let route = Route::custom(
@@ -2227,7 +2227,7 @@ mod tests {
     /// 所以我们能断言「请求确实被发到了代理那里」。
     #[test]
     fn the_proxy_is_shared_and_takes_effect_without_a_restart() {
-        // ⚠ 两台**都在回环上**：`up` 当模型端点，`px` 当代理。
+        // 两台**都在回环上**：`up` 当模型端点，`px` 当代理。
         //   这条测试**不发任何外网请求**——连「直连时打不到」的演示也不做，
         //   因为那既慢、又等于在测试里偷偷联网。
         let up = upstream(vec![Reply(200, openai_reply(judge_json()))]);
@@ -2257,7 +2257,7 @@ mod tests {
             .expect("回环地址是合法代理");
         r.judge(&ctx).expect("经代理也应当通");
         assert_eq!(px.seen().len(), 1, "请求应当经代理打到那台回环口");
-        // ⚠ HTTP 代理收到的是**绝对 URI** 的请求行，这就是「它确实当了代理」的证据。
+        // HTTP 代理收到的是**绝对 URI** 的请求行，这就是「它确实当了代理」的证据。
         assert!(
             px.seen()[0].path.starts_with("http://"),
             "这不是代理形式的请求行：{}",
@@ -2285,7 +2285,7 @@ mod tests {
 
         assert_eq!(d.route().base_url(), "https://api.deepseek.com/v1/");
         assert_eq!(l.route().base_url(), "https://other.example/v1/");
-        // ⚠ 代理是**同一份**——单独一栏、不重复填，就该只有一处可改。
+        // 代理是**同一份**——单独一栏、不重复填，就该只有一处可改。
         proxy.set("").expect("清空");
         assert_eq!(proxy.get(), None);
         assert_eq!(d.route().base_url(), "https://api.deepseek.com/v1/");

@@ -5,7 +5,7 @@ $out = Join-Path $root 'target\deploy-src'
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-# ⚠ **按排除来，不用白名单。**
+# **按排除来，不用白名单。**
 #
 # 白名单漏一个目录，漏掉的东西就永远传不上去了——而「把所有源码传上去」
 # 本身就是要防这种漏。第一次做的是白名单，结果漏了 `.git`（76 个提交的历史）

@@ -3,12 +3,17 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **44** ｜ 验收项全勾 **26** ｜ 已收但留有说明项 **13** ｜ 未收 **5**
+票据总数 **45** ｜ 验收项全勾 **25** ｜ 已收但留有说明项 **11** ｜ 未收 **9**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
 反过来，Status 行是**手写**的，会漂——2026-10-15 一晚之间就有三张票的
 Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
+
+ℹ **分类看的是 Status 行 `·` 之前那个 triage 标签，不是散文**。
+「已定位」「已修完」这类词出现在说明里**不代表这张票已收**——
+曾经票 44 写着「进行中 …两项复核仍未做」，却被说明里的「已定位」
+判成「不是欠的活」。措辞不是状态，标签才是。
 
 ## 一、未收的票（这里就是要干的活）
 
@@ -20,8 +25,12 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
 | `21-readout-phase-never-sent.md` | 5/7 | ready-for-human · **P0 · 2026-10-12 实测，不是推断** | None（可以立刻做） |
 | `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 4/7 | needs-triage · **2026-10-15 连否三个候选后主动收手** | None（票 22 已把反例测出来了，可以立刻做） |
+| `38-measured-bubble-color-in-comments-no-longer-occurs.md` | 0/0 | in-progress · **2026-10-15 已定位、已订正注释与演示夹具、已加守卫测试** | (票面没写 Blocked by) |
+| `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 6/9 | ready-for-human · **2026-10-15 已定位并修掉两个真 bug，但路还选不了** | (票面没写 Blocked by) |
+| `40-key-input-unreachable-when-unset.md` | 7/9 | ready-for-agent · **2026-10-15 真机发现并已修，待门禁与提交** | (票面没写 Blocked by) |
 | `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-agent · **2026-10-15 已量清三项，待做** | (票面没写 Blocked by) |
-| `44-candidate-action-row-is-button-geometry-on-prose.md` | 2/7 | ready-for-agent · **2026-10-15 用户截图指出，待做** | (票面没写 Blocked by) |
+| `44-candidate-action-row-is-button-geometry-on-prose.md` | 16/18 | 进行中 · **2026-10-16 四角与「读成方框」的根因已定位并修完；门禁全绿；两项复核仍未做** | (票面没写 Blocked by) |
+| `45-settings-screen-left-the-paper-family.md` | 19/23 | ready-for-human · **2026-10-16 第三轮：用户六条意见全部落地——按钮族统一撕边、设置页字体 9 档收到 5 档、说明不再无依无靠、撕边顶部黑边定位到源纸污斑并去暗；demo 夹具补上，两轮的盲区关闭；注释 emoji 全仓清理。真机仍未看过** | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
@@ -38,8 +47,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `17-settings-window-parked-offscreen.md` | 3/4 | 已定位 —— 触发对象已在 `6b2acbf` 随「设置搬进面板」删除 |
 | `24-small-type-floor-remeasure.md` | 6/7 | done · **2026-10-14 量具重建 + 三档数据 + 字重对照，结论如下** |
 | `33-attribution-thresholds-are-dark-theme-only.md` | 3/5 | done · 2026-10-14 真机浅色主题实测发现并已修 · 根因定位到具体数值 |
-| `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 6/9 | ready-for-human · **2026-10-15 已定位并修掉两个真 bug，但路还选不了** |
-| `40-key-input-unreachable-when-unset.md` | 7/9 | ready-for-agent · **2026-10-15 真机发现并已修，待门禁与提交** |
 
 ## 三、已收（验收项全勾）
 
@@ -68,7 +75,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `34-tray-icon-looks-grey-on-dark-taskbar.md` | 6/6 |
 | `36-message-roi-left-edge-collapsed-to-zero.md` | 0/0 |
 | `37-seg-pill-narrower-than-active-item.md` | 0/0 |
-| `38-measured-bubble-color-in-comments-no-longer-occurs.md` | 0/0 |
 | `42-settings-page-still-native-controls-and-scrollbar.md` | 8/8 |
 | `43-model-config-two-groups-custom-endpoint-proxy.md` | 9/9 |
 

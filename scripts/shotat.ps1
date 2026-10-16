@@ -38,7 +38,7 @@ $g = [System.Drawing.Graphics]::FromImage($full)
 $g.CopyFromScreen($dw.L, $dw.T, 0, 0, (New-Object System.Drawing.Size($sw, $sh)))
 $g.Dispose()
 
-# ⚠ **用整屏截图，不用 PrintWindow。**
+# **用整屏截图，不用 PrintWindow。**
 # WebView2 走 DirectComposition，PrintWindow 回来的是黑帧/空帧——
 # 上一轮就是被它骗过一次。整屏永远是真相。
 $crop = $full.Clone(

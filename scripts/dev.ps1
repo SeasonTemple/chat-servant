@@ -12,7 +12,7 @@
 #    这个脚本一律以 pwsh 7 启动自己，调用者只需要
 #    `pwsh -NoProfile -File scripts\dev.ps1 <verb>`。
 
-# ⚠ 配色/排版不是本脚本的事；设计准则见 `docs/设计规范.md`。
+# 配色/排版不是本脚本的事；设计准则见 `docs/设计规范.md`。
 [CmdletBinding()]
 param(
   [Parameter(Position = 0)]
@@ -110,7 +110,7 @@ chat-servant 开发入口（用 pwsh 7 运行）
   }
 
   'app' {
-    # ⚠ 别先单独跑 `pnpm dev`：tauri dev 自己会起 vite（BeforeDevCommand），
+    # 别先单独跑 `pnpm dev`：tauri dev 自己会起 vite（BeforeDevCommand），
     #   占着 1420 之后 beforeDevCommand 非零退出，应用起不来。
     Push-Location ui
     Run 'tauri dev' { & pnpm tauri dev }
@@ -132,7 +132,7 @@ chat-servant 开发入口（用 pwsh 7 运行）
   }
 
   'clean' {
-    # ⚠ 不删 .fingerprint —— Cargo 靠它判断要不要重编，删了会让整棵依赖树重编。
+    # 不删 .fingerprint —— Cargo 靠它判断要不要重编，删了会让整棵依赖树重编。
     #   保留策略写在 scripts/targetgc.py 的 docstring 里，这里只转发，不复制。
     if ($DryRun) {
       Run 'targetgc（只报告）' { & uv run --no-project python scripts\targetgc.py --dry-run }

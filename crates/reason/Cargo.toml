@@ -45,7 +45,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 # **async → sync 的桥。** genai 全是 async，而 `Reasoner` trait 必须保持同步
 # （seam 层、`xtask` 的注入探针、界面上的计数全靠它）。
 #
-# ⚠ 桥接放在 **`reason` 自己**而不是 ADR-0003 建议的 `src-tauri`：
+# 桥接放在 **`reason` 自己**而不是 ADR-0003 建议的 `src-tauri`：
 # `xtask` 也要用**真实传输**跑 e2e / 注入探针，而 `xtask` 依赖不到 `src-tauri`。
 # 放一处两边都能用，否则就得把协议层复制一份给 xtask —— 而复制的那份
 # 正是这次要删掉的东西。
@@ -68,7 +68,7 @@ tokio = { version = "1", default-features = false, features = [
 # 新警告出现时才「obvious」。缺的是把策略**写下来**——
 # 这段就是那个策略。
 #
-# ⚠ **为什么 per-crate 的 `unsafe_code = "forbid"` 写在 `src/lib.rs`
+# **为什么 per-crate 的 `unsafe_code = "forbid"` 写在 `src/lib.rs`
 # 而不在这里。** cargo **不允许「继承 + 局部覆盖」并存**：只要这里写
 # `[lints.rust]`，就报 `cannot override workspace.lints in lints`，
 # 整个工作区连 manifest 都解析不了（2026-10-10 本机 cargo 1.98 实测）。

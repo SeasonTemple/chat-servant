@@ -1,6 +1,6 @@
 param([string]$OutDir = "$PSScriptRoot\..\target\shots")
 
-# 九具全出图。⚠ 2026-10-14：Chrome CLI 出空白时**先确认应用没崩**——
+# 九具全出图。2026-10-14：Chrome CLI 出空白时**先确认应用没崩**——
 #   那次空白不是量具坏了，是我把面板改崩了（null 上读 status_hint），
 #   而 `pnpm build` 与 svelte-autofixer 全过。⇒ 出图后必须核对字节数。
 $ErrorActionPreference = 'Stop'
@@ -12,7 +12,7 @@ $states = 'drafted','confirm','armed','drafting','failed','noprep','silent','fre
 
 foreach ($s in $states) {
   $out = Join-Path $OutDir "st-$s.png"
-  # ⚠ **必须重试**：2026-10-14 实测同一 URL 连出三次，前一次空白、
+  # **必须重试**：2026-10-14 实测同一 URL 连出三次，前一次空白、
   #   后两次 580465 字节且逐字节相同。空白与水合时序有关，不是稳定故障。
   #   而空白恰好是「应用崩了」与「量具抖了」共同的表现 ⇒ 单次结果不能定责。
   $len = 0
@@ -25,7 +25,7 @@ foreach ($s in $states) {
     if (Test-Path $out) { $len = (Get-Item $out).Length }
     if ($len -ge 50000) { break }
   }
-  # ⚠ 空白图约 7.5 KB。真面板约 580 KB。低于 50 KB 一律当作「没渲染」。
+  # 空白图约 7.5 KB。真面板约 580 KB。低于 50 KB 一律当作「没渲染」。
   if ($len -lt 50000) { throw "$s 连出四次都是空白（$len bytes）——先查应用是不是崩了" }
   "{0,-9} {1} bytes  (第 {2} 次)" -f $s, $len, $try
 }

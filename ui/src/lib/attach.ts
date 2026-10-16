@@ -83,7 +83,7 @@ export function slideTo(
     const left = active.offsetLeft;
     const width = active.offsetWidth;
 
-    // ⚠⚠ **第一次落位不许补间**（票 37，2026-10-15 定位）。
+    //**第一次落位不许补间**（票 37，2026-10-15 定位）。
     //
     // 药丸的初值是 CSS 里的 `left: 0; width: 0`，于是挂载那一刻
     // `offsetLeft/offsetWidth` 都是 0，而下面对「无位移」的判断要求

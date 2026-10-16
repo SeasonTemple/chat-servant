@@ -98,7 +98,7 @@ unsafe fn describe(hwnd: HWND) -> Option<WindowHit> {
         return None;
     }
 
-    // ⚠ 缓冲区长度必须如实传给 Win32。`GetWindowTextW` 返回的是**实际写入的
+    // 缓冲区长度必须如实传给 Win32。`GetWindowTextW` 返回的是**实际写入的
     // 字符数（不含终止 NUL）**，最大不超过 `buf.len()-1`——`n` 越界的话
     // 下面 `&buf[..n]` 就会 panic。
     let mut buf = [0u16; 512];
@@ -132,13 +132,13 @@ fn process_exe_name(pid: u32) -> Option<String> {
     // 不申请读写内存——这里只读可执行文件的路径。
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
     let mut buf = [0u16; 1024];
-    // ⚠ `size` 是**入参也是出参**：入参写容量，出参写实际字符数。
+    // `size` 是**入参也是出参**：入参写容量，出参写实际字符数。
     // 必须先填上真实容量，否则 Win32 认为缓冲区是 0 字节、直接失败。
     let mut size = buf.len() as u32;
     // SAFETY: `buf` 是 1024 个 u16 的栈数组、容量已如实写进 `size`；
     // `size` 是栈上 u32。Win32 只往这块内存里写，不多写。
     //
-    // ⚠ 另注：`handle` 在这里**没有 CloseHandle**——函数是 `Option<String>`，
+    // 另注：`handle` 在这里**没有 CloseHandle**——函数是 `Option<String>`，
     //   中途有若干个 `?` 提前返回，统一清理需要改成 guard。
     //   进程句柄由系统在进程退出时回收，短期泄漏可接受，
     //   但**每次调用泄漏一个**这件事要知道（`enumerate_for` 每个窗口调一次）。
@@ -169,7 +169,7 @@ fn process_exe_name(pid: u32) -> Option<String> {
 /// 所以取 `find()` 的第一个等于让 z-order 决定。
 /// 同标题之间取面积最大的，标题规则判定「是哪一类」，面积只定主次。
 ///
-/// ## ⚠ 别拿最小化窗口的 `GetWindowRect` 判大小
+/// ## 别拿最小化窗口的 `GetWindowRect` 判大小
 ///
 /// 实测（2026-10-07）：微信主窗口最小化后 `GetWindowRect` 返回
 /// **160x28**，还原后是 **1175x900**——最小化时给的是图标矩形，

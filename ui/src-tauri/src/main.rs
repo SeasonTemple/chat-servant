@@ -16,7 +16,7 @@ fn main() {
             // 托盘**先建**，因为「关闭时 = 收进托盘」这一档要验证托盘存在。
             // 顺序反了的话，设置页可能在托盘建好之前就把那一档存进去了，
             // 于是「收起」这个动作没有落点。
-            // ⚠ **handle 必须最先记下来。** 托盘刷新和「档位变了要刷托盘」
+            // **handle 必须最先记下来。** 托盘刷新和「档位变了要刷托盘」
             // 都从全局取它，晚一步的话第一次刷新就会静默失败。
             commands::set_app_handle(app.handle().clone());
             build_tray(app.handle());
@@ -29,7 +29,7 @@ fn main() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // ⚠ **默认行为是错的**：Tauri 收到关闭请求会退出整个应用。
+                // **默认行为是错的**：Tauri 收到关闭请求会退出整个应用。
                 // 而这个程序是 alwaysOnTop + skipTaskbar + 无边框——
                 // 一旦它从别的途径（比如系统「关闭窗口」快捷键）被关掉，
                 // 用户连同托盘图标一起弄丢了，那才叫找不回来。
@@ -97,7 +97,7 @@ fn main() {
 fn build_tray(app: &tauri::AppHandle) {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    // ⚠ **图标必须显式给。**（实测 2026-10-10）
+    // **图标必须显式给。**（实测 2026-10-10）
     //
     // `TrayIconBuilder::with_id(...)` 不像 `new(app)` 那样自动取应用图标，
     // 而 `tauri.conf.json` 的主窗口也没有 `icon` 字段（`bundle.icon` 只喂
@@ -183,7 +183,7 @@ fn build_tray(app: &tauri::AppHandle) {
         tracing::error!("托盘图标建不起来（程序仍可运行，但没有后台出口）：{e}");
         commands::set_tray_ready(false);
     } else {
-        // ⚠ **成功就是权威结论，不是「等它能被查到」。**
+        // **成功就是权威结论，不是「等它能被查到」。**
         //
         // 「关闭时 = 收进托盘」这一档的成立与否由这里说了算。见
         // `commands::set_tray_ready` 的注释：查 `tray_by_id` 在启动后
@@ -220,7 +220,7 @@ fn init_tracing() {
 
 /// 事件名清单。**这里只是转出，定义在 [`crate::contract::events`]。**
 ///
-/// ⚠ 2026-10-13：本文件原先自己有一份 `pub mod events`（只有 3 个常量），
+/// 2026-10-13：本文件原先自己有一份 `pub mod events`（只有 3 个常量），
 /// 而 `contract.rs` 里另有一份（4 个）。两份都是「事件名的集中处」，
 /// 等于集中了两次——而 `contract.rs` 那份连编译都没进过，
 /// 于是守住这件事的 `no_event_literal_outside_this_file` 从未运行过。

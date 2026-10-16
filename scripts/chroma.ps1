@@ -4,7 +4,7 @@
 # 判据：彩度 = max(r,g,b) - min(r,g,b)。灰度内容恒为 0；
 # 照片必然有彩色像素。
 #
-# ⚠ 变量名教训：PowerShell 变量**大小写不敏感**，`$w` 和 `$W` 是同一个。
+# 变量名教训：PowerShell 变量**大小写不敏感**，`$w` 和 `$W` 是同一个。
 # 早先的版本同时用了 `$W`（区域宽）和 `$w`（图片宽），区域参数被图片
 # 尺寸静默覆盖，扫的是整幅图——四条候选量出来几乎一模一样才发现。
 # 现在全部用带前缀的名字，物理上不可能撞。
@@ -44,7 +44,7 @@ try {
             if ($col -lt 0 -or $col -ge $imgW) { continue }
             $idx = $rowBase + $col * 4
             $b = $buf[$idx]; $g = $buf[$idx + 1]; $r = $buf[$idx + 2]
-            # ⚠ 移位前必须转 [int]：`[byte]200 -shl 16` 在 PowerShell 里是 **0**
+            # 移位前必须转 [int]：`[byte]200 -shl 16` 在 PowerShell 里是 **0**
             # （字节算术溢出），颜色键会塌成少数几个值，色种数少算一个数量级。
             $key = ([int]$r -shl 16) -bor ([int]$g -shl 8) -bor [int]$b
             [void]$colors.Add($key)

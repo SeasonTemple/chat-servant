@@ -33,7 +33,7 @@ function Get-Info([IntPtr]$h) {
     [void][W32]::GetWindowTextW($h, $t, 512)
     $c = New-Object System.Text.StringBuilder 256
     [void][W32]::GetClassNameW($h, $c, 256)
-    # ⚠ 变量名不能叫 `$pid`——那是 PowerShell 的**只读**自动变量，
+    # 变量名不能叫 `$pid`——那是 PowerShell 的**只读**自动变量，
     # 而且大小写不敏感，`$pid` / `$PID` 是同一个。撞上会直接抛异常。
     $procId = 0
     [void][W32]::GetWindowThreadProcessId($h, [ref]$procId)

@@ -1,4 +1,4 @@
-# ⚠ 参数只在**前两行**之内、不带副作用：CI 与 AGENTS.md 里那句
+# 参数只在**前两行**之内、不带副作用：CI 与 AGENTS.md 里那句
 # `pwsh -NoProfile -File scripts/gate.ps1` 必须继续表示「九步全跑」。
 #
 # -Skip / -Only 是给**开发内循环**用的（2026-10-16 加）。加它们的理由是实测：
@@ -38,7 +38,7 @@ function Step($name, $scriptblock) {
 
   $sw = [Diagnostics.Stopwatch]::StartNew()
   & $scriptblock
-  # ⚠ 顺序有讲究：先存退出码再停表。反过来的话 Stop 之后再读
+  # 顺序有讲究：先存退出码再停表。反过来的话 Stop 之后再读
   # $LASTEXITCODE 仍是对的，但一旦以后有人在这里插一条会改 $LASTEXITCODE
   # 的命令，红绿就会读到别人的退出码。判据取自 step 29 那次「假绿」。
   $code = $LASTEXITCODE
@@ -117,7 +117,7 @@ Write-Output "=========================="
 $ErrorActionPreference = "Continue"
 Write-Output "---------- target gc ----------"
 & uv run --no-project python scripts\targetgc.py 2>&1 | Select-Object -Last 6
-# ⚠ 这一步不参与 $fail，**所以它坏了必须自己喊**。
+# 这一步不参与 $fail，**所以它坏了必须自己喊**。
 #   不加这句的话：uv 没装 / 脚本语法错 / 路径写错，输出会和「一切正常」一模一样，
 #   而机制已经三个月没干活了没人知道——本轮反复踩的就是这类静默失效。
 if ($LASTEXITCODE -ne 0) {
@@ -144,7 +144,7 @@ if ($stepTime.Count -gt 0) {
   Write-Output ("  {0,7:N1}s  TOTAL（{1} 步）" -f $total, $stepTime.Count)
 }
 
-# ⚠ 带 -Skip / -Only 的运行**不是完整门禁**。这行必须紧挨着结论，
+# 带 -Skip / -Only 的运行**不是完整门禁**。这行必须紧挨着结论，
 # 否则「跳过 deny 之后全绿」会被读成「九步全绿」——那正是 2026-10-11
 # 踩过的同一个形状（局部结论被当成全局结论，还据此提交了）。
 if ($Skip.Count -gt 0 -or $Only.Count -gt 0) {
@@ -154,7 +154,7 @@ if ($Skip.Count -gt 0 -or $Only.Count -gt 0) {
 if ($fail -eq 0) { Write-Output "GATE: ALL GREEN" } else { Write-Output "GATE: FAILED" }
 Write-Output "GATE_EXIT=$fail"
 
-# ⚠ **必须真的 exit，而不是只把 GATE_EXIT 打印出来。**
+# **必须真的 exit，而不是只把 GATE_EXIT 打印出来。**
 #
 # 2026-10-11 实测踩到：脚本原来只 `Write-Output "GATE_EXIT=$fail"` 而不 exit，
 # 于是 `pwsh -File gate.ps1` 永远返回 0 —— clippy 红了、门禁打了
