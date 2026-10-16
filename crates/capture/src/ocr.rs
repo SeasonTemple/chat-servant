@@ -101,14 +101,16 @@ pub enum OcrError {
 ///
 /// | 引擎 | 何时用 | 代价 |
 /// |---|---|---|
-/// | `Windows.Media.Ocr` | **默认**。没装权重时唯一能跑的路 | 系统自带，零模型体积 |
-/// | PP-OCRv4（[`crate::ocr_pp_pipeline`]） | `%APPDATA%\dev.chatservant.app\models\` 下有权重时 | 15MB 权重，纯 Rust 跑 ONNX |
+/// | `Windows.Media.Ocr` | **默认**（`auto` 与显式都指它） | 系统自带，零模型体积 |
+/// | PP-OCRv4（[`crate::ocr_pp_pipeline`]） | `CHATSERVANT_OCR=ppocr` 显式点名，且权重在 `<仓库>/target/models/` | 15MB 权重，纯 Rust 跑 ONNX |
 ///
-/// **PP-OCRv4 是增强不是必需**：没装权重、或它跑挂了，**都必须继续用 WinRT**，
+/// **PP-OCR 是增强不是必需**：没装权重、或它跑挂了，**都必须继续用 WinRT**，
 /// 而不是在界面上报错。一台没下模型的机器照样要能聊天。
 ///
 /// 想强制走某一条：`CHATSERVANT_OCR=ppocr` 走 PP-OCRv4（没权重会回落并记一条
-/// warning），`CHATSERVANT_OCR=winrt` 强制 WinRT。默认 `auto` = 有权重就用 PP。
+/// warning），`CHATSERVANT_OCR=winrt` 强制 WinRT。
+/// **默认 `auto` 恒为 WinRT**——「目录里碰巧有权重」不算换引擎的授权，
+/// 理由见 [`engine_choice`] 里的注释（2026-10-18 改）。
 pub fn recognize(frame: &Frame) -> Result<OcrText, OcrError> {
     match engine_choice() {
         Engine::Ppocr => {
@@ -157,14 +159,19 @@ fn engine_choice() -> Engine {
         Ok("ppocr") => Engine::Ppocr,
         Ok("winrt") => Engine::Winrt,
         _ => {
-            // auto：有权重才走 PP-OCRv4。**先问文件在不在**，
-            // 别直接调 `recognize()` 让它返回 None 再回落——那样每次静默期
-            // 都会多一次文件系统探测和一个 None 分支。
-            if crate::ocr_pp_pipeline::det_file_present(&crate::ocr_pp::models_dir()) {
-                Engine::Ppocr
-            } else {
-                Engine::Winrt
-            }
+            // **默认恒为 WinRT（2026-10-18 改）。**
+            //
+            // 早先这里是「检测到 det 权重就选 PP-OCR」。那条规则有个致命后果：
+            // **装一次权重就把生产引擎换掉，而没有任何人做过那个决定。**
+            // 2026-10-17 实测：权重装上后 PP-OCR 在 release 下每帧
+            // 1679ms（850×396）/ 5294ms（1262×958 聊天窗），而 `TICK` 是 1000ms；
+            // 而它的输出因为 det 纵向错位（票 39）是一坨垃圾。
+            // ⇒ 「装了权重」这件事**不构成**「换引擎」的授权。
+            //
+            // ⚠ 这不是「删掉 PP-OCR」。它仍在 `CHATSERVANT_OCR=ppocr` 下完整可用，
+            //   正在按票 39 的计划与 WinRT 做对照评测。
+            //   改的是**默认值**，不是能力。
+            Engine::Winrt
         }
     }
 }
@@ -595,25 +602,34 @@ mod tests {
         assert!(!is_single_ideograph(""), "空串不算");
     }
 
-    /// **没设 `CHATSERVANT_OCR` 时必须落在某条真路上**，不能是「三不管」。
+    /// **默认恒为 WinRT——目录里有没有权重都不改。**（2026-10-18）
     ///
-    /// 判据是「有没有权重」——这台机器上大概率没有，于是走 WinRT。
+    /// 早先这条是「默认落在某条真路上，**而且**本机没权重时必须是 WinRT」，
+    /// 后半句是有条件的：权重一装上，那条断言就自动失效，于是
+    /// 「装一次权重就把生产引擎换掉」这件事**全程无人拍板**。
+    ///
+    /// 现在无条件：显式设 `CHATSERVANT_OCR` 才可能选到 PP-OCR。
+    /// 这条守卫**不依赖本机有没有权重**，所以它在任何机器上都是同一个判据。
     #[test]
-    fn the_default_engine_is_one_of_the_two_real_ones() {
-        let e = engine_choice();
-        assert!(
-            matches!(e, Engine::Ppocr | Engine::Winrt),
-            "默认引擎不该是别的变体：{e:?}"
-        );
-        if !crate::ocr_pp_pipeline::det_file_present(&crate::ocr_pp::models_dir()) {
-            assert_eq!(e, Engine::Winrt, "本机没有 PP-OCRv4 权重，默认就该是 WinRT");
+    fn the_default_engine_is_winrt_whether_or_not_weights_are_installed() {
+        // 测试进程自己没设过这个变量；若外层设了，那是在测别的东西，跳过并说明。
+        if std::env::var("CHATSERVANT_OCR").is_ok() {
+            eprintln!("跳过：外层设了 CHATSERVANT_OCR，测的已经不是默认值");
+            return;
         }
+        assert_eq!(
+            engine_choice(),
+            Engine::Winrt,
+            "默认必须是 WinRT。本机权重在不在都不该改这件事——\
+             换引擎是一次决定，不是「目录里碰巧多了几个文件」"
+        );
     }
 
     /// **不存在目录必须判定为「没权重」。**
     ///
-    /// 这条判据是 Auto 模式的开关：它要是误报 true，一台没下模型的机器
-    /// 每轮都会走进 PP-OCRv4 的分支、白跑一次探测再回落。
+    /// 这条判据被 [`crate::ocr_pp_pipeline::recognize_in`] 当作「跑不跑 PP-OCR」
+    /// 的开关：它要是误报 true，一台没下模型的机器会走进 PP-OCR 分支、
+    /// 白跑一次探测再回落。
     #[test]
     fn an_absent_directory_reports_no_weights() {
         let absent = std::env::temp_dir().join("chatservant-definitely-absent-dir");
