@@ -788,8 +788,18 @@
     原来关着的时候显示「关闭」—— 可按下去是**打开**。
     「关闭」读起来像「当前状态是关闭」，而不是「按这个会关闭」。
     控件说的话和它要做的事对不上，用户得先猜一次。
+
+    ⚠ 原来的 class 里还有一个 `cs-onoff`（2026-10-16 删）。
+    它**全仓没有任何样式规则**，而状态已由上面那句文案表达 ——
+    于是一个「有名字没实现」的类：留着会让下一个人以为
+    「哦这里本来该有个 on/off 的样式，只是没写」。
+    ⇒ 真要给开/关加视觉区分，就在 `.cs-btn-ink` 上加，
+      别把类名留着当占位符。
+    ⚠ 同款坑：`svelte-check` **不会**因为「类名在标记里、样式表里没有」
+      而报错（它只报反过来的 `css_unused_selector`）——
+      所以这一类缺口靠门禁抓不到，只能靠数。
   -->
-  <button class="cs-btn cs-btn-ink cs-onoff" onclick={() => toggleImagesOut(!imagesOut)}>
+  <button class="cs-btn cs-btn-ink" onclick={() => toggleImagesOut(!imagesOut)}>
     {imagesOut ? '关掉' : '打开'}
   </button>
   <!--
@@ -1650,11 +1660,27 @@
    * 或者要出去。缺 key 时一个字都还没出去，也不构成一次不可逆动作，
    * 穿红字会把唯一的语义色稀释掉。真要走不可逆语义，红留给发送与退出。
    * 靠**底色**和已配置区分，不加边框：底类 .cs-badge 没有边框，
-   * 单给这一支加 1px 会让它比 .ok 高 2px。 */
+   * 单给这一支加 1px 会让它比 .ok 高 2px。
+   *
+   * ⚠ 2026-10-16 修一个真 bug：这里原来写的是 `var(--cs-line)`，
+   *   而**`--cs-line` 在全仓从未定义过**。刻线那支叫 `--cs-rule`；
+   *   而 `.cs-line`（带点）**也不是**正文那个 class —— 2026-10-16 实测
+   *   它同样全仓零命中，正文那条是 `.cs-draft-text`。
+   *   ⚠ **两处「听起来合理」的引用都指向不存在的东西**，
+   *     所以这个 bug 能在样式表里躺着过好几轮：看起来像引用了一个
+   *     真实存在的 token，而 svelte-check / eslint 都不报
+   *     「自定义属性未定义」——**这一类缺口门禁抓不到**。
+   *   引用一个不存在的自定义属性 ⇒ 该值在**计算时** invalid
+   *   ⇒ **整条 `box-shadow` 声明作废**
+   *   ⇒ 「未配置」徽标那圈描边**从来没渲染出来过**，它一直是光秃秃一个铅笔灰字。
+   *   顺带这处也是漏接管的同类：它在 HC 那段里没有任何对应。
+   *   ⇒ 改用 `--cs-edge`（功能性边界，3 : 1，与纸同源）。
+   *   判据：`ui/scripts/verify-edge.mjs` 问渲染后的 `box-shadow`
+   *   是不是 `none`（改回去验过：确实是 `none`）。 */
   .cs-badge.miss {
     color: var(--cs-pencil);
     background: transparent;
-    box-shadow: inset 0 0 0 1px var(--cs-line);
+    box-shadow: inset 0 0 0 1px var(--cs-edge);
   }
 
   .cs-actions,
@@ -1664,6 +1690,38 @@
     margin-top: 0.4rem;
   }
 
+  /* ══ 输入槽：**内陷 + 弧边**（2026-10-16 第十轮定） ══
+   *
+   * ## 形态的由来（三轮才对上，过程记在票 45 第八~十轮）
+   *
+   * ① 用户：「设置页居然还是原生的边框、白底」⇒ 上一轮把 1px 描边
+   *    从冷色调到 3.04 : 1。**这一轮错了整个方向** ——
+   *    用户追问「**这个边框更淡有什么用？该有吗？**」：1.14:1 太淡认不出，
+   *    3.04:1 也仍是个 Web 输入框，**浓淡根本不是那个变量**。
+   * ② 用户：「按钮是纸片、候选项是纸片，那么输入框…**不应该是类似从纸面
+   *    抠出来的内陷的区域**」⇒ 撕边**语义**就错：撕边说「可以拿起来」，
+   *    而输入槽不是可拿起的零件，它是**你往里写字的地方**。
+   * ③ 用户：「就是要内陷啊？**但也不应边框这么周正吧？**」
+   *    （⚠ 我上一轮把「不应该是」读反了，白做四版候选才发现。）
+   *
+   * ## 形态
+   *
+   * - **内陷**：`box-shadow: inset` 四段，**上/左暗、下/右亮** ——
+   *   真实压痕的物理：凹进去那侧受光少，凸起挡光那侧反光。
+   * - **弧边**：`border-radius: var(--cs-radius)`（8px，裁出来的圆角纸片；
+   *   不是撕的锯齿、也不是直角）。⚠ **无 `border`** ——
+   *   内陷的东西不该有「外」的边，那道边正是它读成 Web 控件的原因。
+   *
+   * ## 颜色：全部从**暖墨**与**纸**混出来
+   *
+   * ⚠ 亮边**必须与纸混，不能 `#fff … transparent`**：
+   *   纯白半透明落暖黄纸必然显冷（2026-10-16 实测那版出来一圈灰蓝，
+   *   **破了同源**）。真实压痕的亮边是「**纸被照亮**」，不是「加了一层白」。
+   *
+   * ⚠⚠ **天花板，说在前面**：`box-shadow: inset` **永远是矩形渐变**
+   *   ⇒ 内陷那条边仍然周正。真正做到「内陷也不周正」要一张
+   *   **「撕边洞」遮罩**（`stripgen.py` 派生），见票 45 第十轮。
+   *   2026-10-16 用户拍板：**先接受这一版**。 */
   .cs-input {
     flex: 1 1 auto;
     min-width: 0;
@@ -1671,39 +1729,31 @@
     font-size: 11.5px;
     font-family: ui-monospace, 'Cascadia Mono', monospace;
     color: var(--cs-ink);
-    /* 底色**完全不透明**（见 app.css 的注释）：透明窗口的分层合成会
-     * 整层丢掉它，这里照面板的纸底走，不学独立窗口那套暗底。
-     *
-     * 2026-10-16 试过把它提到 `--cs-paper-raised`（字条那档，比纸亮一），
-     * **出图后退回**：实测底色 `(250,242,214)` 而纸是 `(238,220,176)` ——
-     * 色相都是暖的，但输入槽的 R−B 只有 36、纸是 62，
-     * 也就是它**更淡更亮、更少黄**，在一张黄纸上直接读成「一块白板」。
-     * ⇒ 输入槽与纸**同色**（「纸上划出的一道槽」），
-     * 「能往里写」这件事交给描边与光标，不交给底色。
-     * 描边同时从 `--cs-rule-strong` 退到 `--cs-rule`：
-     * 撕边按钮已经不用描边了，这一格再用最重的那支墨线，
-     * 于是输入框成了全屏唯一还在喊「这是 Web 输入框」的东西。 */
+    /* 底色**完全不透明**（见 app.css）：透明窗口分层合成会整层丢掉半透明底。
+     * 槽底 = **纸本身**。⚠ 试过 `--cs-paper-raised`（比纸亮）又退回：
+     *   比纸亮读成「白板」，而纸被压实应是**略深**。深度交给内阴影，底色不参与。 */
     background: var(--cs-paper);
-    border: 1px solid var(--cs-rule);
-    /* ⚠ 原来是硬编码的 `7px` —— 它**不对应任何一个 token**
-     *   （`--cs-radius` 是 8px、`--cs-radius-sm` 是 5px），是 Web 默认圆角
-     *   抄下来后随手改的数。同一屏的 `.cs-btn` 用的是 `--cs-radius-sm`，
-     *   输入框与它的按钮差 2px，于是「一个框里一个输入框 + 三颗按钮」
-     *   在同一行里显出两套曲率（票 42，2026-10-15）。
-     *   ⇒ 归到同一支，输入框与它的按钮同族。 */
-    border-radius: var(--cs-radius-sm);
-    /* 浏览器给密码框可能挂 UA 的内阴影/背景图，一并清掉，
-     * 免得在纸色底上出现一圈 Web 默认的灰边。 */
-    appearance: none;
-    box-shadow: none;
+    border: none;
+    /* 弧边。⚠ 原是硬编码 `7px`，票 42 归到 `--cs-radius-sm`(5px)，理由
+     *   「与同屏 `.cs-btn` 同族」——**那个理由已作废**：同屏按钮全换成撕边
+     *   纸条，`border-image` 一生效 `border-radius` 根本不画。
+     *   ⇒ 现在独立取 `--cs-radius`(8px)，按「弧边」这条自己的理由。 */
+    border-radius: var(--cs-radius);
+    appearance: none; /* 清 UA 阴影/背景图与默认外观 */
+    box-shadow:
+      inset 0 2px 4px color-mix(in srgb, var(--cs-tier-ink) 22%, transparent),
+      inset 2px 0 3px color-mix(in srgb, var(--cs-tier-ink) 11%, transparent),
+      inset 0 -2px 3px color-mix(in srgb, #fff 42%, var(--cs-paper)),
+      inset -2px 0 2px color-mix(in srgb, #fff 30%, var(--cs-paper));
   }
 
-  /* ⚠ `:focus` 已有墨色描边，而全局 `:focus-visible`（app.css）另有墨色环。
-   *   这里**不**去覆盖 `:focus-visible` 的 outline：指针点击不该留环，
-   *   键盘 Tab 才该留，两件事由 `:focus` / `:focus-visible` 自己分工。 */
   .cs-input:focus {
     outline: none;
-    border-color: var(--cs-ink);
+    box-shadow:
+      inset 0 2px 5px color-mix(in srgb, var(--cs-tier-ink) 30%, transparent),
+      inset 2px 0 3px color-mix(in srgb, var(--cs-tier-ink) 15%, transparent),
+      inset 0 -2px 4px color-mix(in srgb, #fff 52%, var(--cs-paper)),
+      inset -2px 0 3px color-mix(in srgb, #fff 36%, var(--cs-paper));
   }
 
   /* ── 危险开关下面那一句红。**只有这一句是红的。** ───────────── */
