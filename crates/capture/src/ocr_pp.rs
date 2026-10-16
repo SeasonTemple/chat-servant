@@ -6,26 +6,32 @@
 //! `C:\Program Files` 给普通用户跑的**，塞一个 C++ 运行时进去就多一层
 //! 「装不上」的失败面。这里只用 `tract`：纯 Rust，静态链接。
 //!
-//! ## 当前进度（2026-10-11）
+//! ## 当前进度（2026-10-18 订正）
 //!
 //! **加载层与推理管线都通了。** det 后处理 / rec CTC 解码 / 宽度分桶见
 //! [`crate::ocr_pp_pipeline`]，已接进 [`crate::ocr::recognize`]。
 //! 能跑通的是：读模型、按指定尺寸编译成可执行计划、跑 det 拿到 `[1,1,H,W]`
 //! 概率图、CTC 解码出文本。
 //!
-//! **本机还没有权重**，所以「真帧上的识别准确率」仍未验证——
-//! 缺的是 `%APPDATA%\dev.chatservant.app\models\` 下的三个文件，
-//! 以及一次真机对照（同一帧两条路各读一遍，比对结果）。
+//! ⚠ **权重已经装上了**（在 `<仓库>/target/models/`，2026-10-17），
+//!   所以「跑不跑得起来」不再是问题。**真正的问题是跑出来的东西对不对**：
+//!   同一帧真图上它输出 `419 / 雅扣！手洁双 / 28于证液卖成906正`，
+//!   根因是 **det 框纵向只盖住字形上半**（票 39，正在修）。
+//!   ⇒ **在那个 bug 修好之前，PP-OCR 的输出不能用来论证任何事**——
+//!   那是拿一个有缺陷的实现去代表整条技术路线。
 //!
 //! ## 与 [`crate::ocr`] 的关系
 //!
 //! **不取代它。** `Windows.Media.Ocr` 系统自带、零模型体积，是默认值；
-//! 这条路要 `%APPDATA%\dev.chatservant.app\models\` 里有权重才跑得起来。
+//! 这条路要 `<仓库>/target/models/`（或 `CHATSERVANT_OCR_MODELS` 指定的目录）
+//! 里有权重才跑得起来。
 //!
-//! **2026-10-11：两条路已经接上了。** [`crate::ocr::recognize`] 现在按
-//! `CHATSERVANT_OCR`（`ppocr` / `winrt`，默认 auto）选路，默认 auto 是
-//! 「有权重走 PP-OCRv4，没有就走 WinRT」。**PP-OCRv4 是增强不是必需**——
-//! 没权重或它跑挂都必须继续用 WinRT，而不是让界面报错。
+//! **2026-10-18：默认路改了。** [`crate::ocr::recognize`] 按 `CHATSERVANT_OCR`
+//! （`ppocr` / `winrt`）选路，而**默认值恒为 WinRT**——
+//! 早先是「auto = 检测到权重就走 PP-OCR」，那条规则让「装一次权重」
+//! 悄悄换掉了生产引擎，而没有人做过那个决定。
+//! **PP-OCRv4 是增强不是必需**：没权重或它跑挂都必须继续用 WinRT，
+//! 而不是让界面报错。
 //!
 //! 推理管线（det 后处理 / rec CTC 解码 / 宽度分桶）在
 //! [`crate::ocr_pp_pipeline`]，**那个模块才是干活的**，本模块只管把 ONNX
@@ -87,19 +93,51 @@ pub enum PpError {
     Shape(String),
 }
 
-/// 权重目录。默认 `%APPDATA%\dev.chatservant.app\models\`。
+/// 权重目录。**默认在仓库的 `target/models/`，不是 `%APPDATA%`。**
 ///
-/// **不进仓库。** 15MB 的二进制权重 + 模型许可不是这个仓库该背的东西。
+/// **不进仓库，但进本项目的 `target/`。** 15MB 的二进制权重 + 模型许可
+/// 不是这个仓库该背的；而 `%APPDATA%` 落在系统盘，是这台机器上不该被占的地方。
+/// 本项目所有可再生产物（`target/probe/` 的帧、门禁日志、构建产物）
+/// 一律进 `target/`，权重跟它们是同一类东西——**可再下载，所以就该可再删**。
+///
+/// 查找顺序（先命中先赢）：
+///
+/// 1. `CHATSERVANT_OCR_MODELS` —— 显式指定，永远最优先；
+/// 2. **`<仓库>/target/models/`** —— 开发、探针、`cargo test` 都走这条
+///    （由编译期 `CARGO_MANIFEST_DIR` 反推，`crates/capture` 上两级）；
+/// 3. `<可执行文件所在目录>/models` —— 发布形态：权重装在应用旁边；
+/// 4. 系统临时目录 —— 兜底（CI 里拿不到仓库路径时的最后一条）。
+///
+/// ⚠ 2026-10-18 之前默认是 `%APPDATA%\dev.chatservant.app\models\`。
+/// 那条被删掉不是因为它不能用，是因为**它在 C 盘**：用户明确要求
+/// 产物与权重都留在项目所在盘，不去占系统盘。
+/// ⇒ 装机场景要走第 3 条或第 1 条，别再指望 `%APPDATA%`。
 pub fn models_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("CHATSERVANT_OCR_MODELS") {
         return PathBuf::from(d);
     }
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        // 非 Windows 上没有 APPDATA。测试与 CI 就靠这条落到临时目录去。
-        .unwrap_or_else(std::env::temp_dir)
+    if let Some(d) = repo_target_models() {
+        return d;
+    }
+    if let Some(d) = exe_sibling_models() {
+        return d;
+    }
+    std::env::temp_dir()
         .join("dev.chatservant.app")
         .join("models")
+}
+
+/// `<仓库>/target/models`。编译期路径；拿不到（或它已经不在仓库里了）就 `None`。
+fn repo_target_models() -> Option<PathBuf> {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = manifest.parent()?.parent()?; // crates/capture -> 仓库根
+    Some(repo.join("target").join("models"))
+}
+
+/// `<可执行文件所在目录>/models`。发布形态用；开发时会被上一条抢先。
+fn exe_sibling_models() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join("models"))
 }
 
 /// 只读形状，不跑推理。给探针和排查用——形状对不上时要能在**不**跑推理的

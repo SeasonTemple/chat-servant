@@ -123,8 +123,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 #
 # 许可证 MIT OR Apache-2.0（`cargo info` 核实过），符合 ADR-0003 的门槛。
 # 模型权重（RapidOCR，PP-OCRv4 的 ONNX 导出）约 16MB，**不提交进仓库**，
-# 运行时从 `%APPDATA%\dev.chatservant.app\models\` 读；没放就退回
-# `Windows.Media.Ocr`，而不是启动失败。
+# 运行时从 `<仓库>/target/models\` 读（2026-10-18 改：原先是
+# `%APPDATA%\dev.chatservant.app\models\`，在 C 盘，本项目一律不留产物到系统盘；
+# `CHATSERVANT_OCR_MODELS` 可覆盖）。没放、或没显式 `CHATSERVANT_OCR=ppocr`，
+# 就走 `Windows.Media.Ocr`，而不是启动失败。
 tract-onnx = "0.23"
 # 夹具 manifest 记 sha256，黄金测试据此报出「是哪一个夹具被改坏了」。
 # RustCrypto 的 `sha2` 是 MIT OR Apache-2.0，符合本仓库的许可门槛（ADR-0003）。
