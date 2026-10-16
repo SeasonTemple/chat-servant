@@ -2064,21 +2064,54 @@
   .cs-tick {
     position: absolute;
     left: 50%;
-    top: calc(26px * var(--tk, 1));
-    margin-left: calc(-27px * var(--tk, 1));
+    /* ⚠⚠ `--ms`：**标记相对档位字的缩放**，2026-10-16 加。
+     *
+     * 为什么要它：原来标记是按 `.cs-markbox` 的 60×40 定案的，而档位字只有
+     * 11px —— 标记墨迹因此有字的 **2.43 倍**高（实测 34px 对 14px）。
+     * 「盖章式压在字上」是对的，但**笔比被标的东西还大**就不对了：
+     * 实测「只填入」的 128 个墨点像素 **100% 落在勾的包围盒内**，
+     * 勾的长笔画从「只」穿到「入」，三个字压成一团。
+     * 用户原话：「里面颜色也和边缘不一致」（同轮，另一处）。
+     *
+     * ⚠ **`top` 不跟着 `--ms` 等比缩**：笔心对齐公式是
+     *     `top = 字心y − 1.1 − 笔心y`，而 `字心y` 与 markbox 高度**不缩**。
+     *     照抄等比缩放会让笔心整体上移 ——「标一个东西却没对准它」，
+     *     与当初 `margin-left:-21px` 被推翻是同一类错。
+     *     所以这里写 `46.4px − 笔心y × ms`，`46.4 = 47.5 − 1.1`。
+     *     改 `--ms` 一个数即可，四支笔的对齐自动保持。 */
+    --ms: 0.72;
+    /* ⚠ `--mx`：在「笔心对齐字心」之外再往左挪。
+     * 笔宽 46px 与「只填入」的字宽 44px **几乎一样宽**（实测），
+     * 而笔的长臂是斜向右上的 —— 它必然从第一个字扫到最后一个字，
+     * 于是读成**划掉**，而不是「这一档被批了」。
+     * 左移一格（≈一个字宽）让长臂收在「填」上，「入」露出来。
+     * 代价：笔不再盖满整行，但「盖在字上」这条定案没破。 */
+    --mx: 8px;
+    top: calc(46.4px * var(--tk, 1) - 20.4px * var(--ms) * var(--tk, 1));
+    /* ⚠⚠ **每个分支都必须自带 `--ms` / `--mx`，不许靠基规则兜。**
+     *   三条 `[data-*]` 分支的特异度是 (0,3,0)，压过基规则 (0,1,0)；
+     *   而本机**默认发的是 `tick` + `big`**（实测渲染后的 DOM：
+     *   `data-shape="tick" data-ring="big"`，不是注释里说的 `base`），
+     *   也就是它**根本不读**基规则里的 `margin-left`。
+     *   ⇒ 症状极具迷惑性：`--ms` 看着生效了（`width`/`height` 在基规则里），
+     *     而 `--mx` 改 16 改 40 渲染都一像素不动。
+     *   判据：改了 `margin-left` / `top` 而出图零变化，先
+     *     `--dump-dom` 看清 `data-shape` / `data-ring` 命中的是哪一条，
+     *     **别去怀疑缓存、别去怀疑 HMR、别去怀疑 calc 语法**。 */
+    margin-left: calc(-27px * var(--ms) * var(--tk, 1) - var(--mx) * var(--tk, 1));
     /* ⚠ 这里用 CSS 定尺寸是**有意的**：整格放大时笔必须跟着放大，
      *   而 SVG 的 `width`/`height` 属性写死成 `ACTIVE_VIEW` 的取景框。
      *   早先踩过的那个坑是 `width: 100%`——那会把笔**压回**框宽，
      *   症状是「选了大档但形状没变」。这里给的是显式的等比 px，不是百分比。 */
-    width: calc(var(--tick-w, 60px) * var(--tk, 1));
-    height: calc(var(--tick-h, 40px) * var(--tk, 1));
+    width: calc(var(--tick-w, 60px) * var(--ms) * var(--tk, 1));
+    height: calc(var(--tick-h, 40px) * var(--ms) * var(--tk, 1));
     opacity: 0;
     transition: opacity var(--cs-dur) var(--cs-ease);
   }
 
   .cs-tick[data-shape='ring'] {
-    top: calc(30px * var(--tk, 1));
-    margin-left: calc(-31px * var(--tk, 1));
+    top: calc(46.4px * var(--tk, 1) - 16.4px * var(--ms) * var(--tk, 1));
+    margin-left: calc(-31px * var(--ms) * var(--tk, 1) - var(--mx) * var(--tk, 1));
   }
 
   /* ⚠ **每一支都必须显式给 `--tick-w` / `--tick-h`，不许落 fallback。**
@@ -2112,8 +2145,8 @@
   .cs-tick[data-shape='tick'][data-ring='big'] {
     --tick-w: 56px;
     --tick-h: 34px;
-    top: calc(29px * var(--tk, 1));
-    margin-left: calc(-28px * var(--tk, 1));
+    top: calc(46.4px * var(--tk, 1) - 17.4px * var(--ms) * var(--tk, 1));
+    margin-left: calc(-28px * var(--ms) * var(--tk, 1) - var(--mx) * var(--tk, 1));
   }
 
   .cs-tick[data-shape='ring'][data-ring='big'] {
@@ -2121,8 +2154,8 @@
     --tick-w: 84px;
     --tick-h: 52px;
     /* 字心 y 47.5 − 笔心 y 26 = 21.5。渲染宽高都对了之后这条自然对齐。 */
-    top: calc(21px * var(--tk, 1));
-    margin-left: calc(-42px * var(--tk, 1));
+    top: calc(46.4px * var(--tk, 1) - 25.4px * var(--ms) * var(--tk, 1));
+    margin-left: calc(-42px * var(--ms) * var(--tk, 1) - var(--mx) * var(--tk, 1));
   }
 
   /*  只有 fill，不设 fill-opacity——每层的透明度是**笔迹数据的一部分**，
