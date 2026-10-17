@@ -27,6 +27,8 @@
 //! 生产用 [`SystemOcr`]，测试用 [`RecordedLines`]。
 //! 夹具 + manifest + 一组录制好的行框，就是完整的黄金用例。
 
+use std::borrow::Cow;
+
 use chatservant_capture::anchor::{self, AnchorError, PaneAnchor};
 use chatservant_capture::ocr::{self, OcrError, OcrText};
 use chatservant_core::frame::{Frame, Rect};
@@ -83,11 +85,72 @@ pub enum ReadError {
 /// 抽出来只有一个理由：**它是整条链路上唯一带隐私的步骤**。
 /// 其余每一步都在读像素，而像素是可以脱敏后提交的。
 pub trait LineSource {
-    /// `view` 是**给 OCR 看的画面**，行框坐标以它为原点。
+    /// `view` 是**给 OCR 看的画面**，行框坐标以它的左上角为原点。
     ///
-    /// 它**不是**消息区裁剪件，原因见 [`OCR_UPSCALE`] 与 [`read`]。
+    /// 它是整帧还是消息区裁剪件，**由 [`LineSource::view_policy`] 决定**——
+    /// 两个引擎实测要的画面不一样，见 [`ViewPolicy`]。
     /// 行坐标必须换算回消息区、并按消息区过滤之后才轮到下游。
     fn read(&self, view: &Frame) -> Result<OcrText, OcrError>;
+
+    /// 这个引擎要看哪一块画面、放大几倍。**默认是 WinRT 实测要的那一组。**
+    fn view_plan(&self) -> ViewPlan {
+        ViewPlan::WINRT
+    }
+}
+
+/// OCR 看到的画面该有多大、放大几倍。**两个引擎要的不是一个。**
+///
+/// | | WinRT | PP-OCRv6 |
+/// |---|---|---|
+/// | 画面 | **必须整帧** | **只给消息区** |
+/// | 放大 | **2×** | **1×** |
+/// | 依据 | 裁掉侧边栏后「乐」消失；1× 读不到对方短消息 | 整帧 1146ms/50 行 vs 裁剪 455ms/5 行且逐字更准；1× 已零漏检 |
+///
+/// ⚠ 这不是「谁更讲究」，是**两个识别器对上下文与分辨率的要求不同**。
+/// 它曾经是三个写死的常量（画面=整帧、放大=2、换引擎时手改），
+/// 而「换引擎」与「换那两个」隔着两个 crate——**漏掉任何一个都不报错**，
+/// 只会变成「又慢又不准」。合成一个结构体之后，它们至少一起被审。
+///
+/// ⚠ 仍然**由引擎自己决定**，不由调用方传参：e2e 探针和产品各传各的话，
+/// 探针就证明不了产品那条路。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewPlan {
+    /// 整帧还是消息区裁剪件。
+    pub policy: ViewPolicy,
+    /// 喂给 OCR 之前放大几倍。
+    pub upscale: u32,
+}
+
+/// OCR 看到的画面该有多大。**两个引擎要的不是一个，这是实测逼出来的分叉。**
+///
+/// | | WinRT | PP-OCRv6 |
+/// |---|---|---|
+/// | 画面 | **必须整帧** | **只给消息区** |
+/// | 依据 | 裁掉侧边栏后「乐」消失（`read_lines` 的实测） | 整帧 1146ms/50 行 vs 裁剪 455ms/5 行，且逐字更准（`ocr::crops_to_pane`） |
+///
+/// ⚠ 这不是「谁更讲究」，是**两个识别器对上下文的要求不同**。
+/// 把它做成调用方的一个参数会立刻分叉：e2e 探针和产品各传各的，
+/// 于是探针证明不了产品那条路。所以决定权在**引擎自己**手里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewPolicy {
+    /// 放大后的整帧。
+    WholeFrame,
+    /// 放大后的消息区裁剪件。
+    ChatPane,
+}
+
+impl ViewPlan {
+    /// WinRT 实测要的那一组，也是默认值。
+    pub const WINRT: ViewPlan = ViewPlan {
+        policy: ViewPolicy::WholeFrame,
+        upscale: 2,
+    };
+
+    /// PP-OCRv6 实测要的那一组。
+    pub const PPOCR: ViewPlan = ViewPlan {
+        policy: ViewPolicy::ChatPane,
+        upscale: 1,
+    };
 }
 
 /// 真的调 Windows OCR。纯本地，不出网。
@@ -97,48 +160,84 @@ impl LineSource for SystemOcr {
     fn read(&self, view: &Frame) -> Result<OcrText, OcrError> {
         ocr::recognize(view)
     }
+
+    /// 跟着实际选中的引擎走，不看环境变量自己猜一遍——
+    /// 猜错的后果有两个：给 WinRT 裁了图（对方短消息整条消失），
+    /// 或者给 PP-OCR 放大 2 倍（慢一倍、还一条都不多读）。
+    fn view_plan(&self) -> ViewPlan {
+        if ocr::crops_to_pane() {
+            ViewPlan::PPOCR
+        } else {
+            ViewPlan::WINRT
+        }
+    }
 }
 
-/// OCR 前的最近邻放大倍数。
+/// **WinRT 那条路的放大倍数。** 产品链路上它由
+/// [`ViewPlan::WINRT`] 提供；这里保留一份给探针与直接引用它的代码。
 ///
-/// ## 实测（2026-10-07，微信深色主题，真实帧 1161x893）
+/// ## 两个引擎要的倍数相反，2026-10-18 实测
+///
+/// 同一批真实微信帧（`target/probe/wechat-chat.png` 7 条、`gws-chat.png` 10 条），
+/// 详见 [`docs/adr/0006-ocr-engine-evaluation.md`](../../../docs/adr/0006-ocr-engine-evaluation.md)：
+///
+/// ```text
+///                      1x      2x
+/// WinRT             13/17   14/17    <- 少一条，多放大才补回来
+/// PP-OCRv6 small    17/17   17/17    <- 原生分辨率就吃得下 14px 小字
+/// ```
+///
+/// ⇒ **它曾经是个全局常数，而两个引擎要的相反。** 换引擎与改这一个数
+/// 隔着两个 crate、一次提交，漏掉任何一个都不报错，只变成「又慢又不准」。
+/// 现在它是 [`ViewPlan`] 的一个字段，**跟着引擎一起被决定**。
+///
+/// ⚠ 本常量是 **WinRT 的值（2）**，因为 WinRT 仍是默认引擎。
+/// 把它当「全局的放大倍数」用会让 PP-OCR 那条路慢一倍。
+///
+/// ## WinRT 为什么需要 2（2026-10-07 实测，深色主题，1161x893）
 ///
 /// 对方那条只有一个「乐」的气泡，19x19 px 白字灰底，**放大前一律读不到**，
 /// 放大后稳定读到。1x 时同一张图上 h=12~14 的行却能正常读出来——
 ///
 /// ```text
 /// 整帧 1x   26 行  无「乐」
-/// 整帧 2x   40 行  有「乐」    <- 产品用的就是这一档
+/// 整帧 2x   40 行  有「乐」   <- WinRT 的默认值
 /// 整帧 3x   37 行  有「乐」
 /// 整帧 4x   32 行  有「乐」   （4644x3572，没撞上任何尺寸上限）
 /// ```
 ///
-/// 所以不是「字太小」那么简单。但**放大是必要条件**这一点，
+/// 所以不是「字太小」那么简单，但放大对 WinRT 是**必要条件**，
 /// 在所有被测配置下都成立。
-pub const OCR_UPSCALE: u32 = 2;
+pub const OCR_UPSCALE: u32 = ViewPlan::WINRT.upscale;
 
 /// 把 OCR 读到的行换算回**消息区坐标**，并丢掉落在消息区之外的行。
 ///
+/// `origin` 是**要把视图坐标减掉的那个偏移**：
+/// 整帧视图传 `(chat.x0, chat.y0)`，裁剪视图传 `(0, 0)`。
+///
+/// ⚠ 它不是可有可无的参数。`read_lines` 改用裁剪件之后，
+/// 视图坐标**已经是**消息区相对的；这里若还去减 `chat.x0/y0`，
+/// **每一行都会被平移掉整个消息区的偏移**，而症状是
+/// 「行都在，但全被判成区外丢掉」——空消息流，不报错。
+///
 /// ## 为什么必须丢掉区外的行
 ///
-/// OCR 现在吃的是整帧，于是侧边栏的联系人名、标题栏、输入框里的字
+/// 吃整帧时（WinRT 那条路）侧边栏的联系人名、标题栏、输入框里的字
 /// 全都会被读出来。它们绝不能进消息流——联系人名混进消息里，
 /// 产品就会凭空「听到」对方说的话。那是正确性事故，不是精度问题。
-/// 按消息区矩形裁掉是唯一干净的做法。
-fn lines_into_pane(ocr: OcrText, chat: Rect, scale: u32) -> OcrText {
+fn lines_into_pane(ocr: OcrText, chat: Rect, scale: u32, origin: (i32, i32)) -> OcrText {
     let s = scale as i32;
     let lines = ocr
         .lines
         .into_iter()
         .filter_map(|mut line| {
-            // 放大后的坐标先退回整帧坐标，再平移到消息区原点。
+            // 放大后的坐标先退回视图坐标，再平移到消息区原点。
             let local = Rect::new(
-                line.rect.x0 / s - chat.x0,
-                line.rect.y0 / s - chat.y0,
-                line.rect.x1 / s - chat.x0,
-                line.rect.y1 / s - chat.y0,
-            );
-            // 与消息区没有重叠 = 在侧边栏 / 标题栏 / 输入框里，丢掉。
+                line.rect.x0 / s - origin.0,
+                line.rect.y0 / s - origin.1,
+                line.rect.x1 / s - origin.0,
+                line.rect.y1 / s - origin.1,
+            ); // 与消息区没有重叠 = 在侧边栏 / 标题栏 / 输入框里，丢掉。
             if local.x1 <= 0
                 || local.y1 <= 0
                 || local.x0 >= chat.width()
@@ -149,10 +248,10 @@ fn lines_into_pane(ocr: OcrText, chat: Rect, scale: u32) -> OcrText {
             line.rect = local;
             for w in &mut line.words {
                 w.rect = Rect::new(
-                    w.rect.x0 / s - chat.x0,
-                    w.rect.y0 / s - chat.y0,
-                    w.rect.x1 / s - chat.x0,
-                    w.rect.y1 / s - chat.y0,
+                    w.rect.x0 / s - origin.0,
+                    w.rect.y0 / s - origin.1,
+                    w.rect.x1 / s - origin.0,
+                    w.rect.y1 / s - origin.1,
                 );
             }
             Some(line)
@@ -180,7 +279,9 @@ pub fn read_lines(
     chat: Rect,
     source: &impl LineSource,
 ) -> Result<OcrText, ReadError> {
-    // OCR 吃**放大后的整帧**，不是裁好的消息区。两条都是实测逼出来的：
+    // 给 OCR 看哪一块画面，**由引擎决定**（[`ViewPolicy`]）。两条都是实测：
+    //
+    // ## WinRT：必须整帧
     //
     // 1. 不放大：对方短消息稳定读不到（见 [`OCR_UPSCALE`]）。
     // 2. 只给裁好的消息区：同样读不到。同一帧、同为 2x，把左侧
@@ -201,11 +302,33 @@ pub fn read_lines(
     // **Windows OCR 为什么这样，没查清。** 上面这些数据只支持
     // 「放大 + 左侧有文字上下文」两个条件同时成立，机制本身未知。
     // 这是按实测兜住的行为，不是按原理推出来的结论。
-    let view = frame
-        .upscaled_nearest(OCR_UPSCALE)
+    //
+    // ## PP-OCR：必须裁
+    //
+    // 反过来。同一张真实整窗（`target/probe/full-win.png` 1162×893）：
+    // 整帧 1146ms / 50 行，裁到消息区 455ms / 5 行，
+    // 而且**逐字更准**。见 [`crate::capture::ocr::crops_to_pane`]。
+    let plan = source.view_plan();
+    // 视图左上角在**消息区坐标系**里的位置。
+    //
+    // ⚠ 方向别搞反（2026-10-18 第一次就写反了，被这两条测试当场打回）：
+    // - 整帧视图：视图坐标**就是**整帧坐标，换到消息区要减掉消息区原点；
+    // - 裁剪视图：视图坐标**已经是**消息区相对坐标，一个都不用减。
+    //
+    // 写反的症状不是坐标偏一点，而是**整批行被判成区外丢掉** ⇒ 空消息流。
+    let origin = match plan.policy {
+        ViewPolicy::WholeFrame => (chat.x0, chat.y0),
+        ViewPolicy::ChatPane => (0i32, 0i32),
+    };
+    let base = match plan.policy {
+        ViewPolicy::WholeFrame => Cow::Borrowed(frame),
+        ViewPolicy::ChatPane => Cow::Owned(frame.crop(chat).ok_or(ReadError::NoPane)?),
+    };
+    let view = base
+        .upscaled_nearest(plan.upscale)
         .ok_or(ReadError::NoPane)?;
     let ocr = source.read(&view)?;
-    Ok(lines_into_pane(ocr, chat, OCR_UPSCALE))
+    Ok(lines_into_pane(ocr, chat, plan.upscale, origin))
 }
 
 /// 跑完整条链路。`source` 只负责取文本框，其余全真跑。
@@ -366,6 +489,84 @@ mod tests {
                 lines: self.0.clone(),
             })
         }
+    }
+
+    /// 一个**声明自己要裁到消息区**的假引擎：它按**视图坐标**给行框，
+    /// 于是能验「裁剪件的坐标换算回消息区」对不对。
+    struct CroppedLines(OcrText);
+
+    impl LineSource for CroppedLines {
+        fn read(&self, _view: &Frame) -> Result<OcrText, OcrError> {
+            Ok(self.0.clone())
+        }
+
+        fn view_plan(&self) -> ViewPlan {
+            ViewPlan::PPOCR
+        }
+    }
+
+    /// **裁剪件的坐标换算回消息区，行要留住、位置要准。**
+    ///
+    /// 这是 [`ViewPlan::ChatPane`] 唯一容易搞错的地方：视图原点已经不是
+    /// 整帧的 (0,0)，而是消息区的左上角。若换算时仍减去 `chat.x0/y0`，
+    /// **每一行都会被平移掉整个消息区的偏移**，而症状是
+    /// 「行都被判成区外丢掉」⇒ 空消息流，**全程不报错**。
+    ///
+    /// 2026-10-18：真帧上 `xtask ocr` 逐行 0 行与这条是同一类失败。
+    #[test]
+    fn lines_read_from_a_cropped_view_land_inside_the_pane() {
+        let (fw, fh) = (600u32, 400u32);
+        let chat = Rect::new(120, 40, 600, 360);
+        let f = Frame::from_rgb(fw, fh, vec![30u8; (fw * fh * 3) as usize]).expect("frame");
+        // 视图坐标：消息区里的两行（PP-OCR 是 1×，所以视图坐标 = 消息区相对坐标）
+        let lines = OcrText {
+            text: "甲\n乙".into(),
+            lines: vec![
+                OcrLine {
+                    text: "甲".into(),
+                    rect: Rect::new(10, 20, 200, 40),
+                    words: Vec::new(),
+                },
+                OcrLine {
+                    text: "乙".into(),
+                    rect: Rect::new(10, 200, 300, 220),
+                    words: Vec::new(),
+                },
+            ],
+        };
+        let got = read_lines(&f, chat, &CroppedLines(lines)).expect("读行失败");
+        assert_eq!(got.lines.len(), 2, "裁剪件的行被整批丢掉了：{got:?}");
+        assert_eq!(
+            got.lines[0].rect,
+            Rect::new(10, 20, 200, 40),
+            "第一行的位置偏了——换算时多半是把 chat.x0/y0 多减了一次"
+        );
+        assert_eq!(got.lines[1].rect, Rect::new(10, 200, 300, 220));
+    }
+
+    /// **整帧那条路的换算不能被裁剪改动带歪。**
+    ///
+    /// 默认策略是 [`ViewPlan::WINRT`]，而 `read_lines` 现在多了一段
+    /// 坐标换算。上一条只证明裁剪那条对；这条钉住整帧那条**没变**——
+    /// 夹具的行框本来就写在放大后的整帧坐标系里。
+    #[test]
+    fn the_whole_frame_policy_maps_into_the_pane_exactly_as_before() {
+        let (fw, fh) = (600u32, 400u32);
+        let chat = Rect::new(120, 40, 600, 360);
+        let f = Frame::from_rgb(fw, fh, vec![30u8; (fw * fh * 3) as usize]).expect("frame");
+        let src = RecordedLines(vec![OcrLine {
+            text: "对方那条".into(),
+            rect: to_view(Rect::new(130, 60, 300, 80)),
+            words: Vec::new(),
+        }]);
+        let got = read_lines(&f, chat, &src).expect("读行失败");
+        assert_eq!(got.lines.len(), 1, "整帧路径的行被丢掉了：{got:?}");
+        assert_eq!(
+            got.lines[0].rect,
+            Rect::new(10, 20, 180, 40),
+            "整帧路径的坐标换算变了：{:?}",
+            got.lines[0].rect
+        );
     }
 
     fn recorded() -> RecordedLines {
