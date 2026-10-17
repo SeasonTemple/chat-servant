@@ -34,13 +34,31 @@ $patterns = @(
     @{ n = 'Selection'; t = [System.Windows.Automation.SelectionPattern]::Pattern }
 )
 
+# UIA 的 `BoundingRectangle` 是 `double`，而**未渲染/空元素的宽高是 ±∞**
+# （不是 0）。原实现直接 `[int]$r.Width` ⇒ 抛
+# 「无法将值 "∞" 转换为类型 System.Int32」，整个脚本在**第一个**这种元素上死掉。
+#
+# ⚠⚠ 这里不能简单地把 ∞ 当 0：区域过滤（第 41–44 行）会因此把
+#   「位置未知」的元素判成「在 0,0 附近」，于是**过滤器把量具坏了这件事藏起来**。
+#   ⇒ 非有限值一律标成 `?` 并**不过滤**，让它显形。
+function Get-SafeNum([double]$v) {
+    if ([double]::IsNaN($v) -or [double]::IsInfinity($v)) { return '?' }
+    if ($v -gt [int]::MaxValue -or $v -lt [int]::MinValue) { return '?' }
+    return [int][math]::Round($v)
+}
+
 for ($i = 0; $i -lt $all.Count; $i++) {
     $e = $all.Item($i)
     $c = $null; $r = $null
     try { $c = $e.Current; $r = $c.BoundingRectangle } catch { continue }
-    if ($X1 -gt $X0) {
-        if ($r.X + $r.Width -lt $X0 -or $r.X -gt $X1) { continue }
-        if ($r.Y + $r.Height -lt $Y0 -or $r.Y -gt $Y1) { continue }
+    $rx = Get-SafeNum $r.X
+    $ry = Get-SafeNum $r.Y
+    $rw = Get-SafeNum $r.Width
+    $rh = Get-SafeNum $r.Height
+    # 位置未知的元素**不做区域过滤**（见上面的理由）。
+    if ($X1 -gt $X0 -and $rx -ne '?' -and $ry -ne '?' -and $rw -ne '?' -and $rh -ne '?') {
+        if ($rx + $rw -lt $X0 -or $rx -gt $X1) { continue }
+        if ($ry + $rh -lt $Y0 -or $ry -gt $Y1) { continue }
     }
     $flags = @()
     foreach ($p in $patterns) {
@@ -52,6 +70,6 @@ for ($i = 0; $i -lt $all.Count; $i++) {
     Write-Host ("[{0,4}] {1,-12} '{2}' class={3,-20} rect=({4},{5},{6}x{7}) [{8}]" -f `
         $i, ($c.ControlType.ProgrammaticName -replace 'ControlType\.', ''),
         $name, $c.ClassName,
-        [int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height,
+        $rx, $ry, $rw, $rh,
         ($flags -join ','))
 }

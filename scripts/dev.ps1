@@ -4,7 +4,7 @@
 #
 # 不是为了「把命令包起来」，而是为了消灭两类反复出现的摩擦：
 #
-# 1. **拼错顺序 / 漏一步**。门禁九步的顺序在 `gate.ps1` 里是唯一的真相来源，
+# 1. **拼错顺序 / 漏一步**。门禁的步序在 `gate.ps1` 里是唯一的真相来源，
 #    本脚本**只做转发**，不复制任何一步的命令行——复制就会漂（本仓在
 #    命令文案上已经吃过两次「两处各抄一份」的亏）。
 # 2. **shell 层的编码与引号事故**。会话默认 shell 是 Windows PowerShell 5.1：
@@ -46,17 +46,29 @@ if (-not $pwshCmd) {
 }
 $pwsh = $pwshCmd.Source
 
+# 跑一条命令，**不返回任何值**，结果放 $script:runCode。
+#
+# ⚠ 为什么不能 `return $code`（2026-10-18 修，票 53）：
+#   PowerShell 里函数的**全部输出**都是返回值。所以 `Run` 里那几行
+#   `Write-Output "========== …"` / `">>> … OK"` 会和退出码一起被
+#   调用方 `$a = Run …` 收走 —— 两件事同时坏：
+#   ① 那些给人看的判定行**从来没打印过**（实测：整段输出 73 字符，
+#      只剩 cargo 自己那行 Finished）。
+#   ② `$a` 变成字符串数组，`$a -ne 0` 是**过滤**比较，返回所有非 0 元素
+#      ⇒ 恒为真 ⇒ **check / test / ui-check / ui 永远 exit 1**。
+#   本仓自己的 `gate.ps1` 一直没这个毛病：`Step` 根本不返回值，
+#   直接读 `$LASTEXITCODE`。这里照抄那套纪律。
 function Run([string]$label, [scriptblock]$body) {
   Write-Output ''
   Write-Output "========== $label =========="
   $sw = [Diagnostics.Stopwatch]::StartNew()
   & $body
-  $code = $LASTEXITCODE
+  # 顺序同 gate.ps1：先存退出码再停表。
+  $script:runCode = $LASTEXITCODE
   $sw.Stop()
   Write-Output ('>>> {0} [{1:N1}s] (exit={2})' -f
-    $(if ($code -ne 0) { "$label FAILED" } else { "$label OK" }),
-    $sw.Elapsed.TotalSeconds, $code)
-  return $code
+    $(if ($script:runCode -ne 0) { "$label FAILED" } else { "$label OK" }),
+    $sw.Elapsed.TotalSeconds, $script:runCode)
 }
 
 function Say([string]$text) { Write-Output $text; Write-Output '' }
@@ -72,7 +84,7 @@ chat-servant 开发入口（用 pwsh 7 运行）
   dev.ps1 ui-check     前端三项：svelte-check / lint / autofixer（不含 build）
   dev.ps1 ui           前端全查（含 vite build）
   dev.ps1 app          启动 Tauri dev（内部会自己起 vite，别再单起 pnpm dev）
-  dev.ps1 gate         完整九步门禁（= scripts/gate.ps1，可加 -Skip / -Only）
+  dev.ps1 gate         完整门禁（= scripts/gate.ps1，可加 -Skip / -Only）
   dev.ps1 size         target/ 体积报告 + 多哈希占比
   dev.ps1 clean        回收 target/ 的旧哈希产物（-DryRun 只报告，-Force 无视冷却）
 
@@ -84,34 +96,40 @@ chat-servant 开发入口（用 pwsh 7 运行）
   'check' {
     # 这两条是改 Rust 之后最常跑的两条，也是最便宜的两条。
     # `cargo check` 不是其中之一：clippy 已经要编译，改用它不会更快。
-    $a = Run 'cargo fmt --all --check' { & cargo fmt --all --check }
-    $b = Run 'cargo clippy -D warnings' { & cargo clippy --workspace --all-targets -- -D warnings }
+    Run 'cargo fmt --all --check' { & cargo fmt --all --check }
+    $a = $script:runCode
+    Run 'cargo clippy -D warnings' { & cargo clippy --workspace --all-targets -- -D warnings }
+    $b = $script:runCode
     if ($a -ne 0 -or $b -ne 0) { exit 1 } else { exit 0 }
   }
 
   'test' {
-    $args = @('test', '--workspace')
-    if ($Filter) { $args += $Filter }
-    $code = Run "cargo test $($args -join ' ')" { & cargo @args }
-    exit $code
+    $targs = @('test', '--workspace')
+    if ($Filter) { $targs += $Filter }
+    Run "cargo test $($targs -join ' ')" { & cargo @targs }
+    exit $script:runCode
   }
 
   'ui-check' {
     Push-Location ui
-    $a = Run 'svelte-check' { & pnpm check }
-    $b = Run 'prettier + eslint' { & pnpm lint }
-    $c = Run 'svelte-autofixer' { & $pwsh -NoProfile -File scripts/autofixer.ps1 }
+    Run 'svelte-check' { & pnpm check }
+    $a = $script:runCode
+    Run 'prettier + eslint' { & pnpm lint }
+    $b = $script:runCode
+    Run 'svelte-autofixer' { & $pwsh -NoProfile -File scripts/autofixer.ps1 }
+    $c = $script:runCode
     Pop-Location
     if ($a -ne 0 -or $b -ne 0 -or $c -ne 0) { exit 1 } else { exit 0 }
   }
 
   'ui' {
-    $code = Run 'ui 全查（含 build）' { & $pwsh -NoProfile -File scripts\dev.ps1 ui-check }
+    Run 'ui 全查（含 build）' { & $pwsh -NoProfile -File scripts\dev.ps1 ui-check }
+    $code = $script:runCode
     if ($code -ne 0) { exit $code }
     Push-Location ui
-    $d = Run 'vite build' { & pnpm build }
+    Run 'vite build' { & pnpm build }
     Pop-Location
-    exit $d
+    exit $script:runCode
   }
 
   'app' {
