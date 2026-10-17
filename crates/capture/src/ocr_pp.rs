@@ -137,7 +137,12 @@ pub fn set_models_dir(dir: impl Into<PathBuf>) {
 }
 
 pub fn models_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("CHATSERVANT_OCR_MODELS") {
+    // ⚠ 环境变量**被设成空字符串**与**没设**不是一回事：
+    // `var_os` 对空值返回 `Some("")`，而 PowerShell 的 `$env:X = ''`
+    // 正是「设成空」。它会盖掉后面全部查找，最后得到一个空路径 ⇒ 静默回落。
+    // 实测踩过：那一次的读数是「34 ms 的 OCR」，看着像变快了，其实是回落了。
+    // ⇒ 空值按「没设」处理。
+    if let Some(d) = std::env::var_os("CHATSERVANT_OCR_MODELS").filter(|d| !d.is_empty()) {
         return PathBuf::from(d);
     }
     if let Some(d) = MODELS_OVERRIDE.get() {
@@ -379,30 +384,43 @@ pub enum Backend {
     Ort,
 }
 
-/// 这次用哪个后端。**由 `CHATSERVANT_OCR_BACKEND` 决定，默认 tract。**
+/// 这次用哪个后端。**由 `CHATSERVANT_OCR_BACKEND` 决定，默认 ort。**
 ///
-/// ## 为什么默认还是 tract（2026-10-18）
+/// ## 为什么默认是 ort（2026-10-18 翻，之前是 tract）
 ///
 /// 同一张真实消息区、同一份 v6 small 权重、release 稳态中位：
 ///
 /// ```text
-/// tract-onnx 0.23.8     2501~2552 ms
-/// onnxruntime 4 线程       443~ 455 ms
+/// tract-onnx 0.23.8     2465~2555 ms
+/// onnxruntime 4 线程       491~ 542 ms
 /// ```
 ///
-/// 差 **5.6 倍**，而 `TICK = 1000ms` ⇒ tract 这条**进不了预算**。
-/// 三条排查都指向「是引擎本身」：
+/// 差 **5.6 倍**。三条排查都指向「是引擎本身」而不是配置：
 /// tract 的运行时开关逐个试过没有一个带来可测变化；
 /// `RAYON_NUM_THREADS` 从 12 扫到 2 几乎不变（**2 线程 ≈ 12 线程**）；
 /// 并发两个进程只贵 1.35×，所以它并非单线程。
 ///
-/// 但「要不要为了 5.6 倍接受一份 C++ 动态库」是**装机形态的决定**，
-/// 不是代码能替你做的——所以默认值不变，改用环境变量试。
-/// 上线与否取决于本机与目标机的实测，不取决于这个默认。
+/// 当初没翻，是因为「要不要为了 5.6 倍接受一份二进制依赖」被当成
+/// 装机形态的决定、搁在那里等实测。**这一版翻了**，因为装机形态已经量过：
+///
+/// | | 实测 |
+/// |---|---|
+/// | 装包里的 ORT 运行时 | **静态链接**，`target/` 下找不到任何 `onnxruntime.dll` |
+/// | exe 体积 | **77.3 MB**（含静态链进去的那段） |
+/// | 装包总增 | 再加权重 31 MB |
+///
+/// 换句话说：当初那个「要带一份十几 MB DLL」的顾虑，
+/// 选了 `download-binaries`（静态链接）之后**已经不成立**。
+///
+/// tract **没有删**：`CHATSERVANT_OCR_BACKEND=tract` 立刻切回去，不必重编。
+/// 它仍是「不想引入二进制依赖」时的现成退路。
 pub fn backend() -> Backend {
     match std::env::var("CHATSERVANT_OCR_BACKEND").as_deref() {
         Ok("ort") | Ok("onnxruntime") => Backend::Ort,
-        _ => Backend::Tract,
+        // 显式点名才回退。**不做「能装就装」那套自动判断**——
+        // 理由同引擎那边：「能跑」不是「该不该跑」的授权。
+        Ok("tract") => Backend::Tract,
+        _ => Backend::Ort,
     }
 }
 
