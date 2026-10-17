@@ -585,20 +585,37 @@
     早先是挂在「发送档位」下面那一行，只有走过那一节的人才看得到，
     而「图片」「上下文」两节的改动同样立刻生效。
   -->
-  <!-- ══ 发送档位 ══ -->
-  <h2 class="cs-h2">发送档位</h2>
+  <!--
+    ══ 屏头 ══
+
+    ⚠⚠ **这一屏原先一个标题都没有**：直接从「发送档位」开始，
+    而「全部改完立刻生效」那句灰字孤零零挂在第一个小节下面。
+
+    那句 2026-10-16 被从屏顶挪到这里（当时的理由是「离它描述的东西近」），
+    但它描述的是**整屏**——「图片」「上下文」「外观」几节改了也一样立刻生效，
+    挂在「发送档位」底下等于**归属说错了**：用户会以为只有档位不用重启。
+
+    ⇒ 给这一屏一个屏头（`设置` + 那句话作为副标题），
+      它是**关于这一屏**的话，就该有**关于这一屏**的位置。
+      顺带解决用户 2026-10-16 与 2026-10-18 两次说的
+      「为何说明要单独一行？」——那次的修法是挪位置，
+      而**根因是它不属于任何控件**；给屏头它就不再是一行孤字，
+      而是一块有标题的说明区。
+  -->
+  <header class="cs-set-head">
+    <h1 class="cs-set-title">设置</h1>
+    <p class="cs-set-sub">改完立刻生效，不用重启面板。</p>
+  </header>
 
   <!--
-    「改完不用重启」这句原先是**屏顶独占一行**：左边没有控件、右边没有分节，
-    它不属于任何东西，读起来像一行飘着的脚注。
-    用户 2026-10-16 原话：「为何说明要单独一行？」
-
-    ⇒ 挪到**第一节标题之下**，并给左边线（与 `TierSwitch` 的后果说明同一支），
-      让它明确挂在「发送档位」这一节下面。
-      档位是安全相关、也最需要先知道「改了立刻生效」的那一项，
-      所以放这里不是就近，是**该被看见的位置**。
+    ⚠⚠ 「发送档位」这个小节标题原先写在**这里**（demo 夹具之上），
+    而它真正的控件 `<TierSwitch>` 写在夹具**下面**（2026-10-18 截图抓到）。
+    ⇒ 标题与控件被整块模型配置隔开约 400px，屏幕上读成
+      「发送档位」这一节是空的，后面凭空多出一组控件。
+      这是「标题/说明意义不明」最重的一档：**归属被拆开了**。
+    ⇒ 标题已移到 `<TierSwitch>` 紧上方（标题与控件必须相邻）。
+      demo 夹具留在屏头之后——它是要给人看出图的，不属于任何小节。
   -->
-  <p class="cs-lead">全部改完立刻生效，不用重启面板。</p>
 
   <!--
     demo 夹具（2026-10-16 加），**只在演示模式渲染**，真实运行时不存在。
@@ -631,9 +648,14 @@
       同时加进 demo 夹具，并且要放在纸够得着的位置）的第二次犯。
     -->
     <div>
-      <span class="cs-label">示例：数值滑块</span>
+      <!-- ⚠ 原先写「示例：数值滑块」——**一个正式设置页里出现叫「示例」的东西**，
+           而它正是用户拿来评「说明文字意义不明」的那一屏
+           （2026-10-18）。demo 夹具该镜像真实控件，镜像的**文案**也一样：
+           真实那一节叫「送进模型的最近原文条数」，这里就用同一句，
+           出图评审看到的才与真机一致。 -->
+      <span class="cs-label">送进模型的最近原文条数</span>
       <div class="cs-slider">
-        <input type="range" min="1" max="40" value="12" aria-label="示例数值" />
+        <input type="range" min="1" max="40" value="12" aria-label="送进模型的最近原文条数" />
         <output>12 条</output>
       </div>
     </div>
@@ -659,12 +681,19 @@
           </div>
         {:else}
           <div class="cs-form">
+            <!-- ⚠ placeholder 原先是「粘贴 key」——「key」是什么、
+               贴的是什么格式、贴进去会存到哪，这一屏没一处说。
+               现在把「API」写进去：与下面那行「存入 Windows 凭据管理器」
+               合起来才读得出「这是一把模型 API key，会存进系统凭据管理器」。
+               `aria-label` 与 placeholder 同义：**读屏用户拿不到 placeholder**
+               （它不是可访问名称），所以这一条必须写。 -->
             <input
               class="cs-input"
               type="password"
               autocomplete="off"
               spellcheck="false"
-              placeholder="粘贴 key"
+              aria-label="模型 API key"
+              placeholder="粘贴 API key"
             />
             <button class="cs-btn cs-btn-mini primary">保存</button>
           </div>
@@ -672,6 +701,10 @@
       </section>
     {/each}
   {/if}
+  <!-- ══ 发送档位 ══ -->
+  <!-- ⚠ 标题必须与 `<TierSwitch>` 相邻：中间夹任何东西，
+       它读起来就变成「下一组控件的标题」而不是「这一节的标题」。 -->
+  <h2 class="cs-h2">发送档位</h2>
   <TierSwitch bind:tier onchange={changeTier} />
   {#if tierNote}
     <p class="cs-fail" role="alert">{tierNote}</p>
@@ -721,7 +754,17 @@
 
   <!-- ══ 窗口 ══ -->
   <h2 class="cs-h2">窗口</h2>
-  <p class="cs-label">按窗口控制键时</p>
+  <!--
+    ⚠⚠ **这里原先是两行标签说同一件事**（2026-10-18 用户第三次提「说明文字
+    意义不明的单独占一行」，指的就是这类）：
+      <p class="cs-label">按窗口控制键时</p>     ← 单独一行
+      <SegSlider label="关闭窗口的行为">          ← 控件自己又带一个标签
+    两行的字面意思重叠，而**「名称」和「说明」在排版上分不出来**
+    （它们是同一个 12.5px / 600）——这才是问题，不是哪一句不好看。
+
+    ⇒ 只留一个标签，且用**用户会说的那句**（「按窗口控制键时」），
+      因为它回答的是「我在按哪个键」，而「关闭窗口的行为」是界面自述。
+  -->
   <!--
     两个选项并列、不分主次：它们是同一件事的两半，不是「轻/重」。
     选中用**墨底滑块**，与「发送档位」是同一个 `SegSlider` 组件——
@@ -736,7 +779,7 @@
   -->
   <SegSlider
     bind:value={closeBehavior}
-    label="关闭窗口的行为"
+    label="按窗口控制键时"
     options={CLOSE_OPTIONS}
     onchange={(v) => setClose(v as 'exit' | 'tray')}
   />
@@ -1228,18 +1271,12 @@
      *   由 `budget.html` 量 `offsetWidth - clientWidth`。 */
   }
 
-  /* 「改完不用重启」这句。左边线是它**依附于某一节**的标记——
-   * 原先它在屏顶独占一行，两边都没有东西，读成一节浮着的脚注。
-   * 与 `TierSwitch` 的 `.cs-hint` 用同一支左边线：凡是解释「这一节会发生什么」
-   * 的句子都长这样，不解释的就别加线。 */
-  .cs-lead {
-    margin: 0.1rem 0 0.15rem;
-    font-size: 11.5px;
-    color: var(--cs-pencil);
-    padding-left: 0.55rem;
-    border-left: 2px solid var(--cs-rule);
-    overflow-wrap: anywhere;
-  }
+  /* 原来这里有一条 `.cs-lead`：「改完不用重启」那句。它现在是**屏头的副标题**
+   * （`.cs-set-sub`），所以这条规则连同它的选择器一起删了——留着的样式
+   * svelte 会报 `Unused CSS selector`，而门禁里那道 autofixer 正是这么抓到它的。
+   *
+   * 「解释某一句会发生什么」的那支左边线，现在只剩 `TierSwitch` 的 `.cs-hint`
+   * 在用，规则在那边。凡是解释**整屏**的句子归屏头，不占一节。 */
 
   /* ── 分节标题 ────────────────────────────────────────────────
    *
@@ -1273,6 +1310,37 @@
     font-size: 12.8px;
     font-weight: 600;
     color: var(--cs-ink);
+  }
+
+  /* ── 屏头（2026-10-18 新增）───────────────────────────────────────
+   *
+   * 这一屏原先**一个标题都没有**，直接从「发送档位」的小节开始。
+   * 而「改完立刻生效」那句灰字只能挂在某个小节底下——挂着就变成
+   * 「关于发送档位的话」，而它其实关于**整屏**。
+   *
+   * ⇒ 给屏头一个位置。这不是为了好看，是给**归属**：
+   *   一句话该挂在哪个标题下，取决于它描述的是谁。
+   *
+   * `margin-bottom` 是唯一与 `.cs-h2` 不同的地方：屏头是这一屏的第一块，
+   * 它下面紧跟第一个小节标题，两个 0.85rem 会让「设置」和「发送档位」
+   * 看起来是**平级**的。 */
+  .cs-set-head {
+    margin-bottom: 0.35rem;
+  }
+
+  .cs-set-title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--cs-ink);
+  }
+
+  .cs-set-sub {
+    margin: 0.1rem 0 0;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--cs-pencil);
   }
 
   .cs-label {
@@ -1332,6 +1400,27 @@
 
   /* ── 按钮 ─────────────────────────────────────────────────── */
   .cs-btn {
+    /* ⚠⚠ **两族按钮与输入框共用同一个内容盒高度**（2026-10-18）。
+     *   改之前：`.cs-btn-ink` 是 `padding: 7px 18px`（约 31px）、
+     *   `.cs-btn-mini` 是 `padding: 6px 11px`（约 29px），
+     *   各自按自己的字号算，**两族差 2px**；加上同样的 16px 撕边之后，
+     *   真机实测「打开」65px / 供应商按钮 62px —— 同一屏三种尺寸。
+     *
+     *   ⇒ 不再用 padding 推高度，统一 `min-height: 30px` + flex 居中。
+     *     `box-sizing: border-box` 让这 30px **含**那 32px 撕边，
+     *     于是输入框（`min-height: 30px` + 同样的 16px 边）总高逐项相等。
+     *
+     *   ⚠ 前提是这一族都写着 `class="cs-btn ..."` —— 三族
+     *     （`.cs-btn-ink` / `.cs-btn-mini` / 未来的）都走这条，
+     *     谁漏了 `cs-btn` 谁就掉出这条对齐。 */
+    box-sizing: border-box;
+    min-height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    /* ⚠ `line-height: 1`：flex 居中之后，行高再参与一次垂直布局，
+     *   会把文字顶上去 1–2px。按钮里的文字不需要行距。 */
+    line-height: 1;
     border-radius: var(--cs-radius-sm);
     font-weight: 600;
     transition:
@@ -1745,35 +1834,65 @@
   .cs-input {
     flex: 1 1 auto;
     min-width: 0;
-    padding: 0.35rem 0.45rem;
+    /* ⚠⚠ **高度与同屏按钮对齐**（2026-10-18）。
+     *   改之前这一屏实测：输入框 **24px** 高，右边那颗「保存」**62px** 高
+     *   ——输入框贴在两颗撕边按钮中间，读成「一个洞旁边立着两块纸」。
+     *   `.cs-btn-ink` 与 `.cs-btn-mini` 的内容盒都是 `30px`，
+     *   加上同样的 `16px` 撕边 ⇒ 三者总高**逐项相等**。
+     *   `16px` 与 `32` 必须与两族按钮**逐字绑定**（撕口纸芯最早只内缩
+     *   ~5.5 CSS px，`stripgen.py` 实测），别单独改一个。 */
+    box-sizing: border-box;
+    min-height: 30px;
+    /* ⚠ 左内缩比按钮多 6px：撕边吃掉 16px，文字要回到原来那个视觉位置。
+     * 垂直内缩是 0 —— 靠 `line-height` 居中，padding 会把单行输入框撑歪。 */
+    padding: 0 12px;
     font-size: 11.5px;
+    line-height: 30px;
     font-family: ui-monospace, 'Cascadia Mono', monospace;
     color: var(--cs-ink);
-    /* 底色**完全不透明**（见 app.css）：透明窗口分层合成会整层丢掉半透明底。
-     * 槽底 = **纸本身**。⚠ 试过 `--cs-paper-raised`（比纸亮）又退回：
-     *   比纸亮读成「白板」，而纸被压实应是**略深**。深度交给内阴影，底色不参与。 */
     background: var(--cs-paper);
-    border: none;
-    /* 弧边。⚠ 原是硬编码 `7px`，票 42 归到 `--cs-radius-sm`(5px)，理由
-     *   「与同屏 `.cs-btn` 同族」——**那个理由已作废**：同屏按钮全换成撕边
-     *   纸条，`border-image` 一生效 `border-radius` 根本不画。
-     *   ⇒ 现在独立取 `--cs-radius`(8px)，按「弧边」这条自己的理由。 */
-    border-radius: var(--cs-radius);
+    /* ⚠⚠ **从「无边框」改成撕边纸**（2026-10-18，用户原话：
+     *   「输入框意义不明的要显示完整的边框」）。
+     *
+     *   原来这里是 `border: none` + 四条 inset 阴影，理由写在 app.css 里：
+     *   「3:1 暖色描边不会读成 Web 输入框」。**那是对「像 Web 输入框」的
+     *   防御，不是对「读不出来」的防御**——实测真机上它读成的是一个**洞**：
+     *   没有边框的矩形在纸上看不出是控件，用户不知道那里能点、能写。
+     *
+     *   ⇒ 改成与两族按钮**同一套撕边**（同 `strip.png`、同 slice / width），
+     *     于是输入框与它旁边的按钮是同一种东西的两片，不是一个洞配一块纸。
+     *     边框「完整」是这一版的硬要求；辨识度靠**材质同族**，
+     *     不靠「压淡到看不见」。
+     *
+     *   底色**仍然完全不透明**（见 app.css）：透明窗口分层合成会整层丢掉半透明底。 */
+    border: 16px solid transparent;
+    border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
     appearance: none; /* 清 UA 阴影/背景图与默认外观 */
-    box-shadow:
-      inset 0 2px 4px color-mix(in srgb, var(--cs-tier-ink) 22%, transparent),
-      inset 2px 0 3px color-mix(in srgb, var(--cs-tier-ink) 11%, transparent),
-      inset 0 -2px 3px color-mix(in srgb, #fff 42%, var(--cs-paper)),
-      inset -2px 0 2px color-mix(in srgb, #fff 30%, var(--cs-paper));
+    /* 影子随 alpha 走（同两族按钮）：`box-shadow` 画边框盒，会从撕口的透明区
+     * 漏出矩形直边。`dy ≥ blur/2` ⇒ 高斯核不越进元素内侧，顶部不浮黑边。 */
+    filter: drop-shadow(0 2px 4px rgb(24 18 10 / 0.16));
+    transition:
+      filter var(--cs-dur-fast) var(--cs-ease),
+      border-color var(--cs-dur-fast) var(--cs-ease);
+  }
+
+  .cs-input::placeholder {
+    color: var(--cs-pencil-2);
+    /* ⚠ placeholder 用**与正文同一支**无衬线，不用输入框自己的 monospace：
+     *   等宽字体里「粘贴 API key」会按等宽格子排，宽度比实际字面多一大截，
+     *   读起来像一段被拉长的代码，而不是一个提示。
+     *   （这与 `.cs-draft-text` 的判断同族：**该像正文的地方别像代码**。） */
+    font-family: 'Microsoft YaHei UI', 'PingFang SC', 'Segoe UI', system-ui, sans-serif;
+  }
+
+  .cs-input:hover:not(:disabled) {
+    filter: drop-shadow(0 4px 8px rgb(24 18 10 / 0.22));
   }
 
   .cs-input:focus {
     outline: none;
-    box-shadow:
-      inset 0 2px 5px color-mix(in srgb, var(--cs-tier-ink) 30%, transparent),
-      inset 2px 0 3px color-mix(in srgb, var(--cs-tier-ink) 15%, transparent),
-      inset 0 -2px 4px color-mix(in srgb, #fff 52%, var(--cs-paper)),
-      inset -2px 0 3px color-mix(in srgb, #fff 36%, var(--cs-paper));
+    /* 聚焦态**只抬亮**，不换形：撕边纸条换了形就掉回 Web 输入框那一套了。 */
+    filter: drop-shadow(0 5px 10px rgb(24 18 10 / 0.28));
   }
 
   /* ── 危险开关下面那一句红。**只有这一句是红的。** ───────────── */

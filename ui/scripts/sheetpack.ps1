@@ -60,6 +60,48 @@ $cur = $g.Value
 
 Write-Output ("源图        : {0:N0} 字节  ->  base64 {1:N0} 字符" -f $raw.Length, $b64.Length)
 
+# ⚠⚠⚠ **2026-10-18 补的第二条不变量：`<image>` 的 width/height 必须与 PNG 对得上。**
+#
+# 为什么必须有这条：下面那个 `exit 0` 之前的判断只比 **base64 载荷**，
+# 而 `<image x="0" y="0" width="348" height="512">` 这几个数字是**手写的**
+# ——打包脚本第 75 行的注释自己写着「只换载荷，不碰任何其他标记」。
+# ⇒ 载荷可以完全同步，而纸被画在一个**错的框**里。
+#
+# 真机上就是这样暴露的（2026-10-18 验收）：
+#   · 源 PNG 是 760×1120 = 380×560 @2x，**正好是面板尺寸**
+#   · 而 `<image>` 写的是 348×512 ⇒ 右边 32px、下边 48px 根本没有纸
+#   · 量具实测：纸可见底在面板本地 y≈500、右缘 x≈348，往下/往右全是
+#     底下微信的界面透过来，能直接读出对话列表
+#   · 而 `sheet pack in sync` 那一步**是绿的**
+#
+# ⚠ 守的是「纸铺满面板」这个**真不变量**，不是「载荷同步」那个代理。
+#   代理恰好成立而真不变量已经坏了，正是这道检查原先漏掉的那类。
+Add-Type -AssemblyName System.Drawing
+$img = [System.Drawing.Image]::FromFile($png)
+try {
+    $pxW  = $img.Width
+    $pxH  = $img.Height
+    $cssW = [int]($pxW / 2)
+    $cssH = [int]($pxH / 2)
+}
+finally { $img.Dispose() }
+
+$mm = [regex]::Match($text, '<image\b[^>]*?\bwidth="(\d+)"[^>]*?\bheight="(\d+)"')
+if (-not $mm.Success) {
+    throw 'probe-sheet.svg 里找不到 <image width= height= —— 资产结构变了，脚本要改'
+}
+$imgW = [int]$mm.Groups[1].Value
+$imgH = [int]$mm.Groups[2].Value
+Write-Output ("纸框        : <image> {0}x{1}   源 PNG {2}x{3} = {4}x{5} CSS px @2x" -f `
+        $imgW, $imgH, $pxW, $pxH, $cssW, $cssH)
+if ($imgW -ne $cssW -or $imgH -ne $cssH) {
+    Write-Output '状态        : **纸框与源图对不上** —— 纸不会铺满面板，边缘会透出底下窗口'
+    throw ("<image> 是 {0}x{1}，而源 PNG 是 {2}x{3}（= {4}x{5} CSS px @2x）。" -f `
+            $imgW, $imgH, $pxW, $pxH, $cssW, $cssH) +
+        ' 面板窗口是 380x560 ⇒ 差出来的部分完全没有纸，底下窗口会直接透出来。' +
+        ' 改 <image> 的 width/height 与源图对上（别去缩放 PNG，那会把撕口一起缩小）。'
+}
+
 if ($cur -ceq $b64) {
   Write-Output '状态        : 已同步，SVG 内嵌段与 probe-sheet.png 逐字节相同'
   exit 0
