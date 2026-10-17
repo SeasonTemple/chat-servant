@@ -78,6 +78,36 @@ TAURI_CONFIG: '{"bundle":{"resources":null}}'
   与本文件「URL 不硬编」的立场不冲突：URL 从上游表来（跟得上换版），
   哈希本地钉（挡得住**静默**换内容）。上游合法更新时会响并要求人复核——那正是想要的。
 
+## ⚠⚠ 缺陷③（dry run 第二次抓出）：Windows 上 Python 打印中文会直接崩
+
+dry run `39037571268`：`verify` job ✅（缺陷②的修法在真 runner 上生效），
+`pip install rapidocr omegaconf` ✅（替代 uv 的方案成立），
+然后 `Fetch PP-OCR weights` ❌：
+
+```
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 0-1
+  File "...\Lib\encodings\cp1252.py", line 19, in encode
+    print(f"下载 {name} …")
+```
+
+`actions/setup-python` 装的 Python 3.12 在 Windows 上 **stdout 是传统代码页 cp1252**，
+而本仓的脚本输出全是中文。与 AGENTS.md 里那条 PS 5.1 编码陷阱同族，
+但 **Python 这侧当时没有任何闸门**。
+
+已修 `scripts/fetch_models.py`（模块顶层 reconfigure stdout+stderr，
+`errors="replace"` 兜底：有字符编不出来时降级成 `?`，而不是让**打印失败**变成栈回溯）。
+顺带补上同样缺的 `ui/scripts/targetaudit.py` 与 `scripts/ticketstatus.py`
+——`scripts/targetgc.py` 早就有了，说明这个坑在别处已咬过一次，只有那一个脚本幸免。
+
+### 守卫第三条不变量
+
+> **`gate.ps1` 用 python 调起的脚本，若含非 ASCII，就必须自己 reconfigure。**
+
+为什么值得机器查：这一类错**只在调用方显形**（CI 的 runner、本机 bench 台架），
+本地「记得设 `$env:PYTHONIOENCODING='utf-8'`」就能糊过去——本会话我糊了好几次。
+`errors` 也一并记：守卫查的是「有没有 `.reconfigure(`」这个形态，
+不是「跑起来有没有崩」。
+
 ## 守卫（两处，都自证过）
 
 ### `scripts/check-gate-parity.ps1` 的第二条不变量
@@ -252,7 +282,9 @@ PyPI 来源没变、供应链面没变，去掉的只是「假定有个工具」
 - [x] `release.yml` 的闸门自证（`check_release_yml.py` 8/8，两条 `if:` 严格互斥）
 - [x] **缺陷①在 `release.yml` verify 上复发**：dry run `39036210343` 抓到并修掉
 - [x] 守卫从「只看 ci.yml」扩到「所有 workflow × 逐 job」，自证 15/15
-- [ ] **dry run 在真 runner 上跑通**（第二次派发进行中）
+- [x] **缺陷③ Python 打印中文在 cp1252 上崩**：dry run `39037571268` 抓到并修掉，
+      三个脚本补齐 reconfigure，并加第三条守卫（自证 17/17）
+- [ ] **dry run 第三次派发跑通**（verify 已绿；剩 `tauri build` → 装包核权重）
 - [ ] **push 触发时 `inputs.dry_run` 为空 ⇒ 照常发布**（语义推理，验证它要打 tag）
 - [ ] **跑通一次真实发版**（需授权打 tag）
 

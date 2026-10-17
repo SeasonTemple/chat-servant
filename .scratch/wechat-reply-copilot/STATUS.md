@@ -31,7 +31,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-18 订正：Status 里那个「新撞出的缺陷」已不存在** | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `50-ocr-quality-floor-has-no-machine-guard.md` | 5/6 | ready-for-agent | None（验收项 1、2 可立即做；验收项 4 的实测部分需要真帧在手） |
-| `51-release-cannot-fetch-dict.md` | 12/15 | ready-for-human | 发版那一跳需要你授权打 tag（⚠ **打 tag 会真的发一个 release**）。 |
+| `51-release-cannot-fetch-dict.md` | 13/16 | ready-for-human | 发版那一跳需要你授权打 tag（⚠ **打 tag 会真的发一个 release**）。 |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
