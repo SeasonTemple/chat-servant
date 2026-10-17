@@ -86,11 +86,41 @@ jobs:
         working-directory: ui
         run: pnpm install --frozen-lockfile
 
+      # ⚠ 必须在 `tauri build` **之前**：`bundle.resources` 指的是
+      # `../../target/models/ppocrv6-small/*`，那些文件要真的在磁盘上，
+      # 否则 Tauri 直接报「资源不存在」而打包失败。
+      #
+      # 权重**不进仓库**（30MB 二进制 + 模型许可，见 ADR-0003），
+      # 所以每次发版都得现取。`scripts/fetch_models.py` 逐个核对 SHA256，
+      # 对不上就报错退出——宁可发版失败，也不要装出去一个来路不明的权重。
+      - name: Fetch PP-OCR weights
+        run: uv run --with rapidocr --with omegaconf python scripts/fetch_models.py
+
+      - name: Verify weights before bundling
+        run: uv run --with rapidocr --with omegaconf python scripts/fetch_models.py --check
+
       # 这个项目**只发 Windows 安装包**：捕获链路走 WGC + Windows.Media.Ocr，
       # 没有等价实现，所以不做跨平台矩阵。
       - name: Build msi + nsis
         working-directory: ui
         run: pnpm tauri build --bundles msi,nsis
+
+      # ⚠ 打包完**当场核对装包里真的有权重**。
+      # 「配置里写了 resources」不等于「文件真的进去了」——
+      # 路径写错时 Tauri 未必报错，而产品侧的表现是
+      # 「装上了，但 OCR 一直是慢的那条路」。
+      - name: Verify weights landed in the bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = 'ui/src-tauri/target/release/bundle'
+          if (-not (Test-Path $root)) { throw "没找到打包产物目录：$root" }
+          $hit = Get-ChildItem -Path $root -Recurse -Filter 'PP-OCRv6_det_small.onnx' -File
+          if (-not $hit) { throw "装包里没有 det 权重 —— resources 映射写错了？" }
+          Write-Host "装包内权重：$($hit[0].FullName)"
+          $n = (Get-ChildItem -Path $root -Recurse -Include '*.onnx','ppocrv6_dict.txt' -File).Count
+          Write-Host "装包内 OCR 权重文件数：$n（应为 3）"
+          if ($n -lt 3) { throw "装包里的权重不完整（$n < 3）" }
 
       # 发布说明是**人工策展**的，不是自动生成的：每个 tag 都要有一份
       # docs/release-notes/vX.Y.Z.md，里面同时有 `## 中文` 和 `## English`。
