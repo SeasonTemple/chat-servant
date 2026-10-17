@@ -370,10 +370,10 @@ CSS 视口不变；`--headless=old` 也钳。
 
 ```powershell
 # 一次跑完全部门禁
-# ⚠ 通篇说的「九步」是 CONTRIBUTING 那张表的计数（它把 lint+autofixer 并成一步、
-#   不含 mojibake / sheetpack 两个便宜的）。gate.ps1 实际执行的 Step 数是
-#   **10~11 个**，取决于 secret-scan 是否跳过（没设 CHATSERVANT_PROBE_KEY 就跳）。
-#   2026-10-16 起脚本会打印分步耗时表，那是唯一准确的清单。
+# ⚠ 通篇别数「几步」。`gate.ps1` 里 `Step` 调用的**总数**（2026-10-18 实测 12）
+#   与**实际执行数**天生不等：`secret scan` 在没设 `CHATSERVANT_PROBE_KEY` 时跳过，
+#   CI 用占位 key 必跑 ⇒ 两侧执行数也不相等。
+#   2026-10-16 起脚本会打印分步耗时表，那是唯一准确的清单，别把任何计数抄进文档。
 pwsh -NoProfile -File scripts\gate.ps1
 
 # 开发内循环：只跑其中几步（结论只覆盖跑过的步，脚本会打 GATE_SCOPE: PARTIAL）

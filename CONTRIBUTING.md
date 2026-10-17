@@ -16,7 +16,7 @@ cd ui; pnpm install; cd ..
 # 装 cargo-deny（门禁第 6 步要它）
 cargo install cargo-deny --locked
 
-pwsh -NoProfile -File scripts\gate.ps1     # 九步全绿
+pwsh -NoProfile -File scripts\gate.ps1     # 全绿
 cd ui; pnpm tauri dev                       # 开发模式
 ```
 
@@ -48,7 +48,7 @@ fix(感知): 切回会话后消息变少 —— 水位线住在引擎里
 
 ## 门禁
 
-`scripts/gate.ps1` 是本机九步门禁，`.github/workflows/ci.yml` 与它一一对应。
+`scripts/gate.ps1` 是本机门禁，`.github/workflows/ci.yml` 与它的**步的集合**一一对应。
 **两边要同步改**，否则会各说各话。
 
 > 这句「一一对应」**现在有机器守着**：`scripts/check-gate-parity.ps1` 从
@@ -78,7 +78,7 @@ fix(感知): 切回会话后消息变少 —— 水位线住在引擎里
 > ⚠ 上表是**清单，不是执行顺序**，也不是完整清单：`gate.ps1` 实际还会跑
 > `sheet pack in sync`（纸的源与生成物必须同步），并把 `pnpm lint` 与
 > `svelte-autofixer` 拆成两个 `Step`。2026-10-16 起脚本每轮都会打印**自己的分步耗时表**，
-> 那才是唯一准确的清单；判门禁范围时别数「九步」这个说法。
+> 那才是唯一准确的清单；**别数「几步」**——`secret scan` 在没设 `CHATSERVANT_PROBE_KEY` 时会跳过，两侧天生不等。
 
 ### 内循环：改一行代码不必跑全门禁
 

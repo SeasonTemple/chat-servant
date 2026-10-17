@@ -65,7 +65,7 @@ Rust 核心 + Tauri 2 外壳 + Svelte 5 前端，先打通微信单聊。
 - `ui/src-tauri/` — Tauri 2 外壳：命令层、托盘、观察循环
 - `ui/static/demo/*.json` — 八态演示夹具，`?demo=1&state=<名字>`
 - `.agents/skills/` — 技能库，68 个，**实际只有 6 个可用**（见「Skill 库」一节）
-- `.github/` — CI（九步，与 `gate.ps1` 对齐）、release（tag 驱动，出 msi+nsis）
+- `.github/` — CI（与 `gate.ps1` 的**步的集合**对齐；⚠ 别数「几步」，见下）、release（tag 驱动，出 msi+nsis）
 - `.githooks/` — commit-msg 校验 Conventional Commits、pre-commit 凭据闸
 
 真实 `unsafe` 分布（`rg -c 'unsafe \{|unsafe fn '`，2026-10-11 实测）：
@@ -111,7 +111,7 @@ exit=101）。
 > --lib --bins --tests`，而门禁与 CI 跑的是不带过滤器的版本。
 
 ```bash
-# 本机一次跑完全部门禁（九步）
+# 本机一次跑完全部门禁（gate.ps1 定义的每一步都跑）
 pwsh -NoProfile -File scripts/gate.ps1; echo "exit=$LASTEXITCODE"
 
 # 或者分开跑
@@ -157,13 +157,13 @@ pwsh -NoProfile -File scripts\gate.ps1 -Only 'cargo,ui'
 ```
 
 ⚠ **`dev.ps1` 不复制任何一条命令**，只转发给 `gate.ps1` 与 cargo/pnpm，
-所以门禁那九步的唯一真相来源仍然是 `gate.ps1`。
+所以门禁的步序与内容唯一真相来源仍然是 `gate.ps1`。
 ⚠ `-Skip` / `-Only` 的运行**不是完整门禁**，脚本会在结论旁边打
-`GATE_SCOPE: PARTIAL`——**别把「跳两步之后的全绿」当成「九步全绿」**。
+`GATE_SCOPE: PARTIAL`——**别把「跳两步之后的全绿」当成「全绿」**。
 ⚠ `dev.ps1` 的动词里**没有** `cargo deny` 与 `secret-scan`：
    那两步要联网 / 要密钥，本来也不该进内循环。
 
-热缓存下九步实测耗时（2026-10-16，PowerShell 7）：
+热缓存下各步实测耗时（2026-10-16，PowerShell 7）：
 
 | 步 | 秒 | 步 | 秒 |
 |---|---|---|---|
