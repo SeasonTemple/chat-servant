@@ -460,12 +460,47 @@
 ### 未验完的一条
 
 齿轮按钮下面有一块浅色圆角底板，headless 里没有。怀疑是鼠标悬停
-（`shotpanel.ps1` 会把窗置前，光标位置没动），**但没验完**：
-`run-app.ps1` 起的应用在启动它的后台任务结束时被连带回收
-（`Start-Process` 起在同一作业对象里），第二次起应用时进程已经没了。
+（`shotpanel.ps1` 会把窗置前，光标位置没动），**但没验完**。
 
-⚠ **这条流程坑值得记**：`run-app.ps1` 立刻返回 ⇒ 它不适合跨轮次保持应用存活。
-要保持，得让 `pnpm tauri dev` **本身**就是那个长驻后台任务。
+### ⚠ 2026-10-18 订正：卡住它的那个原因**复现不出来**
+
+原文记的原因是「`run-app.ps1` 起的应用在启动它的后台任务结束时被连带回收
+（`Start-Process` 起在同一作业对象里）」。**今天做了无头 A/B，没复现**：
+
+| 臂 | 起法 | 结果 |
+|---|---|---|
+| A | `Start-Process pwsh -c "Start-Sleep 120"` | 调用方退出后**仍存活**（pid 26748 实测） |
+| B | `Invoke-CimMethod Win32_Process.Create` | **返回 8 起不来**——`pwsh` 在 WindowsApps 下，WMI 的 PATH 不同，与作业对象无关 |
+
+判据是**存活**，不是退出码（票面自己写过「命令返回 0、进程却没了」）。
+⇒ **别据此改机制**：真复现时先查是不是整棵进程树被 kill，而不是
+`Start-Process` 本身有问题。脚本在 `target/probe/detach-test.ps1`（可再生成）。
+
+### ⚠ 但同一次排查里挖到一条**真缺陷**：`run-app.ps1` 的 `RUST_LOG` 一档都没命中
+
+原文是 `info,chat_servant=debug`，而实际 target 是：
+
+| target | 出处 | 跑验收时看什么 |
+|---|---|---|
+| `chat_servant::watch` | `watch.rs` **显式 `target:`** | `tick=… peer=… candidates=`、`一轮 Nms`、`roi=… 归类=` |
+| `chat_servant::pump` | `commands.rs` **显式 `target:`** | `emit readout tick=… phase=… peer=… messages=… candidates=`（票 21 的证据行） |
+| `chat_servant_app` | `src-tauri` 的 bin | 托盘、命令层 |
+
+`EnvFilter` 按 `::` 分段做**前缀**匹配 ⇒ `chat_servant` 匹配不到 `chat_servant_app`，
+而两个显式 target 一个都轮不到。**它不报错，只是安静地什么都收不到。**
+⇒ 已改对，并补两条守卫（`xtask` 的 `filter_tests`）：
+`the_run_app_log_filter_parses`（能被 `EnvFilter` 解析）与
+`every_explicit_tracing_target_is_named_in_the_run_app_filter`
+（**扫源码里每一个显式 `target:` 并要求脚本逐个点名**）。
+**变红已验**（把源码那处退回连字符 ⇒ exit=101）。
+
+顺带把 `watch.rs` 里唯一一处写成 `chat-servant::watch`（连字符）的 target
+统一成下划线——与同模块另两处及 `pump` 一致。
+
+⚠ **判据的来历**：target 名是从当前编译产物
+`target/release/chat-servant-app.exe` 里 grep 出来的，
+**不是**照抄 `target/app.log`——那份日志是 **2026-10-10 的旧构建**，
+照抄会写错包名。
 
 ## 量具提醒
 
