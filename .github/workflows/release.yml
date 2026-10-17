@@ -17,6 +17,11 @@ on:
         required: false
         default: false
         type: boolean
+      draft:
+        description: "把 release 建为**草稿**：资产照样上传、整条 publish 路径照跑，但不进 Releases 页、不通知任何人。验收过了在 UI 上一键 Publish 即可。"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -261,6 +266,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ env.RELEASE_TAG }}
+          # ⚠ 这里的**极性是反的**，且必须反。
+          #   上面版本闸那条是「未知 ⇒ 按要发布处理」（于是去拦版本），
+          #   这条是「未知 ⇒ 按草稿处理」（于是不发布）。
+          #   两条的共同原则是同一个：**判不出来时，按「不做不可逆的事」处理。**
+          #   本条判错的后果是「本该是草稿的东西被公开了」——那不可逆；
+          #   反向判错只是「多建一个草稿」，UI 上一键就能收。
+          MAKE_DRAFT: ${{ inputs.draft }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -288,6 +300,17 @@ jobs:
           # 而 gh 只在**完全不给** --notes/--notes-file 时才自动生成 notes。
           # 这两者的差别就是「保留自动 notes」和「发一条空白 release」的差别。
           $ghArgs = @('release', 'create', $env:TAG, '--title', $env:TAG, '--verify-tag')
+
+          # ⚠ 只有**明确**是 false/0 才算「要公开发布」。
+          #   `'false'` 在 PowerShell 里是非空字符串、判为真，
+          #   而 `inputs.draft=false` 渲染出来**正是字符串 'false'**——
+          #   按真值判会把「明确要发布」当成草稿。
+          $isDraft = ($env:MAKE_DRAFT -notmatch '^\s*(?i:false|0)\s*$')
+          if ($isDraft) {
+            $ghArgs += '--draft'
+            Write-Warning '本次是**草稿**：资产会上传、整条 publish 路径照跑，但不进 Releases 页、不通知任何人。'
+          }
+
           if ($body) {
             $ghArgs += @('--notes', $body)
           }
@@ -298,7 +321,13 @@ jobs:
           & gh @ghArgs
           if ($LASTEXITCODE -ne 0) { throw "gh release create 失败 (exit=$LASTEXITCODE)" }
 
-          Write-Output "已发布 $($env:TAG)，资产 $($assets.Count) 个"
+          if ($isDraft) {
+            Write-Output "已为 $($env:TAG) 建立**草稿 release**，资产 $($assets.Count) 个。"
+            Write-Output "⚠ 它还**没有**公开：在 Releases 页点一下 Publish 才会对外可见。"
+          }
+          else {
+            Write-Output "已发布 $($env:TAG)，资产 $($assets.Count) 个"
+          }
 
       # dry run 的落点。**必须显式出声**，否则「跑完了」会被读成「发出去了」——
       # 而这次跑动的产物确实存在（在 runner 上），只是没有离开 runner。
