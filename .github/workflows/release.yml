@@ -9,9 +9,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布的 tag（必须已存在于远端）"
+        description: "要发布的 tag（必须已存在于远端；dry_run 时可以填 main 之类任意 ref）"
         required: true
         type: string
+      dry_run:
+        description: "只跑到「装包内有权重」为止，**不发布任何东西**。用来在没有 tag 的情况下验证整条发版链路。"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -93,11 +98,30 @@ jobs:
       # 权重**不进仓库**（30MB 二进制 + 模型许可，见 ADR-0003），
       # 所以每次发版都得现取。`scripts/fetch_models.py` 逐个核对 SHA256，
       # 对不上就报错退出——宁可发版失败，也不要装出去一个来路不明的权重。
+      #
+      # ⚠⚠ **2026-10-18 订正：原先这里写的是 `uv run --with rapidocr --with
+      # omegaconf python ...`，而 `windows-latest` 上并没有 uv。**
+      # 依据是官方 runner 镜像清单（`actions/runner-images`
+      # `images/windows/Windows2025-Readme.md`，image `20261013.288.2`）：
+      # Tools 与 Package Management 两段共列了 60 多个工具（含 pip 26.2.1 /
+      # Pipx / Chocolatey / Miniconda），**没有 uv**。Linux 镜像有，Windows 没有。
+      #
+      # 这条之所以一直没被发现：`release.yml` 历史上**只跑过一次，结论是
+      # cancelled，从未成功过**——「配置里写了 uv」只是纸面断言，不是它能跑通的证据。
+      # 改用 `actions/setup-python` + `pip`：两者都是 first-party / 镜像清单里确有的。
+      - name: Setup | Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install OCR model-table dependencies
+        run: python -m pip install --disable-pip-version-check rapidocr omegaconf
+
       - name: Fetch PP-OCR weights
-        run: uv run --with rapidocr --with omegaconf python scripts/fetch_models.py
+        run: python scripts/fetch_models.py
 
       - name: Verify weights before bundling
-        run: uv run --with rapidocr --with omegaconf python scripts/fetch_models.py --check
+        run: python scripts/fetch_models.py --check
 
       # 这个项目**只发 Windows 安装包**：捕获链路走 WGC + Windows.Media.Ocr，
       # 没有等价实现，所以不做跨平台矩阵。
@@ -126,7 +150,12 @@ jobs:
       # docs/release-notes/vX.Y.Z.md，里面同时有 `## 中文` 和 `## English`。
       # 有就用它覆盖自动生成的 notes；没有就保留自动生成的，并**明确告诉人**——
       # 静默留下自动 notes 会让人以为策展已经做过了。
+      #
+      # ⚠ `dry_run` 是唯一能**不出东西**就跑完整条链路的入口：
+      #   取权重 → tauri build → 核对装包内有权重 全部照跑，只跳过这一发。
+      #   `inputs.dry_run` 在 push 触发时为空 ⇒ `!inputs.dry_run` 为真 ⇒ 照常发。
       - name: Publish | GitHub Release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ env.RELEASE_TAG }}
@@ -168,3 +197,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "gh release create 失败 (exit=$LASTEXITCODE)" }
 
           Write-Output "已发布 $($env:TAG)，资产 $($assets.Count) 个"
+
+      # dry run 的落点。**必须显式出声**，否则「跑完了」会被读成「发出去了」——
+      # 而这次跑动的产物确实存在（在 runner 上），只是没有离开 runner。
+      - name: Dry run | nothing was published
+        if: ${{ inputs.dry_run }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = Get-ChildItem 'ui/src-tauri/target/release/bundle' -Recurse -Include *.msi,*.exe -File -ErrorAction SilentlyContinue
+          Write-Output '=================================================='
+          Write-Output 'DRY RUN —— **没有创建 release、没有上传任何资产、没有打 tag**'
+          Write-Output "构建产物（只存在于 runner 上，任务结束即丢弃）：$($assets.Count) 个"
+          $assets | ForEach-Object { Write-Output "  $($_.Name)  $([math]::Round($_.Length/1MB,1)) MB" }
+          Write-Output '上面每一步都真的跑过了：取权重 → tauri build → 核对装包内有权重。'
+          Write-Output '=================================================='
