@@ -13,11 +13,19 @@ Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public class MC {
+    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, IntPtr e);
     public const uint LEFTDOWN = 0x0002, LEFTUP = 0x0004;
 }
 "@
+# ⚠ 必须调，且必须在任何窗口创建之前（2026-10-18 补）。
+#   `AGENTS.md` 踩坑区写着「按坐标点东西必须先 SetProcessDPIAware()」——
+#   UIA / GetWindowRect 报的矩形与 SetCursorPos 用的屏幕坐标**不是同一个空间**
+#   （DPI 虚拟化）。原先这里没调，靠本机 DPI 缩放 = 1 侥幸对上；
+#   一旦缩放不是 100%，它会安静地点在**别的位置**上。
+#   ⇒ 「点了没反应」会读成「控件坏了」，而真因是坐标算错了。
+[void][MC]::SetProcessDPIAware()
 [void][MC]::SetCursorPos($X, $Y)
 Start-Sleep -Milliseconds 250
 [MC]::mouse_event([MC]::LEFTDOWN, 0, 0, 0, [IntPtr]::Zero)
