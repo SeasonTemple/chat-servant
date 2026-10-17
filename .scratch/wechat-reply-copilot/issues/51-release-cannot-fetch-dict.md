@@ -148,9 +148,46 @@ publish 的资产 glob 会拿到空再 throw。**这一步是必然失败的。*
 ——这与「三处文档都说对应并不让那句话更真一点」是同一个陷阱。
 
 
-## ✅ 已实测：dry run 第一次把权重真正取回来
+## ✅✅ 已实测：整条发版链路第一次端到端跑通，且**什么都没发布**
 
-run `39038993181`（dry run，sha `33ec2b5`）。这是本项目**第一次**在干净
+run `39041439289`（dry run，sha `1fbbdd4`）—— **conclusion = success**。
+
+| 步 | 结果 |
+|---|---|
+| `verify`（mojibake + fmt + clippy + test） | ✅ |
+| `Setup \| Python` + `pip install rapidocr omegaconf` | ✅ Python 3.12.10 |
+| `Fetch PP-OCR weights` | ✅ |
+| `Verify weights before bundling` | ✅ |
+| **`Build msi + nsis`** | ✅ |
+| **`Verify weights landed in the bundle`** | ✅ NSIS 路径级 + MSI 体积级，两边都齐 |
+| `Publish \| GitHub Release` | **skipped** ← `dry_run` 闸门在真 runner 上生效 |
+| `Dry run \| nothing was published` | ✅ 打印了「没有创建 release、没有上传任何资产、没有打 tag」 |
+
+收尾输出（runner 上的实测）：
+`chat-servant_0.1.0_x64_en-US.msi 45.2 MB` / `chat-servant_0.1.0_x64-setup.exe 38.3 MB`
+
+**外部核对**：`gh release list` 为空；远端 tag 仍只有 `v0.1.0`。
+⇒ 「取权重 → 打包 → 核对装包内有权重 → 明确不发布」这一整条，
+此前从未在任何 runner 上跑过，现在跑通了。
+
+### 顺带量到的两件事（都不是缺陷，但都记下来）
+
+**① ONNX Runtime 是静态链接的**，运行时不需要 DLL。
+装包里**没有任何 `onnxruntime.dll`**（只有 NSIS 插件与 `nsis_tauri_utils.dll`），
+而 exe 的 `.text` 有 44.5 MB、`.rdata` 34.4 MB ⇒ 那坨体积就是链接进来的 ORT。
+所以安装包不需要额外带库，核对脚本也不必查它。
+
+**② 本机那个 bundle 是陈旧产物，别拿它当准。**
+本机 `target/release/bundle` 是 2026-10-17 19:01–19:02 打的（msi 65.4 MB /
+nsis 58.6 MB，exe 81,042,944 字节），而 runner 上同一次构建是 45.2 / 38.3 MB。
+差 ~20 MB。**原因记为「本地那份早于当天那一串提交，是陈旧产物」**——
+没有进一步证据支持别的机制，就不编一个。
+⇒ 体积以 runner 的新鲜构建为准（msi 45.2 MB / nsis 38.3 MB）。
+
+
+## 倒数第二次 dry run 的细节（run `39038993181`，sha `33ec2b5`）
+
+这是本项目**第一次**在干净
 runner 上把 PP-OCR 权重取回来并通过校验：
 
 | 步 | 结果 |
@@ -385,7 +422,8 @@ PyPI 来源没变、供应链面没变，去掉的只是「假定有个工具」
       runner 上跑通），并抓出缺陷⑤
 - [x] **缺陷⑤ 装包核对查错了空间**：改调 `scripts/verify_bundle.ps1` 翻安装包内部，
       本机用真装包验过（NSIS 路径级 3/3、MSI 体积级 3/3）
-- [ ] **dry run 跑到最后一步**（`Verify weights landed in the bundle` → dry run 收尾）
+- [x] **dry run 跑到最后一步**：run `39041439289`（sha `1fbbdd4`）**success**，
+      核对装包内有权重 ✅、dry run 收尾 ✅、`Publish` **skipped**
 - [ ] **push 触发时 `inputs.dry_run` 为空 ⇒ 照常发布**（语义推理，验证它要打 tag）
 - [ ] **跑通一次真实发版**（需授权打 tag）
 
