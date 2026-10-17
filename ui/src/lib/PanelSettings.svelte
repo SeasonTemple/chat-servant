@@ -247,6 +247,11 @@
   async function refresh() {
     try {
       view = await invoke<SettingsView>('get_settings');
+      // ⚠ 成功时**必须清掉 `fail`**，否则「重试」成功了红色那一条还赖着不走。
+      //   `fail` 之前是只写不清的（只有 DEMO 分支与 catch 分支在设它），
+      //   那在「没有重试入口」时看不出来——因为一屏之内根本不会成功第二次。
+      //   一旦给了重试按钮，不复位就等于**报错是假的**。
+      fail = null;
       // 自定义地址的草稿**只在没有草稿时**从回包填。
       // 覆盖它会让用户正在输入的东西在每次失败提示后被冲掉。
       const next = view.groups.filter((g) => g.route.provider === 'custom');
@@ -877,6 +882,21 @@
 
   {#if fail}
     <p class="cs-fail" role="alert">{fail}</p>
+    <!--
+      ⚠ **2026-10-18 加：失败后的重试入口。**
+
+      原来 `refresh()` 只在打开面板时调一次，于是「凭据管理器读不到」「自定义
+      路由坏了」这类**一次性**故障只能靠关掉面板再打开——
+      而那正好是**你最不想丢当前输入**的时候。
+
+      ⚠ `view` 为 `null` 时下面整块设置体**不渲染**，所以这不是「在默认值上
+      叠一条红字」：**失败屏上除了这条红字没有别的** ⇒ 不给重试按钮，
+      用户在这一屏里无事可做，只能退出。
+
+      ⚠ 按钮复用既有的 `.cs-btn cs-btn-mini`（与「测连通」同一族），
+      **不新造一个按钮样式**。
+    -->
+    <button class="cs-btn cs-btn-mini" onclick={() => void refresh()}>重试</button>
   {/if}
 
   {#if view}
