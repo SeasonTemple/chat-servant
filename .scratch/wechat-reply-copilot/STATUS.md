@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **51** ｜ 验收项全勾 **29** ｜ 已收但留有说明项 **12** ｜ 未收 **10**
+票据总数 **54** ｜ 验收项全勾 **31** ｜ 已收但留有说明项 **13** ｜ 未收 **10**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -49,6 +49,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `24-small-type-floor-remeasure.md` | 6/7 | done · **2026-10-14 量具重建 + 三档数据 + 字重对照，结论如下** |
 | `33-attribution-thresholds-are-dark-theme-only.md` | 3/5 | done · 2026-10-14 真机浅色主题实测发现并已修 · 根因定位到具体数值 |
 | `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 9/10 | done · **2026-10-18 决策已下并上线**：默认引擎 = **PP-OCRv6 small**， |
+| `53-dev-ps1-run-returns-output-and-exit-code.md` | 7/8 | done · 2026-10-18。根因与实测证据见下；四个动词已改，绿红两档都自证过。 |
 
 ## 三、已收（验收项全勾）
 
@@ -83,3 +84,5 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `46-judge-surface-rescans-the-same-rect-four-times.md` | 5/5 |
 | `47-pp-ocr-plan-cache-has-a-recompile-race.md` | 5/5 |
 | `49-pp-ocr-plan-cache-lifetime-and-det-lock.md` | 7/7 |
+| `52-compilable-control-chars-slip-past-the-fffd-scan.md` | 6/6 |
+| `54-autofixer-step-cannot-report-any-warning.md` | 8/8 |
