@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use chatservant_core::frame::{Frame, Rect};
@@ -1106,7 +1106,7 @@ pub fn recognize_in(dir: &std::path::Path, frame: &Frame) -> Option<OcrText> {
         return None;
     }
     let chars = chars_in(dir).ok()?;
-    let cache = BucketCache::new(dir.to_path_buf());
+    let cache = shared_rec_cache(dir);
     match recognize_with(frame, &chars, &cache) {
         Ok(t) => Some(t),
         Err(e) => {
@@ -1114,6 +1114,82 @@ pub fn recognize_in(dir: &std::path::Path, frame: &Frame) -> Option<OcrText> {
             None
         }
     }
+}
+
+/// 跨帧复用的 rec 桶缓存表。**键 = (权重目录, 权重文件的 mtime + 字节数)。**
+type RecCacheTable = std::sync::Mutex<HashMap<(PathBuf, Option<(u64, u64)>), Arc<BucketCache>>>;
+
+/// ⚠⚠ **2026-10-18 加。早先 [`recognize_in`] 每次都 `BucketCache::new`，**
+/// 于是 **rec 图每一帧都从零重编**——`OnceLock` 只在**同一帧内**去重，
+/// 跨帧一点复用都没有（det 那边有 `static`，所以 det 是复用的，rec 不是）。
+///
+/// **证据是代码形状**：`buckets` 是 [`BucketCache`] 的普通字段
+/// （`Mutex<HashMap<..>>`，不是 `static`），而 `BucketCache::new` 开一张空表。
+///
+/// 旁证：`max_buckets = 32` 与「超限清一半」这套淘汰逻辑，**只在长命缓存上
+/// 才有意义**——一帧里几十个框、宽度高度重复，很少摸得到 32 个桶。
+/// 它的存在说明**按帧新建是接线疏漏，不是设计选择**。
+///
+/// ## 失效语义（票 49 点名要写下来的那条）
+///
+/// | 发生什么 | 会怎样 |
+/// |---|---|
+/// | 权重文件被替换/更新 | mtime 变 ⇒ 键变 ⇒ **换一张全新缓存**，重编 |
+/// | 权重文件被删除 | `metadata` 失败 ⇒ stamp 记 `None`；与「能读到」是不同的键，而 `load_rec` 会报错 ⇒ 回落 WinRT 并 `warn!` |
+/// | 换 `CHATSERVANT_OCR_MODELS` | 目录在键里 ⇒ 不可能串用 |
+/// | 同目录同权重 | 命中 ⇒ 跨帧复用（这就是这一节存在的理由） |
+///
+/// ⚠ **`mtime` 的粒度**：某些文件系统只有 1 秒或更粗的精度，
+/// 「同一秒之内替换同尺寸权重」理论上撞键。代价是**用旧权重跑**，
+/// 而不会崩、不会串目录。开发时换权重请重启进程。
+///
+/// ## 容量上限
+///
+/// 每次换权重产生一个新键，所以表会涨。超过 [`REC_CACHE_CAP`] 就**整表清空**
+/// （除了刚插的那个）。这里不做 LRU：换权重是罕见事件，而 LRU 要多一份
+/// 「上一次是谁」的记账，收益不抵复杂度——真要更精细，判据是实测。
+const REC_CACHE_CAP: usize = 8;
+
+/// 权重文件的身份戳。**读不出来就记 `None`**，而不是跳过缓存——
+/// 跳过会让「文件被删」退化成每帧重编一次，那正是本节要修的事。
+fn rec_weight_stamp(path: &Path) -> Option<(u64, u64)> {
+    let md = std::fs::metadata(path).ok()?;
+    let mtime = md
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos() as u64;
+    Some((mtime, md.len()))
+}
+
+/// 从 `table` 里取这个键的缓存，没有就建一张。
+///
+/// ⚠ **表由调用方给**，不是函数内部 `static`——这样守卫测试各用各的
+/// 本地表，**不会因为 `cargo test` 多线程共享进程态而互相干扰**。
+/// 生产那一张由 [`shared_rec_cache`] 用 `OnceLock` 兜住。
+fn shared_rec_cache_in(
+    table: &RecCacheTable,
+    key: (PathBuf, Option<(u64, u64)>),
+) -> Arc<BucketCache> {
+    let mut m = lock_recover(table);
+    if let Some(found) = m.get(&key) {
+        return Arc::clone(found);
+    }
+    let fresh = Arc::new(BucketCache::new(key.0.clone()));
+    if m.len() >= REC_CACHE_CAP {
+        m.clear();
+    }
+    m.insert(key, Arc::clone(&fresh));
+    fresh
+}
+
+/// [`shared_rec_cache_in`] 的生产入口：表是进程级的。
+fn shared_rec_cache(dir: &Path) -> Arc<BucketCache> {
+    static TABLE: std::sync::OnceLock<RecCacheTable> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let key = (dir.to_path_buf(), rec_weight_stamp(&dir.join(REC_MODEL)));
+    shared_rec_cache_in(table, key)
 }
 
 /// [`ocr_pp::chars`] 的可测版本：词典路径由调用方给。
@@ -2591,6 +2667,92 @@ mod tests {
         assert!(
             recognize_in(&dir, &f).is_some(),
             "权重在，`recognize_in` 却给不出结果"
+        );
+    }
+
+    // ── 跨帧 rec 缓存（2026-10-18）────────────────────────────────────
+    //
+    // 三条守卫全部**纯函数、不碰权重、不碰全局单槽**：
+    // 表由测试自己 new 出来（生产那张是 `OnceLock`），
+    // 所以 `cargo test` 多线程跑不会互相干扰。
+
+    fn table() -> RecCacheTable {
+        std::sync::Mutex::new(HashMap::new())
+    }
+
+    /// 同目录同权重 ⇒ 拿到**同一张**缓存。这条就是「跨帧复用」的全部意义。
+    ///
+    /// ⚠ 它守的是 `Arc::ptr_eq`，不是「表里有一条」——
+    /// 后者在一张每次都新建的表上也会成立，那就白守了。
+    #[test]
+    fn the_same_dir_and_weight_stamp_reuses_one_cache_across_calls() {
+        let t = table();
+        let key = (PathBuf::from("weights-a"), Some((100, 21_234_383)));
+        let first = shared_rec_cache_in(&t, key.clone());
+        let second = shared_rec_cache_in(&t, key);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "同键两次调用拿到两张缓存 —— rec 图又会每帧重编，\
+             而这正是 2026-10-18 修掉的那件事"
+        );
+    }
+
+    /// 权重被替换 ⇒ 键变 ⇒ 换新缓存。**票 49 点名的第一条失效语义。**
+    #[test]
+    fn a_changed_weight_stamp_gets_a_fresh_cache() {
+        let t = table();
+        let dir = PathBuf::from("weights-a");
+        let before = shared_rec_cache_in(&t, (dir.clone(), Some((100, 21_234_383))));
+        // 同一目录，mtime 变了（换权重）⇒ 不能复用
+        let after = shared_rec_cache_in(&t, (dir.clone(), Some((200, 21_234_383))));
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "权重 mtime 变了却还在用旧缓存 —— 用户更新模型后会永远跑旧的权重"
+        );
+        // 目录变了同样不能复用（换 CHATSERVANT_OCR_MODELS 的情形）
+        let other_dir =
+            shared_rec_cache_in(&t, (PathBuf::from("weights-b"), Some((100, 21_234_383))));
+        assert!(
+            !Arc::ptr_eq(&before, &other_dir),
+            "换了权重目录却串用了上一份缓存"
+        );
+    }
+
+    /// 权重**读不出来**（文件被删）也要能建缓存并记账。
+    ///
+    /// ⚠ 这条钉的是「stamp 为 `None` 不是跳过缓存」：
+    /// 若实现改成「metadata 失败就返回 None、不进表」，
+    /// 那就退化成**每帧重编一次**——正是本节要修的事。
+    #[test]
+    fn an_unreadable_weight_still_gets_a_cached_entry() {
+        let t = table();
+        let key = (PathBuf::from("weights-gone"), None);
+        let a = shared_rec_cache_in(&t, key.clone());
+        let b = shared_rec_cache_in(&t, key);
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "权重文件读不出来时没有缓存 —— 之后每帧都要重编一遍"
+        );
+    }
+
+    /// 表必须有界。每换一次权重就多一个键，不封顶会一直涨。
+    #[test]
+    fn the_shared_rec_cache_table_stays_bounded() {
+        let t = table();
+        for i in 0..(REC_CACHE_CAP * 4) {
+            let key = (PathBuf::from(format!("w{i}")), Some((i as u64, 1)));
+            let got = shared_rec_cache_in(&t, key.clone());
+            // 每次都要拿到一张真的缓存（不是 None、不是空指针）
+            assert!(Arc::strong_count(&got) >= 1);
+        }
+        let n = lock_recover(&t).len();
+        assert!(
+            n <= REC_CACHE_CAP,
+            "表涨到 {n} 条（上限 {REC_CACHE_CAP}）—— 换权重是罕见事件，但不该无界增长"
+        );
+        assert!(
+            n >= 1,
+            "清空后必须至少留下刚插的那一条，否则下一次调用拿不到自己刚建的缓存"
         );
     }
 }
