@@ -92,7 +92,9 @@ pub trait LineSource {
     /// 行坐标必须换算回消息区、并按消息区过滤之后才轮到下游。
     fn read(&self, view: &Frame) -> Result<OcrText, OcrError>;
 
-    /// 这个引擎要看哪一块画面、放大几倍。**默认是 WinRT 实测要的那一组。**
+    /// 这个引擎要看哪一块画面、放大几倍。**trait 的默认实现给的是
+    /// WinRT 实测要的那一组**；两个引擎各自覆写，默认引擎见
+    /// [`chatservant_capture::ocr`]。
     fn view_plan(&self) -> ViewPlan {
         ViewPlan::WINRT
     }
@@ -191,8 +193,11 @@ impl LineSource for SystemOcr {
 /// 隔着两个 crate、一次提交，漏掉任何一个都不报错，只变成「又慢又不准」。
 /// 现在它是 [`ViewPlan`] 的一个字段，**跟着引擎一起被决定**。
 ///
-/// ⚠ 本常量是 **WinRT 的值（2）**，因为 WinRT 仍是默认引擎。
-/// 把它当「全局的放大倍数」用会让 PP-OCR 那条路慢一倍。
+/// ⚠ 本常量是 **WinRT 那组 `ViewPlan` 的值（2）**，因为**这个 `view_plan()`
+/// 的 trait 默认实现给的就是 WinRT 那组**（两个引擎各自覆写）。
+/// 默认引擎**已经是 PP-OCR**（见 [`chatservant_capture::ocr`]），所以这条
+/// 默认实现现在只对没覆写它的实现生效——把它当「全局的放大倍数」用会让
+/// PP-OCR 那条路慢一倍。
 ///
 /// ## WinRT 为什么需要 2（2026-10-07 实测，深色主题，1161x893）
 ///
