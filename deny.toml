@@ -169,6 +169,40 @@ wildcards = "deny"
 allow-wildcard-paths = true
 deny = [
   # 需要 OpenSSL C 库，会让 Windows 构建变脆。统一走 rustls。
+  # ⚠ `openssl-sys` 被挪到下面的 `skip` 了——原因写在那里，这里保留原规则本身。
+  #   cargo-deny 不允许同一个 crate 同时出现在 `deny` 与 `skip`。
+]
+# ⚠ 2026-10-18：`ort`（ONNX Runtime 后端）把 `openssl-sys` 顶到了构建期依赖的
+#   构建期依赖上，理由写全在下面。
+#
+# ## 事实：它在这里**不进任何交付物**
+#
+# ```text
+# openssl-sys <- native-tls <- ureq  [build-dependencies]  ort-sys  ort  chatservant-capture
+# ```
+#
+# `ureq` 是 **`ort-sys` 的 build-dependency**，用途只有一个：
+# 构建时从 CDN 下一份 ONNX Runtime 的二进制包。
+# **它不进我们的二进制，运行时也不加载它。**
+# 原禁令的理由是「需要 OpenSSL C 库会让 Windows 构建变脆」，
+# 而**这里的 OpenSSL 从不被链接**，所以那个理由对本例不成立。
+#
+# ## 为什么接受它，而不是改用 `load-dynamic`
+#
+# 两种接法（`download-binaries` / `load-dynamic`）二选一：
+# - `download-binaries`：**静态链接** ONNX Runtime，**不需要随包带 DLL**。
+#   实测本机构建后 `target/` 下**找不到任何 onnxruntime.dll**，而推理照常跑通。
+# - `load-dynamic`：没有 ureq，也就没有 openssl，但**必须随应用带一份
+#   `onnxruntime.dll`**（十几 MB），而本机**没有**这份 DLL 可供验证。
+#
+# 对一个要装进 `C:\Program Files` 的桌面应用，
+# **少一份需要随包投递的 DLL** 比多一条只存在于构建期的 TLS 依赖更要紧。
+#
+# ## 撤销方式
+#
+# 不接受的话：把下面这行挪回上面的 `deny` 并删掉 `skip`，
+# `cargo deny check` 立刻恢复成红——那正是本条的护栏。
+skip = [
   { name = "openssl-sys" },
 ]
 skip-tree = []

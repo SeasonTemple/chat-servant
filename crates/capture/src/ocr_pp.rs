@@ -44,16 +44,13 @@
 //! **blank 落在索引 0**，**space 落在最后一类**。见 [`chars`] 与 [`SPACE`]。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tract_onnx::prelude::*;
 // `Factoid` **不在** `tract_onnx::prelude` 里：prelude 只带了
 // `InferenceFact` / `InferenceModel` / `*ModelExt` 加 `tract_core::prelude`，
 // 形状维度那一套（`concretize`）藏在 `tract_hir::infer` 下面。
 use tract_onnx::tract_hir::infer::Factoid;
-
-/// 编译好的可执行计划。`Arc` 是为了 clone 进多帧复用。
-pub type Plan = Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>;
 
 /// det 的输入事实。`[1,3,H,W]`，H/W 取 32 的倍数。
 pub fn det_fact(h: usize, w: usize) -> InferenceFact {
@@ -218,6 +215,20 @@ pub fn model_io(path: &Path) -> Result<IoSpec, PpError> {
 /// 留下一堆泛型算子。定形状时必须**按 32 的倍数取整**——网络里有 8 次
 /// 步长 2 的下采样，总下采样倍数是 32。
 pub fn load_det(path: &Path, h: usize, w: usize) -> Result<Plan, PpError> {
+    load_det_with(backend(), path, h, w)
+}
+
+/// [`load_det`] 的可测版本：后端由调用方给。
+///
+/// 拆出来的理由很具体：`load_det` 内部读**全局** `backend()`（环境变量），
+/// 于是「按后端逐个测一遍」根本做不到——测试想测 ort，实际加载的可能还是 tract。
+/// 症状是 `Ort 推理失败：det 失败：Clashing resolution 32=32 != 64`，
+/// 报错里那个 `32` 正是测试传给 `load_det` 的**另一个**后端编出来的固定形状。
+/// 也就是说：**报错指向 ort，错的却是 tract 的那次加载**。
+pub fn load_det_with(backend: Backend, path: &Path, h: usize, w: usize) -> Result<Plan, PpError> {
+    if backend == Backend::Ort {
+        return Ok(Arc::new(PlanBody::Ort(Mutex::new(ort_session(path)?))));
+    }
     let model = onnx_reader()
         .model_for_path(path)
         .and_then(|mut m| {
@@ -228,10 +239,42 @@ pub fn load_det(path: &Path, h: usize, w: usize) -> Result<Plan, PpError> {
             name: format!("det({})", path.display()),
             msg: format!("{e:#}"),
         })?;
-    model.into_runnable().map_err(|e| PpError::Load {
-        name: format!("det({})", path.display()),
-        msg: format!("{e:#}"),
-    })
+    model
+        .into_runnable()
+        .map(|m| Arc::new(PlanBody::Tract(m)) as Plan)
+        .map_err(|e| PpError::Load {
+            name: format!("det({})", path.display()),
+            msg: format!("{e:#}"),
+        })
+}
+
+/// ONNX Runtime 会话。**4 线程**——本机实测的最优档（ADR-0007）。
+///
+/// ⚠ v6 的 rec 输入高被模型钉死在 48、宽度是动态的，而 ONNX Runtime
+/// **不像 tract 那样按形状编译图**：一个会话吃任意宽度。
+/// ⇒ 走 ort 这条路时，[`crate::ocr_pp_pipeline::BucketCache`] 的分桶
+/// 缓存**不再有存在意义**（只是多花点时间）。
+fn ort_session(path: &Path) -> Result<ort::session::Session, PpError> {
+    ort::session::Session::builder()
+        .map_err(|e| PpError::Load {
+            name: format!("ort({})", path.display()),
+            msg: format!("{e:#}"),
+        })?
+        .with_intra_threads(4)
+        .map_err(|e| PpError::Load {
+            name: format!("ort({})", path.display()),
+            msg: format!("{e:#}"),
+        })?
+        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+        .map_err(|e| PpError::Load {
+            name: format!("ort({})", path.display()),
+            msg: format!("{e:#}"),
+        })?
+        .commit_from_file(path)
+        .map_err(|e| PpError::Load {
+            name: format!("ort({})", path.display()),
+            msg: format!("{e:#}"),
+        })
 }
 
 /// 编译 rec 模型。
@@ -243,6 +286,16 @@ pub fn load_det(path: &Path, h: usize, w: usize) -> Result<Plan, PpError> {
 /// **解法已实现**：[`crate::ocr_pp_pipeline::BucketCache`] 按取整后的宽度
 /// 分桶缓存编译好的图，聊天里高度重复的气泡宽度命中率高。
 pub fn load_rec(path: &Path, w: usize) -> Result<Plan, PpError> {
+    load_rec_with(backend(), path, w)
+}
+
+/// [`load_rec`] 的可测版本，理由同 [`load_det_with`]。
+pub fn load_rec_with(backend: Backend, path: &Path, w: usize) -> Result<Plan, PpError> {
+    if backend == Backend::Ort {
+        // ⚠ 宽度在这条路上**不起作用**：ONNX Runtime 的会话接受任意宽度，
+        // 不像 tract 那样按形状编译图。签名保留 `w` 是为了让两个后端同形。
+        return Ok(Arc::new(PlanBody::Ort(Mutex::new(ort_session(path)?))));
+    }
     let model = onnx_reader()
         .model_for_path(path)
         .and_then(|mut m| {
@@ -253,10 +306,13 @@ pub fn load_rec(path: &Path, w: usize) -> Result<Plan, PpError> {
             name: format!("rec({})", path.display()),
             msg: format!("{e:#}"),
         })?;
-    model.into_runnable().map_err(|e| PpError::Load {
-        name: format!("rec({})", path.display()),
-        msg: format!("{e:#}"),
-    })
+    model
+        .into_runnable()
+        .map(|m| Arc::new(PlanBody::Tract(m)) as Plan)
+        .map_err(|e| PpError::Load {
+            name: format!("rec({})", path.display()),
+            msg: format!("{e:#}"),
+        })
 }
 
 /// tract 的 ONNX 读取器，**关掉 `value_info` 提示**。
@@ -285,6 +341,55 @@ fn onnx_reader() -> tract_onnx::Onnx {
     tract_onnx::onnx().with_ignore_value_info(true)
 }
 
+/// ONNX 推理后端。**默认 tract**，见 [`backend`] 的说明。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// `tract-onnx`：纯 Rust，无额外二进制依赖。
+    Tract,
+    /// `ort`：ONNX Runtime，需要一份 C++ 动态库。
+    Ort,
+}
+
+/// 这次用哪个后端。**由 `CHATSERVANT_OCR_BACKEND` 决定，默认 tract。**
+///
+/// ## 为什么默认还是 tract（2026-10-18）
+///
+/// 同一张真实消息区、同一份 v6 small 权重、release 稳态中位：
+///
+/// ```text
+/// tract-onnx 0.23.8     2501~2552 ms
+/// onnxruntime 4 线程       443~ 455 ms
+/// ```
+///
+/// 差 **5.6 倍**，而 `TICK = 1000ms` ⇒ tract 这条**进不了预算**。
+/// 三条排查都指向「是引擎本身」：
+/// tract 的运行时开关逐个试过没有一个带来可测变化；
+/// `RAYON_NUM_THREADS` 从 12 扫到 2 几乎不变（**2 线程 ≈ 12 线程**）；
+/// 并发两个进程只贵 1.35×，所以它并非单线程。
+///
+/// 但「要不要为了 5.6 倍接受一份 C++ 动态库」是**装机形态的决定**，
+/// 不是代码能替你做的——所以默认值不变，改用环境变量试。
+/// 上线与否取决于本机与目标机的实测，不取决于这个默认。
+pub fn backend() -> Backend {
+    match std::env::var("CHATSERVANT_OCR_BACKEND").as_deref() {
+        Ok("ort") | Ok("onnxruntime") => Backend::Ort,
+        _ => Backend::Tract,
+    }
+}
+
+/// 编译好的可执行计划。`Arc` 是为了 clone 进多帧复用。
+pub type Plan = Arc<PlanBody>;
+
+/// 计划本体。两个后端各占一支，**上层只认 [`Plan`]**。`n///`n/// ⚠ 名字**不能**叫 `PlanKind`：`tract_onnx::prelude::*` 里已经有一个`n/// `PlanKind<F, O>`（tract 的计划种类），同名会被它顶掉——`n/// 而症状是 `PlanKind::Tract(Arc::new(m))` 报「expected SimplePlan」，`n/// 指向的却是 `std::sync::Arc::new`，看起来和这行毫无关系。
+///
+/// `ort` 那支套了 [`Mutex`]：它的 `run` 要 `&mut self`，而我们的
+/// [`crate::ocr_pp_pipeline::BucketCache`] 要把同一张图 clone 进多处。
+/// 加锁不影响产品——观察循环本来就一次只跑一帧。
+pub enum PlanBody {
+    Tract(Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>),
+    Ort(Mutex<ort::session::Session>),
+}
+
 /// 跑一次推理，返回**第 0 个输出**展平成的 `f32` 缓冲与它的形状。
 ///
 /// 展平成一维是故意的：det/rec 后处理都要按下标走，二维以上各自
@@ -294,22 +399,198 @@ fn onnx_reader() -> tract_onnx::Onnx {
 /// `Tensor::as_slice` 在 0.23.8 里**不存在**——取数要走 `view().as_slice()`，
 /// 它自带 dtype 校验：输出万一不是 f32 会**报错**，而不是默默按字节重解释
 /// 出一堆垃圾数值。前提是存储是连续 plain RAM，而计划跑出来的输出一定是。
-pub fn run(plan: &Plan, input: Tensor, stage: &str) -> Result<(Vec<f32>, Vec<usize>), PpError> {
-    let out = plan.run(tvec!(input.into())).map_err(|e| PpError::Run {
-        stage: stage.to_string(),
-        msg: format!("{e:#}"),
-    })?;
-    let t: &Tensor = &out[0];
-    let shape: Vec<usize> = t.shape().to_vec();
-    let data = t
-        .view()
-        .as_slice::<f32>()
-        .map_err(|e| PpError::Run {
-            stage: stage.to_string(),
-            msg: format!("输出不是 f32：{e}"),
-        })?
-        .to_vec();
-    Ok((data, shape))
+///
+/// `shape` 与 `data` 分开传而不是传 `Tensor`，是因为两个后端的张量类型不同
+/// （tract 的 `Tensor` vs `ort::value::Tensor`），**在 `Plan` 之上再统一一次**
+/// 比在每个调用点做两套转换便宜。
+pub fn run(
+    plan: &Plan,
+    shape: &[usize],
+    data: &[f32],
+    stage: &str,
+) -> Result<(Vec<f32>, Vec<usize>), PpError> {
+    match plan.as_ref() {
+        PlanBody::Tract(m) => {
+            let input = tract_onnx::prelude::Tensor::from_shape(shape, data)
+                .map_err(|e| PpError::Shape(format!("造 {stage} 输入失败：{e}")))?;
+            let out = m.run(tvec!(input.into())).map_err(|e| PpError::Run {
+                stage: stage.to_string(),
+                msg: format!("{e:#}"),
+            })?;
+            let t: &Tensor = &out[0];
+            let shape: Vec<usize> = t.shape().to_vec();
+            let data = t
+                .view()
+                .as_slice::<f32>()
+                .map_err(|e| PpError::Run {
+                    stage: stage.to_string(),
+                    msg: format!("输出不是 f32：{e}"),
+                })?
+                .to_vec();
+            Ok((data, shape))
+        }
+        PlanBody::Ort(sess) => {
+            let mut s = sess.lock().map_err(|_| PpError::Run {
+                stage: stage.to_string(),
+                msg: "ONNX Runtime 会话被毒化了（上一条推理 panic 过）".into(),
+            })?;
+            let dims: Vec<i64> = shape.iter().map(|d| *d as i64).collect();
+            let t = ort::value::Tensor::from_array((dims, data.to_vec()))
+                .map_err(|e| PpError::Shape(format!("造 {stage} 输入失败：{e}")))?;
+            let outs = s.run(ort::inputs!["x" => t]).map_err(|e| PpError::Run {
+                stage: stage.to_string(),
+                msg: format!("{e:#}"),
+            })?;
+            let v = outs[0]
+                .try_extract_tensor::<f32>()
+                .map_err(|e| PpError::Run {
+                    stage: stage.to_string(),
+                    msg: format!("输出不是 f32：{e}"),
+                })?;
+            let shape: Vec<usize> = v.0.iter().map(|d| *d as usize).collect();
+            Ok((v.1.to_vec(), shape))
+        }
+    }
+}
+
+/// **ONNX Runtime 后端**能不能真的跑起 v6 的两个模型。
+///
+/// 这是一条**可行性探针**，不是产品路径：它只回答
+/// 「`ort` 这条路在本机通不通、通了有多快」。
+///
+/// 存在的理由很具体：tract 在同一份输入上要 **2501~2552 ms**，
+/// 超 `TICK = 1000ms` 两倍半；而 ONNX Runtime（Python 侧实测）只要
+/// **443~455 ms**。那 5.6 倍的差距决定 PP-OCR 能不能上线，
+/// 而**在把它接进管线之前必须先证明它在本机能跑**——
+/// 「Python 那边能跑」不等于「Rust 这边能跑」：
+/// `ort` 要一份 ONNX Runtime 动态库，构建时还要下载二进制。
+///
+/// 因此这条测试在**没有权重时也跑**（只测环境），有权重时多跑一层真推理。
+#[test]
+fn the_onnxruntime_backend_can_load_and_run_the_v6_models() {
+    use std::time::Instant;
+
+    let dir = models_dir();
+    let det_path = dir.join(crate::ocr_pp_pipeline::DET_MODEL);
+    let rec_path = dir.join(crate::ocr_pp_pipeline::REC_MODEL);
+
+    let build = |p: &std::path::Path| {
+        ort::session::Session::builder()
+            .expect("建 SessionBuilder")
+            .with_intra_threads(4)
+            .expect("设 intra_op_num_threads=4")
+            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+            .expect("设图优化等级")
+            .commit_from_file(p)
+    };
+
+    let Ok(mut sess) = build(&det_path) else {
+        eprintln!(
+            "跳过：{} 下没有 v6 det 权重（PP-OCR 的其它测试也一起跳过）",
+            dir.display()
+        );
+        return;
+    };
+
+    // 喂一张 32x32 的灰图：det 对纯色图本来就不该有框，
+    // 这里要的只是「图跑通了、输出是 [1,1,h,w]、值落在 [0,1]」。
+    let (h, w) = (32usize, 32usize);
+    let buf: Vec<f32> = vec![0.0; 3 * h * w];
+    let t0 = Instant::now();
+    // ⚠ `SessionOutputs` 借用着 session，所以必须**在这个作用域里把它用完**，
+    // 出了作用域才能再 `run` 一次（`&mut sess` 不能重叠借两次）。
+    {
+        let outs = sess
+            .run(ort::inputs!["x" => ort::value::Tensor::from_array((
+                    vec![1i64, 3, h as i64, w as i64],
+                    buf
+                ))
+                .expect("造输入")])
+            .expect("det 推理失败");
+
+        let v = outs["fetch_name_0"]
+            .try_extract_tensor::<f32>()
+            .expect("取 det 输出");
+        let shape: Vec<i64> = v.0.to_vec();
+        assert_eq!(
+            shape,
+            vec![1, 1, h as i64, w as i64],
+            "det 输出形状不对：{shape:?}"
+        );
+        assert!(
+            v.1.iter().all(|v| (-0.01..=1.01).contains(v)),
+            "det 输出不在 [0,1]"
+        );
+    }
+    let cold = t0.elapsed();
+
+    // 热调用才是产品关心的那个数：观察循环每帧都调。
+    let mut hot = Vec::new();
+    for _ in 0..5 {
+        let buf: Vec<f32> = vec![0.0; 3 * h * w];
+        let t = ort::value::Tensor::from_array((vec![1i64, 3, h as i64, w as i64], buf))
+            .expect("造输入");
+        let t0 = Instant::now();
+        sess.run(ort::inputs!["x" => t]).expect("det 推理失败");
+        hot.push(t0.elapsed().as_secs_f64() * 1000.0);
+    }
+    hot.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    eprintln!(
+        "ort det 32x32：首遍 {cold:?}  热调用中位 {:.1} ms（{:?}）",
+        hot[hot.len() / 2],
+        hot.iter().map(|v| format!("{v:.1}")).collect::<Vec<_>>()
+    );
+
+    let mut rec = build(&rec_path).expect("rec 也得能编译");
+    let (rh, rw) = (48usize, 64usize);
+    let buf: Vec<f32> = vec![0.0; 3 * rh * rw];
+    let o = rec
+        .run(ort::inputs!["x" => ort::value::Tensor::from_array((vec![1i64, 3, rh as i64, rw as i64], buf)).expect("造输入")])
+        .expect("rec 推理失败");
+    let v = o["fetch_name_0"]
+        .try_extract_tensor::<f32>()
+        .expect("取 rec 输出");
+    let classes = chars().expect("词典读不出来").len();
+    assert_eq!(
+        v.0[v.0.len() - 1],
+        classes as i64,
+        "rec 输出类数与词典对不上：{:?}",
+        v.0
+    );
+}
+
+/// **两个后端都要能真跑一遍 det**，不是只验默认那个。
+///
+/// 存在的理由：`CHATSERVANT_OCR_BACKEND` 是**运行时环境变量**，
+/// 而门禁只跑默认那一条路径。⇒ 「把 `ort` 那条写坏了，本机 CI 不会响」，
+/// 直到有人真的去设那个变量、然后在真机上读到一片空白。
+///
+/// 这条测试**显式切换后端**跑两遍，所以两个都被覆盖。
+#[test]
+fn both_backends_run_the_det_model() {
+    let dir = models_dir();
+    let det = dir.join(crate::ocr_pp_pipeline::DET_MODEL);
+    if !det.is_file() {
+        eprintln!("跳过：{} 下没有 v6 det 权重", dir.display());
+        return;
+    }
+    let (h, w) = (64usize, 64usize);
+    let buf: Vec<f32> = vec![0.0; 3 * h * w];
+    for backend in [Backend::Tract, Backend::Ort] {
+        let plan = load_det_with(backend, &det, h, w)
+            .unwrap_or_else(|e| panic!("{backend:?} 加载 det 失败：{e}"));
+        let (vals, shape) = run(&plan, &[1, 3, h, w], &buf, "det")
+            .unwrap_or_else(|e| panic!("{backend:?} 推理失败：{e}"));
+        assert_eq!(
+            shape,
+            vec![1, 1, h, w],
+            "{backend:?} 的 det 输出形状不对：{shape:?}"
+        );
+        assert!(
+            vals.iter().all(|v| (-0.01..=1.01).contains(v)),
+            "{backend:?} 的 det 输出不在 [0,1]，说明没过 sigmoid 或预处理错了"
+        );
+    }
 }
 
 /// 词典。**索引 0 是 CTC blank，不在文件里。**
@@ -464,8 +745,7 @@ mod tests {
         let (h, w) = (48usize, 64usize);
         let plan = load_rec(&dir.join(crate::ocr_pp_pipeline::REC_MODEL), w).expect("rec 编译失败");
         let buf = vec![0.0f32; 3 * h * w];
-        let input = Tensor::from_shape(&[1, 3, h, w], &buf).expect("造 rec 输入失败");
-        let (vals, shape) = run(&plan, input, "rec").expect("rec 推理失败");
+        let (vals, shape) = run(&plan, &[1, 3, h, w], &buf, "rec").expect("rec 推理失败");
         // **实测出来是 `[1, T, C]`，不是 `[1, C, T]`。**
         // 2026-10-10 本机真跑 64px 宽的空白图得到 `[1, 8, 6625]`（v4）：
         // **类在最后一维**，时间步在中间维。写这条断言时我先入为主按
@@ -524,8 +804,7 @@ mod tests {
         let plan =
             load_det(&dir.join(crate::ocr_pp_pipeline::DET_MODEL), h, w).expect("det 编译失败");
         let buf = vec![0.0f32; 3 * h * w];
-        let input = Tensor::from_shape(&[1, 3, h, w], &buf).expect("造 det 输入失败");
-        let (vals, shape) = run(&plan, input, "det").expect("det 推理失败");
+        let (vals, shape) = run(&plan, &[1, 3, h, w], &buf, "det").expect("det 推理失败");
         assert_eq!(shape, vec![1, 1, h, w], "det 输出形状不对：{shape:?}");
         assert_eq!(vals.len(), h * w);
         assert!(
