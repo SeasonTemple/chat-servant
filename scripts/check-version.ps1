@@ -121,4 +121,30 @@ if ($uniq.Count -ne 1) {
 
 Write-Output ''
 Write-Output ("版本一致性：四处一致 = {0}" -f $uniq[0])
+
+# ─────────────────────────────────────────────────────────────────────────
+# 附一条：**本版本有没有双语发布说明**。
+#
+# ⚠ 这里刻意**镜像** `release.yml` 的策略，而不是自己定规矩：
+#   · 说明文件**存在** ⇒ 必须同时有 `## 中文` 与 `## English`，否则发版**失败**；
+#   · 说明文件**不存在** ⇒ 只警告，沿用 GitHub 自动生成的 notes。
+# 本地提前验是为了「改了版本号却忘了写说明」在提交里就暴露，
+# 而不是攒到打 tag 那天才炸。正则与 release.yml 里的**逐字相同**。
+$note = Join-Path 'docs\release-notes' ('v{0}.md' -f $uniq[0])
+if (Test-Path $note) {
+    $body = [IO.File]::ReadAllText((Resolve-Path $note))
+    $hasCn = $body -match '(?m)^##\s*中文'
+    $hasEn = $body -match '(?m)^##\s*English'
+    if (-not ($hasCn -and $hasEn)) {
+        Write-Output ("发布说明 {0} 缺少 {1} 段" -f $note, $(if (-not $hasCn -and -not $hasEn) { "'## 中文' 与 '## English'" } elseif (-not $hasCn) { "'## 中文'" } else { "'## English'" }))
+        Write-Output '    ⇒ 双语发布说明是门禁不是建议：release.yml 在这一步会 exit 1。'
+        exit 1
+    }
+    Write-Output ("发布说明     : {0}（双语齐全）" -f $note)
+}
+else {
+    Write-Output ("发布说明     : **没有 {0}**" -f $note)
+    Write-Output '    ⇒ 发版不会失败，但只会得到 GitHub 自动生成的 notes。'
+    Write-Output '      要策展就写一份（同时含 ## 中文 与 ## English），随这个版本一起提交。'
+}
 exit 0
