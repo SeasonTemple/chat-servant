@@ -24,10 +24,10 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 |---|---|---|---|
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
 | `21-readout-phase-never-sent.md` | 5/7 | ready-for-human · **P0 · 2026-10-12 实测，不是推断** | None（可以立刻做） |
-| `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 4/7 | needs-triage · **2026-10-15 连否三个候选后主动收手** | None（票 22 已把反例测出来了，可以立刻做） |
+| `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 4/7 | needs-triage · **2026-10-17：四个候选全部否完，可测的量已穷尽** | **要人眼**（真 WebView2 上并排四候选过一次） |
 | `38-measured-bubble-color-in-comments-no-longer-occurs.md` | 0/0 | in-progress · **2026-10-15 已定位、已订正注释与演示夹具、已加守卫测试** | (票面没写 Blocked by) |
 | `40-key-input-unreachable-when-unset.md` | 8/9 | ready-for-human · **2026-10-16 修复合入并过门禁（`976735e`，此后每轮十步全绿）；只剩一项要真 key 的端到端，那项卡在你本机提供的 key 上** | (票面没写 Blocked by) |
-| `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-agent · **2026-10-15 已量清三项，待做** | (票面没写 Blocked by) |
+| `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-human · **2026-10-18：措辞订正——这票已不是「待做」** | (票面没写 Blocked by) |
 | `44-candidate-action-row-is-button-geometry-on-prose.md` | 18/18 | 进行中 · **2026-10-16 四角与「读成方框」的根因已定位并修完；门禁全绿；两项复核仍未做** | (票面没写 Blocked by) |
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-16 第六轮：真机第一次真的上去了（380×560）。撕边顶边无黑边、撕边纸条读得出来——四轮 headless 的结论在真机成立；真机同时撞出新缺陷：`.cs-input` 描边实测 (212,218,221)、R−B = −9，是全面板唯一蓝多于红的颜色。齿轮底板那条没验完** | (票面没写 Blocked by) |
 | `46-judge-surface-rescans-the-same-rect-four-times.md` | 5/5 | ready-for-human · **2026-10-17 已改已验过门禁。本机（Windows + Rust 1.94.1）编得过， | (票面没写 Blocked by) |
