@@ -27,8 +27,8 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 4/7 | needs-triage · **2026-10-17：四个候选全部否完，可测的量已穷尽** | **要人眼**（真 WebView2 上并排四候选过一次） |
 | `40-key-input-unreachable-when-unset.md` | 8/9 | ready-for-human · **2026-10-16 修复合入并过门禁（`976735e`，此后每轮十步全绿）；只剩一项要真 key 的端到端，那项卡在你本机提供的 key 上** | (票面没写 Blocked by) |
 | `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-human · **2026-10-18：措辞订正——这票已不是「待做」** | (票面没写 Blocked by) |
-| `44-candidate-action-row-is-button-geometry-on-prose.md` | 18/18 | 进行中 · **2026-10-16 四角与「读成方框」的根因已定位并修完；门禁全绿；两项复核仍未做** | (票面没写 Blocked by) |
-| `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-16 第六轮：真机第一次真的上去了（380×560）。撕边顶边无黑边、撕边纸条读得出来——四轮 headless 的结论在真机成立；真机同时撞出新缺陷：`.cs-input` 描边实测 (212,218,221)、R−B = −9，是全面板唯一蓝多于红的颜色。齿轮底板那条没验完** | (票面没写 Blocked by) |
+| `44-candidate-action-row-is-button-geometry-on-prose.md` | 18/18 | ready-for-human · **2026-10-18 订正：只剩一条真正未决** | (票面没写 Blocked by) |
+| `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-18 订正：Status 里那个「新撞出的缺陷」已不存在** | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `50-ocr-quality-floor-has-no-machine-guard.md` | 5/6 | ready-for-agent | None（验收项 1、2 可立即做；验收项 4 的实测部分需要真帧在手） |
 
