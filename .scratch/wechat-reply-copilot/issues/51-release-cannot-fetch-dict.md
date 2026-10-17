@@ -105,17 +105,112 @@ TAURI_CONFIG: '{"bundle":{"resources":null}}'
 | 空目录下跑下载分支 | exit 0 | exit 0，三个文件全部取回并校验通过 |
 | 词典被替换后 `--check` | 非 0 | exit 1 |
 
-## ⚠ 仍未证实的（不要当成已验证）
+## ⚠⚠ 缺陷①的**第二个现场**：在 `release.yml` 的 `verify` job 上原样复发
 
-1. **`uv` 在 `windows-latest` 上是否可用**：`release.yml` 用
-   `uv run --with rapidocr --with omegaconf`，但**没有任何一次成功运行**，
-   所以这是配置层面的断言（tier 1），不是实测（tier 3）。
-   本机走的是 `target/bench-venv`，**完全没有验证过 runner 上这条**。
-2. **从未有过一次成功的发版**：`Verify weights landed in the bundle` 等步骤
-   在真实 runner 上一次都没跑过，它们的正确性是纸面推理。
-   ⚠ 本票修的是「取权重」这一步能不能跑通（在**本机**端到端验的，10/10），
-   **不等于发版整条路通了**。
-3. **tag 我不会自己打**：打 tag 会真的发一个 release，那是要授权的动作。
+dry run `39036210343`（2026-10-18 13:21）第一次派出去，**5 分钟就红**，
+报错与 `ci.yml` 当时逐字相同：
+
+```
+glob pattern ../../target/models/ppocrv6-small/* path not found or didn't match any files.
+failed to run custom build command for `chat-servant-app`
+```
+
+原因：`verify` job 跑 cargo 时**权重还没取**（取权重在 `build` job 里，晚得多），
+而 `release.yml` 里**压根没有 `TAURI_CONFIG` 覆盖**——我先前只修了 `ci.yml`。
+
+⇒ **修了 A 没修隔壁文件，它就原样复发。** 这次 dry run 的价值就在这：
+它在发布任何东西之前，把「本项目从来没跑通过的发版链路」的真实断点指出来了。
+
+已修：`verify` job 加同样的 `TAURI_CONFIG` 覆盖（verify 不打包，处理方式与 CI 相同）。
+
+## ⚠ `release.yml` 用的是 `uv`，而 **runner 上没有 uv**（2026-10-18 查实）
+
+原先那一步是：
+
+```yaml
+run: uv run --with rapidocr --with omegaconf python scripts/fetch_models.py
+```
+
+查官方 runner 镜像清单（`actions/runner-images`，
+`images/windows/Windows2025-Readme.md`，**image `20261013.288.2`**）：
+Tools 与 Package Management 两段共列 60 多个工具
+（Python 3.12.10 / pip 26.2.1 / Pipx / Chocolatey / Miniconda / jq / cmake …），
+**没有 `uv`**。Linux 镜像有，Windows 没有 ⇒ build job 第一步就
+`uv: command not found`。
+
+⚠ **查之前先自检了量具**：那份 readme 只有 35.7 KB，小到可疑，
+所以先确认它确实是那份清单（Python/Node/Rust/Cargo/CMake/Git/pip 都在，
+「7-Zip 缺」只是它写作 `7zip`），**再**拿它的「没有 uv」当结论。
+「清单里没有」只有在清单是真的时才成立。
+
+⚠ `rapidocr 3.10.0` 的 `Requires-Python` 是 `>=3.8,<4`，
+所以 `actions/setup-python` 钉 `'3.12'` 不会卡住 pip 解析（已查本机 dist-info）。
+
+已改：`actions/setup-python@v5`（first-party）+ `python -m pip install`。
+PyPI 来源没变、供应链面没变，去掉的只是「假定有个工具」。
+
+## 守卫因此从「只看 ci.yml」扩到「所有 workflow × 逐 job」
+
+同一条不变量现在扫 `.github/workflows/*.yml` 的**每一个 job**：
+
+> 要么自己在跑 cargo 之前把权重取回来，要么声明 null 覆盖。
+
+逐 job 而不是逐文件，因为同一个文件里可以同时存在「需要权重的 build job」
+与「不需要的 verify job」，文件级判断会把它们混成一句。
+
+⚠ **`pnpm tauri build` 本身就是 cargo 步骤**（CLI 去调 `cargo build`）。
+只认字面 `cargo` 的话，那个**唯一真正需要权重**的 build job 会被整段跳过。
+这条是被自证组 L 打出来的。
+
+⚠ **「量具失效」必须与「量具没找到东西」分开**：现在若 workflow 里有 `jobs:`
+却一个 job 都切不出来，直接报红。来源是一次自证事故：台架正则末尾写成
+`.*\n` 配 `(?s)`，贪婪地把整个 workflow 吃掉只剩 26 行，
+守卫对着残文件报「合规」，我差点反过来去改一个本来正确的守卫。
+
+自证 **15/15**（`parity_selfproof.py`，真仓库文件未触碰，每组还打印该棵树的形状）。
+其中三格是本轮新增、也是本轮教训：
+
+| 组 | 期望 | 抓到了什么 |
+|---|---|---|
+| K 去掉 `release.yml` verify 的覆盖 | 红 | 就是 dry run 那个缺陷 |
+| L 连 `run:` 一起删掉取权重整步 | 红 | **第一版只删了 `- name:`**，留下孤儿 `run:` 行，守卫判绿是**对的**——那一格是我用例写弱了，不是守卫漏检 |
+| O 有 `jobs:` 却切不出 job | 红 | 量具失效不许当合规 |
+
+
+原先那一步是：
+
+```yaml
+run: uv run --with rapidocr --with omegaconf python scripts/fetch_models.py
+```
+
+查官方 runner 镜像清单（`actions/runner-images`，
+`images/windows/Windows2025-Readme.md`，**image `20261013.288.2`**）：
+Tools 与 Package Management 两段共列 60 多个工具
+（Python 3.12.10 / pip 26.2.1 / Pipx / Chocolatey / Miniconda / jq / cmake …），
+**没有 `uv`**。Linux 镜像有，Windows 没有 ⇒ build job 第一步就
+`uv: command not found`。
+
+⚠ **查之前先自检了量具**：那份 readme 只有 35.7 KB，小到可疑，
+所以先确认它确实是那份清单（Python/Node/Rust/Cargo/CMake/Git/pip 都在，
+「7-Zip 缺」只是它写作 `7zip`），**再**拿它的「没有 uv」当结论。
+「清单里没有」只有在清单是真的时才成立。
+
+已改：`actions/setup-python@v5`（first-party）+ `python -m pip install`。
+PyPI 来源没变、供应链面没变，去掉的只是「假定有个工具」。
+
+## dry run：唯一能不出东西就跑完整条链路的入口
+
+`workflow_dispatch` 多一个 `dry_run` 布尔输入。开着时
+取权重 → `tauri build` → **核对装包内真有权重** 全部照跑，
+只把 `gh release create` 那一发跳过，并显式打印
+「没有创建 release、没有上传任何资产、没有打 tag」。
+
+那个收尾步骤是刻意出声的：不写它，这次跑动的产物**确实存在**在 runner 上，
+只是没离开 runner，而后来的读法会是「跑完了 ⇒ 发出去了」。
+
+`tag` 输入的说明也改了：dry_run 时可填 `main` 这类任意 ref
+（publish 已跳过，`checkout ref:` 只是个 ref）。
+
 
 ## ✅ 已实测：CI 转绿（缺陷①的正向判据）
 
@@ -151,5 +246,13 @@ TAURI_CONFIG: '{"bundle":{"resources":null}}'
 - [x] 缺陷②已修（`find_dict_url` + 钉死 SHA256），端到端取回并逐字节比对过
 - [x] ModelSet 文件名对齐变成机器检查（不需要权重在场）
 - [x] **推送后确认 CI 转绿**（run `39035163536`，sha `8261f44`，12/12 success）
-- [ ] **`uv` 在 `windows-latest` 可用**（tier 1 断言，需实测）
+- [x] **查实 `uv` 不在 runner 镜像清单里**（image `20261013.288.2`，60+ 工具中无它），
+      并改用 `actions/setup-python` + `pip`
+- [x] 加 `dry_run` 开关，让整条发版链路能在**不出东西**的前提下被验证
+- [x] `release.yml` 的闸门自证（`check_release_yml.py` 8/8，两条 `if:` 严格互斥）
+- [x] **缺陷①在 `release.yml` verify 上复发**：dry run `39036210343` 抓到并修掉
+- [x] 守卫从「只看 ci.yml」扩到「所有 workflow × 逐 job」，自证 15/15
+- [ ] **dry run 在真 runner 上跑通**（第二次派发进行中）
+- [ ] **push 触发时 `inputs.dry_run` 为空 ⇒ 照常发布**（语义推理，验证它要打 tag）
 - [ ] **跑通一次真实发版**（需授权打 tag）
+

@@ -138,12 +138,25 @@ if ($orphan) {
 # 干净 runner 上就不存在，tauri-build 的 build script 会在**每个 cargo 步骤**
 # （clippy / test / build 全都编 chat-servant-app）抛 `GlobPathNotFound`。
 #
-# 2026-10-18 实测就是这个：最后一次绿 `acf3d0f`，从 `ab8831d` 起连红 28 次，
-# 中间夹着纯文档提交——文档改不动 Rust，所以只可能是 build script。
-# 而**本地永远看不见**：本机 `target/models/` 下有权重，glob 命中。
+# 2026-10-18 实测就是这个，而且**同一个缺陷在两个文件里各犯了一次**：
+#   · `ci.yml` —— 从 `ab8831d`（加 resources 那次）起连红 28 次，
+#     边界是实测的：`acf3d0f` 绿、`ab8831d` 红。
+#   · `release.yml` 的 `verify` job —— dry run `39036210343` 当场抓到，
+#     报错逐字相同。**修了 ci.yml 却没修隔壁文件，它就原样复发。**
 #
 # ⇒ 这条比「少跑一步」更阴：它不是让 CI 少做，是让 CI **根本编不起来**，
-#   而本地全绿。判据取「有没有在 ci.yml 里把它 null 掉」。
+#   而本地全绿（本机有权重，glob 命中）。
+#
+# 所以这里扫的是**所有** workflow 文件，而且**逐 job**：
+# 一个 workflow 里可以同时存在「需要权重的 build job」与「不需要的 verify job」，
+# 文件级判断会把它们混成一句「这个文件取没取权重」。
+#
+# 规则（逐 job）：**要么自己在跑 cargo 之前把权重取回来，要么声明 null 覆盖。**
+#
+# ⚠ job 的切分是**行级文本扫描**（`jobs:` 之后两空格缩进的 `name:` 切块），
+#   不是 YAML 解析——那会给一个守卫脚本拖进一个 YAML 依赖。
+#   覆盖只认「workflow 顶格 env」或「该 job 自己的块内」两处；
+#   写在第三处（比如 job 内某个 step 的 env）认不出来，属已知的漏检面。
 $confPath = 'ui\src-tauri\tauri.conf.json'
 if (Test-Path $confPath) {
   $confRaw = [IO.File]::ReadAllText((Resolve-Path $confPath))
@@ -153,16 +166,82 @@ if (Test-Path $confPath) {
     Where-Object { $_ -match '^\.\./\.\./(target|\.\.)/' -or $_ -match '\.\./\.\./target/' } |
     Sort-Object -Unique
   if ($outside) {
-    # `{}` 是 merge patch 的空操作，所以必须认到 null 那一支。
-    $nulled = $ci -match '"resources"\s*:\s*null'
-    if (-not $nulled) {
-      $fail.Add('tauri.conf.json 的 bundle.resources 指向仓库之外，ci.yml 却没把它 null 掉：')
-      $outside | ForEach-Object { $fail.Add(('    {0}' -f $_)) }
-      $fail.Add('    ⇒ 干净 runner 上 tauri-build 会在每个 cargo 步骤抛 GlobPathNotFound，')
-      $fail.Add('      而本机有这些文件所以本地全绿。ci.yml 的 env 里加：')
-      $fail.Add('      TAURI_CONFIG: ''{"bundle":{"resources":null}}''')
-      $fail.Add('      （必须是 null：TAURI_CONFIG 走 json_patch::merge，空对象是空操作。）')
+    $wfDir = '.github\workflows'
+    $nJobs = 0
+    foreach ($wf in (Get-ChildItem $wfDir -Filter '*.yml' | Sort-Object Name)) {
+      $wfRaw = [IO.File]::ReadAllText($wf.FullName)
+      $lines = $wfRaw -split "`r?`n"
+      # 只认 **workflow 级**的覆盖（顶格 `env:` 块里的 TAURI_CONFIG）。
+      # ⚠ 两个坑都踩过：
+      #   ① 曾经写成「文件里任意地方出现过就算」——release.yml 里 verify job 的
+      #      覆盖会替**整个文件**免检，build job 的取权重步骤删掉也不响（自证组 L）。
+      #   ② 改成只认顶格的 `TAURI_CONFIG:` 又错位了——workflow 级 env 的**子项**
+      #      是 2 空格缩进（job 级是 6 空格）。判据改成「顶格 env: 块的内容」。
+      $fileOverride = $false
+      for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^jobs:\s*$') { break }      # 顶格 env 只可能在 jobs 之前
+        if ($lines[$i] -notmatch '^env:\s*$') { continue }
+        for ($k = $i + 1; $k -lt $lines.Count; $k++) {
+          if ($lines[$k] -notmatch '^\s+\S') { break }    # 出了这个块（回到顶格或空行）
+          if ($lines[$k] -match 'TAURI_CONFIG:.*"resources"\s*:\s*null') { $fileOverride = $true }
+        }
+        break
+      }
+
+      # 切出 jobs 之后每个 job 的块
+      $sawJobs = $false
+      $jobStarts = @()
+      $inJobs = $false
+      for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^jobs:\s*$') { $inJobs = $true; $sawJobs = $true; continue }
+        if ($inJobs -and $lines[$i] -match '^  ([A-Za-z0-9_-]+):\s*$') {
+          $jobStarts += [pscustomobject]@{ Name = $Matches[1]; Line = $i }
+        }
+      }
+      # ⚠ 有 `jobs:` 却一个 job 都切不出来 ⇒ **量具失效**，不能当成「没发现问题」。
+      #   真实来源：自证组 M 的一次正则写错（末尾 `.*\n` 配 `(?s)` 贪婪）
+      #   把整个 workflow 吃掉，只剩 27 行，守卫对着残文件报「合规」。
+      #   「量具坏了」和「量具没找到东西」在屏幕上原本长得一模一样。
+      if ($sawJobs -and $jobStarts.Count -eq 0) {
+        $fail.Add(('{0}.yml 里有 jobs: 却一个 job 都切不出来 —— 本守卫此刻什么都没验' -f $wf.BaseName))
+        $fail.Add('    （要么 job 的缩进写法变了，要么文件被改坏了。别把「没查到」当「没问题」。）')
+        continue
+      }
+      if ($jobStarts.Count -eq 0) { continue }
+
+      for ($j = 0; $j -lt $jobStarts.Count; $j++) {
+        $from = $jobStarts[$j].Line
+        $to = if ($j + 1 -lt $jobStarts.Count) { $jobStarts[$j + 1].Line - 1 } else { $lines.Count - 1 }
+        $block = $lines[$from..$to]
+        $nJobs++
+
+        $cargoAt = -1; $fetchAt = -1
+        for ($k = 0; $k -lt $block.Count; $k++) {
+          $ln = $block[$k]
+          if ($ln -match '^\s*#') { continue }            # 注释里的 cargo 不算
+          # ⚠ `tauri build` / `pnpm tauri build` **本身就是 cargo 步骤**（CLI 去调
+          #   cargo build）。只认字面 `cargo` 的话，release.yml 那个**唯一真正需要
+          #   权重**的 build job 会被整段跳过——自证组 L 删掉它的取权重步骤也不响。
+          if ($cargoAt -lt 0 -and
+              ($ln -match '\bcargo\s+(clippy|test|build|check|run|deny|fmt|xtask)\b' -or
+               $ln -match '\b(tauri|pnpm tauri)\s+build\b')) { $cargoAt = $k }
+          if ($fetchAt -lt 0 -and $ln -match 'fetch_models\.py' -and $ln -notmatch '--check') { $fetchAt = $k }
+        }
+        if ($cargoAt -lt 0) { continue }                  # 这个 job 不跑 cargo
+
+        $jobOverride = $fileOverride -or (($block -join "`n") -match '"resources"\s*:\s*null')
+        $fetchedFirst = ($fetchAt -ge 0 -and $fetchAt -lt $cargoAt)
+        if (-not ($jobOverride -or $fetchedFirst)) {
+          $fail.Add(('{0}.yml 的 job `{1}`：跑 cargo 时权重还不在盘上，也没有 null 覆盖' -f $wf.BaseName, $jobStarts[$j].Name))
+          $fail.Add('    ⇒ 干净 runner 上 tauri-build 会在那一步抛 GlobPathNotFound，')
+          $fail.Add('      而本机有这些文件所以本地全绿。修法二选一：')
+          $fail.Add('      · 在跑 cargo 之前加一步取权重（python scripts/fetch_models.py）；')
+          $fail.Add('      · 或给该 job 加 env：TAURI_CONFIG: ''{"bundle":{"resources":null}}''')
+          $fail.Add('        （必须是 null：TAURI_CONFIG 走 json_patch::merge，空对象是空操作。）')
+        }
+      }
     }
+    $script:jobsChecked = $nJobs
   }
 } else {
   Write-Output "找不到 $confPath —— resources 那条不变量本次没验。"
@@ -170,14 +249,16 @@ if (Test-Path $confPath) {
 }
 
 if ($fail.Count) {
-  Write-Output 'gate.ps1 与 ci.yml 没有对齐：'
+  Write-Output 'CI 与本机门禁没有对齐：'
   Write-Output ''
   $fail | ForEach-Object { Write-Output $_ }
   Write-Output ''
-  Write-Output '本地红、CI 绿是最坏的组合：人更信绿灯，而这份绿灯少跑了一步。'
-  Write-Output '改哪边都行，但要两边一起改，并在这里如实记账（exceptions 就写明理由）。'
+  Write-Output '「本地绿、CI 红」和它的反面倒过来都最坏：人更信另一侧，'
+  Write-Output '而另一侧那份结论少跑了东西、或根本编不起来。改哪边都行，但要两边一起改。'
   exit 1
 }
 
-Write-Output ("gate/CI 对齐：gate.ps1 的 {0} 步，在 ci.yml 里都能找到见证命令。" -f $steps.Count)
+$j = if ($script:jobsChecked) { $script:jobsChecked } else { 0 }
+Write-Output ("gate/CI 对齐：gate.ps1 的 {0} 步在 ci.yml 里都有见证命令；" -f $steps.Count)
+Write-Output ("bundle.resources 那条：扫了 {0} 个 workflow 的 job，逐个都有覆盖或先取权重。" -f $j)
 exit 0
