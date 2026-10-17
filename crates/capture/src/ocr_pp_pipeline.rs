@@ -148,10 +148,22 @@ pub const REC_STD: [f32; 3] = MODELS.rec_norm.1;
 /// 字形的抗锯齿边缘，外扩把被削掉的那一圈补回来，
 /// rec 才拿得到完整的字。
 ///
-/// 外扩量按 `w * r / sqrt(w*h)` 算，所以**细长框的纵向几乎不扩**
-/// （160x14 的行框纵向只多 0.45px）。这是公式本身的行为，
-/// 不是漏了纵向参数——纵向覆盖要靠概率图本身，扩不出来。
-pub const DET_UNCLIP_RATIO: f32 = 1.5;
+/// 外扩量按 **`面积 × ratio / 周长`**（即 `w·h·r / 2(w+h)`）算，各向均匀。
+///
+/// ⚠ 2026-10-18 订正：早先这里写的是 `w·r/√(w·h)`，并且注释里把这个
+/// 「纵向几乎不扩」当成公式的正确行为写了下来——**那正是 bug**。
+/// 现在的实现（rapidocr / 新版 PaddleOCR）用 pyclipper 做多边形偏移，
+/// 外扩量是 `area × ratio / perimeter`，**上下左右一样多**。
+///
+/// 差别用 160x14 的行框算一遍：
+///
+/// | | 横向外扩 | 纵向外扩 |
+/// |---|---|---|
+/// | `w·r/√(wh)`（旧） | 12.4 | **0.45** |
+/// | `area·r/周长`（现） | 6.9 | **6.0** |
+///
+/// 旧的把字削掉上下两半，只把左右撑宽——rec 拿到半截字，真帧 CER 34%。
+pub const DET_UNCLIP_RATIO: f32 = 1.6;
 
 /// rec 的输入高。**我们给的**，不是模型的（模型四个维全是动态的）。
 pub const REC_HEIGHT: usize = 48;
@@ -199,8 +211,13 @@ pub const DET_MAX_BOXES: usize = 64;
 /// 取整到 32 是硬要求（[`DET_STRIDE`]）。放大与否是**模型的约定**：
 /// rapidocr 的 `DetPreProcess` 默认 `limit_type="min"`、`limit_side_len=736`，
 /// 意思是**最短边不足 736 就按比例放大**。PP-OCRv6 的 det 在 14px 小字上
-/// 靠这个放大才把每行连成一条，实测 855x545 的微信帧被放到 1180x736。
+/// 靠这个放大才把每行连成一条，实测 855x545 的微信帧被放到 1184x736。
 /// `det_min_side = 0` 则是「原生尺寸送进去」，v4 那一代用的就是它。
+///
+/// ⚠ 2026-10-18 补记：这个常数**本身是对的，但它一度完全不起作用**——
+/// [`det_input`] 那时只把帧贴进 736 撑大的画布、从不缩放像素。
+/// 「det 一个框都读不出来」的真正修复是 `det_norm` 改成 `0.5/0.5`，
+/// 与本常数无关；而本常数要等到缩放真做了才生效（真帧 CER 18.60% → 0.79%）。
 pub fn det_size(w: u32, h: u32) -> (usize, usize) {
     det_size_with_min_side(w, h, MODELS.det_min_side)
 }
@@ -234,27 +251,96 @@ pub fn rec_width(w: u32) -> usize {
     ((w as usize).div_ceil(REC_STRIDE) * REC_STRIDE).max(REC_STRIDE)
 }
 
+/// rec 的输入宽度：把框**等比**缩到高 [`REC_HEIGHT`] 之后的宽度，取整到 8 的倍数。
+///
+/// ⚠ 2026-10-18 修，这是本仓最贵的第二个 OCR bug。
+/// 调用方早先直接传 `rec_width(box.width())`——也就是**框在原图里的像素宽**。
+/// 而 rec 的高被固定成 48，原图里的一行只有 8~14px 高，于是
+/// [`rec_input`] 的横向步长 `x * bw / out_w` 每输出像素只走 1 个源像素，
+/// 纵向却走了 `bh / 48`：**只把字拉高、不让它变宽**，
+/// 长宽比被扭曲 `48 / bh ≈ 4` 倍。
+///
+/// 症状很有辨识度：**中文几乎不受影响，英文整段报废**——
+///
+/// ```text
+/// openrouter哪些 → oderouer      openrouter贵啊 → oberouter告啊
+/// 只是测试       → 只是河年       api → ai
+/// ```
+///
+/// CJK 笔画密，横压 4 倍仍能对上笔画数；拉丁字母的宽窄与字腔一压就没了。
+/// 而中文行「是不是真满血哦」全程一字不差，正好把范围框死在横向比例上。
+///
+/// 参照实现 rapidocr 算的是 `ceil(img_height * w / h)`，即**等比**。
+#[must_use]
+pub fn rec_input_width(box_: Rect) -> usize {
+    let bh = box_.height().max(1) as u32;
+    let w = (box_.width().max(0) as u32).saturating_mul(REC_HEIGHT as u32) / bh;
+    rec_width(w)
+}
+
 /// RGB 帧 → det 的 `[1,3,H,W]` 归一化张量。
 ///
-/// PP-OCR 的归一化是 `(v/255 - mean) / std`，`mean = std = [0.485, 0.456, 0.406]`
-/// （ImageNet 标准）。**注意通道顺序是 RGB**，而我们的 `Frame` 本来就是 RGB8。
+/// PP-OCR 的 det 归一化是 `(v/255 - mean) / std`，v6 是 `mean = std = 0.5`。
+/// **注意通道顺序是 RGB**，而我们的 `Frame` 本来就是 RGB8。
 ///
-/// 尺寸不足时按**最近邻复制**右下角补齐——不是补黑。补黑会在边缘造出
-/// 一条假的暗边，det 可能把它当文字。
+/// ## 这里**必须真的把帧缩放到 `(w, h)`**，不是把帧贴进一张更大的画布
+///
+/// 2026-10-18 实测（本条是本仓最贵的一次自纠，代价见下）：
+/// 早先的写法是「按帧的原生分辨率逐像素拷贝，越界处复制最后一行/列」——
+/// ```text
+/// let sy = y.min(fh.saturating_sub(1));
+/// let sx = x.min(fw.saturating_sub(1));
+/// ```
+/// 看着像「尺寸对齐」，实际**帧的像素一个都没变**。
+/// 于是 [`det_size`] 算出来的 `det_min_side = 736`（855x545 → 1184x736）
+/// **只决定了画布大小，对送进网络的内容毫无作用**：det 看到的仍是
+/// 原生分辨率的小字，框削掉字的下半截，rec 拿到的是残字。
+///
+/// 真帧实测（`wechat-chat` / `gws-chat` 两帧，答案键 `real-ground-truth.json`）：
+///
+/// | det 输入 | CER |
+/// |---|---|
+/// | 真缩放（rapidocr 同款） | **0.79%** |
+/// | 只补边（本条修掉的写法，Python 侧同构复现） | **18.25%** |
+/// | Rust 修前实测 | 18.60% |
+///
+/// ⇒ 18.25% ≈ 18.60%，**唯一变量就是有没有真的缩放**。
+/// 而 18.6% 与 WinRT 的 18.25% 基本齐平——也就是说修之前，
+/// 换引擎在字符准确度上**一点没赚**，只赚了检出（17/17 对 14/17）。
+///
+/// ## 插值为什么是 Triangle
+///
+/// `Triangle` 就是双线性，等价于 `cv2.INTER_LINEAR`，与 rapidocr 的
+/// `DetPreProcess.resize` 一致。用 `Nearest` 也测过（`ab_rec_norm.py --nearest`），
+/// 在这两帧上 CER 不变——但那测的是 **rec**，det 侧的缩放方向是**上采样**
+/// （1.35 倍），对齐才是这里该守的东西，所以跟参照实现对齐。
+///
+/// 票 07 明写「重采样交给 `image`，不自己实现插值」，
+/// 早先手搓最近邻就已经违反了这一条。
 pub fn det_input(frame: &Frame, w: usize, h: usize) -> Vec<f32> {
+    use image::imageops::FilterType;
+
     let (fw, fh) = (frame.width() as usize, frame.height() as usize);
-    let src = frame.as_bytes();
     let mut out = vec![0.0f32; 3 * w * h];
-    for y in 0..h {
-        let sy = y.min(fh.saturating_sub(1));
-        for x in 0..w {
-            let sx = x.min(fw.saturating_sub(1));
-            let p = &src[(sy * fw + sx) * 3..(sy * fw + sx) * 3 + 3];
-            let o = y * w + x;
-            for c in 0..3 {
-                out[c * w * h + o] = (p[c] as f32 / 255.0 - DET_MEAN[c]) / DET_STD[c];
-            }
-        }
+    if fw == 0 || fh == 0 {
+        return out;
+    }
+    // `from_raw` 接管所有权，所以给一份拷贝；重采样本身已经要另开一份输出。
+    let Some(src) = image::RgbImage::from_raw(fw as u32, fh as u32, frame.as_bytes().to_vec())
+    else {
+        return out;
+    };
+    let scaled = if (fw, fh) == (w, h) {
+        src
+    } else {
+        image::imageops::resize(&src, w as u32, h as u32, FilterType::Triangle)
+    };
+    let plane = w * h;
+    for (i, px) in scaled.pixels().enumerate() {
+        let [r, g, b] = px.0;
+        out[i] = (r as f32 / 255.0 - DET_MEAN[0]) / DET_STD[0];
+        out[plane + i] = (g as f32 / 255.0 - DET_MEAN[1]) / DET_STD[1];
+        out[2 * plane + i] = (b as f32 / 255.0 - DET_MEAN[2]) / DET_STD[2];
     }
     out
 }
@@ -298,44 +384,38 @@ pub fn rec_input(frame: &Frame, box_: Rect, out_w: usize) -> Vec<f32> {
 /// 3. 按面积与宽高筛掉噪点
 /// 4. 反缩放回原图，并裁进画面
 ///
-/// ## 换算比例必须用 **det 输入**尺寸，不能用帧尺寸（2026-10-18 修）
+/// ## 换算比例是 `src / prob`（2026-10-18 订正，同日第二次改这条式子）
 ///
-/// 早先这里是 `src_w / pw` 与 `src_h / ph`。**实测证明那是错的**：
+/// 一次换算串起两段缩放：
 ///
-/// 帧 425x198 → [`det_size`] 补齐到 448x224 → 概率图实测就是 **448x224**
-/// （与 det 输入同尺寸，`xtask ocr --stats` 在 850x396 的帧上同样给出
-/// 概率图 864x416 = det 输入 864x416）。而 [`det_input`] 是**原样拷贝**：
-/// 补边只发生在右/下，左上角与帧逐像素对齐。
+/// ```text
+/// 原图 ──[det_input] 缩放到 det_w/det_h──▶ det 空间 ──[模型内部下采样]──▶ pw/ph
+/// ```
 ///
-/// ⇒ 概率图像素与原图像素是 **1:1**，正确比例恒为 `det_w / pw`（此版本为 1.0），
-/// 用 `src_w / pw` 等于把补边的那部分也算进分母，于是**框朝原点缩**：
+/// 所以比例恒为 `src_w / pw` 与 `src_h / ph`。
 ///
-/// | 墨迹（帧 425x198） | 修复前框 y | 墨迹下沿 | 少盖 |
-/// |---|---|---|---|
-/// | 19..34  | 19..28 | 34 | −6 |
-/// | 42..58  | 42..50 | 58 | −8 |
-/// | 68..84  | 64..72 | 84 | −12 |
-/// | 123..138 | 113..122 | 138 | **−16** |
-/// | 149..158 | 135..144 | 158 | −14 |
+/// ### ⚠ 这一天里这条式子被改过两回，第二回才是对的
 ///
-/// 误差**随离原点的距离增大**，所以越靠下的行被削得越狠：末行 16px 的墨迹
-/// 整个下半个字都在框外，rec 拿到的是**被削掉下半截**的字，输出只能是乱码。
+/// **第一回（早上）**：把 `src / prob` 改成 `det / prob`（＝1.0），当时的实测是
+/// 「帧 425x198 补齐到 448x224、概率图也是 448x224，而 [`det_input`] 是原样拷贝
+/// ⇒ 概率图与原图 1:1」，并记下了一张「框比墨迹下沿少盖 6/8/12/16/14px」的表。
 ///
-/// 去掉补齐后误差消失：把帧裁成 416x192（32 的倍数，det 输入不再补边），
-/// 同样的墨迹给出 21..31 / 48..56 / 73..81 / 127..138 / 153..163，
-/// 而把修复前的框乘以 `ph / src_h = 224/198` 得到 21.5..31.7 / 47.5..56.6 /
-/// 72.4..81.5 / 127.8..138.0 / 152.7..162.9——**逐行吻合到 1px 以内**。
-/// ⇒ 两条路（按 det 输入换算 / 让 det 不补边）数值上等价，选前者。
+/// **第二回（现在）**：那张表和那个立论**都建立在同一个错误前提上**——
+/// [`det_input`] 从来没有真的缩放过，所谓「原样拷贝 + 右下补边」只是把帧贴进
+/// 一张更大的画布。于是「1:1」成立，但 det 因此在**原生分辨率的小字**上工作，
+/// 框削掉字的下半截。
+///
+/// 真帧实测（答案键 `real-ground-truth.json`，两帧）：
+/// 真缩放 **0.79%** ／ 只补边 **18.25%**（Python 侧同构复现）／ Rust 修前 **18.60%**。
+///
+/// ⇒ 早先那个 1.0 **是在替真正的 bug 打补丁**：它让框在「画布比帧大」的
+/// 坐标系里看起来自洽，可 det 看到的本来就是没放大的小字。
+/// [`det_input`] 修成真缩放之后，1:1 不再成立，本式回到第一回之前的写法。
+///
+/// **教训**：两处配置「各自都自洽」时，要问的是**它们合起来送进网络的内容**对不对，
+/// 而不是各自的中间量能不能对上。
 #[allow(clippy::too_many_arguments)]
-pub fn det_boxes(
-    prob: &[f32],
-    pw: usize,
-    ph: usize,
-    det_w: usize,
-    det_h: usize,
-    src_w: usize,
-    src_h: usize,
-) -> Vec<Rect> {
+pub fn det_boxes(prob: &[f32], pw: usize, ph: usize, src_w: usize, src_h: usize) -> Vec<Rect> {
     let n = pw * ph;
     // `prob` 长度不保证正好是 `n`（det 输出形状对不上时会有）。逐个
     // `get().unwrap_or(0.0)`：越界的当 0，也就是「不亮」，落在阈值下，
@@ -393,25 +473,55 @@ pub fn det_boxes(
             if w < DET_MIN_W || h < DET_MIN_H {
                 return None;
             }
-            // PaddleOCR 的 `unclip`：按 `w*r/sqrt(w*h)` 外扩。
-            // 缺了它，框会紧贴二值化阈值留下的笔画核心，
-            // 抗锯齿被削掉的那一圈永远补不回来，rec 拿到的字是**缺的**。
-            // 2026-10-15 补上——早先完全没有这一步。
-            let len = ((w * h) as f64).sqrt();
-            let dx = w as f64 * DET_UNCLIP_RATIO as f64 / len;
-            let dy = h as f64 * DET_UNCLIP_RATIO as f64 / len;
+            // DB 的 `unclip`：把框**各向均匀**外扩 `d = 面积 × ratio / 周长`。
+            //
+            // ⚠ 2026-10-18 修，本仓第三个 OCR bug，也是最要命的那个。
+            // 早先用的是**旧版 PaddleOCR 的各向异性公式**
+            // `dx = w·r/√(wh)`、`dy = h·r/√(wh)`——纵向几乎不扩、横向猛扩。
+            // 参照实现 rapidocr 用的是 pyclipper 的多边形偏移：
+            //
+            // ```python
+            // distance = poly.area * unclip_ratio / poly.length
+            // offset.Execute(distance)        # 各方向都是 distance
+            // ```
+            //
+            // 差别有多大（概率图上 w=298、h=10 的一行）：
+            //
+            // | | 外扩量 | 框高（源图） |
+            // |---|---|---|
+            // | 旧公式 `h·1.5/√(wh)` | 纵 0.27 / 横 8.2 | **8** |
+            // | 多边形偏移 `area·1.6/perim` | 各向 7.74 | **18.9** |
+            //
+            // ⇒ 旧公式把字**削掉上下两半**，只把左右撑得很宽。
+            // rec 拿到的是半截字，真帧 CER 34%；把框纵向撑到两倍即回到 2.35%。
+            // 而 det 概率图两边一致（前景占比 1.42% vs 1.39%），
+            // 所以这不是检测不准，**纯粹是后处理的外扩公式不对**。
+            //
+            // 缺了 unclip 本身也不对：框会紧贴二值化阈值留下的笔画核心，
+            // 抗锯齿被削掉的那一圈永远补不回来。
+            let area_px = (w * h) as f64;
+            let perim = 2.0 * (w + h) as f64;
+            let d = area_px * DET_UNCLIP_RATIO as f64 / perim;
             // 反缩放回原图坐标。用四舍五入而不是截断：截断会让最右/最下
             // 的那一列像素永远落在框外。
             //
-            // ⚠ 比例取 **det 输入**尺寸（`det_w/det_h`），不是帧尺寸。理由与
-            // 实测数字见本函数的文档：补边只加在右/下，概率图与原图左上角
-            // 对齐，用帧尺寸会把框朝原点缩，末行能少盖 16px 墨迹。
-            let sx = det_w as f64 / pw as f64;
-            let sy = det_h as f64 / ph as f64;
-            let x0 = (((*mnx as f64) - dx) * sx).round() as i32;
-            let y0 = (((*mny as f64) - dy) * sy).round() as i32;
-            let x1 = (((*mxx as f64 + 1.0) + dx) * sx).round() as i32;
-            let y1 = (((*mxy as f64 + 1.0) + dy) * sy).round() as i32;
+            // 概率图 → 原图，**一次换算把两段缩放串起来**：
+            //   原图 ──缩放到 det_w/det_h──▶ det 空间 ──模型内部下采样到 pw/ph──▶ 概率图
+            // 所以比例是 `src / prob`，**不是** `det / prob`。
+            //
+            // ⚠ 2026-10-18 订正：早先这里写的是 `det_w / pw`（＝1.0），理由是
+            // 「[`det_input`] 是原样拷贝，概率图与原图左上角逐像素对齐」。
+            // 而那条拷贝本身就是错的（它只补边、从不缩放），
+            // 于是这个写死的 1.0 **在替一个真正的 bug 打补丁**：
+            // 帧被塞进更大的画布却没缩放，det 在原生分辨率的小字上工作。
+            // [`det_input`] 修成真缩放之后，本式回到它被改之前的写法——
+            // 那次「修复」是在错误的成因上打的补丁。
+            let sx = src_w as f64 / pw as f64;
+            let sy = src_h as f64 / ph as f64;
+            let x0 = (((*mnx as f64) - d) * sx).round() as i32;
+            let y0 = (((*mny as f64) - d) * sy).round() as i32;
+            let x1 = (((*mxx as f64 + 1.0) + d) * sx).round() as i32;
+            let y1 = (((*mxy as f64 + 1.0) + d) * sy).round() as i32;
             Some(Rect {
                 x0,
                 y0,
@@ -557,7 +667,7 @@ pub fn det_stats(frame: &Frame) -> Result<DetStats, PpError> {
         .take(pw * ph)
         .filter(|v| **v > DET_THRESH)
         .count();
-    let raw = det_boxes(&vals, pw, ph, dw, dh, fw, fh);
+    let raw = det_boxes(&vals, pw, ph, fw, fh);
     let merged = merge_into_lines(&raw);
     // 限流**在合并之后**——见 [`DET_MAX_BOXES`]。这里如实报出被丢掉多少行，
     // 因为「屏幕下半截没读到」这个故障在最终文本里完全看不出来。
@@ -1053,7 +1163,7 @@ pub fn recognize_with(
     let (pw, ph) = (shape[3], shape[2]);
     // 顺序：先合并成行，再按 [`DET_MAX_BOXES`] 限流。反过来就是拿行数预算
     // 去装单字框，屏幕下半截会被裁掉。见该常量的说明。
-    let mut boxes = merge_into_lines(&det_boxes(&vals, pw, ph, dw, dh, fw, fh));
+    let mut boxes = merge_into_lines(&det_boxes(&vals, pw, ph, fw, fh));
     if boxes.len() > DET_MAX_BOXES {
         tracing::warn!(
             lines = boxes.len(),
@@ -1067,9 +1177,7 @@ pub fn recognize_with(
     let mut lines: Vec<OcrLine> = Vec::new();
     let mut by_w: HashMap<usize, Vec<Rect>> = HashMap::new();
     for b in &boxes {
-        by_w.entry(rec_width(b.width() as u32))
-            .or_default()
-            .push(*b);
+        by_w.entry(rec_input_width(*b)).or_default().push(*b);
     }
     for (w, mut group) in by_w {
         let plan = cache.get(w)?;
@@ -1527,6 +1635,38 @@ mod tests {
         );
     }
 
+    /// **`det_input` 必须真的重采样像素，而不是只把画布撑大。**
+    ///
+    /// 上一条钉的是**算出来的尺寸**，可它当年在 upscale 根本没做的时候照样绿——
+    /// 尺寸对了，像素一个没动，于是「det 看到的是原生分辨率的小字」这件事
+    /// 在整个仓里**没有任何一条守卫看得见**。
+    ///
+    /// 判据用**取值的多样性**而不是某个具体数值：一张只有黑/白两个值的图
+    /// 经双线性放大之后必然出现中间灰。真缩放 ⇒ 取值 > 2 种；
+    /// 复制补边 ⇒ 全程只有黑与白两种（外加被复制出来的同样两种）。
+    #[test]
+    fn the_det_input_really_resamples_pixels_and_not_just_the_canvas() {
+        // 2x2：左半黑、右半白。放大到 8x8。
+        let mut px = vec![0u8; 2 * 2 * 3];
+        for (i, p) in px.chunks_exact_mut(3).enumerate() {
+            let v = if i % 2 == 0 { 0u8 } else { 255u8 };
+            p.copy_from_slice(&[v, v, v]);
+        }
+        let f = Frame::from_rgb(2, 2, px).expect("造帧失败");
+        let out = det_input(&f, 8, 8);
+        assert_eq!(out.len(), 3 * 8 * 8);
+        // 只看第一个通道平面。
+        let distinct: std::collections::BTreeSet<u32> =
+            out[..64].iter().map(|v| (v * 1e4).round() as u32).collect();
+        assert!(
+            distinct.len() > 2,
+            "8x8 的输出只有 {} 种取值（{distinct:?}）——像素没有被重采样，\
+             只是被复制补边了。真帧后果：det 在原生分辨率的小字上工作，\
+             框削掉字的下半截，rec 拿到残字（真帧 CER 18.60% 而非 0.79%）",
+            distinct.len()
+        );
+    }
+
     /// **det 图的形状变了必须重编，不能拿旧的缓存凑。**
     ///
     /// 缓存早先不记 `h`/`w`：聊天窗口一被拖动尺寸，
@@ -1844,14 +1984,69 @@ mod tests {
         assert_eq!(rec_width(0), 8);
     }
 
+    /// **rec 的输入宽必须按框的比例算，不能直接用框的像素宽。**
+    ///
+    /// rec 的高被固定成 48，而原图里的一行只有 8~14px 高。
+    /// 若宽度直接取框的像素宽，`rec_input` 就只把字拉高、不让它变宽，
+    /// 长宽比扭曲 `48 / bh` 倍。中文扛得住（笔画密）、英文扛不住，
+    /// 真帧上表现为 CER 20% 上下而中文行几乎全对。
+    ///
+    /// 参照实现 rapidocr 的 `ceil(img_height * w / h)`，同样是等比。
+    #[test]
+    fn the_rec_input_width_keeps_the_boxes_aspect_ratio() {
+        // 200x12 的一行：高拉到 48 ⇒ 宽 200*48/12 = 800。
+        assert_eq!(
+            rec_input_width(Rect {
+                x0: 0,
+                y0: 0,
+                x1: 200,
+                y1: 12
+            }),
+            800
+        );
+        assert_eq!(
+            rec_input_width(Rect {
+                x0: 0,
+                y0: 0,
+                x1: 100,
+                y1: 10
+            }),
+            480
+        );
+        // 退化框：既不许除零，也不许造出 0 宽（0 宽会让时间步为 0）。
+        assert_eq!(
+            rec_input_width(Rect {
+                x0: 0,
+                y0: 0,
+                x1: 0,
+                y1: 0
+            }),
+            REC_STRIDE
+        );
+        // 高为 0 的退化框按 1 算，不许 panic。
+        assert_eq!(
+            rec_input_width(Rect {
+                x0: 0,
+                y0: 0,
+                x1: 40,
+                y1: 0
+            }),
+            40 * 48
+        );
+    }
+
     /// **二值化 + 连通域 + unclip：一个明显的框能被捞出来。**
     ///
     /// 造一张 32x32 的概率图，中间放一个 8x8 的高概率块。
     ///
-    /// 期望值**含 unclip 外扩**（2026-10-15 补上这一步）：
-    /// `len = sqrt(8*8) = 8`，`dx = dy = 8*1.5/8 = 1.5`，
-    /// 所以框是 `(12-1.5, 10-1.5) .. (19+1+1.5, 17+1+1.5)`
-    /// 四舍五入后的 `(11, 9, 22, 20)`，而不是块本身的 `12,10,20,18`。
+    /// 期望值**含 unclip 外扩**。外扩量 `d = 面积 × ratio / 周长`
+    /// （pyclipper 的多边形偏移，各向均匀）：
+    /// `d = 64 × 1.6 / 32 = 3.2`，所以框是
+    /// `(12-3.2, 10-3.2) .. (19+1+3.2, 17+1+3.2)`
+    /// 四舍五入后的 `(9, 7, 23, 21)`，而不是块本身的 `12,10,20,18`。
+    ///
+    /// ⚠ 2026-10-18 改过期望值：早先按 `w·r/√(wh)` 算，那是**错的公式**
+    /// （纵向外扩 1.5、横向也是 1.5，对细长框则是纵向≈0，见 [`DET_UNCLIP_RATIO`]）。
     ///
     /// 为什么要有这一步：二值化阈值一定削掉抗锯齿边缘，
     /// 框紧贴剩下的核心就意味着 rec 拿到的是**缺了一圈笔画**的字。
@@ -1864,12 +2059,12 @@ mod tests {
                 prob[y * w + x] = 0.9;
             }
         }
-        let boxes = det_boxes(&prob, w, h, w, h, w, h);
+        let boxes = det_boxes(&prob, w, h, w, h);
         assert_eq!(boxes.len(), 1, "应该正好一个框：{boxes:?}");
         assert_eq!(
             (boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1),
-            (11, 9, 22, 20),
-            "框没按 unclip_ratio={} 外扩：{:?}",
+            (9, 7, 23, 21),
+            "框没按 unclip_ratio={}（面积×ratio/周长，各向均匀）外扩：{:?}",
             DET_UNCLIP_RATIO,
             boxes[0]
         );
@@ -1897,7 +2092,7 @@ mod tests {
                 }
             }
         }
-        let boxes = det_boxes(&prob, pw, ph, pw, ph, pw, ph);
+        let boxes = det_boxes(&prob, pw, ph, pw, ph);
         assert_eq!(
             boxes.len(),
             100,
@@ -1919,10 +2114,7 @@ mod tests {
         prob[20 * w + 20] = 1.0;
         prob[21 * w + 20] = 1.0;
         prob[21 * w + 21] = 1.0; // 面积 4
-        assert!(
-            det_boxes(&prob, w, h, w, h, w, h).is_empty(),
-            "噪点没被滤掉"
-        );
+        assert!(det_boxes(&prob, w, h, w, h).is_empty(), "噪点没被滤掉");
     }
 
     /// **概率图比原图小的时候，框要换算回原图坐标。**
@@ -1931,9 +2123,12 @@ mod tests {
     /// 而下游的消息区过滤全靠坐标，错了就等于没有。
     ///
     /// 2026-10-15：期望值含 unclip 外扩。概率图里 8x8 的块
-    /// 外扩 `1.5` 后是 `(6.5, 6.5)..(17.5, 17.5)`，
-    /// 换算到 4 倍大的原图就是 `(26, 26)..(70, 70)`。
+    /// 按 `面积×ratio/周长` 外扩 `3.2` 后是 `(4.8, 4.8)..(19.2, 19.2)`，
+    /// 换算到 4 倍大的原图就是 `(19, 19)..(77, 77)`。
     /// 早先这里断言的是块的原始位置 `(32,32)..(64,64)`。
+    ///
+    /// ⚠ 2026-10-18 改过期望值：外扩公式从 `w·r/√(wh)`（1.5）换成
+    /// `面积×ratio/周长`（3.2），见 [`DET_UNCLIP_RATIO`]。
     #[test]
     fn boxes_are_scaled_back_to_the_source_image() {
         let (pw, ph) = (32usize, 32usize);
@@ -1944,11 +2139,11 @@ mod tests {
                 prob[y * pw + x] = 0.9;
             }
         }
-        let boxes = det_boxes(&prob, pw, ph, sw, sh, sw, sh);
+        let boxes = det_boxes(&prob, pw, ph, sw, sh);
         assert_eq!(boxes.len(), 1);
         let b = boxes[0];
-        assert_eq!((b.x0, b.y0), (26, 26), "没放大回原图：{b:?}");
-        assert_eq!((b.x1, b.y1), (70, 70), "没放大回原图：{b:?}");
+        assert_eq!((b.x0, b.y0), (19, 19), "没放大回原图：{b:?}");
+        assert_eq!((b.x1, b.y1), (77, 77), "没放大回原图：{b:?}");
         assert!(b.x1 <= sw as i32 && b.y1 <= sh as i32, "框超出画面：{b:?}");
     }
 
@@ -2149,50 +2344,53 @@ mod tests {
         assert!(out.iter().all(|v| v.is_finite()));
     }
 
-    /// **框必须盖住产生它的那片墨迹：补边不许把框朝原点缩。**
+    /// **框必须盖住产生它的那片墨迹。**
     ///
-    /// 2026-10-18 实测（帧 425x198，det 输入补齐到 448x224）：框的**下沿**
-    /// 比墨迹下沿高出 6 / 8 / 12 / **16** / 14 px，误差随离原点的距离增大。
-    /// 末行 16px 高的墨迹整个下半截落在框外，rec 拿到的是被削掉下半截的
-    /// 字，输出只能是乱码。根因是换算比例错用了**帧**尺寸去对
-    /// **补齐后**的概率图，见 [`det_boxes`] 的文档。
+    /// 2026-10-18 订正：这条的夹具原来按「det 只补边、不缩放」摆坐标，
+    /// 那套坐标下 `src/prob` 与 `det/prob` 两个公式都能过——**它分不清**。
+    /// [`det_input`] 改成真缩放之后，概率图坐标与帧坐标之间多了一段 1.12 的
+    /// 缩放，两式开始分岔，本条才真的在守换算。
     ///
     /// ## 判据为什么写「覆盖」而不是某个偏移值
     ///
-    /// 「少盖 16px」是这台机器、这张图的**实测结果**，不是不变量：
-    /// 换个字号或换个帧尺寸数字就变了。所以这里断言的是不变量——
-    /// **框必须盖住那片亮区的全部行与列**，不管补了多少边。
-    /// 任何朝原点缩的换算都会让 `y1` 落到亮区下沿之上，当场红。
+    /// 某个偏移值是这台机器、这张图的**实测结果**，不是不变量。
+    /// 所以这里断言的是不变量——**框必须盖住那片亮区在原图里的全部行与列**，
+    /// 不管 det 与帧之间差了多少倍。任何朝原点缩的换算都会让 `y1`
+    /// 落到墨迹下沿之上，当场红。
     ///
     /// ⚠ 这条**不要权重**（造的是概率图，不是跑模型），所以它在 CI 上
     /// 真的会跑——本仓吃过两次「没权重就跳过，等于没守」的亏。
     #[test]
     fn det_boxes_cover_the_full_extent_of_the_ink_they_came_from() {
-        // 帧 400x200 → [`det_size`] 补齐到 416x224（右 +16、下 +24）。
+        // 帧 400x200 → [`det_size`] 补齐到 416x224（横向 ×1.04、纵向 ×1.12）。
         let (src_w, src_h) = (400usize, 200usize);
         let (det_w, det_h) = det_size_with_min_side(src_w as u32, src_h as u32, 0);
         assert_eq!(
             (det_w, det_h),
             (416, 224),
-            "前提变了：本条量的是「补边把框朝原点缩」，det_size 不再补边就量不到它"
+            "前提变了：本条量的是「概率图坐标 → 原图坐标」的比例"
         );
         // 概率图与 det 输入同尺寸——实测 det 输出就是这个形状（见 det_boxes）。
         let (pw, ph) = (det_w, det_h);
-        // [`det_input`] 是原样拷贝、补边只在右/下 ⇒ 概率图第 y 行 = 原图第 y 行。
+        // 墨迹**定义在原图坐标**：x 40..300、y 150..162。
+        // 摆进概率图时要按 det/帧 的比例换算过去，否则测的就不是换算了。
         let (ink_x0, ink_y0, ink_x1, ink_y1) = (40usize, 150usize, 300usize, 162usize);
+        let px = |v: usize, num: usize, den: usize| v * num / den;
+        let (ink_px0, ink_py0) = (px(ink_x0, pw, src_w), px(ink_y0, ph, src_h));
+        let (ink_px1, ink_py1) = (px(ink_x1, pw, src_w), px(ink_y1, ph, src_h));
         let mut prob = vec![0.0f32; pw * ph];
-        for y in ink_y0..ink_y1 {
-            for x in ink_x0..ink_x1 {
+        for y in ink_py0..=ink_py1 {
+            for x in ink_px0..=ink_px1 {
                 prob[y * pw + x] = 0.9;
             }
         }
-        let got = det_boxes(&prob, pw, ph, det_w, det_h, src_w, src_h);
+        let got = det_boxes(&prob, pw, ph, src_w, src_h);
         assert_eq!(got.len(), 1, "应该正好一个框：{got:?}");
         let b = got[0];
         assert!(
             b.y1 >= ink_y1 as i32,
             "框的下沿 y1={} 在墨迹下沿 {ink_y1} **之上** —— 少盖 {} 行，\
-             rec 拿到的是被削掉下半截的字（实测末行能少盖 16px，输出直接成乱码）",
+             rec 拿到的是被削掉下半截的字，输出只能是乱码",
             b.y1,
             ink_y1 as i32 - b.y1
         );
@@ -2211,44 +2409,40 @@ mod tests {
         );
     }
 
-    /// **换算比例来自 `det_w / pw`，不是写死的 1:0。**
+    /// **换算比例要把两段缩放串起来，不能只算一段。**
     ///
-    /// 上一条钉的是「覆盖」，而这版权重恰好 `pw == det_w`，于是那条**分不清**
-    /// 「按 det 输入换算」与「假定概率图与原图 1:1」——两者对这版权重都成立。
-    /// 而 PP-OCR 的 det 内部有下采样，别的导出（例如概率图为 1/4）
-    /// 只有前者是对的。
+    /// 帧 40x40 → [`det_size`] 补到 64x64（×1.6）→ 概率图只有 1/4（再 ×0.25），
+    /// 于是概率图一个像素对应原图 `40/16 = 2.5` 个像素。
     ///
-    /// ONNX 声明 `coordinate_transformation_mode="asymmetric"` +
-    /// `nearest_mode="floor"`，tract 0.23.8 正是这么实现的
-    /// （`tract-core/src/ops/nn/resize.rs`：`Asymmetric => x_out / scale`，
-    /// 配 `Nearest::Floor`），所以 4 倍下采样是**精确对齐**的，
-    /// 夹具才能用整倍数拼出来——这是这条能成立的前提。
+    /// ⚠ 早先这条钉的是 `det_w / pw`，而那个 1.0 之所以看起来自洽，
+    /// 是因为 [`det_input`] 当时只补边不缩放（见它的文档）。
+    /// 现在两段都是真的，所以 `src/prob` 与 `det/prob` **不再相等**——
+    /// 这条正是用来把它们分开的。
     #[test]
-    fn the_det_to_source_scale_comes_from_the_det_input_size() {
+    fn the_det_to_source_scale_chains_both_downsamples() {
         let (src_w, src_h) = (40usize, 40usize);
         let (det_w, det_h) = det_size_with_min_side(src_w as u32, src_h as u32, 0);
         assert_eq!(
             (det_w, det_h),
             (64, 64),
-            "前提变了：本条量的是 4 倍下采样的换算"
+            "前提变了：本条量的是两段缩放串起来之后的换算"
         );
         // 概率图只有 det 输入的 1/4（宽度、高度都整除，无插值歧义）。
         let (pw, ph) = (det_w / 4, det_h / 4);
         let mut prob = vec![0.0f32; pw * ph];
-        // 概率图第 4..=6 行 × 第 2..=8 列 ⇒ det 空间第 16..=27 行 × 第 8..=35 列。
         for y in 4..=6usize {
             for x in 2..=8usize {
                 prob[y * pw + x] = 0.9;
             }
         }
-        let got = det_boxes(&prob, pw, ph, det_w, det_h, src_w, src_h);
+        let got = det_boxes(&prob, pw, ph, src_w, src_h);
         assert_eq!(got.len(), 1, "应该正好一个框：{got:?}");
         let b = got[0];
+        // 概率图 y4..=6 / x2..=8 ⇒ 原图 y10..17 / x5..22（比例 2.5）。
         assert!(
-            b.y0 <= 16 && b.y1 >= 28 && b.x0 <= 8 && b.x1 >= 36,
-            "4 倍下采样时框没落在 det 空间对应的原图区域（det 空间应为 \
-             y16..27 / x8..35 ⇒ 原图 y16..28 / x8..36）：{b:?}。\
-             比例写死成 1:1 就会停在下采样后的坐标上"
+            b.y0 <= 10 && b.y1 >= 17 && b.x0 <= 5 && b.x1 >= 22,
+            "两段缩放没串起来：概率图 y4..6 / x2..8 对应原图 y10..17 / x5..22，\
+             实得 {b:?}。只算一段（4.0）会停在 y12..32，只按 det 换算（16.0）更离谱"
         );
     }
 
