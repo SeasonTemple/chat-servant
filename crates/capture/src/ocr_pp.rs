@@ -102,8 +102,14 @@ pub enum PpError {
 ///
 /// 1. `CHATSERVANT_OCR_MODELS` —— 显式指定，永远最优先；
 /// 2. **外壳指定的目录**（[`set_models_dir`]）—— **装机形态走这条**：
-///    Tauri 把资源放在哪，只有 `app.path().resource_dir()` 知道，
-///    而本 crate 不依赖 Tauri，所以由外壳在启动时告知；
+///    由外壳在启动时调 `app.path().resource_dir()` 告知，本 crate 不依赖 Tauri。
+///    ⚠ **Windows 上这一条其实是冗余的**：实测（ADR-0006）两种安装器都把权重放在
+///    **exe 同级**，第 4 条 `exe_sibling_models` 本来也能找到；而
+///    `resource_dir()` 在 Windows 上**恒等于 exe 所在目录**
+///    （tauri-utils `platform.rs:305`：`cfg!(target_os = "windows")` 恒真短路，
+///    该函数其余分支全是 linux/macos/ios 的 cfg）。
+///    它仍然必需，因为 **macOS 指向 `../Resources`、Linux 指向 `../lib/<name>`**——
+///    那两种形态的资源**不在 exe 旁边**，本 crate 无从猜。
 /// 3. **`<仓库>/target/models/`** —— 开发、探针、`cargo test` 都走这条
 ///    （由编译期 `CARGO_MANIFEST_DIR` 反推，`crates/capture` 上两级）；
 /// 4. `<可执行文件所在目录>/models` —— 没接外壳时的兜底；
