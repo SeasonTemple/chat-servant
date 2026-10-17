@@ -11,12 +11,6 @@ use tauri::{Emitter, Manager, WindowEvent};
 
 fn main() {
     init_tracing();
-    // `bundle.resources` 与 `ModelSet` 的相对路径必须**指向同一处**。
-    // 这条测试跑在每次构建前：两份配置各写各的路径时，
-    // 症状是「装包能成功、但产品永远走 Windows OCR」——
-    // 打包器**不报错**（资源映射写错也可以只是少拷几个文件），
-    // 所以只能靠机器查。
-    assert_resources_and_model_set_agree();
     tauri::Builder::default()
         .setup(|app| {
             // PP-OCR 的权重目录**先定下来**，因为它决定后面所有 OCR 能不能跑。
@@ -265,7 +259,18 @@ pub use crate::contract::events;
 /// - 产品启动时找不到权重 ⇒ **静默退回 Windows.Media.Ocr**，
 ///   而那条路会漏掉 17.6% 的对方消息（ADR-0006 的真帧检出率）。
 ///
-/// ⇒ 这是一条**失败面完全静默**的接线，值得一个断言。
+/// ⇒ 这是一条**失败面完全静默**的接线，值得一条测试。
+///
+/// ⚠ 它只由 [`wiring_tests`] 调用，**不在 `main()` 里跑**：
+/// 这两条配置都是**编译期常量**，不配就是构建期的问题，
+/// 让它在开发机上变成一个「启动即崩」只会更难查——
+/// 该响的地方是门禁（`cargo test`），不是用户的启动流程。
+///
+/// 函数本身也带 `cfg(test)`：唯一的调用点在 `#[cfg(test)] mod wiring_tests` 里，
+/// 而 `--all-targets` **同时编译测试与非测试两个产物**——不标的话，
+/// 非测试那一半会看见一个没人调用的函数，门禁以 dead_code 变红
+/// （实测 exit=101，`error: function ... is never used`）。
+#[cfg(test)]
 fn assert_resources_and_model_set_agree() {
     let conf = include_str!("../tauri.conf.json");
     let prefix = "ppocrv6-small";
