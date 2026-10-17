@@ -141,8 +141,13 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 #   3. 并发两个进程只贵 1.35×（不是 2×），确认它并非单线程。
 #
 # ⇒ 「多一个 C++ 运行时」这条代价现在是**已知且有界的**，
-# 「慢 5.6 倍导致产品上不了线」是**未知且无界的**。两个都留着，
-# `ort` 作可选后端，默认仍是 tract —— 换不换由实测后的那一步决定，不由这条注释决定。
+# 「慢 5.6 倍导致产品上不了线」是**未知且无界的**。
+#
+# ⚠ **2026-10-18 第三次改，这次定了：默认后端翻成 `ort`**（见 ADR-0006）。
+# 上一版这行写的是「默认仍是 tract —— 换不换由实测后的那一步决定，
+# 不由这条注释决定」，而那一步当天就走完了。
+# **tract 没有删**：`CHATSERVANT_OCR_BACKEND=tract` 立刻切回去，不必重编。
+# 它仍是「不想引入二进制依赖」时的现成退路。
 #
 # 许可证：两个 crate 都是 MIT OR Apache-2.0（`cargo info` 核实过），
 # 符合 ADR-0003 的门槛。`ort` 自带的 ONNX Runtime 二进制同为 MIT。
@@ -150,9 +155,12 @@ tract-onnx = "0.23"
 # ⚠ `download-binaries` **不是可选项**：缺它链接期就报
 # `LNK1181: 无法打开输入文件 add_ort_library_path_or_enable_feature_download-binaries_see_ort_docs.lib`
 # ——错误信息里直接写着要开哪个 feature（2026-10-18 实测）。
-# 代价是**构建时要下载一份 ONNX Runtime**（几十 MB），且产物里多一个 DLL。
-# 另一条路是 `load-dynamic`，由我们自己带 DLL——但那正是本节要评估的代价，
-# 所以先用默认那条，把数拿到。
+# 代价是**构建时要下载一份 ONNX Runtime**（几十 MB）。
+#
+# ⚠ **「产物里多一个 DLL」这句是当时的推测，实测没成立**：
+# `download-binaries` 把 ONNX Runtime **静态链进 exe**——把 `xtask.exe`
+# 单独拷进一个零 DLL 的目录，仍能加载权重并跑出 10 行、无告警。
+# 真正会多一个文件的是 `load-dynamic`（自己随包带 DLL）那条路。
 ort = { version = "2.0.0-rc.10", default-features = false, features = [
     "ndarray",
     "std",

@@ -97,21 +97,25 @@ pub enum OcrError {
 
 /// 识别一帧里的文字。纯本地，不出网。
 ///
-/// ## 两条路，默认走 WinRT
+/// ## 两条路，默认走 PP-OCR（2026-10-18 翻的第三次）
 ///
 /// | 引擎 | 何时用 | 代价 |
 /// |---|---|---|
-/// | `Windows.Media.Ocr` | **默认**（`auto` 与显式都指它） | 系统自带，零模型体积 |
-/// | PP-OCRv4（[`crate::ocr_pp_pipeline`]） | `CHATSERVANT_OCR=ppocr` 显式点名，且权重在 `<仓库>/target/models/` | 15MB 权重，纯 Rust 跑 ONNX |
+/// | PP-OCRv6 small（[`crate::ocr_pp_pipeline`]） | **默认**——没设 `CHATSERVANT_OCR` 就是它 | 权重 31 MB，推理后端默认 ort（[`crate::ocr_pp::backend`]） |
+/// | `Windows.Media.Ocr` | `CHATSERVANT_OCR=winrt` 显式点名 | 系统自带，零模型体积 |
 ///
-/// **PP-OCR 是增强不是必需**：没装权重、或它跑挂了，**都必须继续用 WinRT**，
-/// 而不是在界面上报错。一台没下模型的机器照样要能聊天。
+/// ⚠ **本段曾经写着相反的话**：标题是「默认走 WinRT」、表里把 WinRT 标成
+/// **默认**、模型写的是 PP-OCR**v4**、权重写的是 15 MB。四条在同一天内
+/// 全部过期，而文档比代码读得快——**下一个人读到的是这几行，不是 `engine_choice()`**。
+/// ⇒ 翻默认值时**连这段一起改**，并在 [`engine_choice`] 记下为什么翻。
 ///
-/// 想强制走某一条：`CHATSERVANT_OCR=ppocr` 走 PP-OCR（没权重会回落并
-/// **`warn!` 报一次**，不是每帧一条），`CHATSERVANT_OCR=winrt` 强制 WinRT。
-/// **默认 `auto` 恒为 WinRT**——「目录里碰巧有权重」不算换引擎的授权，
-/// 理由见 [`engine_choice`] 里的注释（2026-10-18 改）。
-/// 回落这件事**已经报过了吗**。
+/// **PP-OCR 跑不通仍然继续用 WinRT**，而不是在界面上报错（ADR-0002）：
+/// 一台没下模型的机器照样要能聊天。
+///
+/// 缺权重或推理失败会回落并 **`warn!` 报一次**（不是每帧一条）；
+/// 要强制走另一条用 `CHATSERVANT_OCR`，不必重编。
+///
+/// ## 回落只报一次
 ///
 /// 回落是**持续状态**而不是事件：PP-OCR 挂掉时每一帧都会走到这里。
 /// 早先按帧记 `info!`，回落期间日志会被刷爆——而刷爆的真正代价是

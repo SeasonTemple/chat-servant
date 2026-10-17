@@ -21,10 +21,13 @@ wgc.workspace = true
 image.workspace = true
 # API 的图块要 base64。只取编码那一半，不引解码与全部算法。
 base64 = { version = "0.22", default-features = false, features = ["std"] }
-# 预下载 OCR 模型（PP-OCRv4 ONNX 导出）。**纯 Rust 推理**，不引 C++ 运行时。
-# 见根 Cargo.toml 里为什么选它而不是 `ort`。
+# 预下载 OCR 模型（**PP-OCRv6 small** ONNX 导出）。
+# ⚠ 下面这两行曾经写着「PP-OCRv4 / 纯 Rust 推理，不引 C++ 运行时 /
+# 见根 Cargo.toml 里为什么选它而不是 `ort`」——**三句都过期了**：
+# 权重换成 v6、默认后端已翻成 `ort`。`tract` 还在，但现在是显式回退。
+# 选型经过写在根 Cargo.toml 那一段里，结论在 ADR-0006。
 tract-onnx.workspace = true
-# 见根 Cargo.toml 里为什么**两个**后端都留着。
+# 见根 Cargo.toml 里为什么**两个**后端都留着、以及哪个是默认。
 ort = { workspace = true }
 
 # ── 继承工作区 lint 策略（见根 Cargo.toml 的 `[workspace.lints]`）──
