@@ -1159,35 +1159,80 @@ WARN chatservant_capture::ocr: PP-OCR 不可用（无权重或推理失败），
 3. **那一份权重能加载、能跑**：把 `CHATSERVANT_OCR_MODELS` 指到
    `target/release/models`，`xtask ocr --repeat 3` 稳定读出 10 行，**无回落告警**。
 
-⏳ **尚未证实的一条**：`app.path().resource_dir()` 在 Windows 上是否就是 exe 所在目录。
+⏳ **当时尚未证实的一条**：`app.path().resource_dir()` 在 Windows 上是否就是 exe 所在目录。
 
-### 最后一条也证实了：读 Tauri 自己的源码，而不是启动 GUI
+### 这一条后来的依据是**实现**，不是文档（原先引错了地方）
 
-`tauri 2.12.1` 的 `src/path/desktop.rs:219` 写得很直接：
+⚠ 早先这里引的是 `tauri 2.12.1` 的 `src/path/desktop.rs:219`——
+**那是文档注释**，而且同一段自己写着「this is not a contract」。
+`desktop.rs:231` 的函数体把活转给了 `crate::utils::platform::resource_dir`，
+而 `tauri/src/lib.rs:124` 是 `pub use tauri_utils as utils;`
+⇒ **实现在 `tauri-utils` crate 里，根本不在 `tauri` 里。**
+
+真正决定 Windows 行为的是 `tauri-utils 2.10.1` 的 `src/platform.rs:305`：
 
 ```rust
-/// - **Windows:** Resolves to the directory that contains the main executable.
+if cfg!(target_os = "windows")
+  || ((len >= 2 && parts[len - 2] == "target") || (len >= 3 && parts[len - 3] == "target"))
+    && is_cargo_output_directory(exe_dir)
+{
+  return Ok(exe_dir.to_path_buf());
+}
 ```
 
-exe 落在 `target/release/chat-servant-app.exe` ⇒ `resource_dir()` 就是 `target/release/`
-⇒ `set_models_dir(target/release/models)`，而资源**正是落在那儿**。
+- `cfg!(target_os = "windows")` 在 Windows 上**恒为 `true`** ⇒ `||` 短路 ⇒
+  这个 `if` **无条件成立**，后半段那个「是否在 cargo 输出目录」的判断根本不会求值。
+- 该函数其余分支全是 `#[cfg(target_os = "linux"/"macos"/"ios")]`，
+  **Windows 没有任何别的赋值** ⇒ 进不了这个 `if` 就直接返回
+  `Err(UnsupportedPlatform)`。
 
-⚠ 同一段文档还有一句要照抄：「Although we provide the exact path where this
-function resolves to, **this is not a contract** and things might change in the future.」
-⇒ 这是 Tauri 自己声明的「随时可能变」，所以接线必须有守卫（已有三条），
-不能因为「现在对得上」就当它永久成立。
+⇒ **Windows 上 `resource_dir()` 要么是 exe 所在目录，要么是错误，不可能是别处。**
+这比文档硬：文档说「不是契约」，代码说的是「Windows 分支根本没有第二条路」。
 
-⇒ **四段全部接上了**：
+⚠ 文档里那句「not a contract」仍要留着——它管的是**将来**（若给 Windows 换实现就会变），
+所以那三条守卫必须留着，不能因为「现在对得上」就当它永久成立。
+
+### 真打安装包：两种安装器的落点一致
+
+`pnpm tauri build`（**不带** `--no-bundle`），`BUILD_EXIT=0`，编译 4m28s，
+出 **msi 65.41 MiB** 与 **nsis 58.62 MiB**。
+
+| 装法 | 验法 | exe | 权重 | 结论 |
+|---|---|---|---|---|
+| NSIS | `7z l` 装它自己 | `chat-servant-app.exe` | `models\ppocrv6-small\` | 同级 |
+| MSI | `msiexec /a` 展开到 `target/probe/msi-admin` | `PFiles\chat-servant\` | `PFiles\chat-servant\models\ppocrv6-small\` | 同级 |
+
+三个权重文件的字节数与源文件**逐一对上**
+（9,929,594 / 21,234,383 / 74,947）⇒ 安装器没压缩改写它们。
+
+⚠ `msiexec /a` 是**管理安装**：只展开文件、不写注册表、不装东西，
+所以整次验证没在 C 盘留痕（符合「产物一律留项目盘」那条纪律）。
+
+⇒ **四段全部接上了**，且第 2、3 段现在覆盖到**真安装器**：
 
 | 段 | 状态 | 证据 |
 |---|---|---|
 | 编译期常量互相认（`ModelSet` / `resources` / 外壳 join） | ✅ | 三条守卫，退回旧写法当场红 |
-| 打包期把权重复制过去 | ✅ | `target/release/models/ppocrv6-small/` 三个文件齐全 |
-| 运行期找到那个目录 | ✅ | `resource_dir()` = exe 目录（Tauri 源码） |
-| 那份权重能加载能跑 | ✅ | 指过去跑 `xtask ocr --repeat 3`，10 行，无回落 |
+| 打包期把权重复制过去 | ✅ | `--no-bundle` + **msi / nsis 两种安装器内都验过** |
+| 运行期找到那个目录 | ✅ | `tauri-utils` `platform.rs:305`（**读的是实现**，非文档；⚠ 这是**读代码**，没跑 GUI） |
+| 那份权重能加载能跑 | ✅ | 指到 **MSI 展开目录**跑，10 行，553 ms，无回落 |
 
-顺带量到两个一直缺着的数：**exe 77.3 MB**（ORT 静态链进去的那段就在里面，
-`target/` 下确实找不到任何 `onnxruntime.dll`）、**权重 31 MB**。
+顺带量到两个一直缺着的数：**exe 81,042,944 B（77.29 MiB）**、
+**权重 31,238,924 B（29.79 MiB）**。
+
+⚠ **订正**：这里原先写「`target/` 下确实找不到任何 `onnxruntime.dll`」——
+**范围写错了**。复查时 `target/` 下**有 6 个** `onnxruntime*.dll`，
+只是**全在 `target/bench-venv/` 与 `target/uv-cache/`**（Python `onnxruntime`
+包自带的）；交付目录与两个安装器内**一个都没有**。
+
+⚠ 更要紧的是「找不到 dll ⇒ 静态链接」本身是**推理**。已换成正向实测：
+把 `xtask.exe` 单独拷进一个**只有它自己**的目录（`target/probe/isolated/`，
+零个 dll），指向 MSI 展开出来的权重照常跑 —— **10 行、690 ms、无告警**。
+
+**量具自检**：把权重目录改成一个**没有 `models` 子目录**的地方，
+同一份 exe 打出 `WARN chatservant_capture::ocr: PP-OCR 不可用……回落 Windows OCR`。
+⚠⚠ **两种情况的退出码都是 0**（回落是设计内行为，不是错误）
+⇒ **判成败只能看 stderr 里有没有那条 WARN；退出码在这里恒为 0，拿它判会全绿。**
 
 ### 默认值翻了：引擎 → PP-OCR，后端 → ort
 
@@ -1228,10 +1273,12 @@ Rust 的 `var_os` 对空值返回 `Some("")`，而 PowerShell 的 `$env:X = ''` 
 
 ### 本节没做到
 
-1. **只验了 `--no-bundle`，没打真正的安装包**（msi/nsis）。
-   资源拷贝发生在两者之前（实测已证），但**安装器会不会把资源放到别处**
-   （比如 Program Files 下的某个子目录）**没有验**。
-   ⇒ 「装出来的那份包能用」这句话，本节仍然只覆盖到 `--no-bundle` 这一层。
+1. ~~**只验了 `--no-bundle`，没打真正的安装包**（msi/nsis）。~~
+   **2026-10-18 晚已关闭**：`pnpm tauri build` 出 **msi 65.41 MiB / nsis 58.62 MiB**，
+   两种安装器内的权重都落在 **exe 同级** `models/ppocrv6-small/`
+   （MSI 那份是 `PFiles\chat-servant\`），三个文件字节数与源文件逐一对上，
+   且从**展开目录**实测能加载能推理（10 行、553 ms、无回落）。
+   ⇒ 「装出来的那份包能用」现在覆盖到**真安装器**这一层。
 2. ~~**Rust 2.38% 与 rapidocr 0.79% 还差 3 个编辑**，未逐条 diff 确认。~~
    **2026-10-18 晚已关闭**：同一把尺子重算 + `--explain` 逐条定性 +
    `--drop-line` 反证，差距全部来自贴纸区多检出的一个 `V6` 虚检行，
@@ -1239,4 +1286,8 @@ Rust 的 `var_os` 对空值返回 `Some("")`，而 PowerShell 的 `$env:X = ''` 
    （编辑数为 1，但没有一个字认错）。
    产品路径上 `reject_image_text` 会把该行判给 System。
 3. **仍只有这 2 帧 / 17 条**；浅色模式、链接卡片、其它字号依旧没测。
+4. **没装出来并运行过。** 资源落点与权重可加载性都验了，
+   但**装好的那份 app 能起来并认出权重**这一跳没验——
+   `resource_dir()` 的行为是**读实现**得出的（`platform.rs:305`），不是跑出来的。
+   要彻底关掉这一格得真装一次并启动 GUI。
 

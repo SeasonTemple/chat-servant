@@ -166,7 +166,17 @@ fn repo_target_models() -> Option<PathBuf> {
     Some(repo.join("target").join("models"))
 }
 
-/// `<可执行文件所在目录>/models`。发布形态用；开发时会被上一条抢先。
+/// `<可执行文件所在目录>/models`。
+///
+/// ⚠ **装机形态正常情况下走不到这一条**：Tauri 外壳在 `setup()` 里就调
+/// [`set_models_dir`]（`ui/src-tauri/src/main.rs:25`），那是查找顺序的第 2 位，
+/// 先于本条命中。唯一还能轮到它的情况是 `resource_dir()` 返回 `Err`、
+/// 那次 `set_models_dir` 压根没被调用——而 Windows 上 `resource_dir()`
+/// 只在 `UnsupportedPlatform` 时才出错（tauri-utils `platform.rs:305`
+/// 的 `cfg!(target_os = "windows")` 恒真短路，Windows 没有别的分支）。
+///
+/// 早先这里写的是「发布形态用；开发时会被上一条抢先」——**前半句是错的**：
+/// 发布形态走的是第 2 位，不是本条。
 fn exe_sibling_models() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     Some(exe.parent()?.join("models"))
