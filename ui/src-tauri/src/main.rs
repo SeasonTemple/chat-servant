@@ -23,15 +23,19 @@ fn main() {
             //   `Windows.Media.Ocr`，功能不受影响（见 ADR-0002）。
             //   所以这里只记一条日志，不 panic。
             if let Ok(dir) = app.path().resource_dir() {
-                let models = dir.join("models");
+                let models = dir.join(BUNDLED_MODELS_DIR);
                 chatservant_capture::ocr_pp::set_models_dir(&models);
                 if !models
                     .join(chatservant_capture::ocr_pp_pipeline::KEYS_FILE)
                     .is_file()
                 {
+                    // 只说**事实**（这里没有权重），不说**后果**。
+                    // 早先这里写死「走 Windows.Media.Ocr」——那是默认引擎
+                    // 恰好为 WinRT 时的后果；一旦翻了默认，这句话就开始撒谎，
+                    // 而撒谎的告警比没有告警更坏：人会照着它去找一个不存在的原因。
                     tracing::info!(
                         dir = %models.display(),
-                        "装包里没有 PP-OCR 权重，走 Windows.Media.Ocr"
+                        "装包里没有 PP-OCR 权重；选到 PP-OCR 时会退回 Windows OCR"
                     );
                 }
             }
@@ -249,6 +253,17 @@ fn init_tracing() {
 /// 现在单一出处是 `contract.rs`。
 pub use crate::contract::events;
 
+/// 装包里权重落在 `resource_dir()` 下的**哪一层**。
+///
+/// 这个字面量出现在**两个地方**——`tauri.conf.json` 的 `bundle.resources` 映射目标，
+/// 和 [`main`] 的 `setup` 里那次 `dir.join(...)`。两处任一改错，
+/// 装包**照样成功**、权重**照样没进去**、产品**照样静默退回 Windows OCR**，
+/// 而且 Tauri 自己不报错（它只管「源路径存不存在」）。
+///
+/// 所以它必须是**一个常量**，由
+/// [`wiring_tests::the_bundled_models_dir_is_the_one_the_shell_joins`] 钉住两侧一致。
+const BUNDLED_MODELS_DIR: &str = "models";
+
 /// **`bundle.resources` 与 `ModelSet` 的相对路径必须指向同一处。**
 ///
 /// 装机后 `resource_dir()/models/ppocrv6-small/` 才是权重真正落地的位置，
@@ -292,6 +307,49 @@ fn assert_resources_and_model_set_agree() {
 
 #[cfg(test)]
 mod wiring_tests {
+    use super::BUNDLED_MODELS_DIR;
+
+    /// **外壳 join 的那层目录，必须就是 resources 映射目标的第一段。**
+    ///
+    /// 这是同一条接线的**第三块**，早先没人盯：
+    /// [`super::assert_resources_and_model_set_agree`] 只比了
+    /// 「conf 里有 `ppocrv6-small`」与「`ModelSet` 的文件名以它开头」，
+    /// **没比外壳那次 `dir.join(..)`**。
+    ///
+    /// 后果与另两处一样：把常量改成 `resources` 而 conf 还写 `models/`
+    /// ⇒ 装包成功、权重进去、产品找不到、静默退回 WinRT，且 Tauri 不报错
+    /// （它只管「源路径存不存在」）。
+    #[test]
+    fn the_bundled_models_dir_is_the_one_the_shell_joins() {
+        let conf = include_str!("../tauri.conf.json");
+        let prefix = "ppocrv6-small";
+        // 只看**源路径指向 target/models 的那些条目**——将来加图标之类
+        // 别的资源时，不该被这条判为不合法。
+        let mut checked = 0usize;
+        for line in conf.lines().filter(|l| l.contains("target/models/")) {
+            let Some((_, dest)) = line.split_once("\": ") else {
+                panic!("resources 条目解析不出来（格式变了？）：{line}");
+            };
+            let dest = dest.trim().trim_matches(|c| c == ',' || c == '"');
+            let first = dest.split('/').next().unwrap_or_default();
+            assert_eq!(
+                first, BUNDLED_MODELS_DIR,
+                "resources 目标 `{dest}` 的第一段与外壳 join 的 \
+                 BUNDLED_MODELS_DIR(`{BUNDLED_MODELS_DIR}`) 不一致"
+            );
+            assert!(
+                dest.starts_with(&format!("{BUNDLED_MODELS_DIR}/{prefix}")),
+                "resources 目标 `{dest}` 不在 `{BUNDLED_MODELS_DIR}/{prefix}/` 底下"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "tauri.conf.json 的 bundle.resources 里**一条权重映射都没有**——\
+             装包不会带权重，产品会静默退回 Windows OCR"
+        );
+    }
+
     /// 装机形态那条接线**失败时完全静默**，所以必须有测试盯着。
     ///
     /// 这条测试存在的理由是它验的是**两份配置之间的一致性**，
