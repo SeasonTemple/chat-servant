@@ -131,7 +131,9 @@ pwsh -NoProfile -File scripts\gate.ps1
 
 Encoding scan · `cargo fmt` · `cargo clippy -D warnings` · `cargo test` ·
 secret-scan · `cargo deny check` · `svelte-check` · lint + svelte-autofixer ·
-`vite build`. `.github/workflows/ci.yml` mirrors it step for step.
+`vite build`. `.github/workflows/ci.yml` mirrors it step for step — and
+`scripts/check-gate-parity.ps1` is what makes that claim true: it derives the
+step list from `gate.ps1` and fails if `ci.yml` misses any of them.
 
 > Read the `GATE: ALL GREEN` / `GATE: FAILED` line, not just the exit code.
 
