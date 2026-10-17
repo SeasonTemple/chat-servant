@@ -90,7 +90,12 @@ shell 是 PowerShell。**复杂命令一律落 `.ps1` 用 `pwsh -NoProfile -File
 ```text
 真实微信画面
   → WGC 抓帧（不受遮挡影响，实测 6/9 采样点被盖住照样跑通）
-  → 整帧 2x 最近邻放大 → Windows.Media.Ocr 离线识别
+  → 裁到消息区（`ViewPlan::PPOCR`：ChatPane + 1×）→ PP-OCRv6 small 离线识别
+    ⚠ **2026-10-18 订正**：原文写「整帧 2x 最近邻放大 → Windows.Media.Ocr」，
+    那是 **WinRT 那条路**（`ViewPlan::WINRT`：WholeFrame + 2×），而它现在已是
+    **显式回退**（`CHATSERVANT_OCR=winrt`）。默认引擎自 2026-10-18 起是 PP-OCRv6 small
+    + ONNX Runtime，**看的是裁剪件、原生 1×**——两半都不再是默认路径。
+    判据：`crates/perceive/src/pipeline.rs` 的 `ViewPlan`，由引擎决定（票 39 实测）。
   → 逐行归类（我 / 对方 / 标题 / 碎片 / 图片内字）
   → 头部 400x40 像素指纹锁会话
   → 真实模型：判断意图 → 起草候选 → 按概率排序
@@ -216,8 +221,16 @@ ROI 带子 2x   4 行，读不到「乐」
 ```
 
 `Windows.Media.Ocr` **需要行周围有内容才收**，裁得越紧漏得越多。
-现方案：**永远 OCR 整帧（2x 最近邻），行框换算到消息区坐标后再按 ROI 过滤**。
-不要改回裁 ROI 带子。
+**这条只对 WinRT 成立。** WinRT 那条路的方案是：**永远 OCR 整帧（2x 最近邻）**，
+行框换算到消息区坐标后再按 ROI 过滤。不要改回裁 ROI 带子。
+
+⚠⚠ **2026-10-18 订正：原文这段没有限定引擎，而默认引擎已经不是 WinRT。**
+**PP-OCRv6 的结论正相反**：整帧 1146 ms / 50 行，**裁到消息区 455 ms / 5 行，
+而且读得更准**（票 39 实测）⇒ 默认路径**就是裁剪**，
+由 `ViewPlan::PPOCR = { ChatPane, upscale: 1 }` 决定，由引擎自己带。
+⇒ **别把这条禁令套到 PP-OCR 上**：照着原文去「改回整帧」，
+等于把默认引擎那份已实测的提速与提准一起撤掉。
+判据：`crates/perceive/src/pipeline.rs` 的 `ViewPlan`，**两个引擎的值不同**。
 
 ### 4.4 空格阈值不要拍脑袋
 

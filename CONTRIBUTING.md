@@ -5,7 +5,8 @@
 
 ## 开发环境
 
-**只支持 Windows。** 捕获链路走 Windows Graphics Capture + `Windows.Media.Ocr`，
+**只支持 Windows。** 捕获链路走 Windows Graphics Capture + 本地离线 OCR
+（默认 **PP-OCRv6 small + ONNX Runtime**；`Windows.Media.Ocr` 降为显式回退），
 没有等价实现——在 Linux 上它连编译都过不了（`crates/capture` 整块是 Win32 FFI）。
 
 ```powershell
