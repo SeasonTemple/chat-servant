@@ -25,6 +25,18 @@ jobs:
   # 门：发布前再跑一遍完整门禁，红则不发。
   verify:
     runs-on: windows-latest
+    # ⚠⚠ **同一个缺陷的第二个现场**（2026-10-18 dry run 39036210343 当场抓到）。
+    #
+    # 这一步跑 cargo 时**权重还没取**（取权重在 build job 里，晚得多），
+    # 而 tauri-build 的 build script 在每个 cargo 步骤都会遍历 `bundle.resources`，
+    # glob 匹配为空**无条件**抛 `GlobPathNotFound` ⇒ verify 必红，
+    # 于是 `build` job 被 needs 连坐跳过，**发版链路一步都走不到**。
+    #
+    # 我先前只在 ci.yml 上修了同一个问题，于是它在隔壁文件原样复发。
+    # verify 不打包，所以处理方式与 CI 相同：把映射 null 掉。
+    # 细节与「为什么必须是 null 而不是 {}」见 ci.yml 里的长注释。
+    env:
+      TAURI_CONFIG: '{"bundle":{"resources":null}}'
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable

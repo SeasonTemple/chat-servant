@@ -197,7 +197,13 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001 - 缺 rapidocr 时要能说清缺什么
         print(f"取不到 rapidocr 的模型表：{e}", file=sys.stderr)
         print("本脚本刻意不在本地硬编 URL/SHA256 —— 请先装 rapidocr：", file=sys.stderr)
-        print("    uv run --with rapidocr --with omegaconf python scripts/fetch_models.py", file=sys.stderr)
+        # 两条路都给：`uv` **不在 GitHub 的 Windows runner 镜像里**
+        # （actions/runner-images，Windows2025，image 20261013.288.2，Tools 与
+        # Package Management 两段 60+ 工具中无它），所以 release.yml 走的是 pip。
+        # 这里只给 uv 会让从 CI 日志过来的人去装一个装不上的东西。
+        print("    python -m pip install rapidocr omegaconf   # CI 用的就是这条", file=sys.stderr)
+        print("    uv run --with rapidocr --with omegaconf python scripts/fetch_models.py",
+              file=sys.stderr)
         return 2
 
     # 这一条**不需要权重在场、也不需要网络**，所以第一个跑：
