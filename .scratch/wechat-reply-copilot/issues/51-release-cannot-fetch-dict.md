@@ -148,6 +148,56 @@ publish 的资产 glob 会拿到空再 throw。**这一步是必然失败的。*
 ——这与「三处文档都说对应并不让那句话更真一点」是同一个陷阱。
 
 
+## ✅ 已实测：dry run 第一次把权重真正取回来
+
+run `39038993181`（dry run，sha `33ec2b5`）。这是本项目**第一次**在干净
+runner 上把 PP-OCR 权重取回来并通过校验：
+
+| 步 | 结果 |
+|---|---|
+| `verify`（fmt + clippy + test） | ✅ 缺陷①′ 的修法在真 runner 上生效 |
+| `Setup | Python` + `pip install rapidocr omegaconf` | ✅ 替代 uv 的方案成立（Python 3.12.10） |
+| **`Fetch PP-OCR weights`** | ✅ 上一次就是死在这里（cp1252），修后过了 |
+| **`Verify weights before bundling`** | ✅ 三个文件齐全、SHA256 对得上 |
+| **`Build msi + nsis`** | ✅ **Tauri release 构建第一次在任何 runner 上跑通** |
+| `Verify weights landed in the bundle` | ❌ ← 缺陷⑤ |
+
+## ⚠⚠ 缺陷⑤：装包核对步骤**查错了地方**（不是路径错，是空间错）
+
+```powershell
+Get-ChildItem $BundleDir -Recurse -Include '*.onnx','ppocrv6_dict.txt'
+```
+
+这找的是**打包目录里的散文件**，而 `bundle.resources` 的内容进的是
+**安装包内部**（`<安装目录>\models\ppocrv6-small\`）。两者不是同一个空间
+⇒ 必然找不到。而权重其实好好地在装包里。
+
+⚠ **我在 40 分钟前刚犯过同一个错**：当时我看着 `target/release/bundle/`
+说「产物里没有权重」，随后自己订正了。这次是同一个错误在 workflow 里。
+
+### 本机拿真装包验到的结果（tier 3）
+
+| 装包 | 查法 | 结果 |
+|---|---|---|
+| NSIS `…_x64-setup.exe` | `7z l` 按**路径**匹配（归档保留原名） | `models\ppocrv6-small\` 下三个**全在** |
+| MSI `…_x64_en-US.msi` | `7z e` 抽流后按**体积**匹配 | 抽出 4 个流：81,042,944 / **21,234,383** / **9,929,594** / **74,947** 字节 |
+
+后三个与 det / rec / dict **逐字节等长**。
+
+⚠ MSI 那边只能用体积，因为它的内部流名是 `PathFile_I<hash>`——**文件名被
+哈希掉了**；而且 `7z l` 对 MSI **只列出一个 `app.cab` 不下沉**（实测只解析出
+1 个体积，而真实流有 4 个），必须 `7z e` 抽取。
+⇒ MSI 是**代理判据**，名字级判据由 NSIS 提供，两者都过才算数。
+体积是**当场从刚取回来的权重文件读的**，不是写死的常量。
+
+### 修法
+
+新增 `scripts/verify_bundle.ps1`（可复用，本地与 CI 跑同一份代码），
+`release.yml` 那一步改为调它。目录优先取 `$env:BUNDLE_DIR`，
+让那个 env 仍是**唯一出处**——否则脚本里再写一遍字面量，
+等于刚修掉的「同一路径三份副本」又回来了。
+
+
 ## 守卫（两处，都自证过）
 
 ### `scripts/check-gate-parity.ps1` 的第二条不变量
@@ -330,7 +380,12 @@ PyPI 来源没变、供应链面没变，去掉的只是「假定有个工具」
 - [x] 顺带订正我自己搞错的一处结论：「装包里没有权重」是查错了地方——
       正确查法是 `target/{release,debug}/models/ppocrv6-small/`，三个文件都在，
       **`bundle.resources` 是生效的**
-- [ ] **dry run 跑通到底**（缺陷④修完后重派；`tauri build` 那一段尚未在任何 runner 上跑过）
+- [x] **dry run 第一次把权重真正取回来**：run `39038993181`，
+      取权重 / 核权重 / `Build msi + nsis` 三步全 ✅（Tauri release 构建首次在任何
+      runner 上跑通），并抓出缺陷⑤
+- [x] **缺陷⑤ 装包核对查错了空间**：改调 `scripts/verify_bundle.ps1` 翻安装包内部，
+      本机用真装包验过（NSIS 路径级 3/3、MSI 体积级 3/3）
+- [ ] **dry run 跑到最后一步**（`Verify weights landed in the bundle` → dry run 收尾）
 - [ ] **push 触发时 `inputs.dry_run` 为空 ⇒ 照常发布**（语义推理，验证它要打 tag）
 - [ ] **跑通一次真实发版**（需授权打 tag）
 

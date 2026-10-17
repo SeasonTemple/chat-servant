@@ -160,18 +160,20 @@ jobs:
       # 「配置里写了 resources」不等于「文件真的进去了」——
       # 路径写错时 Tauri 未必报错，而产品侧的表现是
       # 「装上了，但 OCR 一直是慢的那条路」。
+      #
+      # ⚠⚠ **这里原先内联的那段查错了地方**（2026-10-18 dry run `39038993181` 红）：
+      #   `Get-ChildItem $BundleDir -Recurse -Include '*.onnx'` 找的是**打包目录里
+      #   的散文件**，而 `bundle.resources` 的内容进的是**安装包内部**
+      #   （`<安装目录>\models\ppocrv6-small\`）。两者不是一个空间 ⇒ 必然找不到。
+      #   而权重其实好好地在装包里（NSIS 的 `7z l` 直接列得出三个文件）。
+      #
+      # 现在调 `scripts/verify_bundle.ps1`：它**翻安装包内部**，而且把查法与理由
+      # 都打在日志里（NSIS 按路径、MSI 按体积——MSI 内部流名是哈希）。
+      # 本地拿真装包验过：MSI 抽出的流是 21,234,383 / 9,929,594 / 74,947 字节，
+      # 与三个权重文件逐字节等长。
       - name: Verify weights landed in the bundle
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $root = $env:BUNDLE_DIR
-          if (-not (Test-Path $root)) { throw "没找到打包产物目录：$root" }
-          $hit = Get-ChildItem -Path $root -Recurse -Filter 'PP-OCRv6_det_small.onnx' -File
-          if (-not $hit) { throw "装包里没有 det 权重 —— resources 映射写错了？" }
-          Write-Host "装包内权重：$($hit[0].FullName)"
-          $n = (Get-ChildItem -Path $root -Recurse -Include '*.onnx','ppocrv6_dict.txt' -File).Count
-          Write-Host "装包内 OCR 权重文件数：$n（应为 3）"
-          if ($n -lt 3) { throw "装包里的权重不完整（$n < 3）" }
+        run: ./scripts/verify_bundle.ps1
 
       # 发布说明是**人工策展**的，不是自动生成的：每个 tag 都要有一份
       # docs/release-notes/vX.Y.Z.md，里面同时有 `## 中文` 和 `## English`。
