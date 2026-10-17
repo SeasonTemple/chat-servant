@@ -175,6 +175,60 @@ foreach ($t in 1,2,4,8) {
 `EngineConfig.onnxruntime.enable_cpu_mem_arena: false`。
 本轮遵守「一次只动一个变量」，没有改它，所以它的影响完全未知。
 
+### ⚠ 2026-10-18：上面那张表是 Python 侧的，Rust 侧的值是**外推**的——外推链条在这里
+
+上面整张线程表跑的是 **Python + rapidocr**，而生产是 **Rust + ort**
+（`ocr_pp.rs` 的 `.with_intra_threads(4)`）。⚠ 两侧的实测数**不是同一次运行**，
+所以「Rust 用 4」这个值是外推来的。三段依据，逐条列清：
+
+1. **图优化是同一档。** 上面说 rapidocr 硬编码 `ORT_ENABLE_ALL`，
+   而 Rust 侧写的是 `GraphOptimizationLevel::Level3`——
+   ⚠️ 这两个名字**看起来不一样**，必须查实现，不能凭名字认定。
+   查 `ort 2.0.0-rc.10` 的 `src/session/builder/impl_options.rs:377`：
+
+   ```rust
+   GraphOptimizationLevel::Level3 => ort_sys::GraphOptimizationLevel::ORT_ENABLE_ALL
+   ```
+
+   ⇒ **同一档**。（旧版本 ort 里 `Level3` 的含义与本条不同，
+   换 ort 版本要重查这一行。）
+
+2. **t4 上两侧 e2e 几乎重合。** 上面表里 t4 的 wechat 中位是 **559 ms**，
+   而 Rust release 的稳态实测是 **549~560 ms**（10 行、无回落）。
+   ⚠️ 这是**两个独立进程、两个独立代码路径**的数，它们重合
+   ⇒ 「线程数对性能的作用方式」在两侧一致。
+
+3. **阶段拆分说明为什么 t8 会崩。** 从
+   `target/probe/ocrbench/latency-breakdown-small-t{1,2,4,8}.json` 的 `warm` 看
+   （⚠ 注意是 `warm`，不是 `cold`——冷启首推的数会差近一倍）：
+
+   | 档 | det_infer | rec_infer | cls | e2e 中位（wechat） |
+   |---|---|---|---|---|
+   | 1 | 1164.6 | 234.9 | 9.3 | 1463.8 |
+   | 2 | 651.8 | 137.4 | 7.1 | 860.3 |
+   | **4** | **389.5** | **96.1** | 6.9 | **558.8** |
+   | 8 | 551.0 | **362.4** ⚠ | 7.7 | 1264.8 |
+
+   ⇒ **det 与 rec 都是在 4 最优**，而 t8 时 **rec 劣化 3.8 倍**。
+   机制上讲得通：rec 的输入高固定 48、宽按框算，**图很小**，
+   开 8 线程几乎全是调度开销；det 输入是缩放到 736 那一档的大图，
+   受益有限（389 → 551 ms 反而变慢）。
+   ⚠ 而 det 与 rec 共用同一个 `intra_op_num_threads`
+   （`with_intra_threads` 是 **per-session** 的）⇒ 4 对两者同时最优，
+   这就是它值得写死的原因。
+
+⚠ **外推的边界**——以下任一变化都要在 Rust 侧重扫，别拿本文的数字当结论：
+
+- 换 `ort` 版本（`Level3` 的含义随版本变，见第 1 条）
+- 换 CPU / 换物理核数（上面 4 之所以最优，是因为本机只有 **6 个物理核**）
+- det 输入尺寸变化（736 那一档的缩放逻辑改了，det 与 rec 的最优线程数
+  可能不再重合）
+
+⇒ **现状：Rust 侧没重扫，但外推链条完整，且 t4 上两侧实测重合。**
+⚠ 这不构成「已验证」。要变成「已验证」得在 Rust 侧加一个可配的
+`intra_op_num_threads` 再跑四档——**成本是改代码 + 四轮重编**，
+而收益只在换机器/换版本时才兑现。
+
 ## tiny vs small
 
 ### 权重出处（可复现，带校验）
