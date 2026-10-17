@@ -107,19 +107,35 @@ pub enum OcrError {
 /// **PP-OCR 是增强不是必需**：没装权重、或它跑挂了，**都必须继续用 WinRT**，
 /// 而不是在界面上报错。一台没下模型的机器照样要能聊天。
 ///
-/// 想强制走某一条：`CHATSERVANT_OCR=ppocr` 走 PP-OCRv4（没权重会回落并记一条
-/// warning），`CHATSERVANT_OCR=winrt` 强制 WinRT。
+/// 想强制走某一条：`CHATSERVANT_OCR=ppocr` 走 PP-OCR（没权重会回落并
+/// **`warn!` 报一次**，不是每帧一条），`CHATSERVANT_OCR=winrt` 强制 WinRT。
 /// **默认 `auto` 恒为 WinRT**——「目录里碰巧有权重」不算换引擎的授权，
 /// 理由见 [`engine_choice`] 里的注释（2026-10-18 改）。
+/// 回落这件事**已经报过了吗**。
+///
+/// 回落是**持续状态**而不是事件：PP-OCR 挂掉时每一帧都会走到这里。
+/// 早先按帧记 `info!`，回落期间日志会被刷爆——而刷爆的真正代价是
+/// **第一条被淹掉之后没人再看见它**。
+static PPOCR_FALLBACK_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub fn recognize(frame: &Frame) -> Result<OcrText, OcrError> {
+    use std::sync::atomic::Ordering;
+
     match engine_choice() {
         Engine::Ppocr => {
-            let out = crate::ocr_pp_pipeline::recognize(frame);
-            match out {
-                Some(t) => return Ok(t),
-                None => {
-                    tracing::info!("PP-OCRv4 不可用（无权重或推理失败），本轮回落 WinRT");
-                }
+            if let Some(t) = crate::ocr_pp_pipeline::recognize(frame) {
+                // 恢复了就把闸复位，下次再坏时照样报。
+                PPOCR_FALLBACK_REPORTED.store(false, Ordering::Relaxed);
+                return Ok(t);
+            }
+            if !PPOCR_FALLBACK_REPORTED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "PP-OCR 不可用（无权重或推理失败），本轮起回落 Windows OCR —— \
+                     若这不是你预期的，先查权重目录与 bundle.resources 的映射"
+                );
+            } else {
+                tracing::debug!("仍在回落 Windows OCR");
             }
         }
         Engine::Winrt => return recognize_winrt(frame),
@@ -134,20 +150,22 @@ pub fn recognize(frame: &Frame) -> Result<OcrText, OcrError> {
 /// 编译器把「以后再加变体忘了处理」这件事留到了运行期——而 OCR 选错路的后果
 /// 是**静默读到别的文字**，不是报错。
 ///
-/// ## 「回落」是静默的，而那条 warning 在探针里看不见（2026-10-15）
+/// ## 「回落」曾经**真的**看不见，现在看得见了（2026-10-15 踩，2026-10-18 修）
 ///
-/// [`recognize`] 回落时只有 [`crate::ocr_pp_pipeline::recognize_in`] 里的一句
-/// `tracing::warn!`。而 `xtask` 的日志过滤器是
-/// `with_env_filter("xtask=debug,wgc=trace")`——**没有全局档位**，
-/// 于是 `chatservant_capture` 这个 target 的记录一律被丢掉。
+/// [`recognize`] 回落时只有一句 `tracing::warn!`。而 `xtask` 的日志过滤器
+/// 曾经写成 `"xtask=debug,wgc=trace"`——**`EnvFilter` 没有全局档位时，
+/// 未列出的 target 一律被丢掉**，于是 `chatservant_capture` 的记录整条看不见，
+/// 包括这一句。
 ///
 /// 后果实测过一次：PP-OCR 每帧都失败回落 WinRT，而 `xtask ocr` 打出的是
 /// **WinRT 的逐字输出**，看上去像「PP-OCR 把整张图切成单字框」。
 /// 排查方向因此整段跑偏——调了半天的 det 参数，而 det 一次都没真正跑起来。
 ///
-/// **判据**：PP-OCR 跑 det 要几秒（debug 构建十几秒），
+/// ⇒ 过滤器现在带全局档位（`xtask` 的 `LOG_FILTER`），
+/// 并由 `the_log_filter_has_a_global_level` 钉住，免得改回去。
+///
+/// **判据**（不依赖日志也能分辨）：PP-OCR 跑 det 要几秒（debug 构建十几秒），
 /// WinRT 只要 300ms 量级。两个数字差一个量级，就说明你看到的是哪条路。
-/// 要看那条 warning，用能覆盖 `chatservant_capture` 的过滤器再跑一次。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Engine {
     Ppocr,
