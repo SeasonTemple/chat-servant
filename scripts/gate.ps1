@@ -1,8 +1,8 @@
 # 参数只在**前两行**之内、不带副作用：CI 与 AGENTS.md 里那句
-# `pwsh -NoProfile -File scripts/gate.ps1` 必须继续表示「九步全跑」。
+# `pwsh -NoProfile -File scripts/gate.ps1` 必须继续表示「每一步都跑」。
 #
 # -Skip / -Only 是给**开发内循环**用的（2026-10-16 加）。加它们的理由是实测：
-# 一轮九步里 `cargo deny check` 要联网拉 advisory-db、`pnpm build` 要全量打包，
+# 一轮里 `cargo deny check` 要联网拉 advisory-db、`pnpm build` 要全量打包，
 # 改一个 .svelte 时这两步与改动完全无关，却各要几十秒。
 # 默认路径一个字节都没变，所以 CI / release 与文档里那句话仍然成立。
 param(
@@ -149,7 +149,7 @@ if ($stepTime.Count -gt 0) {
 }
 
 # 带 -Skip / -Only 的运行**不是完整门禁**。这行必须紧挨着结论，
-# 否则「跳过 deny 之后全绿」会被读成「九步全绿」——那正是 2026-10-11
+# 否则「跳过 deny 之后全绿」会被读成「全绿」——那正是 2026-10-11
 # 踩过的同一个形状（局部结论被当成全局结论，还据此提交了）。
 if ($Skip.Count -gt 0 -or $Only.Count -gt 0) {
   Write-Output "GATE_SCOPE: PARTIAL —— 跳过了部分步骤（-Skip $($Skip -join ',') / -Only $($Only -join ',')），结论只覆盖跑过的那几步"
