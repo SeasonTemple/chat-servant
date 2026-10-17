@@ -1988,4 +1988,85 @@ mod filter_tests {
              未列出的 target（含 chatservant_capture）会被整条丢掉"
         );
     }
+
+    /// `scripts/run-app.ps1` 里那条 `RUST_LOG` **真的能解析**。
+    ///
+    /// ⚠ 为什么必须验「能不能解析」而不是只验字符串长相：
+    /// `EnvFilter` 对一条写错的指令是**整条丢弃**，而那正好等于
+    /// 「你什么日志都收不到」——它不报错，只是安静。
+    /// 而这正是改之前那样子的情况：`info,chat_servant=debug`
+    /// **一档都没命中**（实际 target 是 `chat_servant_app` 与两个显式 target）。
+    #[test]
+    fn the_run_app_log_filter_parses() {
+        let filter = run_app_rust_log();
+        tracing_subscriber::EnvFilter::try_new(&filter).unwrap_or_else(|e| {
+            panic!("run-app.ps1 的 RUST_LOG 解析失败（整条被丢弃 ⇒ 什么日志都收不到）：{e}\n  内容：{filter}")
+        });
+    }
+
+    /// **源码里每一个显式 `target:` 都必须在 `run-app.ps1` 的过滤器里被点名。**
+    ///
+    /// 跨文件的不变量：`watch.rs` 用 `chat-servant::watch`（连字符）、
+    /// `commands.rs` 用 `chat_servant::pump`（下划线），两者不一致却都是
+    /// 跑验收时**唯一可信的证据行**（tick/peer/candidates、emit readout phase）。
+    /// 谁新增一个显式 target 而忘了同步诊断脚本 ⇒ 这条红。
+    ///
+    /// ⚠ 判据取**产物**（脚本里那行字），不是某份抄写出来的常量——
+    /// 抄一份就等于把「守卫守的是原件」降级成「守的是副本」。
+    #[test]
+    fn every_explicit_tracing_target_is_named_in_the_run_app_filter() {
+        let filter = run_app_rust_log();
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui/src-tauri/src");
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&src).expect("读 ui/src-tauri/src 失败") {
+            let path = entry.expect("目录项读不出来").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("源码读不出来");
+            for line in text.lines() {
+                let Some(rest) = line.split_once("target: \"").map(|(_, r)| r) else {
+                    continue;
+                };
+                let target = rest.split('"').next().unwrap_or_default();
+                if target.is_empty() {
+                    continue;
+                }
+                checked += 1;
+                let named = filter.split(',').any(|d| {
+                    let (t, _) = d.split_once('=').unwrap_or((d, ""));
+                    t.trim() == target
+                });
+                assert!(
+                    named,
+                    "源码里有显式 tracing target `{target}`（{}），\
+                     但 scripts/run-app.ps1 的 RUST_LOG 没点名它 ⇒ \
+                     跑真机验收时这一路的证据行收不到。\n  过滤器：{filter}",
+                    path.file_name().and_then(|f| f.to_str()).unwrap_or("?")
+                );
+            }
+        }
+        assert!(
+            checked > 0,
+            "一个显式 target 都没扫到 —— 扫描方式坏了，不是源码变了"
+        );
+    }
+
+    /// 从 `scripts/run-app.ps1` 里取出 `RUST_LOG` 的值。
+    fn run_app_rust_log() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/run-app.ps1");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读 {} 失败：{e}", path.display()));
+        text.lines()
+            .filter_map(|l| l.split_once("$env:RUST_LOG"))
+            .find_map(|(_, rest)| {
+                rest.trim()
+                    .trim_start_matches('=')
+                    .trim()
+                    .strip_prefix('\'')
+                    .and_then(|s| s.split_once('\'').map(|(v, _)| v))
+            })
+            .unwrap_or_else(|| panic!("run-app.ps1 里找不到 `$env:RUST_LOG = '...'` 那一行"))
+            .to_string()
+    }
 }

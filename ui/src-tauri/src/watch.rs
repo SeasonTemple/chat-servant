@@ -818,7 +818,18 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                 // 没有这行就只能靠猜；有了它，泄漏源被定位到哪一段一目了然。
                 if ticks % 20 == 1 {
                     tracing::info!(
-                        target: "chat-servant::watch",
+                        // ⚠ **2026-10-18 改：连字符 → 下划线。**
+                        // 本模块**只有这一条**用了 `chat-servant::watch`（连字符），
+                        // 同模块另外两条本来就是 `chat_servant::watch`（下划线），
+                        // 而 `commands.rs` 用 `chat_servant::pump`。
+                        // ⚠ target 字符串对 `EnvFilter` 不透明 ⇒ **一条拼错就等于
+                        // 这一路的日志永远收不到**，而它不报错，只是安静。
+                        // Rust 的 target 惯例是下划线（包名 `chat-servant-app`
+                        // 进到 crate 名会转成 `chat_servant_app`），所以下划线是正解。
+                        // 守卫：`xtask` 的
+                        // `every_explicit_tracing_target_is_named_in_the_run_app_filter`
+                        // ——它扫源码里每一个显式 `target:` 并要求诊断脚本逐个点名。
+                        target: "chat_servant::watch",
                         "tick={ticks} peer={:?} candidates={}",
                         s.peer,
                         s.candidates.len()
