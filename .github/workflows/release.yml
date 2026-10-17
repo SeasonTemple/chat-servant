@@ -84,6 +84,21 @@ jobs:
       # 两者不能混用——dispatch 的 ref_name 是分支名（"main"），
       # 拿它当 tag 会去发布一个叫 main 的 release，checkout 也会检出分支而不是 tag。
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      # 装包产物目录。
+      #
+      # ⚠⚠ **不是** `ui/src-tauri/target/release/bundle`——本文件原先三处都写的
+      #   那个路径，**三处都错**（核对装包、publish 资产、dry run 收尾）。
+      #   `ui/src-tauri` 是**根工作区的成员**，所以 cargo 的 target 目录在工作区根。
+      #   本机实测：`target/release/bundle/msi/chat-servant_0.1.0_x64_en-US.msi`、
+      #   `.../nsis/chat-servant_0.1.0_x64-setup.exe` 都在那儿，
+      #   而 `ui/src-tauri/target` **根本不存在**。
+      #   ⇒ 「核对装包内有权重」会 throw「没找到打包产物目录」，
+      #     publish 的资产 glob 会拿到空再 throw——即使 `tauri build` 成功。
+      #
+      #   抽成 env 就是为了让这个路径**只存在一处**：三份副本里的任何一份
+      #   漂了，两份还对的读者不会察觉（这与本仓那句「三处文档都说对应
+      #   并不让那句话更真一点」是同一个陷阱）。
+      BUNDLE_DIR: target/release/bundle
     steps:
       - uses: actions/checkout@v6
         with:
@@ -149,7 +164,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $root = 'ui/src-tauri/target/release/bundle'
+          $root = $env:BUNDLE_DIR
           if (-not (Test-Path $root)) { throw "没找到打包产物目录：$root" }
           $hit = Get-ChildItem -Path $root -Recurse -Filter 'PP-OCRv6_det_small.onnx' -File
           if (-not $hit) { throw "装包里没有 det 权重 —— resources 映射写错了？" }
@@ -175,7 +190,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $note = "docs/release-notes/$env:TAG.md"
-          $assets = Get-ChildItem -Path 'ui/src-tauri/target/release/bundle' -Recurse -Include *.msi,*.exe -File
+          $assets = Get-ChildItem -Path $env:BUNDLE_DIR -Recurse -Include *.msi,*.exe -File
 
           if (-not $assets) {
             throw "没有找到安装包产物，bundle 目录可能是空的"
@@ -217,7 +232,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $assets = Get-ChildItem 'ui/src-tauri/target/release/bundle' -Recurse -Include *.msi,*.exe -File -ErrorAction SilentlyContinue
+          $assets = Get-ChildItem $env:BUNDLE_DIR -Recurse -Include *.msi,*.exe -File -ErrorAction SilentlyContinue
           Write-Output '=================================================='
           Write-Output 'DRY RUN —— **没有创建 release、没有上传任何资产、没有打 tag**'
           Write-Output "构建产物（只存在于 runner 上，任务结束即丢弃）：$($assets.Count) 个"
