@@ -1,9 +1,9 @@
-//! PP-OCRv4 的**推理管线**：预处理 → det 后处理 → rec 后处理。
+//! PP-OCR 的**推理管线**：预处理 → det 后处理 → rec 后处理。
 //!
 //! # 与 [`crate::ocr_pp`] 的分工
 //!
 //! [`ocr_pp`] 只管「把 ONNX 编译成能跑的图、把输出取出来」——那层与模型
-//! 无关。**这一层全是 PP-OCRv4 特有的约定**，换模型就得重写。
+//! 无关。**这一层全是 PP-OCR 特有的约定**，换模型就得重查。
 //!
 //! # 三件事，原型代码里对应三段
 //!
@@ -31,15 +31,73 @@ use tract_onnx::prelude::{RunnableModel, TypedFact, TypedOp};
 use crate::ocr::{OcrError, OcrLine, OcrText};
 use crate::ocr_pp::{self, BLANK, Plan, PpError};
 
+/// 一套权重：**det 文件、rec 文件、词典文件、两个归一化常数、det 的尺寸策略**，
+/// 全部的**唯一出处**。
+///
+/// 早先这些各写各的字面量，改模型要同时动七八个地方，漏一个就是
+/// 「rec 类数与词典对不上」或者「det 一个框都读不出来」这种**只在真机上暴露**的错。
+/// ⚠ 2026-10-18 实测：v6 的 rec 输出 **18710** 类，
+/// 而 `ppocrv6_dict.txt` 只有 18708 行——差的两个是 CTC 的 blank 与 space，
+/// 与 v4「6623 行文件 / 6625 类输出」同一套约定。见 [`chars_in`]。
+pub struct ModelSet {
+    pub det: &'static str,
+    pub rec: &'static str,
+    pub keys: &'static str,
+    /// 人类可读的名字，只进日志与错误文本。
+    pub label: &'static str,
+    /// det 的 `(x/255 - mean) / std`。
+    pub det_norm: ([f32; 3], [f32; 3]),
+    /// rec 的 `(x/255 - mean) / std`。`(0,0)` 表示**只除 255**，不减均值。
+    pub rec_norm: ([f32; 3], [f32; 3]),
+    /// det 的最短边下限。`0` = 原生尺寸送进去；`736` = 最短边不足就放大到 736。
+    pub det_min_side: u32,
+}
+
+/// **生产用的一套：PP-OCRv6 small。**
+///
+/// 选它而不是 v4 的理由全在 [`docs/adr/0006-ocr-engine-evaluation.md`]：
+/// 同一批真实微信帧上 v6 是 **17/17 零漏检、CER 0.79%**，v4 在真帧上读出过
+/// `419 / 雅扣！手洁双` 这类整行不可用输出（根因是 det 框纵向欠覆盖）。
+///
+/// ⚠ **归一化常数与 v4 完全不同，这三处是本轮实测踩出来的**：
+///
+/// | | v4 mobile | **v6 small（本套）** |
+/// |---|---|---|
+/// | det 归一化 | `(x/255 - [.485,.456,.406]) / [.229,.224,.225]` | **`(x/255 - .5) / .5`** |
+/// | rec 归一化 | `(x/255 - .5) / .5` | **只 `x/255`** |
+/// | det 最短边 | 原生 | **放大到 ≥736** |
+///
+/// 带着 v4 的常数去跑 v6，det 是**一个框都读不出来**（`cargo xtask ocr
+/// target/probe/wechat-chat.png --scale 1` 实测：3 遍全 0 行）。
+/// 这三行数字来自 rapidocr 的 `DetPreProcess` / `Rec` 预处理，
+/// 它是 v6 的**参考实现**，照它抄才不会错。
+///
+/// v4 的权重仍留在 `target/models/` 里可供 A/B，但**代码不再引用它**。
+pub const V6_SMALL: ModelSet = ModelSet {
+    det: "ppocrv6-small/PP-OCRv6_det_small.onnx",
+    rec: "ppocrv6-small/PP-OCRv6_rec_small.onnx",
+    keys: "ppocrv6-small/ppocrv6_dict.txt",
+    label: "PP-OCRv6 small",
+    det_norm: ([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+    rec_norm: ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+    det_min_side: 736,
+};
+
+/// 生产用的那套。换模型**只改这一行**。
+pub const MODELS: ModelSet = V6_SMALL;
+
 /// det 的权重文件名。**磁盘上就这一个**，没有「按尺寸分文件」这一说。
-pub const DET_MODEL: &str = "ch_PP-OCRv4_det_mobile.onnx";
+pub const DET_MODEL: &str = MODELS.det;
 
 /// rec 的权重文件名。同上，**只有一个**。
 ///
 /// 2026-10-15 实测：早先的 [`BucketCache::plan_path`] 按宽度拼出
 /// `ch_PP-OCRv4_rec_mobile_w{w}.onnx`，而磁盘上从没有过这种文件，
 /// 于是每个宽度的 rec 编译都对着一个不存在的路径失败。见 [`BucketCache`]。
-pub const REC_MODEL: &str = "ch_PP-OCRv4_rec_mobile.onnx";
+pub const REC_MODEL: &str = MODELS.rec;
+
+/// 词典文件名。与 [`DET_MODEL`] 同源，改模型不会漏掉它。
+pub const KEYS_FILE: &str = MODELS.keys;
 
 /// det 的总下采样倍数。**8 次步长 2 的下采样 = 32。**
 ///
@@ -60,18 +118,30 @@ pub const DET_STRIDE: usize = 32;
 /// 一行 6 个字的墨迹高 **12px**，而 det 给的框高只有 **8px**，
 /// 且框整体上移约 6~7px —— rec 拿到的是一个**被削掉下半截**的字，
 /// 识别结果只能是乱码。
-pub const DET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-pub const DET_STD: [f32; 3] = [0.229, 0.224, 0.225];
+/// det 的归一化常数。**跟着 [`MODELS`] 走**，v6 与 v4 不同（见其文档）。
+///
+/// v4 那一代取自 PaddleOCR 的 `DetNormalizeImage`
+/// （`mean=[0.485,0.456,0.406]`、`std=[0.229,0.224,0.225]`）；
+/// v6 是 `mean = std = 0.5`。
+///
+/// ⚠ 早先这里写错过一次 `std = [0.456, 0.456, 0.456]`——把 mean 的第二个分量
+/// 抄进了 std。后果是**送进网络的对比度只有应有值的一半**，
+/// DB 头的 sigmoid 输出整体偏低，按 [`DET_THRESH`] 二值化之后
+/// 只剩笔画最密的核心留下来。
+///
+/// 实测后果（`cargo xtask ocr <帧> --stats` 对同一张真帧）：
+/// 一行 6 个字的墨迹高 **12px**，而 det 给的框高只有 **8px**，
+/// 且框整体上移约 6~7px —— rec 拿到的是一个**被削掉下半截**的字，
+/// 识别结果只能是乱码。
+pub const DET_MEAN: [f32; 3] = MODELS.det_norm.0;
+pub const DET_STD: [f32; 3] = MODELS.det_norm.1;
 
-/// rec 的归一化常数。取自 PaddleOCR 的 `RecNormalizeImage`
-/// （`mean = std = [0.5, 0.5, 0.5]`）。
+/// rec 的归一化常数。同样**跟着 [`MODELS`] 走**。
 ///
-/// ## det 与 rec 是**两套**常数，不能共用（2026-10-15 修）
-///
-/// 早先 rec 复用了 det 的 ImageNet 那一套。它们在 PaddleOCR 里
-/// 本来就是分开配的，共用会让 rec 的输入整体偏离训练分布。
-pub const REC_MEAN: [f32; 3] = [0.5, 0.5, 0.5];
-pub const REC_STD: [f32; 3] = [0.5, 0.5, 0.5];
+/// v6 的 rec 是 SVTR_LCNet，**只除 255，不减均值**——`(0,0)/(1,1)`
+/// 就是「不做 `(v - mean)/std`」的写法。
+pub const REC_MEAN: [f32; 3] = MODELS.rec_norm.0;
+pub const REC_STD: [f32; 3] = MODELS.rec_norm.1;
 
 /// PaddleOCR DB 后处理的 `unclip` 外扩比例。
 ///
@@ -125,11 +195,35 @@ pub const DET_MAX_BOXES: usize = 64;
 
 /// det 的输入尺寸：32 的倍数。
 ///
-/// **不缩放比例**——PP-OCRv4 的 det 内部有 `Resize` 按比例缩到 1/4，
-/// 输入给多大就按多大算。取整到 32 的倍数是硬要求（[`DET_STRIDE`]）。
+/// **先按 [`MODELS::det_min_side`] 决定要不要放大，再取整到 32 的倍数。**
+///
+/// 取整到 32 是硬要求（[`DET_STRIDE`]）。放大与否是**模型的约定**：
+/// rapidocr 的 `DetPreProcess` 默认 `limit_type="min"`、`limit_side_len=736`，
+/// 意思是**最短边不足 736 就按比例放大**。PP-OCRv6 的 det 在 14px 小字上
+/// 靠这个放大才把每行连成一条，实测 855x545 的微信帧被放到 1180x736。
+/// `det_min_side = 0` 则是「原生尺寸送进去」，v4 那一代用的就是它。
 pub fn det_size(w: u32, h: u32) -> (usize, usize) {
-    let w = (w as usize).div_ceil(DET_STRIDE) * DET_STRIDE;
-    let h = (h as usize).div_ceil(DET_STRIDE) * DET_STRIDE;
+    det_size_with_min_side(w, h, MODELS.det_min_side)
+}
+
+/// [`det_size`] 的可测版本：最短边下限由调用方给。
+///
+/// 拆出来是因为「取整到 32」与「要不要放大」是**两件要分别钉的事**——
+/// 早先把它们塞在一个函数里，于是给放大规则加了守卫之后，
+/// 量「取整」的三条测试全被 736 顶飞了。拆开各自说得清。
+pub fn det_size_with_min_side(w: u32, h: u32, min_side: u32) -> (usize, usize) {
+    let (mut w, mut h) = (w as f32, h as f32);
+    let min_side = min_side as f32;
+    if min_side > 0.0 {
+        let short = w.min(h);
+        if short < min_side && short > 0.0 {
+            let ratio = min_side / short;
+            w *= ratio;
+            h *= ratio;
+        }
+    }
+    let w = (w.round() as usize).div_ceil(DET_STRIDE) * DET_STRIDE;
+    let h = (h.round() as usize).div_ceil(DET_STRIDE) * DET_STRIDE;
     (w.max(DET_STRIDE), h.max(DET_STRIDE))
 }
 
@@ -403,7 +497,7 @@ pub struct DetStats {
     /// det 的输入尺寸（32 的倍数）。
     pub det_input_w: usize,
     pub det_input_h: usize,
-    /// 概率图的尺寸。PP-OCRv4 的 det 输出与输入同尺寸。
+    /// 概率图的尺寸。det 输出与输入同尺寸（v4/v6 均实测过）。
     pub prob_w: usize,
     pub prob_h: usize,
     /// 二值化后的前景像素数，用来确认阈值没有把图削空或全收进来。
@@ -494,7 +588,7 @@ pub fn det_stats(frame: &Frame) -> Result<DetStats, PpError> {
 // rec 后处理：CTC 解码
 // ────────────────────────────────────────────────────────────────────────
 
-/// CTC 解码。`vals` 是 `[1,T,C]` 展平后的缓冲，`chars` 是 6624 长的词典。
+/// CTC 解码。`vals` 是 `[1,T,C]` 展平后的缓冲，`chars` 是**与 C 等长**的词典。
 ///
 /// 三步，**顺序是 CTC 的定义，不能换**：
 /// 1. 每个时间步取最大类（argmax）
@@ -513,13 +607,18 @@ pub fn ctc_decode(vals: &[f32], shape: &[usize], chars: &[String]) -> (String, f
         return (String::new(), 0.0);
     }
     let (t, c) = (shape[1], shape[2]);
-    if c != chars.len() + 1 {
+    // ⚠ 这里曾经写的是 `c != chars.len() + 1`，**而它一直是错的**：
+    // 词典表早已把末位的 space 类补进去（见 [`chars_in`]），`chars.len()`
+    // 就等于类数，再 `+1` 等于要求模型多输出一类。
+    // 它当年能跑，纯粹是因为词典表当时**少补了 space**——
+    // 歪打正着抵消了。2026-10-18 补上 space 的那一刻，
+    // 整个 rec 静默返回空串：`xtask ocr <真帧> --scale 1` 逐行 0 行。
+    if c != chars.len() {
         // 类数与词典对不上。**这是配置错误，不是识别失败**——
         // 返回空串 + 0 置信度，上游会把它当「这一框没字」。
         tracing::warn!(
             classes = c,
             dict = chars.len(),
-            expected = chars.len() + 1,
             "rec 类数与词典对不上，跳过本框"
         );
         return (String::new(), 0.0);
@@ -856,9 +955,9 @@ pub fn det_file_present(dir: &std::path::Path) -> bool {
     dir.join(DET_MODEL).is_file()
 }
 
-/// 整套 PP-OCRv4 识别。**权重不在就返回 `None`，不是错误。**
+/// 整套 PP-OCR 识别。**权重不在就返回 `None`，不是错误。**
 ///
-/// `None` 的含义是「这台机器没装 PP-OCRv4，请走 WinRT 那条路」。
+/// `None` 的含义是「这台机器没装 PP-OCR，请走 WinRT 那条路」。
 /// 刻意不让它变成 [`PpError`]——那会让「没装模型」和「模型坏了」混成一类，
 /// 而前者是完全正常的配置状态。
 pub fn recognize(frame: &Frame) -> Option<OcrText> {
@@ -878,26 +977,34 @@ pub fn recognize_in(dir: &std::path::Path, frame: &Frame) -> Option<OcrText> {
     match recognize_with(frame, &chars, &cache) {
         Ok(t) => Some(t),
         Err(e) => {
-            tracing::warn!("PP-OCRv4 失败，回落 WinRT：{e}");
+            tracing::warn!("{} 失败，回落 WinRT：{e}", MODELS.label);
             None
         }
     }
 }
 
 /// [`ocr_pp::chars`] 的可测版本：词典路径由调用方给。
+///
+/// **类数必须等于 rec 的输出宽度，而不只是「文件行数 + 1」。**
+///
+/// 实测（2026-10-18）：v6 的 rec 输出 **18710** 类，词典文件 **18708** 行。
+/// 差的是首尾两个约定——**blank 在 0**，**空格在最后一类**
+/// （PaddleOCR 导出时把 space 单独摘出去，不写进词典文件）。
+/// v4 同样是「6623 行 / 6625 类」。
+///
+/// ⚠ 早先这里只 `insert(0, blank)`，少补了尾部那个空格，于是
+/// `chars.len()` 比模型少 1 类。CTC 真预测到最后一类时是**越界下标**，
+/// 而那条路径平时走不到，所以一直没暴露。
 fn chars_in(dir: &std::path::Path) -> Result<Arc<Vec<String>>, PpError> {
-    let raw = std::fs::read_to_string(dir.join("ppocr_keys_v1.txt")).map_err(|e| {
-        PpError::MissingModels(format!(
-            "{}（{e}）",
-            dir.join("ppocr_keys_v1.txt").display()
-        ))
-    })?;
+    let raw = std::fs::read_to_string(dir.join(KEYS_FILE))
+        .map_err(|e| PpError::MissingModels(format!("{}（{e}）", dir.join(KEYS_FILE).display())))?;
     let mut v: Vec<String> = raw
         .lines()
         .map(|l| l.trim_end_matches('\r').to_string())
         .collect();
-    // blank 在 0，文件里的字符整体后移一位。
+    // blank 在 0，文件里的字符整体后移一位；space 在最后一类。
     v.insert(0, String::new());
+    v.push(ocr_pp::SPACE.to_string());
     Ok(Arc::new(v))
 }
 
@@ -1310,40 +1417,66 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    /// **归一化常数必须逐字等于 PaddleOCR 的配置。**
+    /// **归一化常数必须逐字等于当前模型的那一套。**
     ///
-    /// 2026-10-15 实测的两处错：
+    /// ## 这个断言改过两次，两次都是实测打回的
     ///
-    /// 1. det 的 `std` 曾写成 `[0.456, 0.456, 0.456]`——把 mean 的第二个
-    ///    分量抄进了 std，输入对比度只剩一半。真帧上 det 给的框高 8px，
-    ///    而同一行的字形墨迹高 12px，rec 拿到的是被削掉下半截的字。
-    /// 2. rec 曾复用 det 的 ImageNet 常数；PaddleOCR 里 rec 是
-    ///    `mean = std = 0.5`，与 det 分开配。
+    /// 1. **2026-10-15**：det 的 `std` 曾写成 `[0.456, 0.456, 0.456]`——
+    ///    把 mean 的第二个分量抄进了 std，输入对比度只剩一半。真帧上
+    ///    det 给的框高 8px，而同一行的字形墨迹高 12px，rec 拿到的是
+    ///    被削掉下半截的字。
+    /// 2. **2026-10-18**：换 v6 权重后**整套常数都得换**。
+    ///    v6 det 是 `mean = std = 0.5`、v6 rec **只除 255**，
+    ///    继续用 v4 的 ImageNet 常数 ⇒ **det 一个框都读不出来**。
     ///
-    /// 撤掉修复时这条会红。
+    /// ⚠ 所以这条断言的期望值**必须跟着 [`MODELS`] 一起改**，
+    /// 换模型不改它 = 换模型不查预处理。
     #[test]
-    fn the_normalization_constants_match_paddleocr() {
+    fn the_normalization_constants_match_the_active_model() {
         for (got, want, name) in [
-            (DET_MEAN[0], 0.485, "det mean[0]"),
-            (DET_MEAN[1], 0.456, "det mean[1]"),
-            (DET_MEAN[2], 0.406, "det mean[2]"),
-            (DET_STD[0], 0.229, "det std[0]"),
-            (DET_STD[1], 0.224, "det std[1]"),
-            (DET_STD[2], 0.225, "det std[2]"),
-            (REC_MEAN[0], 0.5, "rec mean[0]"),
-            (REC_STD[0], 0.5, "rec std[0]"),
+            (DET_MEAN[0], 0.5, "det mean[0]"),
+            (DET_MEAN[1], 0.5, "det mean[1]"),
+            (DET_MEAN[2], 0.5, "det mean[2]"),
+            (DET_STD[0], 0.5, "det std[0]"),
+            (DET_STD[1], 0.5, "det std[1]"),
+            (DET_STD[2], 0.5, "det std[2]"),
+            // v6 的 rec 只除 255：用 mean=0 / std=1 表达「不减均值」。
+            (REC_MEAN[0], 0.0, "rec mean[0]"),
+            (REC_STD[0], 1.0, "rec std[0]"),
         ] {
             assert!(
                 (got - want).abs() < 1e-6,
-                "{name} = {got}，PaddleOCR 要的是 {want}。写错会让输入偏离训练分布，\
-                 而症状是「框比字矮、识别成乱码」，不会报错"
+                "{name} = {got}，{} 要的是 {want}。写错会让输入偏离训练分布，\
+                 而症状是「框比字矮、识别成乱码」或「一个框都没有」，不会报错",
+                MODELS.label
             );
         }
         // det 的 std 若等于 mean 的某个分量，就是抄串了行——单独钉住这个形状。
         assert!(
-            DET_STD != [DET_MEAN[1]; 3],
+            DET_STD != [DET_MEAN[1]; 3] || DET_MEAN[1] == DET_MEAN[0],
             "det 的 std 又变成 mean[1] 重复了三遍"
         );
+    }
+
+    /// **det 的最短边下限是模型的约定，不能自己拍。**
+    ///
+    /// PP-OCRv6 的 det 在 14px 小字上靠这个放大才把每行连成一条：
+    /// rapidocr 默认 `limit_type="min"`、`limit_side_len=736`，
+    /// 855x545 的微信帧因此被送到 1180x736。
+    ///
+    /// 撤掉这个放大，`cargo xtask ocr target/probe/wechat-chat.png --scale 1`
+    /// 会从 17 行掉到个位数。
+    #[test]
+    fn the_det_input_is_scaled_up_to_the_models_minimum_side() {
+        assert_eq!(MODELS.det_min_side, 736, "v6 的 det 最短边下限是 736");
+        // 855x545：最短边 545 < 736 → 按 736/545 放大 → 1180x736。
+        assert_eq!(
+            det_size(855, 545),
+            (1184, 736),
+            "真帧 1 的 det 输入尺寸变了"
+        );
+        // 已经够大的图不动：1280x1024 的最短边 1024 > 736。
+        assert_eq!(det_size(1280, 1024), (1280, 1024), "大图不该被放大");
     }
 
     /// **det 输入要保住完整对比度。**
@@ -1668,13 +1801,15 @@ mod tests {
     /// 尺寸不对齐会让 pad 算错，输出图与输入对不上，框全错。
     #[test]
     fn the_det_input_is_rounded_up_to_a_multiple_of_32() {
+        // 这一条只量「取整」，所以最短边下限传 0（不放大）——
+        // 放大规则归 `the_det_input_is_scaled_up_to_the_models_minimum_side` 管。
         // 1161 → 1184（37×32）、893 → 896（28×32）
-        assert_eq!(det_size(1161, 893), (1184, 896));
-        assert_eq!(det_size(1024, 768), (1024, 768));
+        assert_eq!(det_size_with_min_side(1161, 893, 0), (1184, 896));
+        assert_eq!(det_size_with_min_side(1024, 768, 0), (1024, 768));
         // 已对齐的不能被推高一档。
-        assert_eq!(det_size(320, 64), (320, 64));
+        assert_eq!(det_size_with_min_side(320, 64, 0), (320, 64));
         // 小于 32 的要有下限，否则下采样后是空图。
-        assert_eq!(det_size(4, 4), (32, 32));
+        assert_eq!(det_size_with_min_side(4, 4, 0), (32, 32));
     }
 
     /// **rec 的宽度必须取到 8 的倍数。**
@@ -1845,14 +1980,17 @@ mod tests {
     ///
     /// `a a a` 折叠成 `a`。这是 CTC 的核心规则。
     ///
-    /// 夹具遵守 `C == chars.len() + 1`（`chars[0]` 是 blank 的空占位，
+    /// 夹具遵守 `C == chars.len()`（`chars[0]` 是 blank 的空占位，
     /// 真实字符从 `chars[1]` 起，所以类 c ↔ `chars[c]`），否则类数守卫
     /// 会直接降级成空串——**症状是「解出来什么都没有」，而不是报错**。
+    ///
+    /// ⚠ 这三条夹具当年写的是 `chars.len() + 1`，**而那是被守卫的 bug 教出来的**：
+    /// 守卫写着「类数必须比词典多 1」，夹具就照着凑，于是 bug 被测试保护了三年。
     #[test]
     fn ctc_collapses_consecutive_repeats() {
-        // 词典：["", "a", "b"] → 类数 4：0=blank 1=a 2=b 3=多余
+        // 词典：["", "a", "b"] → 类数 3：0=blank 1=a 2=b
         let chars = vec![String::new(), "a".into(), "b".into()];
-        let c = chars.len() + 1;
+        let c = chars.len();
         // T=4：[a, a, a, b]
         let mut vals = Vec::new();
         for cls in [1usize, 1, 1, 2] {
@@ -1871,7 +2009,7 @@ mod tests {
     #[test]
     fn ctc_keeps_non_consecutive_repeats() {
         let chars = vec![String::new(), "a".into(), "b".into()];
-        let c = chars.len() + 1;
+        let c = chars.len();
         let mut vals = Vec::new();
         for cls in [1usize, 2, 1] {
             let mut row = vec![0.0f32; c];
@@ -1888,7 +2026,7 @@ mod tests {
     #[test]
     fn ctc_skips_blanks_without_collapsing_them() {
         let chars = vec![String::new(), "a".into()];
-        let c = chars.len() + 1;
+        let c = chars.len();
         let mut vals = Vec::new();
         for cls in [1usize, 0, 1] {
             let mut row = vec![0.0f32; c];
@@ -1907,10 +2045,45 @@ mod tests {
     fn a_class_count_mismatch_degrades_to_empty() {
         let chars = vec![String::new(), "a".into(), "b".into()];
         let vals = vec![0.0, 1.0, 0.0, 0.0];
-        // C 给了 5，但词典只该配 4
+        // C 给了 5，但词典只有 3 类
         let (text, conf) = ctc_decode(&vals, &[1, 1, 5], &chars);
         assert_eq!(text, "", "类数不匹配还解出了文本：{text:?}");
         assert_eq!(conf, 0.0);
+    }
+
+    /// **`C` 与词典**严格等长**——不多不少。**
+    ///
+    /// 这条是 2026-10-18 从一个真机故障里长出来的：
+    /// 守卫原来写的是 `C != chars.len() + 1`，而词典表从那天起
+    /// 补上了末位的 space 类，`chars.len()` 已经等于类数。
+    /// ⇒ **每个框都被判成「类数对不上」而静默返回空串**，
+    /// `xtask ocr <真帧> --scale 1` 逐行 0 行，而全程**一个错都没报**。
+    ///
+    /// 所以这里正反两面都钉：
+    /// - `C == chars.len()`：**必须**解出文本（这是绝大多数调用的情况）；
+    /// - `C == chars.len() + 1`：**必须**解出空串（曾经被当成正确的那一档）。
+    #[test]
+    fn the_class_count_must_equal_the_dictionary_length_exactly() {
+        let chars = vec![String::new(), "a".into(), "b".into()];
+        let mut row = vec![0.0f32; chars.len()];
+        row[1] = 1.0;
+        let vals: Vec<f32> = (0..3).flat_map(|_| row.clone()).collect();
+
+        let (text, _) = ctc_decode(&vals, &[1, 3, chars.len()], &chars);
+        assert_eq!(
+            text, "a",
+            "C == chars.len() 是正常路径，却什么都没解出来：{text:?}"
+        );
+
+        let mut wider = row.clone();
+        wider.push(0.0);
+        let vals_wider: Vec<f32> = (0..3).flat_map(|_| wider.clone()).collect();
+        let (text, _) = ctc_decode(&vals_wider, &[1, 3, chars.len() + 1], &chars);
+        assert_eq!(
+            text, "",
+            "C 比词典多 1 类时居然还解出了文本：{text:?}。\
+             这是 2026-10-18 真机「逐行 0 行」的同一个 bug"
+        );
     }
 
     /// **det 预处理输出长度对，且是 `[1,3,H,W]` 的 NCHW 排列。**
@@ -1978,7 +2151,7 @@ mod tests {
     fn det_boxes_cover_the_full_extent_of_the_ink_they_came_from() {
         // 帧 400x200 → [`det_size`] 补齐到 416x224（右 +16、下 +24）。
         let (src_w, src_h) = (400usize, 200usize);
-        let (det_w, det_h) = det_size(src_w as u32, src_h as u32);
+        let (det_w, det_h) = det_size_with_min_side(src_w as u32, src_h as u32, 0);
         assert_eq!(
             (det_w, det_h),
             (416, 224),
@@ -2034,7 +2207,7 @@ mod tests {
     #[test]
     fn the_det_to_source_scale_comes_from_the_det_input_size() {
         let (src_w, src_h) = (40usize, 40usize);
-        let (det_w, det_h) = det_size(src_w as u32, src_h as u32);
+        let (det_w, det_h) = det_size_with_min_side(src_w as u32, src_h as u32, 0);
         assert_eq!(
             (det_w, det_h),
             (64, 64),
@@ -2072,7 +2245,7 @@ mod tests {
     fn a_missing_det_file_means_none_not_an_error() {
         let empty = std::env::temp_dir().join("chatservant-no-such-models-dir");
         assert!(
-            !empty.join("ch_PP-OCRv4_det_mobile.onnx").is_file(),
+            !empty.join(DET_MODEL).is_file(),
             "测试前提不成立：那个临时目录里居然有权重"
         );
         assert!(
