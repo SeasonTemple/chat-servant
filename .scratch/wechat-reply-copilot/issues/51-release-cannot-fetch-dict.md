@@ -108,6 +108,46 @@ UnicodeEncodeError: 'charmap' codec can't encode characters in position 0-1
 `errors` 也一并记：守卫查的是「有没有 `.reconfigure(`」这个形态，
 不是「跑起来有没有崩」。
 
+## ⚠⚠ 缺陷④（不用 runner 就能发现）：装包产物路径写错了，而且**同一份错路径重复了三遍**
+
+`release.yml` 里三处（核对装包、publish 资产、dry run 收尾）都写：
+
+```
+ui/src-tauri/target/release/bundle
+```
+
+**三处都错。** `ui/src-tauri` 是**根工作区的成员**，所以 cargo 的 target 目录
+在工作区根。本机实测（tier 3，不是推断）：
+
+| 路径 | `Test-Path` |
+|---|---|
+| `target/release/bundle` | **True**（`msi/chat-servant_0.1.0_x64_en-US.msi` 65.4 MB + `nsis/…_x64-setup.exe` 58.6 MB） |
+| `ui/src-tauri/target/release/bundle` | **False** |
+
+⇒ 即使 `tauri build` 成功，「核对装包内有权重」会 throw「没找到打包产物目录」，
+publish 的资产 glob 会拿到空再 throw。**这一步是必然失败的。**
+
+### 顺带订正一个我自己搞错的结论
+
+我一度报「本机这个 bundle 里没有权重」。**那是查错了地方**：
+`bundle.resources` 的文件是**进安装包内部**（`<install>/models/...`），
+不会以散文件形式躺在 `target/release/bundle/` 下。
+
+正确查法是看 build script 拷到 target 目录的那一份（tauri-build `lib.rs:745-763`
+就是把 resources 拷进 target dir）：
+
+- `target/release/models/ppocrv6-small/`：det 9696.9 KiB / rec 20736.7 KiB / dict 73.2 KiB
+- `target/debug/models/ppocrv6-small/`：同样三个
+
+⇒ **`bundle.resources` 是生效的，装包里确实有权重。**
+
+### 修法
+
+抽成 job 级 `BUNDLE_DIR: target/release/bundle`，三处都改用它。
+抽 env 的理由和抽不抽无关：**三份副本里的任何一份漂了，两份还对的读者不会察觉**
+——这与「三处文档都说对应并不让那句话更真一点」是同一个陷阱。
+
+
 ## 守卫（两处，都自证过）
 
 ### `scripts/check-gate-parity.ps1` 的第二条不变量
@@ -284,7 +324,13 @@ PyPI 来源没变、供应链面没变，去掉的只是「假定有个工具」
 - [x] 守卫从「只看 ci.yml」扩到「所有 workflow × 逐 job」，自证 15/15
 - [x] **缺陷③ Python 打印中文在 cp1252 上崩**：dry run `39037571268` 抓到并修掉，
       三个脚本补齐 reconfigure，并加第三条守卫（自证 17/17）
-- [ ] **dry run 第三次派发跑通**（verify 已绿；剩 `tauri build` → 装包核权重）
+- [x] **缺陷④ 装包产物路径三处全错**：`ui/src-tauri/target/...` 不存在，
+      真实是工作区根的 `target/release/bundle`（本机 `Test-Path` 实测）⇒ 抽成
+      job 级 `BUNDLE_DIR`，路径只存一处
+- [x] 顺带订正我自己搞错的一处结论：「装包里没有权重」是查错了地方——
+      正确查法是 `target/{release,debug}/models/ppocrv6-small/`，三个文件都在，
+      **`bundle.resources` 是生效的**
+- [ ] **dry run 跑通到底**（缺陷④修完后重派；`tauri build` 那一段尚未在任何 runner 上跑过）
 - [ ] **push 触发时 `inputs.dry_run` 为空 ⇒ 照常发布**（语义推理，验证它要打 tag）
 - [ ] **跑通一次真实发版**（需授权打 tag）
 
