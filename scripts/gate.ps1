@@ -65,6 +65,11 @@ Step "sheet pack in sync" { & pwsh -NoProfile -File ui\scripts\sheetpack.ps1 -Ch
 # 因为它是纯读文件——而它红掉意味着下面每一步的「CI 也会跑」都是空话。
 Step "gate/CI parity" { & pwsh -NoProfile -File "$PSScriptRoot\check-gate-parity.ps1" 2>&1 | Select-Object -Last 30 }
 
+# 版本号在**四个文件**里各声明一份，而且 JSON 那两处没有继承可借。
+# 放在最便宜那几步里：纯读文件，而它红掉意味着打出来的包版本号是错的——
+# 而发版闸只比 tag ↔ tauri.conf.json，另外三处对不上它**不会拦**。
+Step "version consistency" { & pwsh -NoProfile -File "$PSScriptRoot\check-version.ps1" 2>&1 | Select-Object -Last 15 }
+
 Step "cargo fmt --all --check" { cargo fmt --all --check 2>&1 | Select-Object -Last 40 }
 Step "cargo clippy -D warnings" { cargo clippy --workspace --all-targets -- -D warnings 2>&1 | Select-Object -Last 60 }
 Step "cargo test --workspace"  { cargo test --workspace 2>&1 | Select-Object -Last 60 }

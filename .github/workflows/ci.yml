@@ -103,13 +103,20 @@ jobs:
         shell: pwsh
         run: ./scripts/check-gate-parity.ps1
 
-      - name: "Gate 4 | cargo fmt --check"
+      # ④ 版本号在四个文件里各声明一份（JSON 那两处没有继承可借），
+      # 而发版闸只比 tag ↔ tauri.conf.json，另外三处对不上它**不会拦**。
+      # 纯读文件，所以排在编译那几步前面。
+      - name: "Gate 4 | version consistency"
+        shell: pwsh
+        run: ./scripts/check-version.ps1
+
+      - name: "Gate 5 | cargo fmt --check"
         run: cargo fmt --all --check
 
-      - name: "Gate 5 | cargo clippy -D warnings"
+      - name: "Gate 6 | cargo clippy -D warnings"
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: "Gate 6 | cargo test"
+      - name: "Gate 7 | cargo test"
         run: cargo test --workspace
 
       # ⑤ 凭据扫描。
@@ -128,7 +135,7 @@ jobs:
       # 曾经这里写的是字面量 `CHATSERVANT_PROBE_KEY: sk-...`，于是那串字面量
       # **本身就在 ci.yml 里**，扫描器如实报出了 ci.yml——扫描器没坏，是探针自指了。
       # 探针串一旦入库，它要找的东西就住在他自己家里。
-      - name: "Gate 7 | secret scan"
+      - name: "Gate 8 | secret scan"
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -155,22 +162,22 @@ jobs:
           Write-Output 'SECRET_SCAN_OK —— 抓得到探针，也放得过干净仓库'
 
       # ⑥ 许可证 / advisory / 来源合规，策略见 docs/adr/0003-dependency-strategy.md
-      - name: "Gate 8 | cargo deny check"
+      - name: "Gate 9 | cargo deny check"
         run: cargo install cargo-deny --locked && cargo deny check
 
-      - name: "Gate 9 | svelte-check"
+      - name: "Gate 10 | svelte-check"
         working-directory: ui
         run: pnpm check
 
-      - name: "Gate 10 | prettier + eslint"
+      - name: "Gate 11 | prettier + eslint"
         working-directory: ui
         run: pnpm lint
 
-      - name: "Gate 11 | svelte-autofixer"
+      - name: "Gate 12 | svelte-autofixer"
         shell: pwsh
         run: ./ui/scripts/autofixer.ps1
 
-      - name: "Gate 12 | vite build"
+      - name: "Gate 13 | vite build"
         working-directory: ui
         run: pnpm build
 

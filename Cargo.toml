@@ -70,7 +70,11 @@ question_mark = "warn"
 similar_names = "allow"
 
 [workspace.package]
-version = "0.1.0"
+# ⚠ 版本号在这里改一处不够——**四处必须一起改**，否则发版闸会拦：
+#   `Cargo.toml`（本行）/ `ui/package.json` / `ui/src-tauri/Cargo.toml` /
+#   `ui/src-tauri/tauri.conf.json`。
+#   门禁那一步 `version consistency`（scripts/check-version.ps1）会逐个点名。
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 license = "BUSL-1.1"

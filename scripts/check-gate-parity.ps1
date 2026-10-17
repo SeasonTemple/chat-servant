@@ -60,6 +60,7 @@ $witness = [ordered]@{
   'ui build'              = 'pnpm build'
   # 本脚本自己也在名单里：谁把这一步从 CI 删掉，本守卫会喊。
   'gate/CI parity'        = 'check-gate-parity.ps1'
+  'version consistency'   = 'check-version.ps1'
 }
 
 foreach ($p in @($gatePath, $ciPath)) {
