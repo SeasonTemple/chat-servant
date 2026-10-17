@@ -1045,11 +1045,105 @@ WARN chatservant_capture::ocr: PP-OCR 不可用（无权重或推理失败），
 失败会以 `warn!` 自曝，且指向要查的那两处接线。
 这不等于「验证过了」，但它把「坏了没人知道」这个失败面关掉了。
 
+### 装机形态：**真跑过一次**（2026-10-18，`pnpm tauri build --no-bundle`）
+
+之前两节都写着「装机形态仍未实测」。本轮跑了，`ui/src-tauri` 是工作区成员，
+所以产物与资源都落在根 `target/` 下——这刚好让**装包那份**与**开发那份**
+分辨得开（前者 `target/release/models/`，后者 `target/models/`）。
+
+已证实的三条：
+
+1. **`bundle.resources` 在 `--no-bundle` 下也会被拷贝。**
+   这条原先是推断（文档只说「打包时」），实测成立：
+
+   ```text
+   target/release/models/ppocrv6-small/
+     PP-OCRv6_det_small.onnx    9,929,594
+     PP-OCRv6_rec_small.onnx   21,234,383
+     ppocrv6_dict.txt              74,947
+   ```
+
+   ⇒ `--no-bundle` **足以验证资源接线**，不必为了这一步去打真正的安装包。
+
+2. **目的地正是 `models/ppocrv6-small/`**，与 `BUNDLED_MODELS_DIR` + `ModelSet` 对得上。
+
+3. **那一份权重能加载、能跑**：把 `CHATSERVANT_OCR_MODELS` 指到
+   `target/release/models`，`xtask ocr --repeat 3` 稳定读出 10 行，**无回落告警**。
+
+⏳ **尚未证实的一条**：`app.path().resource_dir()` 在 Windows 上是否就是 exe 所在目录。
+
+### 最后一条也证实了：读 Tauri 自己的源码，而不是启动 GUI
+
+`tauri 2.12.1` 的 `src/path/desktop.rs:219` 写得很直接：
+
+```rust
+/// - **Windows:** Resolves to the directory that contains the main executable.
+```
+
+exe 落在 `target/release/chat-servant-app.exe` ⇒ `resource_dir()` 就是 `target/release/`
+⇒ `set_models_dir(target/release/models)`，而资源**正是落在那儿**。
+
+⚠ 同一段文档还有一句要照抄：「Although we provide the exact path where this
+function resolves to, **this is not a contract** and things might change in the future.」
+⇒ 这是 Tauri 自己声明的「随时可能变」，所以接线必须有守卫（已有三条），
+不能因为「现在对得上」就当它永久成立。
+
+⇒ **四段全部接上了**：
+
+| 段 | 状态 | 证据 |
+|---|---|---|
+| 编译期常量互相认（`ModelSet` / `resources` / 外壳 join） | ✅ | 三条守卫，退回旧写法当场红 |
+| 打包期把权重复制过去 | ✅ | `target/release/models/ppocrv6-small/` 三个文件齐全 |
+| 运行期找到那个目录 | ✅ | `resource_dir()` = exe 目录（Tauri 源码） |
+| 那份权重能加载能跑 | ✅ | 指过去跑 `xtask ocr --repeat 3`，10 行，无回落 |
+
+顺带量到两个一直缺着的数：**exe 77.3 MB**（ORT 静态链进去的那段就在里面，
+`target/` 下确实找不到任何 `onnxruntime.dll`）、**权重 31 MB**。
+
+### 默认值翻了：引擎 → PP-OCR，后端 → ort
+
+两个默认一起翻，依据分开说：
+
+**引擎**（`engine_choice`）此前三次变化，每次的依据都不同：
+
+| 版本 | 默认 | 依据 |
+|---|---|---|
+| 早先 | 「检测到权重就选 PP-OCR」 | **无人拍板**——装个文件就换掉生产引擎 |
+| 2026-10-18 上午 | WinRT | PP-OCR 真帧 CER 18.60%，与 WinRT 的 18.25% 齐平，换了没赚 |
+| 2026-10-18 傍晚 | **PP-OCR** | CER 2.38%、532~542 ms、装机四段全验过、失败会 `warn!` |
+
+守卫 `the_default_engine_is_*` **两次改默认都是它当场红的**，不是事后想起来的。
+
+**后端**（`backend`）从 tract 翻到 ort。当时没翻的理由是
+「要不要为了 5.6 倍接受一份 C++ 动态库」——**这条顾虑已经不成立**：
+选的是 `ort` 的 `download-binaries`，**静态链接**，不额外带 DLL。
+代价是 exe 77.3 MB，这是它的价。
+
+两条都保留显式回退：`CHATSERVANT_OCR=winrt`、`CHATSERVANT_OCR_BACKEND=tract`，
+不必重编。
+
+**仍然不做**「按权重在不在自动选」——那是这个默认值被推翻过一次的原因。
+权重是**能不能用**的前提，不是**该不该用**的授权。
+
+### 顺带修一个把自己骗了的坑
+
+`CHATSERVANT_OCR_MODELS` **被设成空字符串**与**没设**不是一回事：
+Rust 的 `var_os` 对空值返回 `Some("")`，而 PowerShell 的 `$env:X = ''` 正是设成空。
+它会盖掉后面全部查找，最后拿到一个空路径 ⇒ 静默回落。
+
+实测症状极具欺骗性：那一次的读数是「**34 ms 的 OCR**」——看着像变快了 15 倍，
+其实是回落到了 WinRT。现在空值按「没设」处理。
+
+⚠ 这条只在**翻转默认之前**才是坑（那时默认就是 WinRT，回落看不出来）。
+翻转之后它会让默认路径莫名其妙变快——**症状比病因好认得多，更危险**。
+
 ### 本节没做到
 
-1. **Rust 2.38% 与 rapidocr 0.79% 还差 3 个编辑**——已定位为产品路径上会被
+1. **只验了 `--no-bundle`，没打真正的安装包**（msi/nsis）。
+   资源拷贝发生在两者之前（实测已证），但**安装器会不会把资源放到别处**
+   （比如 Program Files 下的某个子目录）**没有验**。
+   ⇒ 「装出来的那份包能用」这句话，本节仍然只覆盖到 `--no-bundle` 这一层。
+2. **Rust 2.38% 与 rapidocr 0.79% 还差 3 个编辑**——已定位为产品路径上会被
    `reject_image_text` 挡掉的虚检，**未逐条 diff 确认三者完全对应**。
-2. **仍只有这 2 帧 / 17 条**；浅色模式、链接卡片、其它字号依旧没测。
-3. **默认引擎与默认后端仍然一行都没动**——本节把失败面变响了，
-   但「装得上」这件事仍然只有推断，没有实测。
+3. **仍只有这 2 帧 / 17 条**；浅色模式、链接卡片、其它字号依旧没测。
 
