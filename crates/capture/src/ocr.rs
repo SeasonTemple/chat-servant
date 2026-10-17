@@ -176,6 +176,52 @@ fn engine_choice() -> Engine {
     }
 }
 
+/// **这条引擎要不要先把画面裁到消息区再送进去。** 2026-10-18 实测。
+///
+/// 同一张真实微信整窗（`target/probe/full-win.png`，1162×893，
+/// ONNX Runtime、4 线程、PP-OCRv6 small）：
+///
+/// ```text
+/// 整帧        1086~1146 ms   50 行   （45 行是侧边栏与会话列表，事后被丢掉）
+/// 只裁消息区   443~ 455 ms    5 行   （就是那 5 条消息）
+/// ```
+///
+/// ⇒ **快 2.5 倍，而且读得更准**：整帧那 45 行是联系人名与别的会话预览，
+/// 它们让 det 多算 10 倍面积，也让 rec 多编几十个宽度的图。
+/// 文本质量也更好——整帧把「反正你那么喜爱」读成「反止你那么喜爱」，
+/// 裁剪后逐字正确。
+///
+/// ⚠ **这与 WinRT 的结论相反**（见 `perceive::read_lines` 的实测）：
+/// `Windows.Media.Ocr` 裁剪后会漏读，所以它仍要整帧。
+/// 两个引擎要的画面**不一样**，所以这件事由引擎决定，不由调用方决定。
+///
+/// ⚠ 顺带一条硬约束上的好处：整帧会把**联系人名与其它会话的预览**一起读进来。
+/// 那些读进来又被丢掉的行，仍然是「读了别人的东西」。
+pub fn crops_to_pane() -> bool {
+    matches!(engine_choice(), Engine::Ppocr)
+}
+
+/// **这条引擎要放大几倍。** 2026-10-18 实测。
+///
+/// ```text
+///            1x      2x
+/// WinRT     13/17   14/17    <- 2× 补回一条
+/// PP-OCRv6  17/17   17/17    <- 1× 已经零漏检，2× 只是慢
+/// ```
+///
+/// ⇒ **两个引擎要的倍数相反。** 早先它是 `perceive::OCR_UPSCALE`
+/// 一个全局常数，于是「换引擎」和「换倍数」必须同时做，
+/// 而这两件事隔着两个 crate、一次提交——**漏掉任何一个都不会报错，
+/// 只会变成「又慢又不准」**。所以它现在是引擎自己的属性。
+///
+/// ⚠ `perceive::OCR_UPSCALE` 保留为 WinRT 的值，供那条路与探针使用。
+pub fn upscale() -> u32 {
+    match engine_choice() {
+        Engine::Ppocr => 1,
+        Engine::Winrt => 2,
+    }
+}
+
 /// [`Windows.Media.Ocr`] 那条路。**默认。**
 pub fn recognize_winrt(frame: &Frame) -> Result<OcrText, OcrError> {
     use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};

@@ -1,4 +1,4 @@
-//! PP-OCRv4 本地推理（det + rec），纯 Rust 跑 ONNX。
+//! PP-OCR 本地推理（det + rec），纯 Rust 跑 ONNX。
 //!
 //! ## 为什么不原样搬 RapidOCR
 //!
@@ -30,17 +30,18 @@
 //! （`ppocr` / `winrt`）选路，而**默认值恒为 WinRT**——
 //! 早先是「auto = 检测到权重就走 PP-OCR」，那条规则让「装一次权重」
 //! 悄悄换掉了生产引擎，而没有人做过那个决定。
-//! **PP-OCRv4 是增强不是必需**：没权重或它跑挂都必须继续用 WinRT，
+//! **PP-OCR 是增强不是必需**：没权重或它跑挂都必须继续用 WinRT，
 //! 而不是让界面报错。
 //!
 //! 推理管线（det 后处理 / rec CTC 解码 / 宽度分桶）在
 //! [`crate::ocr_pp_pipeline`]，**那个模块才是干活的**，本模块只管把 ONNX
 //! 编译成能跑的图。
 //!
-//! ## 词典是 **6624** 类，不是 6623
+//! ## 词典类数 = 文件行数 **+2**
 //!
-//! `ppocr_keys_v1.txt` 有 6623 行，**blank 索引 0 不在文件里**——
-//! 那是 CTC 约定，不是第 6624 个汉字。见 [`chars`]。
+//! PP-OCRv6 small 的 `ppocrv6_dict.txt` 有 18708 行，而 rec 输出 **18710** 类。
+//! 差的两个是 CTC 约定，**都不在词典文件里**：
+//! **blank 落在索引 0**，**space 落在最后一类**。见 [`chars`] 与 [`SPACE`]。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -156,7 +157,7 @@ fn exe_sibling_models() -> Option<PathBuf> {
 ///
 /// **所以：输出形状一律靠真跑一次来确认。** det 的
 /// [`tests::the_det_plan_runs_on_a_flat_image`] 与 rec 的
-/// [`tests::the_rec_plan_emits_6625_classes_for_the_6624_dictionary`]
+/// [`tests::the_rec_plan_emits_exactly_one_class_per_dictionary_entry`]
 /// 就是这么写的——那比读 fact 硬，而且顺带证明了图真的跑得动。
 ///
 /// 代价是本函数要带 `Factoid` trait（`tract_onnx::prelude` **不含**它，
@@ -166,7 +167,7 @@ pub fn model_io(path: &Path) -> Result<IoSpec, PpError> {
         .model_for_path(path)
         .map_err(|e| PpError::Load {
             name: path.display().to_string(),
-            msg: e.to_string(),
+            msg: format!("{e:#}"),
         })?;
     // **推导失败不当作致命错误。** det 里有 `Resize`（带动态 scale），
     // `analyse` 在它上面会失败——而我们要的只是「ONNX 里**声明**了什么」，
@@ -198,14 +199,14 @@ pub fn model_io(path: &Path) -> Result<IoSpec, PpError> {
         .input_outlets()
         .map_err(|e| PpError::Load {
             name: path.display().to_string(),
-            msg: e.to_string(),
+            msg: format!("{e:#}"),
         })
         .map(outlets)?;
     let outputs = model
         .output_outlets()
         .map_err(|e| PpError::Load {
             name: path.display().to_string(),
-            msg: e.to_string(),
+            msg: format!("{e:#}"),
         })
         .map(outlets)?;
     Ok(IoSpec { inputs, outputs })
@@ -213,11 +214,11 @@ pub fn model_io(path: &Path) -> Result<IoSpec, PpError> {
 
 /// 编译 det 模型，**输入形状由调用方定**。
 ///
-/// 形状不是猜的：PP-OCRv4 的 det 是动态 H/W 的，不给具体形状就会
+/// 形状不是猜的：det 是动态 H/W 的，不给具体形状就会
 /// 留下一堆泛型算子。定形状时必须**按 32 的倍数取整**——网络里有 8 次
 /// 步长 2 的下采样，总下采样倍数是 32。
 pub fn load_det(path: &Path, h: usize, w: usize) -> Result<Plan, PpError> {
-    let model = tract_onnx::onnx()
+    let model = onnx_reader()
         .model_for_path(path)
         .and_then(|mut m| {
             m.set_input_fact(0, det_fact(h, w))?;
@@ -225,11 +226,11 @@ pub fn load_det(path: &Path, h: usize, w: usize) -> Result<Plan, PpError> {
         })
         .map_err(|e| PpError::Load {
             name: format!("det({})", path.display()),
-            msg: e.to_string(),
+            msg: format!("{e:#}"),
         })?;
     model.into_runnable().map_err(|e| PpError::Load {
         name: format!("det({})", path.display()),
-        msg: e.to_string(),
+        msg: format!("{e:#}"),
     })
 }
 
@@ -242,7 +243,7 @@ pub fn load_det(path: &Path, h: usize, w: usize) -> Result<Plan, PpError> {
 /// **解法已实现**：[`crate::ocr_pp_pipeline::BucketCache`] 按取整后的宽度
 /// 分桶缓存编译好的图，聊天里高度重复的气泡宽度命中率高。
 pub fn load_rec(path: &Path, w: usize) -> Result<Plan, PpError> {
-    let model = tract_onnx::onnx()
+    let model = onnx_reader()
         .model_for_path(path)
         .and_then(|mut m| {
             m.set_input_fact(0, rec_fact(w))?;
@@ -250,12 +251,38 @@ pub fn load_rec(path: &Path, w: usize) -> Result<Plan, PpError> {
         })
         .map_err(|e| PpError::Load {
             name: format!("rec({})", path.display()),
-            msg: e.to_string(),
+            msg: format!("{e:#}"),
         })?;
     model.into_runnable().map_err(|e| PpError::Load {
         name: format!("rec({})", path.display()),
-        msg: e.to_string(),
+        msg: format!("{e:#}"),
     })
+}
+
+/// tract 的 ONNX 读取器，**关掉 `value_info` 提示**。
+///
+/// ## 为什么必须关（2026-10-18 实测，PP-OCRv6）
+///
+/// Paddle2ONNX 导出的图会在 `graph.value_info` 里给每个中间张量写死形状。
+/// tract 把这些当**硬约束**参与 `analyse` 的形状 unification，于是 v6 的
+/// det 与 rec **都编译不出来**，报的是一句看不出所以然的话：
+///
+/// ```text
+/// Failed analyse for node #170 "Conv.0" ConvHir:
+///   Unifying shapes DynamicDimension.0,48,24,(DynamicDimension.1+1)/2
+///                    and 1,48,24,160:
+///   Impossible to unify Sym(DynamicDimension.0) with Val(1)
+/// ```
+///
+/// 那个 `1,48,24,160` 是导出时**某一个样本输入**的回写形状，batch 被钉成 1，
+/// 而我们给的 batch 也是 1 —— 冲突出在 tract 把两边的符号名当不同变量。
+/// 形状本身 tract 推得出来（`into_optimized()` 就是在推），
+/// 提示反而成了枷锁。`with_ignore_value_info(true)` 关掉它。
+///
+/// ⚠ 图的**输出**形状本来就默认不采信（`use_output_shapes` 默认 `false`），
+/// 所以这条只影响中间张量的提示，不影响我们的输入约定。
+fn onnx_reader() -> tract_onnx::Onnx {
+    tract_onnx::onnx().with_ignore_value_info(true)
 }
 
 /// 跑一次推理，返回**第 0 个输出**展平成的 `f32` 缓冲与它的形状。
@@ -270,7 +297,7 @@ pub fn load_rec(path: &Path, w: usize) -> Result<Plan, PpError> {
 pub fn run(plan: &Plan, input: Tensor, stage: &str) -> Result<(Vec<f32>, Vec<usize>), PpError> {
     let out = plan.run(tvec!(input.into())).map_err(|e| PpError::Run {
         stage: stage.to_string(),
-        msg: e.to_string(),
+        msg: format!("{e:#}"),
     })?;
     let t: &Tensor = &out[0];
     let shape: Vec<usize> = t.shape().to_vec();
@@ -295,15 +322,16 @@ pub fn chars() -> Result<Arc<Vec<String>>, PpError> {
     if let Some(c) = CACHE.get() {
         return Ok(Arc::clone(c));
     }
-    let path = models_dir().join("ppocr_keys_v1.txt");
+    let path = models_dir().join(crate::ocr_pp_pipeline::KEYS_FILE);
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| PpError::MissingModels(format!("{}（{e}）", path.display())))?;
     let mut v: Vec<String> = raw
         .lines()
         .map(|l| l.trim_end_matches('\r').to_string())
         .collect();
-    // blank 在 0，文件里的字符整体后移一位。
+    // blank 在 0，文件里的字符整体后移一位；space 在最后一类。
     v.insert(0, String::new());
+    v.push(SPACE.to_string());
     let arc = Arc::new(v);
     let _ = CACHE.set(Arc::clone(&arc));
     Ok(arc)
@@ -312,17 +340,24 @@ pub fn chars() -> Result<Arc<Vec<String>>, PpError> {
 /// CTC blank 的类索引。**恒为 0**——这是 CTC 的约定，不是这批权重的选择。
 pub const BLANK: usize = 0;
 
+/// 空格类。**恒为最后一类**——PaddleOCR 导出时把它从词典文件里摘出去了。
+///
+/// ⚠ 2026-10-18 之前词典只补了首头的 blank、没补这个尾巴，于是
+/// `chars.len()` 比 rec 的输出宽度**少 1**（v4：6624 vs 6625；v6：18709 vs 18710）。
+/// 平时预测不到最后一类，所以一直没炸；它是一颗只在特定字符上响的地雷。
+pub const SPACE: &str = " ";
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// 模型文件不在本机就**跳过**，不假装通过。
     ///
-    /// 这批测试要真下载 15MB 权重才能跑，而 CI 与别人的机器上没有它们。
+    /// 这批测试要真下载权重才能跑，而 CI 与别人的机器上没有它们。
     /// 硬跑只会变成「永远红」，红久了就没人看了。
     fn require_models() -> Option<PathBuf> {
         let dir = models_dir();
-        if dir.join("ppocr_keys_v1.txt").is_file() {
+        if dir.join(crate::ocr_pp_pipeline::KEYS_FILE).is_file() {
             Some(dir)
         } else {
             eprintln!("跳过：{} 下没有权重", dir.display());
@@ -330,18 +365,34 @@ mod tests {
         }
     }
 
-    /// **词典必须有 6624 类，且 0 号是 blank。**
+    /// 词典里真实字符的行数。**2026-10-18 实测 PP-OCRv6 small 是 18708 行。**
+    const DICT_LINES: usize = 18_708;
+
+    /// **词典类数 = 文件行数 + blank + space，且 0 号是 blank、末号是空格。**
     ///
-    /// `ppocr_keys_v1.txt` 实测 6623 行。CTC 的 blank 落在索引 0，
-    /// 所以类总数是 **6624**。只按文件行数去查表会让最后一个类越界。
+    /// 早先的断言只钉了「文件行数 + 1」，漏掉了末位那个空格类，
+    /// 而 **rec 真的输出多 1 类**（v4 6625、v6 18710）——
+    /// 见 [`SPACE`] 的说明。这条断言改成两端都钉死。
     #[test]
-    fn the_dictionary_is_6624_classes_with_a_blank_at_zero() {
+    fn the_dictionary_covers_every_class_the_rec_model_emits() {
         if require_models().is_none() {
             return;
         }
         let cs = chars().expect("词典读不出来");
-        assert_eq!(cs.len(), 6624, "类数不对，rec 的输出宽度与词典对不上");
-        assert!(cs[BLANK].is_empty(), "0 号必须是 blank，不能是字符");
+        let classes = DICT_LINES + 2;
+        assert_eq!(
+            cs.len(),
+            classes,
+            "类数不对：词典 {} 行 + blank + space 应为 {classes} 类，实得 {}",
+            DICT_LINES,
+            cs.len()
+        );
+        assert_eq!(cs[BLANK], "", "0 号必须是 blank，不能是字符");
+        assert_eq!(
+            cs[classes - 1],
+            SPACE,
+            "末号必须是 space：CTC 真预测到它时是越界下标"
+        );
         assert!(!cs[1].is_empty(), "1 号应该是第一个真实字符");
         assert!(
             cs.iter()
@@ -359,7 +410,8 @@ mod tests {
     #[test]
     fn the_det_model_takes_nchw_rgb_and_the_batch_is_dynamic_too() {
         let Some(dir) = require_models() else { return };
-        let spec = model_io(&dir.join("ch_PP-OCRv4_det_mobile.onnx")).expect("det 形状读不出来");
+        let spec =
+            model_io(&dir.join(crate::ocr_pp_pipeline::DET_MODEL)).expect("det 形状读不出来");
         assert_eq!(spec.inputs.len(), 1, "det 输入应该只有一个");
         assert_eq!(
             spec.inputs[0],
@@ -373,62 +425,68 @@ mod tests {
         // `the_det_plan_runs_on_a_flat_image` **真跑一次**证明为 `[1,1,H,W]`。
     }
 
-    /// **rec 是全动态 `[1,3,H,W]`——**不是**固定高 48。
+    /// **rec 的输入是 `[1,3,48,W]`——高被模型钉死在 48，宽才是动态的。**
     ///
-    /// 这条断言 2026-10-10 **实测推翻过原来的假设**。写它的时候我以为
-    /// `ch_PP-OCRv4_rec_mobile.onnx` 的输入高固定 48（那是 PaddleOCR
-    /// `RecImageGenerator` 的行为，属于**数据增强侧**），实测 `model_io`
-    /// 报的是 `[-1, 3, -1, -1]`——**四个维全是动态的**，模型自己不管尺寸。
+    /// 这条断言**在两个模型上给过相反的答案**，两次都是实测打回的：
     ///
-    /// 所以 **48 这个数是我们要自己给的**（[`rec_fact`] 里写死），不是模型
-    /// 给的。这反而好：宽高都能自由选，不用迁就某份导出时写死的宽度。
-    /// 代价是**宽度一变就得重编一次图**——见 [`load_rec`] 的说明。
+    /// - **v4**（2026-10-10）：`[-1, 3, -1, -1]`，四个维全是动态的，
+    ///   「48 是我们自己给的」。当年的注释按 PaddleOCR 训练侧想当然，
+    ///   断言写反了。
+    /// - **v6**（2026-10-18 实测 `PP-OCRv6_rec_small.onnx`）：`[-1, 3, 48, -1]`
+    ///   ——**模型自己就要求 48**。所以 [`rec_fact`] 里的 48 不再是
+    ///   「我们的选择」，而成了**必须遵守的契约**：换个别的 rec 权重，
+    ///   这个数要跟着模型走。
+    ///
+    /// 宽度仍然是动态的，代价不变：**宽度一变就得重编一次图**——见 [`load_rec`]。
     #[test]
-    fn the_rec_model_is_fully_dynamic_and_we_supply_the_size() {
+    fn the_rec_model_pins_its_input_height_to_48() {
         let Some(dir) = require_models() else { return };
-        let spec = model_io(&dir.join("ch_PP-OCRv4_rec_mobile.onnx")).expect("rec 形状读不出来");
+        let spec =
+            model_io(&dir.join(crate::ocr_pp_pipeline::REC_MODEL)).expect("rec 形状读不出来");
         assert_eq!(spec.inputs.len(), 1, "rec 输入应该只有一个");
         assert_eq!(
             spec.inputs[0],
-            vec![-1, 3, -1, -1],
-            "rec 输入形状变了：{:?}。48 高是**我们自己给的**，不是模型的；\
+            vec![-1, 3, 48, -1],
+            "rec 输入形状变了：{:?}。48 高是**模型要求**的，不是我们的选择；\
              若这里变了，rec 的预处理与宽度分桶策略都要重查",
             spec.inputs[0]
         );
     }
 
-    /// **rec 输出的类数必须是 6625 = 6624 字符 + 1 blank。**
+    /// **rec 输出的类数必须等于词典类数（v6 small = 18710）。**
     ///
     /// 这条是**真跑一次**得到的，不是读 fact 读来的（读不到，见 [`model_io`]）。
     /// 它是 CTC 解码表的下标上界——类数一旦对不上，解出来的不是错字，
     /// 而是**越界或者整段空白**。
     #[test]
-    fn the_rec_plan_emits_6625_classes_for_the_6624_dictionary() {
+    fn the_rec_plan_emits_exactly_one_class_per_dictionary_entry() {
         let Some(dir) = require_models() else { return };
         let (h, w) = (48usize, 64usize);
-        let plan = load_rec(&dir.join("ch_PP-OCRv4_rec_mobile.onnx"), w).expect("rec 编译失败");
+        let plan = load_rec(&dir.join(crate::ocr_pp_pipeline::REC_MODEL), w).expect("rec 编译失败");
         let buf = vec![0.0f32; 3 * h * w];
         let input = Tensor::from_shape(&[1, 3, h, w], &buf).expect("造 rec 输入失败");
         let (vals, shape) = run(&plan, input, "rec").expect("rec 推理失败");
-        // **实测出来是 `[1, T, 6625]`，不是 `[1, 6625, T]`。**
-        // 2026-10-10 本机真跑 64px 宽的空白图得到 `[1, 8, 6625]`：
+        // **实测出来是 `[1, T, C]`，不是 `[1, C, T]`。**
+        // 2026-10-10 本机真跑 64px 宽的空白图得到 `[1, 8, 6625]`（v4）：
         // **类在最后一维**，时间步在中间维。写这条断言时我先入为主按
         // PaddleOCR 训练侧的布局想成 `[1, 6625, T]`，被实测打回。
         // CTC 解码的下标要按 `[t][c]` 走，写反了会得到一整段空白——
         // 而且它**不报错**，所以只能靠真跑一次钉死。
-        assert_eq!(shape.len(), 3, "rec 输出应该是 [1,T,6625]，实际 {shape:?}");
+        let classes = chars().expect("词典读不出来").len();
+        assert_eq!(shape.len(), 3, "rec 输出应该是 [1,T,C]，实际 {shape:?}");
         assert_eq!(shape[0], 1, "rec batch 是 1：{shape:?}");
         assert_eq!(
-            shape[2], 6625,
-            "rec 类数与 6624 词典对不上：{shape:?}（类在**最后一维**）"
+            shape[2], classes,
+            "rec 输出 {0} 类而词典 {1} 类，对不上：{shape:?}（类在**最后一维**）",
+            shape[2], classes
         );
         assert!(shape[1] > 0, "rec 时间步不能是 0：{shape:?}");
         assert_eq!(
             vals.len(),
-            shape[1] * 6625,
-            "展平后的元素数与 [1,T,6625] 对不上：{} vs {}",
+            shape[1] * classes,
+            "展平后的元素数与 [1,T,C] 对不上：{} vs {}",
             vals.len(),
-            shape[1] * 6625
+            shape[1] * classes
         );
         // softmax 之后每一格都该是概率。
         assert!(
@@ -443,7 +501,8 @@ mod tests {
     #[test]
     fn the_det_plan_compiles_for_a_realistic_chat_window() {
         let Some(dir) = require_models() else { return };
-        let p = load_det(&dir.join("ch_PP-OCRv4_det_mobile.onnx"), 768, 512).expect("det 编译失败");
+        let p =
+            load_det(&dir.join(crate::ocr_pp_pipeline::DET_MODEL), 768, 512).expect("det 编译失败");
         assert!(Arc::strong_count(&p) >= 1);
     }
 
@@ -451,7 +510,7 @@ mod tests {
     #[test]
     fn the_rec_plan_compiles() {
         let Some(dir) = require_models() else { return };
-        load_rec(&dir.join("ch_PP-OCRv4_rec_mobile.onnx"), 320).expect("rec 编译失败");
+        load_rec(&dir.join(crate::ocr_pp_pipeline::REC_MODEL), 320).expect("rec 编译失败");
     }
 
     /// **一次 det 推理真的产得出合法概率图。**
@@ -462,7 +521,8 @@ mod tests {
     fn the_det_plan_runs_on_a_flat_image() {
         let Some(dir) = require_models() else { return };
         let (h, w) = (32usize, 32usize);
-        let plan = load_det(&dir.join("ch_PP-OCRv4_det_mobile.onnx"), h, w).expect("det 编译失败");
+        let plan =
+            load_det(&dir.join(crate::ocr_pp_pipeline::DET_MODEL), h, w).expect("det 编译失败");
         let buf = vec![0.0f32; 3 * h * w];
         let input = Tensor::from_shape(&[1, 3, h, w], &buf).expect("造 det 输入失败");
         let (vals, shape) = run(&plan, input, "det").expect("det 推理失败");
