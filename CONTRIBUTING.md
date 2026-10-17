@@ -70,15 +70,23 @@ fix(感知): 切回会话后消息变少 —— 水位线住在引擎里
 | 7 | `pnpm check`（svelte-check） |
 | 8 | `pnpm lint` + `svelte-autofixer` |
 | 9 | `pnpm build` |
+| — | 贴纸包同步（`ui/scripts/sheetpack.ps1 -Check`）、门禁自身与 CI 的对齐、**版本号四处一致**（`scripts/check-version.ps1`）——这三步上表没单列，见下方注 |
 
 > ⚠ **判断门禁成不成功看它打印的那两行**（`GATE: ALL GREEN` / `GATE: FAILED`），
 > 不要只看退出码。2026-10-11 实测踩过：脚本只打印 `GATE_EXIT` 而不 `exit`，
 > 于是 `pwsh -File` 永远返回 0，一个带红门禁的提交就提交上去了。
 
 > ⚠ 上表是**清单，不是执行顺序**，也不是完整清单：`gate.ps1` 实际还会跑
-> `sheet pack in sync`（纸的源与生成物必须同步），并把 `pnpm lint` 与
-> `svelte-autofixer` 拆成两个 `Step`。2026-10-16 起脚本每轮都会打印**自己的分步耗时表**，
+> `sheet pack in sync`（纸的源与生成物必须同步）、`gate/CI parity`、与
+> `version consistency`，并把 `pnpm lint` 与 `svelte-autofixer` 拆成两个 `Step`。
+> 2026-10-16 起脚本每轮都会打印**自己的分步耗时表**，
 > 那才是唯一准确的清单；**别数「几步」**——`secret scan` 在没设 `CHATSERVANT_PROBE_KEY` 时会跳过，两侧天生不等。
+
+> ⚠ **改版本号要改四处**，一起改：`Cargo.toml` 的 `[workspace.package]`、
+> `ui/src-tauri/Cargo.toml` 的 `[package]`、`ui/package.json`、
+> `ui/src-tauri/tauri.conf.json`。后两个是 JSON，**没有继承可借**，只能手动对齐。
+> 而 `release.yml` 的发版闸只比 **tag ↔ `tauri.conf.json`**——另外三处对不上它**不会拦**，
+> 所以那道「四处一致」才有必要。守卫：`scripts/check-version.ps1`。
 
 ### 内循环：改一行代码不必跑全门禁
 

@@ -474,7 +474,7 @@ dependencies = [
 
 [[package]]
 name = "chat-servant-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chatservant-capture",
  "chatservant-core",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "chatservant-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "chatservant-core",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "chatservant-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "chatservant-perceive"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chatservant-capture",
  "chatservant-core",
@@ -529,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "chatservant-reason"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chatservant-core",
  "chatservant-perceive",
@@ -6042,7 +6042,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chatservant-capture",
