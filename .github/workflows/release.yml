@@ -100,9 +100,82 @@ jobs:
       #   并不让那句话更真一点」是同一个陷阱）。
       BUNDLE_DIR: target/release/bundle
     steps:
+      # ⚠⚠ **发版链路最后一跳至今没被任何 runner 执行过**（2026-10-18）。
+      #
+      # 上面每一步（verify / 取权重 / 打包 / 核对装包）都在真 runner 上跑通了，
+      # 只有 `gh release create` 这一发没有——而它排在**最后**：
+      # 前面的构建要烧二三十分钟，它一失败就全白费。
+      # `gh release create` **没有 --dry-run**，所以这一跳在任何授权下都无法
+      # 零风险预演（已查 `gh release create --help`：无此开关）。
+      #
+      # 于是改成**让它自证**：在装工具链、装依赖、打包**之前**，
+      # 把这一跳的判据原样打出来，并做一条版本一致性检查。
+      # 这一步只读文件、只 echo，**不发任何东西、不改任何东西**。
+      #
+      # ⚠ 判据那两行表达式与下面 publish 步的 `if:` **逐字相同**——
+      #   所以这里打出来的 `publish_would_run` 就是那一步会不会跑，
+      #   而不是另一套独立算出来的值（两套算式迟早会漂，而漂了没人看得出来）。
+      #
+      # 位置在 checkout 之后、toolchain/pnpm/build 之前：
+      #   要读 `tauri.conf.json` 就必须已检出（checkout 只要十几秒，
+      #   而报错晚一分钟总比晚三十分钟好）。
       - uses: actions/checkout@v6
         with:
           ref: ${{ env.RELEASE_TAG }}
+
+      - name: Report publish gate
+        shell: pwsh
+        # ⚠ `PUBLISH_WOULD_RUN` 用的是与下面 publish 步 `if:` **逐字相同**的表达式。
+        #   这样整个文件里控制「发不发」的表达式**只有一个**，
+        #   而不是我在这里另写一份算式——两套算式迟早会漂，漂了没人看得出来。
+        #   （发布说明里也直接打这个值，所以日志打出来的就是那一步的真判据。）
+        env:
+          PUBLISH_WOULD_RUN: ${{ !inputs.dry_run }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Output '=== PUBLISH GATE ==='
+          Write-Output "  event_name        = ${{ github.event_name }}"
+          Write-Output "  resolved_tag      = $env:RELEASE_TAG"
+          Write-Output "  inputs.dry_run    = [${{ inputs.dry_run }}]"
+          Write-Output "  publish_would_run = $env:PUBLISH_WOULD_RUN"
+          Write-Output "  assets_from       = $env:BUNDLE_DIR"
+
+          # ⚠ 字符串当布尔用是 PowerShell 的经典坑：`'false'` 是**非空字符串**
+          #   ⇒ 判为真。`${{ !inputs.dry_run }}` 在 dispatch 且 dry_run=false 时
+          #   渲染出来的**正是字符串 `'false'`**，而那恰恰是要发布的那一档。
+          #   所以这里反向取：只有**明确**是 false/0 才算 dry run，
+          #   其余（含空串、大小写变体、意外值）一律按「要发布」处理。
+          #   方向不能反——反了就会在真发布时跳过版本检查，
+          #   而那正是这道闸要拦的那种错标 release。
+          $isPublish = ($env:PUBLISH_WOULD_RUN -notmatch '^\s*(?i:false|0)\s*$')
+
+          # ⚠⚠ **tag 与安装包里的版本号是两套东西**，而 `tauri build` 的产物名
+          #   用的是后者（`chat-servant_<version>_x64-setup.exe`）。
+          #   tag 打到 v0.1.1 而 `tauri.conf.json` 还写 0.1.0 时，
+          #   发出去的 release 标题是 v0.1.1、附件却叫 chat-servant_0.1.0_...。
+          #   下载的人拿到的是「0.1.0 的文件，挂在 1.1 的发布页下面」，
+          #   而**没有任何一步会报错**——它俩根本不在一个空间里核对。
+          #
+          #   收紧方向是「不发版」而不是「发一个错标的版」，所以这条是安全的。
+          #
+          # ⚠⚠ **只在真要发布时才拦**。dry run 传的 tag 是 `main`（还没有 tag），
+          #   `main` 的版本号当然对不上——第一版没加这个条件，
+          #   结果这道闸把 dry run 入口**自己堵死了**，是自证用例 C 抓出来的。
+          #   两值照样打印，只是 dry run 时不判死。
+          $cfg = Get-Content ui/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $tagVer = $env:RELEASE_TAG -replace '^v', ''
+          Write-Output "  tauri_version     = $($cfg.version)"
+          Write-Output "  tag_version       = $tagVer"
+          if ($cfg.version -ne $tagVer) {
+            if (-not $isPublish) {
+              Write-Warning '版本号对不上，但本次是 dry run（不发布），继续跑完整条链路。'
+            }
+            else {
+              Write-Error ("tag '$env:RELEASE_TAG' 与 tauri.conf.json 的 version '$($cfg.version)' 不一致。" +
+                ' 附件名用的是后者，先改版本号再打 tag —— 否则会发出一个标题与文件名对不上的 release。')
+              exit 1
+            }
+          }
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: pnpm/action-setup@v4
