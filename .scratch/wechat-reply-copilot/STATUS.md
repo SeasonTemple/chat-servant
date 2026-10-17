@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **54** ｜ 验收项全勾 **31** ｜ 已收但留有说明项 **13** ｜ 未收 **10**
+票据总数 **55** ｜ 验收项全勾 **32** ｜ 已收但留有说明项 **13** ｜ 未收 **10**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -86,3 +86,4 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `49-pp-ocr-plan-cache-lifetime-and-det-lock.md` | 7/7 |
 | `52-compilable-control-chars-slip-past-the-fffd-scan.md` | 6/6 |
 | `54-autofixer-step-cannot-report-any-warning.md` | 8/8 |
+| `55-machine-acceptance-exit-paths-silence-and-stale-checklist.md` | 9/9 |
