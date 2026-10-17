@@ -2345,6 +2345,14 @@ mod tests {
     /// 那条守**常量**（`REC_MEAN`/`REC_STD` 的值），本条守**公式**（怎么用它们）。
     /// ⇒ 本条的期望值**用常量算、不硬编码**：常量错由那条报，
     /// 公式错由本条报，两条不重叠，也不互相顶替。
+    ///
+    /// ⚠ **覆盖边界**：它守的是**预处理产物的像素值**，
+    /// **不守真帧字准**（那要真权重，而权重是 gitignored 的 31 MB、
+    /// CI 上没有，见 [`every_rec_width_bucket_compiles_against_a_real_weight_file`]
+    /// 的「缺件即跳过」模式）。⚠ 别因为「CI 有这条测试」就以为字准被守住了——
+    /// 票 30 末尾踩过「别把『CI 全绿』读成『真机路径验过了』」这个坑。
+    /// 换引擎 / 改预处理 / 调 det 阈值之后要跑的那次台架，
+    /// 写在 `CONTRIBUTING.md` §维护陷阱第 6 条。
     #[test]
     fn the_rec_input_keeps_channel_separation_and_black_to_white_contrast() {
         // 颜色帧：R 沿 x 从 0 递增到 255，G 恒 128、B 恒 0。
