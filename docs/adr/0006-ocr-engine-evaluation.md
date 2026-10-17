@@ -796,3 +796,87 @@ CHATSERVANT_OCR_BACKEND=ort       491 ms   （余量 51%）
 4. **`ort` 的线程数固定在 4**，那是 ADR-0007 在 Python 侧扫出来的最优档；
    **在 Rust 侧没有重新扫**。
 5. **`use_cls`（方向分类）仍未做**，竖排/倒置的图仍是未测风险。
+
+
+---
+## 2026-10-18（三）：装机形态的接线补齐了，但**「换默认」仍未验证**
+
+上一节说卡点是「打包形态没实测」。这一节把接线补上了——
+**但请注意最后那句：真正的装机复测仍然没做，所以默认值一行都没动。**
+
+### 之前「正式取权重」这件事**从来没有被脚本化过**
+
+前面几轮里权重是**从本机 rapidocr 的 wheel 里复制**来的。做台架够用
+（同一个模型），但装机场景根本走不通：CI 上没有 wheel，
+安装包也带不出 30MB 的 ONNX。
+
+新增 `scripts/fetch_models.py`：
+
+- URL 与 SHA256 **不本地硬编**，直接读 rapidocr 自带的模型表
+  （硬编 URL 的坏处是上游换版本时你收不到任何通知，只会装出一个来路不明的权重）；
+- 取完**当场核对 SHA256**，对不上就删掉报错退出；
+- 词典**不在模型表里**（它是 rec 的附属文件），所以这里**不假装校验**，
+  只核对行数 18708（+blank+space = 18710 类）——
+  少一行的话 rec 会在 CTC 解码那一步静默返回空串。
+
+**实测：现有那份权重的 SHA256 与官方表逐字节一致**（两遍都通过）。
+也就是说前面所有的性能与准确率数字，量的是**正版权重**，不是随便哪份 onnx。
+
+### `tauri.conf.json` 里原本**一个 `resources` 都没有**
+
+⇒ 装出来的包里**根本没有任何权重**。这不是「还没验证」，是**已知的必然失败**：
+即使把默认引擎改成 PP-OCR，装机后也会因为找不到权重而静默退回 WinRT。
+
+补了：
+
+```json
+"resources": { "../../target/models/ppocrv6-small/*": "models/ppocrv6-small/" }
+```
+
+### 谁来告诉代码「资源目录在哪儿」
+
+只有 Tauri 知道（`app.path().resource_dir()`），
+而 `crates/capture` 不依赖 Tauri。所以：
+
+- `ocr_pp::set_models_dir()` —— 外壳在 `setup` 里告知，**只设一次**（`OnceLock`）；
+- 查找顺序变成 **环境变量 > 外壳 > 仓库 target/models > exe 旁 > temp**。
+  前两条是「人给的」，后三条是「猜的」，这个次序不是随手排的。
+
+### 这条接线失败时**完全静默**，所以配了两道机器检查
+
+**一、两份配置互相不认**（`tauri.conf.json` 与 `ModelSet` 各写各的路径）：
+打包**照样成功**，产品启动找不到权重 ⇒ 静默退回 WinRT，
+而那条路会漏掉 **17.6%** 的对方消息。
+`wiring_tests::the_bundle_resources_and_the_model_set_point_at_the_same_directory` 盯着它。
+
+实测它会响（把 `ModelSet` 的词典改成 `weights-v5/...`）：
+
+```text
+panicked at ui\src-tauri\src\main.rs:281:9:
+ModelSet 的 weights-v5/ppocrv6_dict.txt 不在 resources 映射的 ppocrv6-small/ 底下
+test result: FAILED. 1 passed; 1 failed
+```
+
+**二、装包里真的有权重吗**：`release.yml` 在 `tauri build` **之后**
+扫一遍产物目录，找不到 `PP-OCRv6_det_small.onnx` 就让发版失败。
+理由：「配置里写了 resources」**不等于**「文件真的进去了」。
+
+⚠ Tauri 自己的 build 脚本会拒绝**路径不存在**的映射（实测过），但它**不管**
+「路径存在、但映射到了错的目录」——那正是上面第一条测试负责的。
+
+### ⚠ 默认值仍然一行都没动
+
+**因为「装机能不能跑」这件事本轮仍然没有实测。**
+现在做完的是「让它有机会跑」，不是「它跑过了」。
+在别的机器、在装好的包上验一遍之前就翻默认值，
+等于把「静默退回 WinRT」这个已知失败面写进默认路径。
+
+### 本节没做到
+
+1. **没有真打过安装包**：`pnpm tauri build` 本轮没跑，所以
+   `resources` 映射在真实产物里长什么样、资源目录在 Windows 上究竟
+   落在 exe 旁还是别处，**都还是推断**。
+2. **没有在装机形态下跑过一次 OCR**——那是「换默认」的最后一道验证。
+3. **包体积没量**：`ort` 是静态链接（`target/` 下找不到任何 `onnxruntime.dll`），
+   但**静态链接进 exe 的那段有多大**，本轮没测。
+4. release.yml 的新步骤**只在真发版时才会跑**，本机未执行过。

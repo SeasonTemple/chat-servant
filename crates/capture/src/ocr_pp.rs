@@ -101,18 +101,47 @@ pub enum PpError {
 /// 查找顺序（先命中先赢）：
 ///
 /// 1. `CHATSERVANT_OCR_MODELS` —— 显式指定，永远最优先；
-/// 2. **`<仓库>/target/models/`** —— 开发、探针、`cargo test` 都走这条
+/// 2. **外壳指定的目录**（[`set_models_dir`]）—— **装机形态走这条**：
+///    Tauri 把资源放在哪，只有 `app.path().resource_dir()` 知道，
+///    而本 crate 不依赖 Tauri，所以由外壳在启动时告知；
+/// 3. **`<仓库>/target/models/`** —— 开发、探针、`cargo test` 都走这条
 ///    （由编译期 `CARGO_MANIFEST_DIR` 反推，`crates/capture` 上两级）；
-/// 3. `<可执行文件所在目录>/models` —— 发布形态：权重装在应用旁边；
-/// 4. 系统临时目录 —— 兜底（CI 里拿不到仓库路径时的最后一条）。
+/// 4. `<可执行文件所在目录>/models` —— 没接外壳时的兜底；
+/// 5. 系统临时目录 —— 最后一条（CI 里拿不到仓库路径时）。
+///
+/// ⚠ 顺序不是随手排的：**1 与 2 都是「人给的」**（环境变量、外壳），
+/// 排在自动查找前面；3~5 全是猜的，优先级最低。
 ///
 /// ⚠ 2026-10-18 之前默认是 `%APPDATA%\dev.chatservant.app\models\`。
 /// 那条被删掉不是因为它不能用，是因为**它在 C 盘**：用户明确要求
 /// 产物与权重都留在项目所在盘，不去占系统盘。
 /// ⇒ 装机场景要走第 3 条或第 1 条，别再指望 `%APPDATA%`。
+/// 进程内指定的权重目录。**由外壳（Tauri）启动时调用 [`set_models_dir`] 设一次。**
+static MODELS_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// 外壳告诉本进程「权重在哪儿」。
+///
+/// ## 为什么需要它，而不是靠 [`models_dir`] 自己找
+///
+/// 装机之后，权重的位置只有 **Tauri 知道**（`app.path().resource_dir()`），
+/// 而 `crates/capture` 不依赖 Tauri——它要是自己去找，就得自己猜
+/// 「资源目录在 exe 旁边还是上一级」，而那件事各平台不一样、试错成本很高。
+///
+/// ⚠ **只设一次**（`OnceLock`）。重复设置不会报错，而是**静默沿用第一次的值**——
+/// 测试里想改就会踩到。要改先 `std::process::exit` 或干脆另起一个进程。
+///
+/// 优先级：**低于 `CHATSERVANT_OCR_MODELS`**，高于其余自动查找。
+/// 环境变量是「人显式指定」，任何自动规则都该让位。
+pub fn set_models_dir(dir: impl Into<PathBuf>) {
+    let _ = MODELS_OVERRIDE.set(dir.into());
+}
+
 pub fn models_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("CHATSERVANT_OCR_MODELS") {
         return PathBuf::from(d);
+    }
+    if let Some(d) = MODELS_OVERRIDE.get() {
+        return d.clone();
     }
     if let Some(d) = repo_target_models() {
         return d;

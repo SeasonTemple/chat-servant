@@ -11,8 +11,36 @@ use tauri::{Emitter, Manager, WindowEvent};
 
 fn main() {
     init_tracing();
+    // `bundle.resources` 与 `ModelSet` 的相对路径必须**指向同一处**。
+    // 这条测试跑在每次构建前：两份配置各写各的路径时，
+    // 症状是「装包能成功、但产品永远走 Windows OCR」——
+    // 打包器**不报错**（资源映射写错也可以只是少拷几个文件），
+    // 所以只能靠机器查。
+    assert_resources_and_model_set_agree();
     tauri::Builder::default()
         .setup(|app| {
+            // PP-OCR 的权重目录**先定下来**，因为它决定后面所有 OCR 能不能跑。
+            //
+            // 只有 Tauri 知道资源目录在哪儿（`resource_dir()`），
+            // 而 `chatservant_capture` 不依赖 Tauri——所以在这儿告知它，
+            // 而不是让 capture 自己猜「exe 旁边还是上一级」。
+            //
+            // ⚠ 装包里**没有**权重时不要当成错误：那条路会退回
+            //   `Windows.Media.Ocr`，功能不受影响（见 ADR-0002）。
+            //   所以这里只记一条日志，不 panic。
+            if let Ok(dir) = app.path().resource_dir() {
+                let models = dir.join("models");
+                chatservant_capture::ocr_pp::set_models_dir(&models);
+                if !models
+                    .join(chatservant_capture::ocr_pp_pipeline::KEYS_FILE)
+                    .is_file()
+                {
+                    tracing::info!(
+                        dir = %models.display(),
+                        "装包里没有 PP-OCR 权重，走 Windows.Media.Ocr"
+                    );
+                }
+            }
             // 托盘**先建**，因为「关闭时 = 收进托盘」这一档要验证托盘存在。
             // 顺序反了的话，设置页可能在托盘建好之前就把那一档存进去了，
             // 于是「收起」这个动作没有落点。
@@ -226,3 +254,66 @@ fn init_tracing() {
 /// 于是守住这件事的 `no_event_literal_outside_this_file` 从未运行过。
 /// 现在单一出处是 `contract.rs`。
 pub use crate::contract::events;
+
+/// **`bundle.resources` 与 `ModelSet` 的相对路径必须指向同一处。**
+///
+/// 装机后 `resource_dir()/models/ppocrv6-small/` 才是权重真正落地的位置，
+/// 而 [`chatservant_capture::ocr_pp_pipeline::ModelSet`] 里三个文件名都是
+/// **相对 `models_dir()`** 的。两份配置各写各的时候：
+///
+/// - 打包**照样成功**（资源映射写错常常只是少拷几个文件，Tauri 不报错）；
+/// - 产品启动时找不到权重 ⇒ **静默退回 Windows.Media.Ocr**，
+///   而那条路会漏掉 17.6% 的对方消息（ADR-0006 的真帧检出率）。
+///
+/// ⇒ 这是一条**失败面完全静默**的接线，值得一个断言。
+fn assert_resources_and_model_set_agree() {
+    let conf = include_str!("../tauri.conf.json");
+    let prefix = "ppocrv6-small";
+    let det = chatservant_capture::ocr_pp_pipeline::DET_MODEL;
+    let rec = chatservant_capture::ocr_pp_pipeline::REC_MODEL;
+    let keys = chatservant_capture::ocr_pp_pipeline::KEYS_FILE;
+    assert!(
+        conf.contains(prefix),
+        "tauri.conf.json 的 bundle.resources 里没有 {prefix}/ —— \
+         装包不会带权重，产品会静默退回 Windows OCR"
+    );
+    for name in [det, rec, keys] {
+        assert!(
+            name.starts_with(prefix),
+            "ModelSet 的 {name} 不在 resources 映射的 {prefix}/ 底下"
+        );
+    }
+}
+
+#[cfg(test)]
+mod wiring_tests {
+    /// 装机形态那条接线**失败时完全静默**，所以必须有测试盯着。
+    ///
+    /// 这条测试存在的理由是它验的是**两份配置之间的一致性**，
+    /// 而不是任何一份配置本身对不对——两份都对但互相不认，是最容易漏的那类错。
+    #[test]
+    fn the_bundle_resources_and_the_model_set_point_at_the_same_directory() {
+        super::assert_resources_and_model_set_agree();
+    }
+
+    /// `models_dir()` 的优先级：**环境变量 > 外壳 > 自动查找**。
+    ///
+    /// ⚠ `set_models_dir` 是 `OnceLock`，**只设一次**，所以这条只验
+    /// 「没设过的时候它仍然落在仓库 `target/models`」——
+    /// 设过之后的优先级只能靠另一个进程验（`xtask` 就是干这个的）。
+    #[test]
+    fn models_dir_still_finds_the_repo_weights_without_a_shell() {
+        let d = chatservant_capture::ocr_pp::models_dir();
+        assert_eq!(
+            d.file_name().and_then(|s| s.to_str()),
+            Some("models"),
+            "自动查找必须落在名为 models 的目录上：{}",
+            d.display()
+        );
+        assert!(
+            !d.to_string_lossy().contains("%APPDATA%") && !d.to_string_lossy().contains("AppData"),
+            "权重又落回系统盘了：{}（硬约束：产物一律留项目所在盘）",
+            d.display()
+        );
+    }
+}
