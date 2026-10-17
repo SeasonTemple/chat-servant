@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **49** ｜ 验收项全勾 **25** ｜ 已收但留有说明项 **11** ｜ 未收 **13**
+票据总数 **50** ｜ 验收项全勾 **25** ｜ 已收但留有说明项 **11** ｜ 未收 **14**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -35,6 +35,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `47-pp-ocr-plan-cache-has-a-recompile-race.md` | 5/5 | ready-for-human · **2026-10-17 已改已验过门禁。本机（Windows + Rust 1.94.1）编得过， | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `49-pp-ocr-plan-cache-lifetime-and-det-lock.md` | 3/7 | ready-for-human · **2026-10-17 前半条已改已验过门禁（`det_plan` 编译不再持锁）**。 | (票面没写 Blocked by) |
+| `50-ocr-quality-floor-has-no-machine-guard.md` | 0/5 | ready-for-agent | None（验收项 1、2 可立即做；验收项 4 的实测部分需要真帧在手） |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
