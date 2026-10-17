@@ -41,6 +41,18 @@ from pathlib import Path
 
 from PIL import Image
 
+# ⚠ Windows 上 Python 的 stdout 默认是传统代码页（GitHub 的 Windows runner
+#   上就是 cp1252），一句中文 print 就 UnicodeEncodeError 带栈回溯崩掉。
+#   本仓在 scripts/fetch_models.py 上踩过（CI run 39037571268），
+#   而 ocrbench 这一族当时**一个都没加**——守卫的不变量只管
+#   「gate.ps1 会 python 调起的脚本」，人工跑的台架在射程外。
+#   不能指望调用方设 PYTHONIOENCODING，必须在脚本里自己改。
+#   errors="replace"：真有编不出来的字符时**降级成 ? 而不是崩**——
+#   台架的失败模式必须是「读数不符」，不是「打印失败 ⇒ 栈回溯」。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):        # 3.7+ 都有
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # 「墨」的亮度上限。⚠ 用的是 PIL 的 `L`（ITU-R 601 luma），**不是** WCAG
 # 相对亮度——为的是能走字节级比较，不必逐像素算幂函数。
 # 两者在本量具上**分类结果相同**，因为阈值离两端都很远：
