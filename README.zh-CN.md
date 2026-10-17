@@ -120,7 +120,9 @@ pwsh -NoProfile -File scripts/gate.ps1
 
 编码扫描 / `cargo fmt` / `cargo clippy -D warnings` / `cargo test` / secret-scan /
 `cargo deny check` / `svelte-check` / lint + svelte-autofixer / `vite build`。
-`.github/workflows/ci.yml` 与它逐条对应。
+`.github/workflows/ci.yml` 与它逐条对应——这句话由
+`scripts/check-gate-parity.ps1` 守着：它从 `gate.ps1` 反推步名清单，
+CI 少跑一步就红。
 
 > **看它打印的那一行**（`GATE: ALL GREEN` / `GATE: FAILED`），不要只看退出码。
 

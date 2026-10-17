@@ -48,22 +48,47 @@ jobs:
         working-directory: ui
         run: pnpm install --frozen-lockfile
 
-      # 下面九步与 `scripts/gate.ps1` 一一对应。
-      # 改本地门禁时**同步改这里**，否则两套门禁会各说各话。
+      # ⚠⚠ **2026-10-18 订正**：原文写「下面九步与 `scripts/gate.ps1` 一一对应」，
+      # 而**实际不是**——两处硬伤：
+      # ① **`sheet pack in sync` 这一步 CI 里根本没有**（本地每次都跑）。
+      #    它是 `ui/scripts/sheetpack.ps1 -Check`，纯 pwsh 脚本，CI 完全能跑。
+      #    ⇒ 一份改了 SVG 内嵌 base64 的 PR，**本地门禁红、CI 绿**。
+      # ② **`prettier + eslint` 与 `svelte-autofixer` 两个都编号 `8/9`**
+      #    ——所以「九步」这个总数从一开始就是假的。
+      #
+      # **现在刻意不写 `/总数`**，只留 `Gate N` 这个位置号。分母是这里唯一会
+      # 反复变假的东西：`secret scan` 在本地 `gate.ps1` 里没设
+      # `CHATSERVANT_PROBE_KEY` 就跳过，CI 用占位 key 必跑 ⇒ 两侧总数天生不等；
+      # 而每次往这张表加一步，任何写死的分母立刻过期，还长得像"已对齐"。
+      # ⇒ 「对齐」指的是**步的集合一致**，不是数字相同。
+      # 通篇的「九步」是 CONTRIBUTING 那张表的计数（它把 lint+autofixer 并成一步、
+      # 不含 mojibake / sheetpack 两个便宜的），见 `docs/HANDOFF.md` §5。
 
       # ① 编码损坏（U+FFFD）。它排在最前面，因为它最便宜——
       #    受损的全是注释与文档，fmt / clippy / test / svelte-check 一律照绿。
-      - name: "Gate 1/9 | mojibake scan"
+      - name: "Gate 1 | mojibake scan"
         shell: pwsh
         run: ./scripts/scan-mojibake.ps1
 
-      - name: "Gate 2/9 | cargo fmt --check"
+      # ② 贴纸包（探针面板那张撕边纸）内嵌的 base64 与源图是否逐字节相同。
+      - name: "Gate 2 | sheet pack in sync"
+        shell: pwsh
+        run: ./ui/scripts/sheetpack.ps1 -Check
+
+      # 本门禁自己的组成有没有漂到 CI 外面去。名单从 scripts/gate.ps1 反推，
+      # 见证取命令而非步名（本地 `ui build` / CI `vite build` 名字本就故意不同）。
+      # 2026-10-18 第一次去核就抓到 `sheet pack in sync` 本地跑、CI 里没有。
+      - name: "Gate 3 | gate/CI parity"
+        shell: pwsh
+        run: ./scripts/check-gate-parity.ps1
+
+      - name: "Gate 4 | cargo fmt --check"
         run: cargo fmt --all --check
 
-      - name: "Gate 3/9 | cargo clippy -D warnings"
+      - name: "Gate 5 | cargo clippy -D warnings"
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: "Gate 4/9 | cargo test"
+      - name: "Gate 6 | cargo test"
         run: cargo test --workspace
 
       # ⑤ 凭据扫描。
@@ -82,7 +107,7 @@ jobs:
       # 曾经这里写的是字面量 `CHATSERVANT_PROBE_KEY: sk-...`，于是那串字面量
       # **本身就在 ci.yml 里**，扫描器如实报出了 ci.yml——扫描器没坏，是探针自指了。
       # 探针串一旦入库，它要找的东西就住在他自己家里。
-      - name: "Gate 5/9 | secret scan"
+      - name: "Gate 7 | secret scan"
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -109,22 +134,22 @@ jobs:
           Write-Output 'SECRET_SCAN_OK —— 抓得到探针，也放得过干净仓库'
 
       # ⑥ 许可证 / advisory / 来源合规，策略见 docs/adr/0003-dependency-strategy.md
-      - name: "Gate 6/9 | cargo deny check"
+      - name: "Gate 8 | cargo deny check"
         run: cargo install cargo-deny --locked && cargo deny check
 
-      - name: "Gate 7/9 | svelte-check"
+      - name: "Gate 9 | svelte-check"
         working-directory: ui
         run: pnpm check
 
-      - name: "Gate 8/9 | prettier + eslint"
+      - name: "Gate 10 | prettier + eslint"
         working-directory: ui
         run: pnpm lint
 
-      - name: "Gate 8/9 | svelte-autofixer"
+      - name: "Gate 11 | svelte-autofixer"
         shell: pwsh
         run: ./ui/scripts/autofixer.ps1
 
-      - name: "Gate 9/9 | vite build"
+      - name: "Gate 12 | vite build"
         working-directory: ui
         run: pnpm build
 
