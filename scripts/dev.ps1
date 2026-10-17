@@ -26,6 +26,11 @@ param(
   [string[]]$Skip = @(),
   [string[]]$Only = @(),
 
+  # clean 的透传开关。`targetgc.py` 自带 24 小时冷却（两次**真回收**之间），
+  #   而门禁每跑一次就可能写冷却戳 —— 于是「用户明确说要清理、脚本却什么都没做」。
+  #   这个开关把 `--force` 透下去，无视冷却立刻收一次。
+  [switch]$Force,
+
   [switch]$DryRun
 )
 
@@ -69,7 +74,7 @@ chat-servant 开发入口（用 pwsh 7 运行）
   dev.ps1 app          启动 Tauri dev（内部会自己起 vite，别再单起 pnpm dev）
   dev.ps1 gate         完整九步门禁（= scripts/gate.ps1，可加 -Skip / -Only）
   dev.ps1 size         target/ 体积报告 + 多哈希占比
-  dev.ps1 clean        回收 target/ 的旧哈希产物（-DryRun 只报告）
+  dev.ps1 clean        回收 target/ 的旧哈希产物（-DryRun 只报告，-Force 无视冷却）
 
 ⚠ 判门禁红绿只看 gate.ps1 打的 GATE: ALL GREEN / GATE: FAILED 那两行。
 ⚠ check / test / ui-check 都不含 cargo deny 与 secret-scan，**不是完整门禁**。
@@ -134,11 +139,12 @@ chat-servant 开发入口（用 pwsh 7 运行）
   'clean' {
     # 不删 .fingerprint —— Cargo 靠它判断要不要重编，删了会让整棵依赖树重编。
     #   保留策略写在 scripts/targetgc.py 的 docstring 里，这里只转发，不复制。
-    if ($DryRun) {
-      Run 'targetgc（只报告）' { & uv run --no-project python scripts\targetgc.py --dry-run }
-    } else {
-      Run 'targetgc' { & uv run --no-project python scripts\targetgc.py }
-    }
+    # ⚠ -DryRun 与 -Force 是两件事：前者「只报告」，后者「无视 24h 冷却」。
+    #   缺了透传就会出现「用户说了清理、脚本跑了却零回收」，而它**不报错**。
+    $targs = @('--no-project', 'python', 'scripts\targetgc.py')
+    if ($DryRun) { $targs += '--dry-run' }
+    if ($Force) { $targs += '--force' }
+    Run 'targetgc' { & uv run @targs }
   }
 }
 
