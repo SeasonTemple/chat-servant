@@ -107,15 +107,40 @@ TAURI_CONFIG: '{"bundle":{"resources":null}}'
 
 ## ⚠ 仍未证实的（不要当成已验证）
 
-1. **CI 是否真的绿了**：本地门禁不含 build script 这条路径，
-   正向判据是「推送后看 runner 的结果」，不是本机读数。
-2. **`uv` 在 `windows-latest` 上是否可用**：`release.yml` 用
+1. **`uv` 在 `windows-latest` 上是否可用**：`release.yml` 用
    `uv run --with rapidocr --with omegaconf`，但**没有任何一次成功运行**，
    所以这是配置层面的断言（tier 1），不是实测（tier 3）。
    本机走的是 `target/bench-venv`，**完全没有验证过 runner 上这条**。
-3. **从未有过一次成功的发版**：`Verify weights landed in the bundle` 等步骤
+2. **从未有过一次成功的发版**：`Verify weights landed in the bundle` 等步骤
    在真实 runner 上一次都没跑过，它们的正确性是纸面推理。
-4. **tag 我不会自己打**：打 tag 会真的发一个 release，那是要授权的动作。
+   ⚠ 本票修的是「取权重」这一步能不能跑通（在**本机**端到端验的，10/10），
+   **不等于发版整条路通了**。
+3. **tag 我不会自己打**：打 tag 会真的发一个 release，那是要授权的动作。
+
+## ✅ 已实测：CI 转绿（缺陷①的正向判据）
+
+本地门禁**不含** build script 那条路径，所以本地全绿证明不了任何事。
+正向判据只能是 runner：
+
+| | |
+|---|---|
+| run | `39035163536`（sha `8261f44`） |
+| 时间 | 2026-10-18 13:05:53 → 13:14:51（8m58s） |
+| 结论 | **success** |
+| 12 步 | Gate 1~12 全 success |
+
+关键那一步：`Gate 5 | cargo clippy -D warnings` = success
+——它就是连红 28 次的那一步。
+
+顺带证实了两件本来只是「配置层面看着对」的事：
+
+- `Gate 2 | sheet pack in sync` success ⇒ `shell: pwsh` + `run: ./xxx.ps1`
+  这条路在 `windows-latest` 上真的能跑（本票新增的那一步）。
+- `Gate 3 | gate/CI parity` success ⇒ 新守卫在 runner 的文件副本上
+  不会误报（剥注释那段在那里同样成立）。
+- `Gate 7 | secret scan` success ⇒ `TAURI_CONFIG` 没有影响到
+  `cargo run -p xtask` 那条路。
+
 
 ## 验收项
 
@@ -125,6 +150,6 @@ TAURI_CONFIG: '{"bundle":{"resources":null}}'
 - [x] 缺陷②的根因定位（词典在别的 backend 分支，不是「上游没有」）
 - [x] 缺陷②已修（`find_dict_url` + 钉死 SHA256），端到端取回并逐字节比对过
 - [x] ModelSet 文件名对齐变成机器检查（不需要权重在场）
-- [ ] **推送后确认 CI 转绿**（需看 runner 实测结果）
+- [x] **推送后确认 CI 转绿**（run `39035163536`，sha `8261f44`，12/12 success）
 - [ ] **`uv` 在 `windows-latest` 可用**（tier 1 断言，需实测）
 - [ ] **跑通一次真实发版**（需授权打 tag）
