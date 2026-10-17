@@ -195,11 +195,21 @@ enum ProbeCmd {
     },
 }
 
+/// 探针的日志过滤器。**必须有全局档位**——见 [`the_log_filter_has_a_global_level`]。
+const LOG_FILTER: &str = "info,xtask=debug,wgc=trace";
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         // `wgc` 的 "Item closed, stopping capture" 是 debug!，info 级别看不到它。
         // 排查抓帧失败要靠这一行区分「item 被系统关掉」和「帧没来」，所以开 trace。
-        .with_env_filter("xtask=debug,wgc=trace")
+        //
+        // ⚠ `info` 那段**不能省**（2026-10-18 补）。`EnvFilter` 没有全局档位时，
+        // 未列出的 target 一律被丢掉，于是 `chatservant_capture` 的记录整条看不见——
+        // 包括「PP-OCR 不可用、回落 Windows OCR」那一句。
+        // 后果实测过一次：PP-OCR 每帧都失败回落，而 `xtask ocr` 打出来的是
+        // WinRT 的逐字输出，看上去像「PP-OCR 把整张图切成了单字框」，
+        // 排查方向整段跑偏——调了半天 det 参数，det 一次都没真跑起来。
+        .with_env_filter(LOG_FILTER)
         .init();
     let cli = Cli::parse();
     match cli.cmd {
@@ -1917,4 +1927,29 @@ fn write_png(frame: &chatservant_capture::Frame, path: &Path) -> Result<()> {
         .context("构造图像失败")?;
     img.save(path).context("写 PNG 失败")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::LOG_FILTER;
+
+    /// **过滤器必须带全局档位，否则 `chatservant_capture` 的记录全被丢掉。**
+    ///
+    /// `EnvFilter` 的规则是「没列出的 target 一律丢弃」，而不是「没列出的按默认档」。
+    /// 写成 `"xtask=debug,wgc=trace"` 时，capture 里那句
+    /// 「PP-OCR 不可用、回落 Windows OCR」**根本不会出现在输出里**——
+    /// 于是探针打出来的是 WinRT 的逐字结果，看上去像 PP-OCR 把整张图切成了单字框。
+    /// 这个误判实测过一次，调了半天 det 参数，det 一次都没真跑起来。
+    ///
+    /// 判据取「逗号前的第一段有没有 `=`」：没有 `=` 就是全局档位。
+    /// 用结构判断而不是 `starts_with("info")`，这样换档位也不会失效。
+    #[test]
+    fn the_log_filter_has_a_global_level() {
+        let first = LOG_FILTER.split(',').next().unwrap_or_default();
+        assert!(
+            !first.contains('='),
+            "LOG_FILTER 的第一段 `{first}` 带 target 名 ⇒ 没有全局档位，\
+             未列出的 target（含 chatservant_capture）会被整条丢掉"
+        );
+    }
 }
