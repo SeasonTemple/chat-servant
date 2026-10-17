@@ -33,6 +33,14 @@ ROOT = Path(__file__).resolve().parent.parent
 ISSUES = ROOT / ".scratch" / "wechat-reply-copilot" / "issues"
 OUT = ROOT / ".scratch" / "wechat-reply-copilot" / "STATUS.md"
 
+# 本脚本输出全是中文，而 Windows 上 Python 的 stdout 默认是传统代码页 cp1252
+# —— 不处理就会 UnicodeEncodeError。样板见 scripts/targetgc.py；
+# 真正被它咬到的那次是 scripts/fetch_models.py 在 GitHub runner 上崩
+# （run 39037571268），同一个仓、同一类错。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 DONE = ("done", "已修", "已定位", "销账", "验完")
 # 分类的**权威判据是 Status 行 `·` 之前那一段（triage 标签）**，不是散文里的词。
 # 下面是**前缀**匹配（不是等值）：不少票的标签后面直接跟括号说明，

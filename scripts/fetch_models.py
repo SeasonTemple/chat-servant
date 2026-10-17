@@ -42,6 +42,23 @@ CI 上没有 wheel，安装包也带不出 30MB 的 ONNX。
 `--check` 做两件事，**都不需要权重在场**：
 1. 本文件的文件名清单与 Rust 侧 `ModelSet` 逐个对齐（改一边忘另一边 ⇒ 红）；
 2. 权重在场时再核对齐全性与 SHA256。
+
+## ⚠ stdout 编码：Windows 上默认是 cp1252，打印中文会直接崩
+
+dry run `39037571268` 在 runner 上就死在这儿：
+
+    UnicodeEncodeError: 'charmap' codec can't encode characters in position 0-1
+      File "...\\Lib\\encodings\\cp1252.py", line 19, in encode
+        print(f"下载 {name} …")
+
+`actions/setup-python` 装的 Python 3.12 在 Windows 上 stdout 用传统代码页 cp1252，
+而本脚本**全是中文输出**。⇒ 光改脚本不够，还得让脚本自己改。
+
+所以下面那句 reconfigure 是**必需品**，不是洁癖：
+它让脚本在任何调用方（CI、本机、编辑器终端）下都能跑，
+而不依赖「记得设 `PYTHONIOENCODING=utf-8`」这种外部约定。
+本会话里我已经因为这条在 bench 台架上踩过好几次——
+本地要靠 `$env:PYTHONIOENCODING='utf-8'` 才不炸，那只是本机碰巧。
 """
 
 from __future__ import annotations
@@ -57,6 +74,15 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 DEST = REPO / "target" / "models" / "ppocrv6-small"
 MODEL_SET_SRC = REPO / "crates" / "capture" / "src" / "ocr_pp_pipeline.rs"
+
+# ⚠ 必须在这里做，不能指望调用方设好 PYTHONIOENCODING：
+#   GitHub 的 Windows runner 上 Python 3.12 的 stdout 是 cp1252，
+#   打印中文会 UnicodeEncodeError 崩掉（实测 run 39037571268）。
+#   errors="replace" 是兜底：真有编不出来的字符时**降级成 ? 而不是崩**，
+#   因为这个脚本的失败模式必须是「校验不符 ⇒ 红」，不是「打印失败 ⇒ 栈回溯」。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):        # 3.7+ 都有
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 # `ModelSet` 里那三个文件名，逐字对应 crates/capture/src/ocr_pp_pipeline.rs。
 # ⚠ 改这里必须同时改那边的 ModelSet，否则产品去读一个不存在的文件。

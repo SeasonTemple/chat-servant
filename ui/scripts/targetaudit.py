@@ -34,6 +34,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEPS = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "target" / "debug" / "deps"
 
+# 本脚本输出全是中文，而 Windows 上 Python 的 stdout 默认是传统代码页 cp1252
+# —— 不处理就会 UnicodeEncodeError。样板见 scripts/targetgc.py；
+# 真正被它咬到的那次是 scripts/fetch_models.py 在 GitHub runner 上崩
+# （run 39037571268），同一个仓、同一类错。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # libwindows-1a2b3c4d5e6f7890.rlib / windows-capture-abc123.rmeta / app.exe / app.pdb
 HASHED = re.compile(r"^(lib)?(.+?)-([0-9a-f]{8,32})$")
 

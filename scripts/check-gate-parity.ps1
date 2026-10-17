@@ -248,6 +248,43 @@ if (Test-Path $confPath) {
   exit 1
 }
 
+# ─────────────────────────────────────────────────────────────────────────
+# ⑤ Windows 上 Python 打印中文会崩：stdout 默认 cp1252
+#
+# 实测（dry run `39037571268`，2026-10-18）：
+#   UnicodeEncodeError: 'charmap' codec can't encode characters in position 0-1
+#     File "...\Lib\encodings\cp1252.py", line 19, in encode
+#       print(f"下载 {name} …")
+# `actions/setup-python` 装的 Python 3.12 在 Windows 上 stdout 用传统代码页，
+# 而本仓的脚本**输出全是中文**。
+#
+# 规则：**gate.ps1 用 python 调起来的脚本，若含非 ASCII，就必须自己 reconfigure。**
+# 为什么要机器查：这一类错在**调用方**才显形（CI 的 runner、本机 bench 台架），
+# 本地「记得设 PYTHONIOENCODING=utf-8」就能糊过去——本会话里我糊了好几次。
+# `scripts/targetgc.py` 早就有 reconfigure（说明这个坑在别处已咬过一次），
+# 而 `fetch_models.py` / `targetaudit.py` / `ticketstatus.py` 三家都没有。
+$pyInvoked = [regex]::Matches($gate, '(?m)python[\s\\]+([\w\\./-]+\.py)') |
+  ForEach-Object { $_.Groups[1].Value -replace '\\', '/' } |
+  Sort-Object -Unique
+$pyNonAscii = 0
+foreach ($py in $pyInvoked) {
+  if (-not (Test-Path $py)) {
+    $fail.Add("gate.ps1 要跑 $py，但仓库里没有这个文件")
+    continue
+  }
+  $pyRaw = [IO.File]::ReadAllText((Resolve-Path $py))
+  if ($pyRaw -notmatch '[^\x00-\x7F]') { continue }   # 全 ASCII，cp1252 编得动，不管
+  $pyNonAscii++
+  if ($pyRaw -notmatch '\.reconfigure\s*\(') {
+    $fail.Add("$py 含非 ASCII 输出，但没自己 reconfigure stdout/stderr")
+    $fail.Add('    ⇒ Windows 上（CI 的 runner 尤其）stdout 默认 cp1252，打印中文会 UnicodeEncodeError。')
+    $fail.Add('      修：在模块顶层加')
+    $fail.Add('        for _s in (sys.stdout, sys.stderr):')
+    $fail.Add('            if hasattr(_s, "reconfigure"): _s.reconfigure(encoding="utf-8", errors="replace")')
+    $fail.Add('      别指望调用方记得设 PYTHONIOENCODING。样板：scripts/targetgc.py')
+  }
+}
+
 if ($fail.Count) {
   Write-Output 'CI 与本机门禁没有对齐：'
   Write-Output ''
@@ -260,5 +297,6 @@ if ($fail.Count) {
 
 $j = if ($script:jobsChecked) { $script:jobsChecked } else { 0 }
 Write-Output ("gate/CI 对齐：gate.ps1 的 {0} 步在 ci.yml 里都有见证命令；" -f $steps.Count)
-Write-Output ("bundle.resources 那条：扫了 {0} 个 workflow 的 job，逐个都有覆盖或先取权重。" -f $j)
+Write-Output ("bundle.resources 那条：扫了 {0} 个 workflow 的 job，逐个都有覆盖或先取权重；" -f $j)
+Write-Output ("Python 编码那条：gate.ps1 调起 {0} 个脚本，其中 {1} 个含非 ASCII，都已自己 reconfigure。" -f $pyInvoked.Count, $pyNonAscii)
 exit 0
