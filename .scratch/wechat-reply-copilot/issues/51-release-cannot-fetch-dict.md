@@ -427,3 +427,59 @@ PyPI 来源没变、供应链面没变，去掉的只是「假定有个工具」
 - [ ] **push 触发时 `inputs.dry_run` 为空 ⇒ 照常发布**（语义推理，验证它要打 tag）
 - [ ] **跑通一次真实发版**（需授权打 tag）
 
+## 最后一跳：无法零风险预演，于是改成让它自报（2026-10-18 收尾）
+
+### 客观边界：这一跳**没有** dry run
+
+`gh release create --help` 里**没有 `--dry-run`**（只有 `--verify-tag` /
+`--notes` / `--notes-file` / `--discussion-category` 等）。
+⇒ `dry_run` 开关跳过的正是这一跳，所以它**在任何授权下都无法零风险预演**。
+这条要写清楚，否则下一个人会以为「dry run 绿了 = 发版链路全绿」。
+
+⇒ 改成**自报**：在 checkout 之后、装工具链与打包**之前**，把这一跳的判据
+原样打出来（`Report publish gate`）。只读文件、只 echo。
+
+### ⚠ 顺带查出缺陷⑥：tag 与安装包里的版本号是两套东西
+
+`tauri build` 的产物名用 `tauri.conf.json` 的 `version`
+（`chat-servant_<version>_x64-setup.exe`），而 release 标题用 tag。
+打 `v0.1.1` 而 version 还写 `0.1.0` ⇒ 发出「标题 v0.1.1、附件
+`chat-servant_0.1.0_x64-setup.exe`」，**没有任何一步会报错**——
+它俩根本不在一个空间里核对。现在不一致就在打包前几秒内红（自证 9/9）。
+
+### ⚠ 缺陷⑦：**我自己上一提交埋的**——推 tag 永远发不出去
+
+加 `draft` 开关时写了「空串/意外值一律按草稿处理」（保守方向对），
+但**没判事件类型**。而 `on: push: tags` 触发时 `inputs` 整个为空、
+`inputs.draft` 渲染出来就是空串 ⇒ **推 tag 只会建草稿、永远发不出 release**，
+而工作流开头偏偏写着「由 tag 触发发布」。
+
+⚠⚠ 它的自证 **6/6 全绿**。绿的原因是判据有**两条轴**（值 × 事件），
+6 组全在「值」上打转（true/false/False/0/空/weird），**事件那一轴一格没测**。
+⇒ 教训：**先数判据有几个维度，再数用例覆盖了几个**；
+维度数 > 覆盖数时，全绿只说明「碰过的那块是对的」。
+补到 9 组（加 push 轴 3 组）后才红并修掉（`d5aeb7d`）。
+
+### dry run 验证结果（run `39048885973`，sha `a572338`，28 分钟，**success**）
+
+| 步 | 结果 |
+|---|---|
+| `Report publish gate` | ✅ 打出了 `event_name=workflow_dispatch` / `resolved_tag=main` / `inputs.dry_run=[true]` / `publish_would_run=false` / `tauri_version=0.1.0` / `tag_version=main`，并警告「版本对不上但这是 dry run」 |
+| `Build msi + nsis` | ✅ |
+| `Verify weights landed in the bundle` | ✅ NSIS 路径级 3/3 + MSI 体积级 3/3 |
+| `Publish \| GitHub Release` | **skipped** |
+| `Dry run \| nothing was published` | ✅ |
+
+外部核对：`gh release list` 为空，远端 tag 仍只有 `v0.1.0`。
+⚠ `publish_would_run=false` 这一行是**第一次在真 runner 上打出来的**，
+而不是本地推理出来的。
+
+### 仍未证实
+
+- **push 触发时 `inputs.dry_run` 为空 ⇒ 照常发布**（验证它要打 tag）
+- **`gh release create` 这一发本身**（验证它要发一个东西，dry run 到不了）
+- ⚠ 已加 `draft` 开关（`--draft`）：资产照样上传、整条 publish 路径真跑，
+  但不进 Releases 页、不通知任何人，验收后在 UI 上一键 Publish。
+  它把「跑不通」与「不发布」拆开了——自证 9/9（判据用退出码 + 参数里有无 `--draft`）。
+
+
