@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **50** ｜ 验收项全勾 **25** ｜ 已收但留有说明项 **11** ｜ 未收 **14**
+票据总数 **50** ｜ 验收项全勾 **25** ｜ 已收但留有说明项 **12** ｜ 未收 **13**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -26,7 +26,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `21-readout-phase-never-sent.md` | 5/7 | ready-for-human · **P0 · 2026-10-12 实测，不是推断** | None（可以立刻做） |
 | `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 4/7 | needs-triage · **2026-10-15 连否三个候选后主动收手** | None（票 22 已把反例测出来了，可以立刻做） |
 | `38-measured-bubble-color-in-comments-no-longer-occurs.md` | 0/0 | in-progress · **2026-10-15 已定位、已订正注释与演示夹具、已加守卫测试** | (票面没写 Blocked by) |
-| `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 6/9 | ready-for-human · **2026-10-15 已定位并修掉两个真 bug，但路还选不了** | (票面没写 Blocked by) |
 | `40-key-input-unreachable-when-unset.md` | 8/9 | ready-for-human · **2026-10-16 修复合入并过门禁（`976735e`，此后每轮十步全绿）；只剩一项要真 key 的端到端，那项卡在你本机提供的 key 上** | (票面没写 Blocked by) |
 | `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-agent · **2026-10-15 已量清三项，待做** | (票面没写 Blocked by) |
 | `44-candidate-action-row-is-button-geometry-on-prose.md` | 18/18 | 进行中 · **2026-10-16 四角与「读成方框」的根因已定位并修完；门禁全绿；两项复核仍未做** | (票面没写 Blocked by) |
@@ -52,6 +51,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `17-settings-window-parked-offscreen.md` | 3/4 | 已定位 —— 触发对象已在 `6b2acbf` 随「设置搬进面板」删除 |
 | `24-small-type-floor-remeasure.md` | 6/7 | done · **2026-10-14 量具重建 + 三档数据 + 字重对照，结论如下** |
 | `33-attribution-thresholds-are-dark-theme-only.md` | 3/5 | done · 2026-10-14 真机浅色主题实测发现并已修 · 根因定位到具体数值 |
+| `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 9/10 | done · **2026-10-18 决策已下并上线**：默认引擎 = **PP-OCRv6 small**， |
 
 ## 三、已收（验收项全勾）
 
@@ -82,12 +82,3 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `37-seg-pill-narrower-than-active-item.md` | 0/0 |
 | `42-settings-page-still-native-controls-and-scrollbar.md` | 8/8 |
 | `43-model-config-two-groups-custom-endpoint-proxy.md` | 9/9 |
-
-## 四、⚠ 脚本当场抓出来的漂移（Status 行自己写的数字与实点不符）
-
-| 票 | Status 写的 | 机器点的 |
-|---|---|---|
-| `25-main-window-loads-deprecated-panel.md` | 5/5 | 4/4 |
-
-> 这些不是脚本猜的，是 Status 行里的 `N/M` 与实际勾选数量对不上。
-> **按本表的数字读进度**，别按 Status 读。
