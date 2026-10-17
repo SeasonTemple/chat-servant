@@ -131,6 +131,44 @@ if ($orphan) {
   $orphan | ForEach-Object { $fail.Add(('    Step "{0}"' -f $_)) }
 }
 
+# ─────────────────────────────────────────────────────────────────────────
+# ④（另一条不变量，同属「CI 能不能跑本地能跑的东西」）
+#
+# `tauri.conf.json` 的 `bundle.resources` 里**只要有一条指向仓库之外**（`target/`），
+# 干净 runner 上就不存在，tauri-build 的 build script 会在**每个 cargo 步骤**
+# （clippy / test / build 全都编 chat-servant-app）抛 `GlobPathNotFound`。
+#
+# 2026-10-18 实测就是这个：最后一次绿 `acf3d0f`，从 `ab8831d` 起连红 28 次，
+# 中间夹着纯文档提交——文档改不动 Rust，所以只可能是 build script。
+# 而**本地永远看不见**：本机 `target/models/` 下有权重，glob 命中。
+#
+# ⇒ 这条比「少跑一步」更阴：它不是让 CI 少做，是让 CI **根本编不起来**，
+#   而本地全绿。判据取「有没有在 ci.yml 里把它 null 掉」。
+$confPath = 'ui\src-tauri\tauri.conf.json'
+if (Test-Path $confPath) {
+  $confRaw = [IO.File]::ReadAllText((Resolve-Path $confPath))
+  # 取 resources 那段里所有形如 "../../..." 的 key；只认仓库外的相对起点。
+  $outside = [regex]::Matches($confRaw, '"(\.\./\.\./[^"]*)"\s*:') |
+    ForEach-Object { $_.Groups[1].Value } |
+    Where-Object { $_ -match '^\.\./\.\./(target|\.\.)/' -or $_ -match '\.\./\.\./target/' } |
+    Sort-Object -Unique
+  if ($outside) {
+    # `{}` 是 merge patch 的空操作，所以必须认到 null 那一支。
+    $nulled = $ci -match '"resources"\s*:\s*null'
+    if (-not $nulled) {
+      $fail.Add('tauri.conf.json 的 bundle.resources 指向仓库之外，ci.yml 却没把它 null 掉：')
+      $outside | ForEach-Object { $fail.Add(('    {0}' -f $_)) }
+      $fail.Add('    ⇒ 干净 runner 上 tauri-build 会在每个 cargo 步骤抛 GlobPathNotFound，')
+      $fail.Add('      而本机有这些文件所以本地全绿。ci.yml 的 env 里加：')
+      $fail.Add('      TAURI_CONFIG: ''{"bundle":{"resources":null}}''')
+      $fail.Add('      （必须是 null：TAURI_CONFIG 走 json_patch::merge，空对象是空操作。）')
+    }
+  }
+} else {
+  Write-Output "找不到 $confPath —— resources 那条不变量本次没验。"
+  exit 1
+}
+
 if ($fail.Count) {
   Write-Output 'gate.ps1 与 ci.yml 没有对齐：'
   Write-Output ''
