@@ -115,19 +115,49 @@ wgc = "2.0"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-# ── OCR：PP-OCRv4 的 ONNX 推理（`crates/capture/src/ocr_pp.rs`）──
+# ── OCR：PP-OCRv6 的 ONNX 推理（`crates/capture/src/ocr_pp.rs`）──
 #
-# 选 `tract-onnx` 而不是 `ort`：**纯 Rust**，不需要 ONNX Runtime 的 C++
-# 动态库。`ort` 会给一个装进 `C:\Program Files` 的应用塞一份额外二进制依赖，
-# 而这份程序是**单机、离线、零 token** 的——多一个运行时就是多一个装不上的理由。
+# ⚠ **2026-10-18 订正：当初选 tract 的理由成立，但那个理由从没被量化过。**
 #
-# 许可证 MIT OR Apache-2.0（`cargo info` 核实过），符合 ADR-0003 的门槛。
-# 模型权重（RapidOCR，PP-OCRv4 的 ONNX 导出）约 16MB，**不提交进仓库**，
-# 运行时从 `<仓库>/target/models\` 读（2026-10-18 改：原先是
-# `%APPDATA%\dev.chatservant.app\models\`，在 C 盘，本项目一律不留产物到系统盘；
-# `CHATSERVANT_OCR_MODELS` 可覆盖）。没放、或没显式 `CHATSERVANT_OCR=ppocr`，
-# 就走 `Windows.Media.Ocr`，而不是启动失败。
+# 原文（保留，因为它是真实的决策记录）：
+# > 选 `tract-onnx` 而不是 `ort`：**纯 Rust**，不需要 ONNX Runtime 的 C++
+# > 动态库。`ort` 会给一个装进 `C:\Program Files` 的应用塞一份额外二进制依赖，
+# > 而这份程序是**单机、离线、零 token** 的——多一个运行时就是多一个装不上的理由。
+#
+# 同一台机器、同一张真实微信整窗裁出的消息区、同一份 PP-OCRv6 small 权重、
+# release 构建、稳态中位：
+#
+# ```text
+# tract-onnx 0.23.8    2501~2552 ms    <- 超 TICK(1000ms) 2.5 倍
+# onnxruntime 4 线程      443~ 455 ms    <- 余量 55%
+# ```
+#
+# **差 5.6 倍。** 三条排查都指向「是引擎本身，不是配置」：
+#   1. tract 的运行时开关（`TRACT_AVGPOOL_SEPARABLE` / `TRACT_ENABLE_BLOCKED_CONV`）
+#      逐个试过，**没有一个带来可测的变化**（14.07 / 13.91 / 13.89 s，5 遍合计）。
+#   2. tract 用 rayon 全局池，`RAYON_NUM_THREADS` 从 12 扫到 2，
+#      中位 2481 / 2555 / 2453 / 2443 ms —— **2 线程与 12 线程几乎一样**，
+#      说明这份负载在 tract 里根本没有可并行的地方。
+#   3. 并发两个进程只贵 1.35×（不是 2×），确认它并非单线程。
+#
+# ⇒ 「多一个 C++ 运行时」这条代价现在是**已知且有界的**，
+# 「慢 5.6 倍导致产品上不了线」是**未知且无界的**。两个都留着，
+# `ort` 作可选后端，默认仍是 tract —— 换不换由实测后的那一步决定，不由这条注释决定。
+#
+# 许可证：两个 crate 都是 MIT OR Apache-2.0（`cargo info` 核实过），
+# 符合 ADR-0003 的门槛。`ort` 自带的 ONNX Runtime 二进制同为 MIT。
 tract-onnx = "0.23"
+# ⚠ `download-binaries` **不是可选项**：缺它链接期就报
+# `LNK1181: 无法打开输入文件 add_ort_library_path_or_enable_feature_download-binaries_see_ort_docs.lib`
+# ——错误信息里直接写着要开哪个 feature（2026-10-18 实测）。
+# 代价是**构建时要下载一份 ONNX Runtime**（几十 MB），且产物里多一个 DLL。
+# 另一条路是 `load-dynamic`，由我们自己带 DLL——但那正是本节要评估的代价，
+# 所以先用默认那条，把数拿到。
+ort = { version = "2.0.0-rc.10", default-features = false, features = [
+    "ndarray",
+    "std",
+    "download-binaries",
+] }
 # 夹具 manifest 记 sha256，黄金测试据此报出「是哪一个夹具被改坏了」。
 # RustCrypto 的 `sha2` 是 MIT OR Apache-2.0，符合本仓库的许可门槛（ADR-0003）。
 sha2 = "0.10"

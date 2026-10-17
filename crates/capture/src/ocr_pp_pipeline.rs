@@ -26,10 +26,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use chatservant_core::frame::{Frame, Rect};
-use tract_onnx::prelude::{RunnableModel, TypedFact, TypedOp};
 
 use crate::ocr::{OcrError, OcrLine, OcrText};
-use crate::ocr_pp::{self, BLANK, Plan, PpError};
+use crate::ocr_pp::{self, BLANK, Plan, PlanBody, PpError};
 
 /// 一套权重：**det 文件、rec 文件、词典文件、两个归一化常数、det 的尺寸策略**，
 /// 全部的**唯一出处**。
@@ -538,9 +537,7 @@ pub fn det_prob_map(frame: &Frame) -> Result<(Vec<f32>, usize, usize), PpError> 
     let (dw, dh) = det_size(fw as u32, fh as u32);
     let plan = det_plan(dh, dw)?;
     let buf = det_input(frame, dw, dh);
-    let input = tract_onnx::prelude::Tensor::from_shape(&[1, 3, dh, dw], &buf)
-        .map_err(|e| PpError::Shape(format!("造 det 输入失败：{e}")))?;
-    let (vals, shape) = ocr_pp::run(&plan, input, "det")?;
+    let (vals, shape) = ocr_pp::run(&plan, &[1, 3, dh, dw], &buf, "det")?;
     if shape.len() != 4 || shape[0] != 1 || shape[1] != 1 {
         return Err(PpError::Shape(format!("det 输出不是 [1,1,h,w]：{shape:?}")));
     }
@@ -770,10 +767,14 @@ where
     }
 }
 
-/// [`Plan`] 拆开的那一层。写出来是为了别把那一长串泛型重复三遍。
-type PlanBody = RunnableModel<TypedFact, Box<dyn TypedOp>>;
-
 /// 宽度 → 该宽度的 cell。**存 cell 而不是图**是并发修复的关键，见 [`get_or_compile`]。
+///
+/// ⚠ 这里存的是 [`PlanBody`]（`Slot::Ready` 外面再包一层 `Arc` 才是 [`Plan`]），
+/// 别名直接来自 `ocr_pp`。早先这里有个本地别名指向 tract 的 `RunnableModel`，
+/// 而 v6 换轨之后 `Plan` 变成了「两个后端的枚举 + Arc」——别名没跟着改，
+/// 于是缓存类型与 `load_rec` 的返回类型对不上，而编译器报的是
+/// `expected Slot<PlanBody>, found Slot<SimplePlan<...>>`，
+/// **指向一行看着完全无辜的 `get_or_compile`**。
 type Buckets = HashMap<usize, Arc<OnceLock<Slot<PlanBody>>>>;
 
 /// 按宽度缓存编译好的 rec 图。
@@ -828,9 +829,31 @@ impl BucketCache {
     /// 拿宽度 `w` 的可执行计划，没有就编一个。
     ///
     /// 「只编一次」的保证与桶上限都在 [`get_or_compile`] 里；这里只提供编译器。
+    ///
+    /// ## ⚠ 走 `ort` 时**按宽度分桶是错的**（2026-10-18 实测）
+    ///
+    /// tract 是**按形状编译图**的，所以每个宽度一份计划、必须分桶。
+    /// ONNX Runtime **不是**：一个会话吃任意宽度。
+    /// 而分桶在这里的代价是——**每遇到一个新宽度就新建一个 ONNX Runtime 会话**，
+    /// 而建会话是几十到上百毫秒级的操作。
+    ///
+    /// 实测（`xtask ocr <消息区帧> --scale 1 --stats`，release）：
+    ///
+    /// ```text
+    /// det 推理  480 ms      12 个框的 rec 合计约 620 ms   合计 1101 ms
+    /// ```
+    ///
+    /// 620ms / 12 ≈ 52ms 一个框，而 48 高的 rec 单次推理只该是几毫秒——
+    /// 差的那部分几乎全是**反复建会话**。
+    /// ⇒ ort 下统一用键 0，一个会话吃所有宽度。
     pub fn get(&self, w: usize) -> Result<Plan, PpError> {
         let path = self.plan_path();
-        get_or_compile(&self.buckets, self.max_buckets, w, || {
+        let key = if ocr_pp::backend() == ocr_pp::Backend::Ort {
+            0
+        } else {
+            w
+        };
+        get_or_compile(&self.buckets, self.max_buckets, key, || {
             ocr_pp::load_rec(&path, w)
         })
     }
@@ -1023,9 +1046,7 @@ pub fn recognize_with(
     // ── det ──
     let plan = det_plan(dh, dw)?;
     let input_buf = det_input(frame, dw, dh);
-    let input = tract_onnx::prelude::Tensor::from_shape(&[1, 3, dh, dw], &input_buf)
-        .map_err(|e| PpError::Shape(format!("造 det 输入失败：{e}")))?;
-    let (vals, shape) = ocr_pp::run(&plan, input, "det")?;
+    let (vals, shape) = ocr_pp::run(&plan, &[1, 3, dh, dw], &input_buf, "det")?;
     if shape.len() != 4 || shape[0] != 1 || shape[1] != 1 {
         return Err(PpError::Shape(format!("det 输出不是 [1,1,h,w]：{shape:?}")));
     }
@@ -1055,9 +1076,7 @@ pub fn recognize_with(
         let mut decoded: Vec<OcrLine> = Vec::new();
         for b in group.drain(..) {
             let buf = rec_input(frame, b, w);
-            let input = tract_onnx::prelude::Tensor::from_shape(&[1, 3, REC_HEIGHT, w], &buf)
-                .map_err(|e| PpError::Shape(format!("造 rec 输入失败：{e}")))?;
-            let (vals, shape) = ocr_pp::run(&plan, input, "rec")?;
+            let (vals, shape) = ocr_pp::run(&plan, &[1, 3, REC_HEIGHT, w], &buf, "rec")?;
             let (text, conf) = ctc_decode(&vals, &shape, chars);
             if !text.trim().is_empty() {
                 // 词级矩形与行矩形同框：PP-OCR 的 rec 是**整框一个序列**，
