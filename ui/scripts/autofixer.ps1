@@ -109,9 +109,24 @@ $results = $jobs | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
   $code = $LASTEXITCODE
 
   # ── 取结构化输出 ──────────────────────────────────────────────
-  # ⚠ 2026-10-15 改：原来用正则抓 `issues:\s*\[(.*?)\]` 再 `split ','`，
-  # 而**一条 issue 的文本里含逗号**（比如 `"',' expected"`）会被切成三段
-  # ⇒ 报成 issues=3，实际只有 1 个。改为整段 JSON 解析。
+  # ⚠⚠⚠ **工具在「有告警」时输出的不是 JSON**（2026-10-18 实测，票 54）。
+  #
+  # 没有告警时是：
+  #     { issues: [], suggestions: [], require_another_tool_call_after_fixing: false }
+  # 有一条告警时变成 **JS 字面量 + 字符串拼接**：
+  #     { issues: [ 'Unused CSS selector ".cs-lead"\n' +
+  #                 'https://svelte.dev/e/... at line 1278, column 2' ],
+  #       suggestions: [], … }
+  # 那个 `+` 不是合法 JSON，`ConvertFrom-Json` 必然抛。
+  #
+  # ⇒ 后果不是「误报」，是**方向错**：抛异常 ⇒ $obj=$null ⇒ Dead=true
+  #   ⇒ 报 `TOOL-UNAVAILABLE` ⇒ 脚本自己打印「查网络/工具本身，**别改代码**」。
+  # 而它唯一会这么判的场合，恰恰是**代码真有问题**的时候。
+  #   门禁确实还是红的（exit 2），但它把人指向网络、而不是那行 CSS。
+  #   实测：`PanelSettings.svelte` 一条真实的 `Unused CSS selector`
+  #   就足以让这一步变成「工具坏了」。
+  #
+  # 所以这里两条路都走：先试真 JSON（无告警那条），失败再按字面量解析。
   $obj = $null
   $start = $raw.IndexOf('{')
   if ($start -ge 0) {
@@ -121,20 +136,53 @@ $results = $jobs | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
     }
   }
 
-  # ⚠⚠ **拿不到 JSON ⇒ 工具没跑完，不等于这个文件干净。**
-  # 原来的写法是「issue 数 = 0 ⇒ OK」，于是工具崩在出结果之前时，
-  # 空输出与「干净」完全同形，门禁**静默放行一个从没被检查过的文件**。
-  # 那比误报严重得多：误报会被看见，静默放行不会。
-  if ($null -eq $obj) {
-    return [pscustomobject]@{ Rel = $j.Rel; Dead = $true; Code = $code; Issues = 0; Suggestions = @() }
+  if ($null -ne $obj) {
+    $t = @($obj.issues)
+    return [pscustomobject]@{
+      Rel = $j.Rel; Dead = $false; Code = $code
+      Issues = $t.Count; First = $(if ($t.Count) { [string]$t[0] } else { '' })
+      Suggestions = @($obj.suggestions)
+    }
+  }
+
+  # ── 回落：按 JS 字面量解析 ────────────────────────────────────
+  # 一条 = 若干单引号字面量用 `+` 串起来。所以先按「字面量（可带 +）」切条，
+  # 再在每条**内部**把所有字面量拼回去——不用 `-split '\+'`，
+  # 因为告警正文里本来就可能有 `+`。
+  $lit = "'(?:[^'\\]|\\.)*'"
+  $groupRe = [regex]($lit + '(?:\s*\+\s*' + $lit + ')*')
+  $litRe = [regex]$lit
+
+  function Get-Entries([string]$block) {
+    @($groupRe.Matches($block) | ForEach-Object {
+      ($litRe.Matches($_.Value) | ForEach-Object {
+        $_.Value.Substring(1, $_.Value.Length - 2).
+          Replace('\n', "`n").Replace('\t', "`t").Replace("\'", "'")
+      }) -join ''
+    })
+  }
+
+  $ib = [regex]::Match($raw, '(?s)issues:\s*\[(.*?)\]\s*,').Groups[1].Value
+  $sb = [regex]::Match($raw, '(?s)suggestions:\s*\[(.*?)\]').Groups[1].Value
+  # ⚠ 调用点必须再套一层 `@()`：函数写回管道时，`@('abc')` 会被 PowerShell
+  #   **拆包成标量字符串**，于是 `$issues[0]` 取到的是**第一个字符**而不是第一条。
+  #   实测就是这样把告警原文打成了单个「A」——计数仍然对，所以只查计数看不出来。
+  $issues = @(Get-Entries $ib)
+  $sugs = @(Get-Entries $sb)
+
+  # ⚠ 两个数组都一个条目都切不出来 ⇒ 那才是真的「工具没跑完」。
+  #   只判 `issues` 会漏掉「有 suggestions 无 issues」那种形状。
+  if ($issues.Count -eq 0 -and $sugs.Count -eq 0) {
+    return [pscustomobject]@{ Rel = $j.Rel; Dead = $true; Code = $code; Issues = 0; First = ''; Suggestions = @() }
   }
 
   [pscustomobject]@{
     Rel = $j.Rel
     Dead = $false
     Code = $code
-    Issues = @($obj.issues).Count
-    Suggestions = @($obj.suggestions)
+    Issues = $issues.Count
+    First = $(if ($issues.Count) { [string]$issues[0] } else { '' })
+    Suggestions = $sugs
   }
 }
 
@@ -152,6 +200,9 @@ foreach ($r in ($results | Sort-Object Rel)) {
   else {
     $bad++
     Write-Output ("  FAIL  {0}  issues={1} suggestions={2}" -f $r.Rel, $r.Issues, @($r.Suggestions).Count)
+    # ⚠ 必须打出告警原文。只报 `issues=1` 的话，看的人还得自己回去找是哪一行，
+    #   而这一步历史上**只会**在这种时候红——原文缺席最容易被当成噪声跳过。
+    if ($r.First) { Write-Output ("        {0}" -f $r.First) }
     if (@($r.Suggestions).Count -gt 0) {
       Write-Output ("        {0}" -f (@($r.Suggestions) -join '; '))
     }

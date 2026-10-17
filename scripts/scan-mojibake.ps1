@@ -1,4 +1,4 @@
-# 扫源码与文档里的 U+FFFD（Unicode 替换字符）。
+# 扫源码与文档里的 U+FFFD（Unicode 替换字符），以及**游离控制符**。
 #
 # 为什么值得单独立一步：**受损的全是注释与文档**，所以 fmt / clippy / test /
 # svelte-check 一样绿，损坏能静静躺着一直没人发现。
@@ -6,6 +6,16 @@
 # 成因见 ticket 19：PS 5.1 的 `(Get-Content -Raw) -replace … | Set-Content
 # -Encoding UTF8` 做机械替换，UTF-8 被按 ANSI 读回再写——字符已经丢了，
 # 事后无法从文件里还原。
+#
+# ⚠ 第二类损伤见 ticket 52：**转义序列被当成真字符写进了源码**。
+#   实测在 `crates/capture/src/inject.rs` 抓到四种：
+#   - `bytes` 的 `b` 变成 U+0008（退格符）——读出来看着像 `ytes`，肉眼扫不出来
+#   - `focus` / `fill_input_box` 的 `f` 变成 U+000C（换页符）
+#   - `type_unicode` 的 `t` 变成 TAB
+#   - 另一处留了字面反引号 + r（本文件早先也是这样，所以下面连它一起扫）
+#   **四种全部编译得过、测试跑得过**，因为受损的是注释；
+#   而 `ocus(target)` 这种把字母吃掉的注释，clippy 同样不会管。
+#   ⇒ 只查 U+FFFD 的那一档扫不到它们，必须单独扫控制符。
 #
 # **只扫项目自己的目录，不扫 git ls-files 的全量。**
 # `.agents/` `.claude/` `.minimax/` `.zcode/` 是 CLI 为别的运行时装的，四份
@@ -34,14 +44,47 @@ $files += Get-ChildItem -Path . -File -Include *.md,*.toml -ErrorAction Silently
 $files += Get-ChildItem -Path ui -File -Include *.json,*.ts,*.js -ErrorAction SilentlyContinue
 $files = $files | Where-Object { $_.Name -match $ext } | Sort-Object FullName -Unique
 
+# U+0000–U+0008 / U+000B / U+000C / U+000E–U+001F / U+007F：这些字符在任何一份
+# 源码或文档里都没有合法用途，看到就是损坏。TAB / LF / CR **排除**——
+# TAB 本身合法，见下面「词中 TAB」。
+$ctrlRe = [regex]"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]"
+# 词中间的 TAB：ticket 52 里 `type_unicode` 的 `t` 被换成了 TAB。
+# 只报「字母/数字 夹 TAB 夹 字母/数字」——那不是缩进风格，是字母被吃掉了。
+$midTabRe = [regex]"[\p{L}\p{N}]\t[\p{L}\p{N}]"
+# 字面转义残留：PowerShell 的 `` `r `` / `` `n `` 被当成普通字符写进了源码。
+# 判据收窄到「行尾是 反引号 + 一个字母 + 只有空白」——源码里没有任何合法写法
+# 长这样，而 markdown 满地都是（行内代码就在行尾），所以源码之外不适用。
+$litEscRe = [regex]'`[a-zA-Z][ \t]*$'
+
 $hits = @()
+$ctrlHits = @()
 foreach ($f in $files) {
   try { $c = [IO.File]::ReadAllText($f.FullName) } catch { continue }
+  $rel = $f.FullName.Replace((Get-Location).Path + '\', '')
   if ($c -match "\uFFFD") {
     $n = ([regex]::Matches($c, "\uFFFD")).Count
     $idx = ([regex]::Match($c, "\uFFFD")).Index
     $ln = ($c.Substring(0, $idx) -split "`n").Count
-    $hits += ('  {0}:{1}  {2} 个 U+FFFD' -f $f.FullName.Replace((Get-Location).Path + '\', ''), $ln, $n)
+    $hits += ('  {0}:{1}  {2} 个 U+FFFD' -f $rel, $ln, $n)
+  }
+  foreach ($m in $ctrlRe.Matches($c)) {
+    $ln = ($c.Substring(0, $m.Index) -split "`n").Count
+    $ctrlHits += ('  {0}:{1}  U+{2:X4}（游离控制符）' -f $rel, $ln, [int][char]$m.Value)
+  }
+  foreach ($m in $midTabRe.Matches($c)) {
+    $ln = ($c.Substring(0, $m.Index) -split "`n").Count
+    $ctrlHits += ('  {0}:{1}  词中间的 TAB：…{2}…（字母被换成了制表符）' -f $rel, $ln, ($m.Value -replace "`t", '<TAB>'))
+  }
+  # 字面转义残留**只对源码扫，markdown 一律跳过**。
+  # 教训：v1 的判据是「反引号紧跟在 `*` 后面」，第一跑就在三张票里各误报一次
+  # ——markdown 的 **`y 51..63`** 这种加粗行内代码长得一模一样。
+  # ⇒ 宁可漏，也别让守卫天天喊狼来了。
+  if ($f.Extension -ne '.md') {
+    foreach ($ln2 in ($c -split "`n")) {
+      if ($litEscRe.IsMatch($ln2)) {
+        $ctrlHits += ('  {0}  字面转义残留：…{1}…（PowerShell 的 `r / `n 被写成了字面字符）' -f $rel, $ln2.Trim())
+      }
+    }
   }
 }
 
@@ -54,6 +97,14 @@ if ($hits.Count -gt 0) {
   Write-Output '其他门禁会报它们。处理办法见 .scratch/…/19-mojibake-in-source-comments.md'
   exit 1
 }
+if ($ctrlHits.Count -gt 0) {
+  Write-Output '发现游离控制符 / 词中 TAB / 字面转义残留：'
+  $ctrlHits | ForEach-Object { Write-Output $_ }
+  Write-Output ''
+  Write-Output '这一类 U+FFFD 那一档扫不到：它们是**能编译的控制符**，而且往往顶掉了'
+  Write-Output '一个字母（bytes→ytes、focus→ocus）。见 .scratch/…/52-*.md'
+  exit 1
+}
 
-Write-Output 'U+FFFD 扫描：干净'
+Write-Output 'U+FFFD / 控制符 扫描：干净'
 exit 0

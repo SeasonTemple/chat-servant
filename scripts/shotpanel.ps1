@@ -1,8 +1,19 @@
 param(
   [string]$ProcName = 'chat-servant-app',
-  [string]$Out = 'E:\workspace\chat-servant\target\probe\v11_full.png',
+  [string]$Out = '',
   [int]$Pad = 8
 )
+
+# 默认输出路径必须**从仓库位置算出来**，不能写死。
+# 曾经写死 `E:\workspace\chat-servant\target\probe\v11_full.png`——那是本仓
+# 换过位置之前的路径。E: 盘在，所以 New-Item -Force 会把那个目录凭空建出来，
+# 脚本照样打印 "saved"，而截图躺在仓库外面没人看得见。
+if (-not $Out) {
+  # 注意只跳**一层**：`Split-Path` 自己就会去掉叶子（`-Leaf`），
+  # 再套一层 -Parent 会退到仓库的上一级去，路径反而跑到仓库外面。
+  $repo = Split-Path $PSScriptRoot -Parent
+  $Out = Join-Path $repo 'target\probe\panel.png'
+}
 
 # Find the panel window by owning process, force it visible, bring it forward,
 # then capture the screen region around it. fgwin.ps1 targets by title, which
