@@ -86,11 +86,18 @@ def main() -> int:
                 ys = [p[1] for p in box]
                 boxes.append((float(min(ys)) / scale, float(max(ys)) / scale))
 
+    # ⚠ 顺序要紧：**冷启动是第一次调用的值**，必须在 `sort()` 之前取。
+    #   早先这里先 `times.sort()` 再打 `times[0]`，打出来的是三次里的**最小值**，
+    #   于是报出「冷启动 602ms < 稳态 897ms」这种反常数字，
+    #   还让我据此猜「ORT 在构造时就预热了」——那个猜测也是错的。
+    cold_ms = times[0]
     times.sort()
     median_ms = times[len(times) // 2]
 
     print(f"frame {Image.open(frame).size}  {scale}x -> {img.size}")
-    print(f"time  cold {times[0]:.0f} ms  median {median_ms:.0f} ms  (3 calls)")
+    print(f"time  first-call {cold_ms:.0f} ms  median {median_ms:.0f} ms  (3 calls)")
+    print("  ⚠ 这个「首次调用」**不是冷启动**：RapidOCR 的三个模型是惰性加载的，")
+    print("    真正的冷启动还要加上构造 + 会话建立（约 328ms，ADR-0007 实测）。")
     print(f"detected {len(boxes)} boxes / truth {len(centers)} lines")
 
     hit = 0
