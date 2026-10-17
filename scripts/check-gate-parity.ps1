@@ -258,30 +258,58 @@ if (Test-Path $confPath) {
 # `actions/setup-python` 装的 Python 3.12 在 Windows 上 stdout 用传统代码页，
 # 而本仓的脚本**输出全是中文**。
 #
-# 规则：**gate.ps1 用 python 调起来的脚本，若含非 ASCII，就必须自己 reconfigure。**
+# 规则：**本项目自有的 Python 脚本，若含非 ASCII，就必须自己 reconfigure。**
 # 为什么要机器查：这一类错在**调用方**才显形（CI 的 runner、本机 bench 台架），
 # 本地「记得设 PYTHONIOENCODING=utf-8」就能糊过去——本会话里我糊了好几次。
 # `scripts/targetgc.py` 早就有 reconfigure（说明这个坑在别处已咬过一次），
 # 而 `fetch_models.py` / `targetaudit.py` / `ticketstatus.py` 三家都没有。
-$pyInvoked = [regex]::Matches($gate, '(?m)python[\s\\]+([\w\\./-]+\.py)') |
+#
+# ⚠⚠ **2026-10-18 第二次收范围。** 原先这条写的是「**gate.ps1 用 python 调起的**
+#   脚本」——范围是从「当时出问题的三个文件在哪」推出来的，不是从
+#   「这条不变量在哪些地方成立」推出来的。代价当场兑现：
+#   `scripts/ocrbench/` 整族 **17 个脚本全是中文输出、一个都没加**，
+#   而它们恰好是排查 OCR 时天天要跑的那几个。
+#   ⇒ 扫描面改成**仓库跟踪的本项目 Python 脚本**，
+#     用 `git ls-files` 一次列全（枚举范围要能被一条命令列完，不能靠记忆）。
+#
+#   ⚠ **刻意排除 `.agents/skills/`**：那 16 个是第三方 skill 的 vendored 内容，
+#     本仓没有理由去改别人的脚本。判据不是「文件在哪」，是「这是不是我们自己的代码」。
+#
+# ⚠ 这条是**保守**的：判据只看「源码含非 ASCII」，而中文可能只出现在注释里、
+#   根本不进输出。宁可多要求那 5 行，也不给「看起来只在注释里所以放过」留口子。
+$pyGateInvoked = [regex]::Matches($gate, '(?m)python[\s\\]+([\w\\./-]+\.py)') |
   ForEach-Object { $_.Groups[1].Value -replace '\\', '/' } |
   Sort-Object -Unique
-$pyNonAscii = 0
-foreach ($py in $pyInvoked) {
+
+# gate.ps1 点名要跑的文件必须存在——这是另一条不变量，范围窄是**故意的**。
+foreach ($py in $pyGateInvoked) {
   if (-not (Test-Path $py)) {
     $fail.Add("gate.ps1 要跑 $py，但仓库里没有这个文件")
-    continue
   }
+}
+
+$pyScope = @(
+  git ls-files 'scripts/*.py' 'scripts/**/*.py' 'ui/scripts/*.py' 'ui/scripts/**/*.py'
+) | Where-Object { $_ -and $_ -notmatch '^\.agents/' } | Sort-Object -Unique
+
+if (-not $pyScope) {
+  $fail.Add('一条 .py 都没列出来 —— 扫描面本身失效了，不许当合规放过。')
+}
+
+$pyNonAscii = 0
+foreach ($py in $pyScope) {
+  if (-not (Test-Path $py)) { continue }
   $pyRaw = [IO.File]::ReadAllText((Resolve-Path $py))
   if ($pyRaw -notmatch '[^\x00-\x7F]') { continue }   # 全 ASCII，cp1252 编得动，不管
   $pyNonAscii++
   if ($pyRaw -notmatch '\.reconfigure\s*\(') {
-    $fail.Add("$py 含非 ASCII 输出，但没自己 reconfigure stdout/stderr")
+    $fail.Add("$py 含非 ASCII，但没自己 reconfigure stdout/stderr")
     $fail.Add('    ⇒ Windows 上（CI 的 runner 尤其）stdout 默认 cp1252，打印中文会 UnicodeEncodeError。')
     $fail.Add('      修：在模块顶层加')
     $fail.Add('        for _s in (sys.stdout, sys.stderr):')
     $fail.Add('            if hasattr(_s, "reconfigure"): _s.reconfigure(encoding="utf-8", errors="replace")')
     $fail.Add('      别指望调用方记得设 PYTHONIOENCODING。样板：scripts/targetgc.py')
+    $fail.Add('      ⚠ 插在**完整的 import 语句之后**：多行括号 import 的顶格那行是开头不是结尾。')
   }
 }
 
@@ -298,5 +326,5 @@ if ($fail.Count) {
 $j = if ($script:jobsChecked) { $script:jobsChecked } else { 0 }
 Write-Output ("gate/CI 对齐：gate.ps1 的 {0} 步在 ci.yml 里都有见证命令；" -f $steps.Count)
 Write-Output ("bundle.resources 那条：扫了 {0} 个 workflow 的 job，逐个都有覆盖或先取权重；" -f $j)
-Write-Output ("Python 编码那条：gate.ps1 调起 {0} 个脚本，其中 {1} 个含非 ASCII，都已自己 reconfigure。" -f $pyInvoked.Count, $pyNonAscii)
+Write-Output ("Python 编码那条：扫本项目自有 .py {0} 个（不含 .agents/ 第三方），其中 {1} 个含非 ASCII，都已自己 reconfigure。" -f $pyScope.Count, $pyNonAscii)
 exit 0
