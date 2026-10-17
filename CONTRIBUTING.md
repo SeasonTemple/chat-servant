@@ -144,6 +144,46 @@ BSL 1.1 不在 GitHub 的许可列表里，所以仓库页面会显示 `Other`�
 > 不要只看退出码。2026-10-11 实测踩过：脚本只打印 `GATE_EXIT` 而没 `exit`，
 > 于是 `pwsh -File` 永远返回 0，一个带红门禁的提交就提交上去了。
 
+### 6. 门禁全绿证明不了「OCR 认字还准」——动过 OCR 就自己跑一次台架
+
+票 30 在「定线」那一节钉了三条质量下限（召回率 ≥80% / 整条全对率 ≥50% /
+字符准确率 ≥75%），⚠ 而 `cargo test` **一个都不检查**。
+
+按能不能拿到权重分三层：
+
+| 层 | 需要 ONNX 权重？ | CI 上 |
+|---|---|---|
+| det 整链路（二值化 + 连通域 + unclip） | 否 | ✅ 真跑 |
+| **rec 预处理**（裁剪 → resize → 归一化） | 否 | ✅ 真跑（2026-10-18 补的守卫） |
+| rec 解码（推理 → CTC → 认出的字） | **是** | ⚠ **必然跳过** |
+
+第三层要的那些权重在 `target/models/`、是 gitignored 的 31 MB，CI 上没有——
+与 `crates/perceive/tests/golden.rs` 的「缺件即跳过」同一模式。
+⚠ 而**真帧与答案键**也在 `target/` 下（真人会话内容，不入库），
+所以**这一步只能人工跑**。它不是缺陷，是隐私约束的必然结果。
+
+⇒ **换了引擎、改了预处理、调了 det 阈值、动了 det/rec 后处理之后，
+门禁绿了不算数**，要自己跑：
+
+```bash
+pwsh -NoProfile -File target\probe\run_cer2.ps1            # 生成 4 份后端输出
+target\bench-venv\Scripts\python.exe scripts\ocrbench\cer_real_frame.py --explain
+```
+
+⚠ 两个判据陷阱（都实测踩过）：
+
+1. **看 stderr 有没有 `WARN …回落 Windows OCR`，别只看退出码。**
+   回落时退出码**仍是 0**（回落是设计内行为，不是错误）⇒ 拿退出码判会全绿。
+   而且 WinRT 约 34 ms、PP-OCR 约 550 ms——
+   ⚠ **「快得不正常」本身就是回落信号**。
+2. **两次跑必须用同一把尺子。** `cer_real_frame.py`（框顶 / ±30px）与
+   `bench_real_cer.py`（框中心 / ±8px）算出来的数**不可比**。
+   2026-10-18 就因为把这两个数并排，得出过一个错的结论（ADR-0006 第（四）节）。
+
+台架的 `--explain`（逐条看配对）、`--drop-line`（测某一行的贡献度）、
+`--tol`（扫容差、确认结论在稳定区）三个开关是定位问题的工具，
+用法见 `scripts/ocrbench/cer_real_frame.py` 的 docstring 与 ADR-0006 第（四）节。
+
 ## 硬约束
 
 这七条是产品底线，改动不得破坏。完整说明见 `AGENTS.md`。
