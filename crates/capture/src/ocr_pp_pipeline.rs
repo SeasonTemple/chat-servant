@@ -2326,6 +2326,106 @@ mod tests {
         assert!(out.iter().all(|v| v.is_finite()));
     }
 
+    /// **rec 预处理：像素值本身要对，不只是长度对。**
+    ///
+    /// 2026-10-18（票 50 的 L2）：既有的 rec 守卫夹具**全是纯色帧**
+    /// （[`the_rec_input_has_the_right_length`] 与
+    /// [`boxes_larger_than_the_frame_are_clamped`] 只断长度与有限性，
+    /// 另两条断宽度函数、不碰张量）。**纯色帧过任何仿射仍是纯色**，
+    /// 所以下面四种「识别全崩、但长度对、无 NaN」的写法它们一条都不会红：
+    ///
+    /// | 改法 | 后果 |
+    /// |---|---|
+    /// | 布局写成 `out[o*3+c]`（HWC，现在是 CHW） | 识别全崩，长度同样对 |
+    /// | `sx` 左右翻转 | 识别全崩 |
+    /// | 三通道都读 `p[0]` | 颜色全丢 |
+    /// | 公式系数被改（`(p/255-M)/S` → `p/255*2`） | 偏离训练分布，识别乱码 |
+    ///
+    /// ⚠ **与 [`the_normalization_constants_match_the_active_model`] 分工**：
+    /// 那条守**常量**（`REC_MEAN`/`REC_STD` 的值），本条守**公式**（怎么用它们）。
+    /// ⇒ 本条的期望值**用常量算、不硬编码**：常量错由那条报，
+    /// 公式错由本条报，两条不重叠，也不互相顶替。
+    #[test]
+    fn the_rec_input_keeps_channel_separation_and_black_to_white_contrast() {
+        // 颜色帧：R 沿 x 从 0 递增到 255，G 恒 128、B 恒 0。
+        // 三个通道在 x 方向上的行为各不相同（递增 / 恒定 / 恒定），
+        // 于是「通道写串」与「三通道读同一字节」都藏不住。
+        let (w, h) = (64u32, 8u32);
+        let mut px = vec![0u8; (w * h * 3) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let o = ((y * w + x) * 3) as usize;
+                px[o] = (x * 255 / (w - 1)) as u8;
+                px[o + 1] = 128;
+                px[o + 2] = 0;
+            }
+        }
+        let f = Frame::from_rgb(w, h, px).expect("造帧失败");
+        let b = Rect {
+            x0: 0,
+            y0: 0,
+            x1: w as i32,
+            y1: h as i32,
+        };
+        // out_w == bw ⇒ `sx = bx + x*bw/out_w` 就是 x，1:1 采样，期望值可手算。
+        let out_w = w as usize;
+        let hh = REC_HEIGHT;
+        let plane = hh * out_w;
+        let out = rec_input(&f, b, out_w);
+
+        // ① 布局与方向：CHW 下通道 c 的**第一行**随 x 单调不减。
+        //    ⚠ 只看第一行——跨行比较会在「上一行末尾 255、下一行开头 0」
+        //    处反向，那不是 bug，是行边界。
+        let row0 = &out[..out_w];
+        assert!(
+            row0.windows(2).all(|p| p[0] <= p[1]),
+            "rec 通道 0 的第一行没有随 x 单调不减——查 sx 方向，\
+             以及 out 索引是 `c*h*w + o`（CHW）还是 `o*3 + c`（HWC）"
+        );
+
+        // ② 通道独立：G / B 在 x 方向上恒定。若三通道都读 `p[0]`，
+        //    通道 1 也会随 x 变，这条立刻不成立。
+        for (c, name) in [(1usize, "G"), (2usize, "B")] {
+            let plane_c = &out[c * plane..(c + 1) * plane];
+            let first = plane_c[0];
+            assert!(
+                plane_c.iter().all(|v| (v - first).abs() < 1e-6),
+                "rec 通道 {name} 本该沿 x 恒定（只有 R 在变），却变了 ⇒ \
+                 三通道很可能读了同一个字节"
+            );
+        }
+
+        // ③ 公式系数：黑到白的跨度必须是 `1 / REC_STD[0]`——
+        //    公式里除 255 的是**像素值**，所以满量程跨度是 `1/std` 而不是 `1/255/std`。
+        //    det 侧同形的那条是 `the_det_input_preserves_black_to_white_contrast`。
+        let spread = row0[out_w - 1] - row0[0];
+        let want = 1.0f32 / REC_STD[0];
+        assert!(
+            (spread - want).abs() < 1e-3,
+            "rec 黑白跨度 = {spread}，按 REC_STD[0]={} 应该是 {want}。\
+             系数被改会让输入偏离训练分布，而症状是「识别成乱码」，不会报错",
+            REC_STD[0]
+        );
+
+        // ④ 逐点比对：期望值用**常量**算。HWC 布局或索引写错时这里整片对不上。
+        for c in 0..3 {
+            for x in [0usize, 1, out_w / 2, out_w - 1] {
+                let got = out[c * plane + x];
+                let raw = match c {
+                    0 => ((x * 255 / (w as usize - 1)) as u8) as f32,
+                    1 => 128.0,
+                    _ => 0.0,
+                };
+                let expect = (raw / 255.0 - REC_MEAN[c]) / REC_STD[c];
+                assert!(
+                    (got - expect).abs() < 1e-3,
+                    "rec 张量 [c={c}, x={x}] = {got}，按公式算是 {expect}。\
+                     索引是 out[c*h*w + o]（CHW）吗？"
+                );
+            }
+        }
+    }
+
     /// **框比画面大时要被夹住，不能越界取像素。**
     ///
     /// 越界取像素会 panic 或者读到别人的内存——det 偶尔会吐出超出画面的框，
