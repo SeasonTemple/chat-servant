@@ -32,6 +32,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 use chatservant_core::dispatch::DeliveryReceipt;
+use windows::core::HRESULT;
 
 /// 回读超时。超过就归 `PossiblySent`——**不能归失败**。
 pub const READBACK_TIMEOUT: Duration = Duration::from_millis(400);
@@ -89,15 +90,14 @@ fn write_clipboard(text: &str) -> Result<(), String> {
     utf16.push(0); // Win32 要求以 NUL 结尾
     let bytes = utf16.len() * 2;
 
-    // SAFETY: 整块只操作**剪贴板**——OpenClipboard/EmptyClipboard/SetClipboardData`r
+    // SAFETY: 整块只操作**剪贴板**——OpenClipboard/EmptyClipboard/SetClipboardData
     // 配的都是本函数刚构造的 HGLOBAL。Win32 会**接管**这块内存的所有权，
-    // 所以 ytes 的尺寸必须和 utf16 的实际字节数一致（上面已算），
+    // 所以 bytes 的尺寸必须和 utf16 的实际字节数一致（上面已算），
     // 之后 Rust 侧不再访问 utf16。每条错误分支都成对 CloseClipboard。
     unsafe {
-        // 打开剪贴板失败最常见的原因是**别的程序正开着它**。
-        // 这里重试几次而不是立刻报错——Windows 上这一瞬间是常态。
-        if !open_clipboard_with_retry() {
-            return Err("打不开剪贴板（可能被别的程序占用）".into());
+        // 打开剪贴板失败的重试与原因说明见 open_clipboard_with_retry。
+        if let Err(code) = open_clipboard_with_retry() {
+            return Err(explain_open_failure(code));
         }
         let r = (|| -> Result<(), String> {
             EmptyClipboard().map_err(|e| format!("清空剪贴板失败：{e}"))?;
@@ -134,8 +134,8 @@ fn read_clipboard() -> Result<String, String> {
     // SAFETY: 只读剪贴板。GlobalLock 返回的指针指向**系统管理的**共享内存，
     // 直到 GlobalUnlock 之前都有效，所以锁的生命周期覆盖下面的读取。
     unsafe {
-        if !open_clipboard_with_retry() {
-            return Err("回读时打不开剪贴板".into());
+        if let Err(code) = open_clipboard_with_retry() {
+            return Err(format!("回读时{}", explain_open_failure(code)));
         }
         let r = (|| -> Result<String, String> {
             let hglobal =
@@ -165,20 +165,49 @@ pub fn read_clipboard_public() -> Result<String, String> {
     read_clipboard()
 }
 
-/// 打开剪贴板，最多试 5 次。
+/// 打开剪贴板，最多试 5 次。失败时把**最后一次的 Win32 错误码**带出去。
 ///
 /// Windows 的剪贴板是**全局独占**的：任何程序开着它，别人就 Open 不了。
 /// 这是系统级常态（复制粘贴、剪贴板管理器、各种输入法），不是异常。
 /// 重试是唯一正确的处理方式。
-fn open_clipboard_with_retry() -> bool {
+fn open_clipboard_with_retry() -> Result<(), HRESULT> {
+    let mut last = HRESULT(0);
     for _ in 0..5 {
         // SAFETY: 无参数、无指针，只尝试打开剪贴板。None = 当前任务。
-        if unsafe { OpenClipboard(None) }.is_ok() {
-            return true;
+        match unsafe { OpenClipboard(None) } {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e.code(),
         }
         std::thread::sleep(Duration::from_millis(12));
     }
-    false
+    Err(last)
+}
+
+/// 把 `OpenClipboard` 的失败说成**能照着查**的话。
+///
+/// 这里**不许猜原因**。2026-10-18 实测：锁屏状态下 `inject` 的 5 个往返测试全红，
+/// 而当时这句写的是「可能被别的程序占用」——锁屏时压根没有别的程序在复制。
+/// 猜出来的原因不是「不精确」，是**把排查引到错方向**（去杀剪贴板管理器）。
+///
+/// 已知真因（都实测过发生过，但**当时没留下错误码**，所以不写死映射）：
+/// - **会话锁屏**——2026-10-18 实测 5 个测试同时转红，当时前台是锁屏界面。
+/// - 别的程序正开着剪贴板——Windows 全局独占的常态，5 次重试都撞上才算。
+///
+/// 剩下的码一律不解释：报出来让人自己查 MSDN，比编一个像模像样的
+/// 「可能被 X 占用」强——后者会让下一个人**不再去看错误码**。
+fn explain_open_failure(code: HRESULT) -> String {
+    let num = code.0 as u32;
+    // 0x800401D0 CLIPBRD_E_CANT_OPEN、0x800401D1 CLIPBRD_E_NOT_CONCURRENT_OPEN：
+    // 文档明确写了这两个码就是「有别的进程开着」，属于**读文档**那一档证据。
+    let cause = match num {
+        0x8004_01D0 | 0x8004_01D1 => "别的程序正开着剪贴板（CLIPBRD_E_CANT_OPEN）",
+        0x8007_0005 => "访问被拒（E_ACCESSDENIED）",
+        _ => "原因未归类，按下面的 HRESULT 查 MSDN",
+    };
+    format!(
+        "打不开剪贴板（{cause}；HRESULT 0x{num:08X}）。\
+         已知真因之二：**会话处于锁屏状态**时这里必失败（2026-10-18 实测）"
+    )
 }
 
 /// 把一组按键展开成事件序列：**先全部按下，再全部按相反顺序抬起**。
@@ -256,10 +285,10 @@ fn send_inputs(inputs: &mut [INPUT]) -> Result<(), String> {
     if inputs.is_empty() {
         return Ok(());
     }
-    // SAFETY: inputs 是调用方（chord_events / 	ype_unicode）构造好的、
+    // SAFETY: inputs 是调用方（chord_events / type_unicode）构造好的、
     // 长度与 cbSize 描述一致的结构数组，指针有效覆盖整个调用。
     // SendInput 会**读**这块内存并把事件投到当前前台窗口——
-    //   调用方已通过 ocus(target) 确认目标在前台（见 ill_input_box）。
+    //   调用方已通过 focus(target) 确认目标在前台（见 fill_input_box）。
     let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
     if sent as usize == inputs.len() {
         Ok(())
@@ -569,8 +598,8 @@ mod tests {
             .iter()
             .map(|i| {
                 // `INPUT::Anonymous` 是 union，读字段要 unsafe。
-                // SAFETY: 读 union 的字段。chord_events 只会造 `r
-                // `INPUT{ Keyboard }`，所以 ki 这个变体**是有效的**。
+                // SAFETY: 读 union 的字段。chord_events 只会造 `INPUT` 的
+                // Keyboard 变体，所以 ki 这个变体**是有效的**。
                 // 读的是拷贝（ki 不是引用），不产生别名。
                 let ki = unsafe { i.Anonymous.ki };
                 (ki.wVk.0, ki.dwFlags == KEYEVENTF_KEYUP)
