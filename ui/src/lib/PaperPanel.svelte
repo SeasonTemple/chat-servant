@@ -117,6 +117,22 @@
   /** 「关闭时」当前值。Rust 侧持有，同样只做镜像。 */
   let closeBehavior = $state<'exit' | 'tray'>('exit');
 
+  /**
+   * 托盘能不能当落点用。**决定「收进托盘」那一枚摆不摆**（2026-10-18）。
+   *
+   * ⚠⚠ 它**不看 `closeBehavior`**。那是一个**偏好**（按窗口控制键时怎么办），
+   *   而「收起来、程序继续跑」是一个**能力**。原先写成
+   *   `{#if closeBehavior === 'tray'}` ⇒ 默认档 `exit` 下这一枚根本不渲染，
+   *   **用户没有任何办法让面板离开屏幕而程序还在跑**：
+   *   `decorations: false` + `skipTaskbar` 意味着它也不在任务栏上。
+   *   ⇒ 偏好当开关用是错位：临时动作不该拿持久偏好当门票。
+   *
+   * ⚠ 默认 `true`：**别在拿到答案之前先藏起来**。
+   *   Rust 那侧 `Pending` 也算可用（`build_tray` 一定跑得完），
+   *   先藏后显会让这一枚在启动时闪一下。
+   */
+  let trayReady = $state(true);
+
   /** 设置主区开没开。**它与正文区互斥**，理由见模板里那条。 */
   let settingsOpen = $state(false);
 
@@ -456,16 +472,21 @@
     void (async () => {
       if (HAS_TAURI) {
         try {
-          const [t, cb] = await Promise.all([
+          const [t, cb, tr] = await Promise.all([
             invoke<string>('get_tier'),
             invoke<'exit' | 'tray'>('get_close_behavior'),
+            invoke<boolean>('tray_ready'),
           ]);
           if (TIERS.some((x) => x.key === t)) tier = t as TierKey;
           closeBehavior = cb;
+          trayReady = tr;
         } catch (e) {
           // 读不到就停在最低档 + 退出档。**解析失败一律落到最低**，
           // 与 Rust 侧 `parse_tier` 的方向一致：不因为读不到就假定用户
           // 想升档，那是要用户自己的动作才该发生的事。
+          // ⚠ `trayReady` **不动**（默认 true）：问不到不是「托盘没了」，
+          //   而 `hide_panel` 自己也会再挡一道。两道都当成「没了」的话，
+          //   一次 IPC 抖动就会让「收进托盘」整枚消失。
           console.error('读档位/关闭行为失败，按最低档显示：', e);
         }
       }
@@ -759,14 +780,20 @@
         {/if}
       </button>
 
-      {#if closeBehavior === 'tray'}
+      {#if trayReady}
         <button
           class="cs-glyph"
           type="button"
           data-no-drag
           title="收进托盘 · 程序继续运行"
           aria-label="收进托盘"
-          onclick={() => void invoke('hide_panel').catch(() => {})}
+          onclick={() =>
+            // ⚠⚠ **不许再写空 catch**（2026-10-18）。Rust 侧现在会在
+            //   「托盘建不起来」时**主动拒绝**——那个窗口
+            //   `decorations: false` + `skipTaskbar`，藏了就再也找不回来。
+            //   原来的 `catch(() => {})` 会把这次拒绝连同原因一起吞掉，
+            //   表现成「按了没反应」，而真相是「这一枚现在不该存在」。
+            void invoke('hide_panel').catch((e) => console.error('收进托盘失败：', e))}
         >
           <svg
             width="20"

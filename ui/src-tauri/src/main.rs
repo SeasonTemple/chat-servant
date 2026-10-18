@@ -105,6 +105,7 @@ fn main() {
             commands::set_close_behavior,
             commands::get_mark_shape,
             commands::set_mark_shape,
+            commands::tray_ready,
             commands::hide_panel,
             commands::show_panel,
             commands::quit_app,
