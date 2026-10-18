@@ -196,12 +196,12 @@ BSL 1.1 不在 GitHub 的许可列表里，所以仓库页面会显示 `Other`�
 |---|---|---|
 | det 整链路（二值化 + 连通域 + unclip） | 否 | ✅ 真跑 |
 | **rec 预处理**（裁剪 → resize → 归一化） | 否 | ✅ 真跑（2026-10-18 补的守卫） |
-| rec 解码（推理 → CTC → 认出的字） | **是** | ⚠ **必然跳过** |
+| rec 解码（推理 → CTC → 认出的字） | **是** | ✅ **真跑**（2026-10-19 起，票 67 前置三） |
 
-第三层要的那些权重在 `target/models/`、是 gitignored 的 31 MB，CI 上没有——
-与 `crates/perceive/tests/golden.rs` 的「缺件即跳过」同一模式。
+第三层要的那些权重在 `target/models/`、是 gitignored 的 31 MB
+⇒ CI 必须**自己取**，见下面「Gate 7b」。
 ⚠ 而**真帧与答案键**也在 `target/` 下（真人会话内容，不入库），
-所以**这一步只能人工跑**。它不是缺陷，是隐私约束的必然结果。
+所以**真帧那一步只能人工跑**。它不是缺陷，是隐私约束的必然结果。
 
 ⚠⚠ **2026-10-18 起第三层多了一道机器守卫，但它守的不是真帧**
 （票 50 的 L3）：`crates/capture/tests/ocr_accuracy.rs`
@@ -221,11 +221,64 @@ $env:CS_OCR_CER_FULL='1'; cargo test -p chatservant-capture --test ocr_accuracy 
 | 覆盖真实气泡/头像/缩放 | ❌ | ✅ |
 | 覆盖「换引擎后字全崩」 | ✅ | ✅ |
 
-⇒ 所以上面那张三层表里第三层「CI 必然跳过」的结论**没变**：
-它在本机自动跑、在 CI 上照样跳过。⚠ **别把「CI 绿」读成「字准验过了」**。
+⇒ 所以上面那张三层表里第三层现在是「CI 真跑」，**但它守的是合成语料**。
+⚠ **「CI 绿」现在能推出「合成语料上的字准过线了」，推不出「真帧上的字准没问题」**
+——真帧仍然只有人工台架那一条路。
+
+### 6b. CI 上「跑测试的 job 必须先造夹具」，少一样就红
+
+⚠⚠ **这条不变量已经复发三次**，每次症状都是同一个形状：**门禁全绿，
+而那条测试根本没跑。**
+
+1. `ci.yml` 从不取权重 ⇒ 字准守卫在 CI 上是死代码；
+2. 取了权重却没造语料 ⇒ run `39142436305` 全绿，而那条测试
+   `finished in 0.00s`（本机真推理 20.61 s）——**验的是一次跳过**；
+3. `release.yml` 的 verify job 同款（`cargo test` 在前，取权重在另一个 job 后面）。
+
+⇒ 三次都是**逐个文件**修的，而范围本该从「这条不变量在哪些地方成立」推。
+现在有机器守卫了：`scripts/check-gate-parity.ps1` 第 ⑥ 条**逐 job** 要求
+「跑测试之前先取权重、再造语料」，认 `cargo test` **与** `cargo nextest`。
+
+⚠⚠ **为什么不能用 ④ 那套 `TAURI_CONFIG: resources:null` 豁免**：
+null 只解决**编得过**（tauri-build 的 glob），而字准测试要的是**文件在盘上**。
+
+**判据是「这个 job 里，跑测试的步之前有没有那两步」，不是「这个 workflow 里有没有」。**
+一个 workflow 里可以同时有「取好权重才打包的 build job」与「什么都没取的 verify job」，
+文件级判断会把两者混成一句。
+
+⚠⚠⚠ **`cargo test` 的输出里，`test … ok` 同时代表通过与跳过。**
+缺件那一支是 `return`，而返回前 harness 只看到「这个测试没失败」。
+唯一的判据是那行 **`finished in`**：
+
+| `finished in` | 含义 |
+|---|---|
+| `0.00s` | **跳过了**，一个字都没推理 |
+| 十几秒 / 几十秒 | 真跑了 |
+
+⇒ **验「某个测试真的执行了」，不要读 `ok`，去读 `finished in`。**
+2026-10-19 实测：run `39142436305` 全绿、`success`，
+而它是 `0.00s` —— 一次「验了一个跳过」的完整案例。
+
+对应到 workflow 上就是这几步（`ci.yml` 与 `release.yml` 的 verify job 各一份）：
+
+- `Gate 7b-1/7b-2`：setup-python + `pip install rapidocr omegaconf`
+  （⚠ **不能省**：脚本刻意从 rapidocr 包里读模型表，缺依赖会在**联网之前**就断，
+  于是「modelscope 通不通」那个真正的问题一格都没测到）
+- `Gate 7b-3/7b-4`：`actions/cache` + `python scripts/fetch_models.py`（**刻意不设
+  `continue-on-error`**，取不到就红）
+- `Gate 7b-5`：`python scripts/ocrbench/gen_corpus.py` 造合成语料
+  （⚠ **权重与语料是两件独立的事**，两个都在 `target/` 下、都 gitignored）
+- `Gate 8b`：`--nocapture` 单跑那一条，把 CER / 召回 / 全对率打进日志
+  （⚠ 刻意**不改** `Gate 8` 的 `cargo test --workspace`——它与 `gate.ps1` /
+  `AGENTS.md` / 本文件 / `release.yml` **四处逐字一致**是本仓约定）
+
+⇒ 复核用的 run `39144160245`（commit `f010e9e`）：`Gate 8` **14.52s**、
+`Gate 8b` **20.71s**、**CER 0.23%**——与本机**逐位相同**。
+⇒ 顺带证伪了两件本机代表不了 runner 的事：modelscope.cn 在美国 runner 上可达、
+ort 在 runner 上真能加载 ONNX Runtime 并推理（不是只链接得上）。
 
 ⇒ **换了引擎、改了预处理、调了 det 阈值、动了 det/rec 后处理之后，
-门禁绿了不算数**。有合成语料就先跑 L3（自动），再跑真帧台架（人工）：
+门禁绿了仍不算数**（真帧那一半机器永远测不到）：
 
 ```bash
 pwsh -NoProfile -File target\probe\run_cer2.ps1            # 生成 4 份后端输出

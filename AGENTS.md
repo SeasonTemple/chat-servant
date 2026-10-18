@@ -504,6 +504,27 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
   「设置屏莫名退回主区」不是产品缺陷，是 dev HMR。
 - **造「另一个会话」的夹具，差别必须在字形/位置上，不许在亮度上。** 四个用亮度差
   造的夹具全绿，而会话身份闸从来没关过（硬约束第 1 条实测破口）。
+- ⚠⚠ **`cargo test` 输出里的 `test … ok` 同时代表「通过」与「跳过」。** 缺件那一支
+  是 `return`，而 harness 只看到「这个测试没失败」。⇒ **验「某个测试真的执行了」
+  不要读 `ok`，去读那行 `finished in`：0.00s = 跳过，十几秒 = 真跑。**
+  2026-10-19 实测踩过：CI run `39142436305` 全绿、`success`，
+  而 `ocr_accuracy` 那行是 `finished in 0.00s`（本机真推理 20.61s）——
+  **验的是一个跳过**，据此下的「modelscope 可达、ort 在 runner 能推理」两个结论
+  其实一个都没测到。同族的还有回落：`recognize_in` 回落到 Windows OCR 时**退出码仍是 0**，
+  而「快得不正常」（34ms vs 550ms）才是信号。
+- ⚠⚠ **「CI 绿」要成立，得先确认每个跑测试的 job 自己备齐了夹具。** 权重
+  （`target/models/`，gitignored）与合成语料（`target/probe/ocrbench/`，
+  同样 gitignored）是**两件独立的事**，缺任一件都是静默跳过。
+  这条不变量已复发三次（`ci.yml` 不取权重 → 取了权重没造语料 → `release.yml` 同款），
+  现在由 `scripts/check-gate-parity.ps1` 第 ⑥ 条**逐 job** 机器守
+  （认 `cargo test` 与 `cargo nextest`；**不吃** `TAURI_CONFIG: resources:null` 那套豁免，
+  因为 null 只解决「编得过」而字准测试要的是「文件在盘上」）。
+  ⚠ 判据是**逐 job**不是逐文件：一个 workflow 里可以同时有「取好权重才打包的 build job」
+  与「什么都没取的 verify job」，文件级判断会把两者混成一句。详见 `CONTRIBUTING.md` §6b。
+- ⚠ **自证用「复制备份」恢复注入，会把 mtime 一起还原 ⇒ cargo 认为没改过、不重编**
+  ⇒ 后面几轮自证全在验陈旧产物。症状极像「守卫没修好」（恢复后本该绿那次仍红，
+  且红在无关字段上）。⇒ 恢复时**重写文件内容**而不是 `File.Copy`，
+  并确认恢复后那次运行日志里确实出现 `Compiling <crate>`。
 - `docs/HANDOFF.md` 的冷启动内容（能干什么 / 已证伪的路 / 命令）**保持有效**，
   且每条都带实测日期与证据来源。2026-10-13 已把其中的按日日记与重复的硬约束
   清掉，改写后的版本是核实过的。若它与代码冲突，**以代码为准并立刻修文档**——
