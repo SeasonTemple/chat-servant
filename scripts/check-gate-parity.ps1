@@ -63,6 +63,7 @@ $witness = [ordered]@{
   'version consistency'   = 'check-version.ps1'
   'license consistency'   = 'check-license.ps1'
   'opaque backgrounds'    = 'check-opaque-bg.ps1'
+  'forensics hook guard'  = 'check-hooks.ps1'
 }
 
 foreach ($p in @($gatePath, $ciPath)) {
@@ -171,7 +172,9 @@ if (Test-Path $confPath) {
   if ($outside) {
     $wfDir = '.github\workflows'
     $nJobs = 0
+    $script:wfCount = 0
     foreach ($wf in (Get-ChildItem $wfDir -Filter '*.yml' | Sort-Object Name)) {
+      $script:wfCount++
       $wfRaw = [IO.File]::ReadAllText($wf.FullName)
       $lines = $wfRaw -split "`r?`n"
       # 只认 **workflow 级**的覆盖（顶格 `env:` 块里的 TAURI_CONFIG）。
@@ -328,6 +331,6 @@ if ($fail.Count) {
 
 $j = if ($script:jobsChecked) { $script:jobsChecked } else { 0 }
 Write-Output ("gate/CI 对齐：gate.ps1 的 {0} 步在 ci.yml 里都有见证命令；" -f $steps.Count)
-Write-Output ("bundle.resources 那条：扫了 {0} 个 workflow 的 job，逐个都有覆盖或先取权重；" -f $j)
+Write-Output ("bundle.resources 那条：扫了 {0} 个 workflow 的 {1} 个 job，逐个都有覆盖或先取权重；" -f $script:wfCount, $j)
 Write-Output ("Python 编码那条：扫本项目自有 .py {0} 个（不含 .agents/ 第三方），其中 {1} 个含非 ASCII，都已自己 reconfigure。" -f $pyScope.Count, $pyNonAscii)
 exit 0

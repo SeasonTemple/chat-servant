@@ -83,6 +83,13 @@ Step "license consistency" { & pwsh -NoProfile -File "$PSScriptRoot\check-licens
 # 2026-10-18 实测扫到 7 处，已全部改成「混背后那张纸」。纯读文件，排在编译前。
 Step "opaque backgrounds" { & pwsh -NoProfile -File "$PSScriptRoot\check-opaque-bg.ps1" 2>&1 | Select-Object -Last 15 }
 
+# 取证闸（`.githooks/pre-commit`）本身还在不在、判据还是不是那样。
+# 凭据闸是硬约束第 7 条的最后一道防线，而**它自己没有任何守卫**——
+# 2026-10-18 实测 `grep -n 'githooks' scripts/gate.ps1` 零命中，
+# 它整个消失或被改坏，门禁一声不吭（同「守卫本身没有守卫」那一族）。
+# 纯读文件，排在编译那几步前面。
+Step "forensics hook guard" { & pwsh -NoProfile -File "$PSScriptRoot\check-hooks.ps1" 2>&1 | Select-Object -Last 15 }
+
 Step "cargo fmt --all --check" { cargo fmt --all --check 2>&1 | Select-Object -Last 40 }
 Step "cargo clippy -D warnings" { cargo clippy --workspace --all-targets -- -D warnings 2>&1 | Select-Object -Last 60 }
 Step "cargo test --workspace"  { cargo test --workspace 2>&1 | Select-Object -Last 60 }

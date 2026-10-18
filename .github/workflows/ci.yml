@@ -133,6 +133,20 @@ jobs:
         shell: pwsh
         run: ./scripts/check-opaque-bg.ps1
 
+      # ⚠ 取证闸（`.githooks/pre-commit`）自身。
+      #
+      # 凭据闸是硬约束第 7 条的最后一道防线，而它自己**没有任何守卫**——
+      # 2026-10-18 实测 `grep -n 'githooks' scripts/gate.ps1` 零命中。
+      # 它整个消失或判据被改坏，门禁一声不吭。
+      #
+      # ⚠ 它在 CI 上尤其该跑：githooks 只在本机生效（CONTRIBUTING 陷阱 5），
+      #   所以这一道是**唯一**能让「闸门被改坏」在 PR 上就响的地方。
+      #   守卫查三样：判据片段还在、marker 仍是两段式（没自豁免）、
+      #   图片白名单与仓库实际跟踪的图片一致（当前 7 张）。
+      - name: "Gate 5c | forensics hook guard"
+        shell: pwsh
+        run: ./scripts/check-hooks.ps1
+
       - name: "Gate 6 | cargo fmt --check"
         run: cargo fmt --all --check
 
