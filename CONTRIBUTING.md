@@ -77,8 +77,9 @@ fix(感知): 切回会话后消息变少 —— 水位线住在引擎里
 > 于是 `pwsh -File` 永远返回 0，一个带红门禁的提交就提交上去了。
 
 > ⚠ 上表是**清单，不是执行顺序**，也不是完整清单：`gate.ps1` 实际还会跑
-> `sheet pack in sync`（纸的源与生成物必须同步）、`gate/CI parity`、与
-> `version consistency`，并把 `pnpm lint` 与 `svelte-autofixer` 拆成两个 `Step`。
+> `sheet pack in sync`（纸的源与生成物必须同步）、`gate/CI parity`、
+> `version consistency`、`license consistency`，并把 `pnpm lint` 与 `svelte-autofixer`
+> 拆成两个 `Step`。
 > 2026-10-16 起脚本每轮都会打印**自己的分步耗时表**，
 > 那才是唯一准确的清单；**别数「几步」**——`secret scan` 在没设 `CHATSERVANT_PROBE_KEY` 时会跳过，两侧天生不等。
 
@@ -87,6 +88,19 @@ fix(感知): 切回会话后消息变少 —— 水位线住在引擎里
 > `ui/src-tauri/tauri.conf.json`。后两个是 JSON，**没有继承可借**，只能手动对齐。
 > 而 `release.yml` 的发版闸只比 **tag ↔ `tauri.conf.json`**——另外三处对不上它**不会拦**，
 > 所以那道「四处一致」才有必要。守卫：`scripts/check-version.ps1`。
+
+> ⚠ **license 只有一处真相**：根 `Cargo.toml` 的 `[workspace.package] license`（BUSL-1.1）。
+> 其余五个成员各写一份。守卫：`scripts/check-license.ps1`，成员清单由
+> `cargo metadata --no-deps` 给 ⇒ **新增 crate 自动被覆盖**，不用改守卫。
+>
+> ⚠⚠ **这道不能省，也不能指望 `cargo deny check` 顺带抓**（2026-10-18 实测）：
+> MIT / Apache-2.0 都在 `deny.toml` 的白名单里，把某个成员写错成
+> `MIT OR Apache-2.0` **不会**触发 "license is not explicitly allowed"；
+> `deny.toml` 里那条 `{ allow = ["BUSL-1.1"], crate = "…" }` 只是变成一条
+> `warning[license-exception-not-encountered]`，而 `cargo deny check` **仍然 exit 0**。
+> ⇒ 在「写错成 permissive」这个方向上 `cargo deny` 是瞎的。
+> （反方向是有效的：写错成 BUSL 而没进 exceptions，会 exit 1。
+> 所以这道守卫守的是**白名单方向**，不是「许可没被允许」。）
 
 ### 内循环：改一行代码不必跑全门禁
 

@@ -87,13 +87,13 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `52-compilable-control-chars-slip-past-the-fffd-scan.md` | 6/6 |
 | `54-autofixer-step-cannot-report-any-warning.md` | 8/8 |
 | `55-machine-acceptance-exit-paths-silence-and-stale-checklist.md` | 9/9 |
-| `56-version-lives-in-four-files-but-only-one-is-gated.md` | 7/7 |
+| `56-version-lives-in-four-files-but-only-one-is-gated.md` | 11/11 |
 
 ## 四、⚠ 脚本当场抓出来的漂移（Status 行自己写的数字与实点不符）
 
 | 票 | Status 写的 | 机器点的 |
 |---|---|---|
-| `56-version-lives-in-four-files-but-only-one-is-gated.md` | 4/4 | 7/7 |
+| `56-version-lives-in-four-files-but-only-one-is-gated.md` | 4/4 | 11/11 |
 
 > 这些不是脚本猜的，是 Status 行里的 `N/M` 与实际勾选数量对不上。
 > **按本表的数字读进度**，别按 Status 读。

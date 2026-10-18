@@ -110,13 +110,26 @@ jobs:
         shell: pwsh
         run: ./scripts/check-version.ps1
 
-      - name: "Gate 5 | cargo fmt --check"
+      # license 在**每个**工作区成员里各声明一份，唯一出处是根 `[workspace.package]`。
+      # 成员清单由 `cargo metadata --no-deps` 给（不是硬编码包名）⇒ 新增 crate 自动被覆盖。
+      #
+      # ⚠ 这一步**不能**指望 `cargo deny check` 顺带抓。MIT / Apache-2.0 都在
+      #   deny.toml 的白名单里，所以写错成 MIT 不会触发 "not explicitly allowed"；
+      #   `deny.toml` 里那条 BUSL-1.1 例外变成用不上的，cargo-deny 只发一条
+      #   `warning[license-exception-not-encountered]` 并**仍然 exit 0**
+      #   （2026-10-18 实测：改回去 deny_exit=0）。
+      #   ⇒ 在这个方向上 cargo deny 是瞎的，这道是唯一能守住它的东西。
+      - name: "Gate 5 | license consistency"
+        shell: pwsh
+        run: ./scripts/check-license.ps1
+
+      - name: "Gate 6 | cargo fmt --check"
         run: cargo fmt --all --check
 
-      - name: "Gate 6 | cargo clippy -D warnings"
+      - name: "Gate 7 | cargo clippy -D warnings"
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: "Gate 7 | cargo test"
+      - name: "Gate 8 | cargo test"
         run: cargo test --workspace
 
       # ⑤ 凭据扫描。
@@ -135,7 +148,7 @@ jobs:
       # 曾经这里写的是字面量 `CHATSERVANT_PROBE_KEY: sk-...`，于是那串字面量
       # **本身就在 ci.yml 里**，扫描器如实报出了 ci.yml——扫描器没坏，是探针自指了。
       # 探针串一旦入库，它要找的东西就住在他自己家里。
-      - name: "Gate 8 | secret scan"
+      - name: "Gate 9 | secret scan"
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -162,22 +175,22 @@ jobs:
           Write-Output 'SECRET_SCAN_OK —— 抓得到探针，也放得过干净仓库'
 
       # ⑥ 许可证 / advisory / 来源合规，策略见 docs/adr/0003-dependency-strategy.md
-      - name: "Gate 9 | cargo deny check"
+      - name: "Gate 10 | cargo deny check"
         run: cargo install cargo-deny --locked && cargo deny check
 
-      - name: "Gate 10 | svelte-check"
+      - name: "Gate 11 | svelte-check"
         working-directory: ui
         run: pnpm check
 
-      - name: "Gate 11 | prettier + eslint"
+      - name: "Gate 12 | prettier + eslint"
         working-directory: ui
         run: pnpm lint
 
-      - name: "Gate 12 | svelte-autofixer"
+      - name: "Gate 13 | svelte-autofixer"
         shell: pwsh
         run: ./ui/scripts/autofixer.ps1
 
-      - name: "Gate 13 | vite build"
+      - name: "Gate 14 | vite build"
         working-directory: ui
         run: pnpm build
 

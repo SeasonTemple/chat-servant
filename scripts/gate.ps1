@@ -70,6 +70,13 @@ Step "gate/CI parity" { & pwsh -NoProfile -File "$PSScriptRoot\check-gate-parity
 # 而发版闸只比 tag ↔ tauri.conf.json，另外三处对不上它**不会拦**。
 Step "version consistency" { & pwsh -NoProfile -File "$PSScriptRoot\check-version.ps1" 2>&1 | Select-Object -Last 15 }
 
+# license 在**每个**工作区成员里各声明一份，唯一出处是根 `[workspace.package]`。
+# ⚠ 这一步不能指望 `cargo deny check` 顺带抓：MIT / Apache-2.0 都在白名单里，
+#   写错成 MIT 只会让 deny.toml 那条 BUSL-1.1 例外变成 `warning[...]`
+#   并**仍然 exit 0**（2026-10-18 实测）。纯读文件 + 一次 `cargo metadata --no-deps`，
+#   排在编译那几步前面。
+Step "license consistency" { & pwsh -NoProfile -File "$PSScriptRoot\check-license.ps1" 2>&1 | Select-Object -Last 15 }
+
 Step "cargo fmt --all --check" { cargo fmt --all --check 2>&1 | Select-Object -Last 40 }
 Step "cargo clippy -D warnings" { cargo clippy --workspace --all-targets -- -D warnings 2>&1 | Select-Object -Last 60 }
 Step "cargo test --workspace"  { cargo test --workspace 2>&1 | Select-Object -Last 60 }

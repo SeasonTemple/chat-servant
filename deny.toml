@@ -60,7 +60,7 @@ allow = [
 #   理由逐条写在下面 exceptions 上方。要点：
 #     · MPL-2.0 只要求「改动该 crate 本身要开源」，链接使用**不传染**
 #       整个分发包——这与 GPL/LGPL 的传染性不同。
-#     · 本项目源码是 MIT/Apache-2.0，**不修改**这些 crate，不分发它们的源码。
+#     · 本项目源码是 BUSL 1.1（`LICENSE`），**不修改**这些 crate，不分发它们的源码。
 #     · 但要注意：cssparser / selectors / dtoa-short / option-ext 是
 #       **运行时**依赖（wry 的 WebView 绑定层），会进最终二进制。
 #       这不是"构建期所以无所谓"。

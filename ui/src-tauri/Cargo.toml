@@ -9,7 +9,11 @@ description = "桌面聊天回复助手的界面外壳"
 # Tauri 模板默认给 2021 —— 那样写不了 let-chain，所以显式提到 2024。
 edition = "2024"
 rust-version = "1.85"
-license = "MIT OR Apache-2.0"
+# ⚠ 与根 `Cargo.toml` 的 `[workspace.package] license` 同值（BUSL-1.1）。
+#   它原先写的是 `MIT OR Apache-2.0`——**与 `LICENSE` 和工作区其余 crate 都矛盾**，
+#   而且 `deny.toml` 的 exceptions 里 `chat-servant-app` 本来就按 BUSL-1.1 点名，
+#   也就是说那条例外在给一个错的声明兜底。2026-10-18 订正。
+license = "BUSL-1.1"
 publish = false
 
 [lib]
