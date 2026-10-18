@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **62** ｜ 验收项全勾 **39** ｜ 已收但留有说明项 **13** ｜ 未收 **10**
+票据总数 **63** ｜ 验收项全勾 **39** ｜ 已收但留有说明项 **14** ｜ 未收 **10**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -50,6 +50,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `33-attribution-thresholds-are-dark-theme-only.md` | 3/5 | done · 2026-10-14 真机浅色主题实测发现并已修 · 根因定位到具体数值 |
 | `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 9/10 | done · **2026-10-18 决策已下并上线**：默认引擎 = **PP-OCRv6 small**， |
 | `53-dev-ps1-run-returns-output-and-exit-code.md` | 7/8 | done · 2026-10-18。根因与实测证据见下；四个动词已改，绿红两档都自证过。 |
+| `63-tick-geometry-and-pill-material.md` | 9/10 | done · 2026-10-18 · 验收项 **10/10** |
 
 ## 三、已收（验收项全勾）
 
@@ -104,6 +105,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `58-settings-third-pass-hierarchy.md` | 7/7 | 10/10 |
 | `60-tier-row-runs-off-paper-guard-measures-the-svg-not-the-paint.md` | 10/10 | 14/14 |
 | `61-chip-selected-state-broke-consistency.md` | 8/8 | 9/9 |
+| `63-tick-geometry-and-pill-material.md` | 10/10 | 9/10 |
 
 > 这些不是脚本猜的，是 Status 行里的 `N/M` 与实际勾选数量对不上。
 > **按本表的数字读进度**，别按 Status 读。

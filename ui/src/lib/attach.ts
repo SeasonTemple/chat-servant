@@ -69,19 +69,31 @@ export function flashOnce(
  *
  * @param pick      从容器里挑出当前激活项与指示块（返回 null 表示还没就位）
  * @param duration  补间时长；传 0 表示直接落位（尊重 reduced-motion）
+ * @param bleed     **指示块向四周外扩的像素**（2026-10-18 加）。
+ *
+ *   为什么需要它：指示块原来与激活项**逐像素重合**（`left = offsetLeft`、
+ *   `width = offsetWidth`）。那是「药丸」这个形状的前提——它靠描边与
+ *   底色自己占住那一格。
+ *
+ *   ⚠ 改成**撕边纸片**之后就不成立了：撕边那 10px 会被吃掉，
+ *   若仍按激活项的盒子落位，撕边会直接啃在文字上
+ *   （「只填入」实测只剩半只「只」字）。
+ *   ⇒ 落位要**外扩**：内衬盒仍与激活项重合，而撕边落在盒外，
+ *   于是「选中」读成一片纸盖上去，而不是一个框贴在字旁边。
  */
 export type SliderParts = { pill: HTMLElement; active: HTMLElement } | null;
 
 export function slideTo(
   pick: (scope: HTMLElement) => SliderParts,
   duration: number,
+  bleed = 0,
 ): Attachment<HTMLElement> {
   return (node) => {
     const found = pick(node);
     if (!found) return;
     const { pill, active } = found;
-    const left = active.offsetLeft;
-    const width = active.offsetWidth;
+    const left = active.offsetLeft - bleed;
+    const width = active.offsetWidth + bleed * 2;
 
     //**第一次落位不许补间**（票 37，2026-10-15 定位）。
     //
@@ -104,7 +116,6 @@ export function slideTo(
     // 修法：初值（offset 全 0）视为「还没落位」，直接落位。之后的切换
     // 仍然照常滑动 —— 那才是这个组件要表达的东西。
     const unplaced = pill.offsetLeft === 0 && pill.offsetWidth === 0;
-
     // 没有位移就不补间：否则一段无意义的 240ms 动画只会让人觉得卡
     if (
       unplaced ||
