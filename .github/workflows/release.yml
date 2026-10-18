@@ -62,6 +62,43 @@ jobs:
       - name: mojibake scan
         shell: pwsh
         run: ./scripts/scan-mojibake.ps1
+
+      # ⚠⚠⚠ **同一个缺陷的第三个现场**（2026-10-18，`ci.yml` 修完才发现）
+      #
+      # verify 这一步的 `cargo test --workspace` 同样**没有权重、也没有语料**
+      # （取权重在 build job 里，晚得多）。原先这不痛：字准测试「缺件即跳过」。
+      # ⚠ 但 `ocr_accuracy.rs` 已改成**`CI` 存在时缺件即 panic**
+      #   （GitHub Actions 对**所有** workflow 都设 `CI=true`，不只 ci.yml）
+      #   ⇒ 不补这两步，**verify 必红**，于是 build 被 needs 连坐跳过，
+      #   **发版链路一步都走不到**——与上面 `GlobPathNotFound` 那次的形状一模一样。
+      #
+      # ⇒ 「本仓的一条 workflow 修了，同一个不变量在另一条里就不成立」
+      # 这件事已经发生三次。逐字取自 `ci.yml` 的 Gate 7b-1..7b-5。
+      - name: Setup | Python (reads the model table)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install OCR model-table dependencies
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check rapidocr omegaconf
+
+      - uses: actions/cache@v4
+        with:
+          path: target/models
+          key: ocr-models-v6-small-v1
+
+      - name: Fetch OCR weights for the accuracy test
+        shell: pwsh
+        run: python scripts/fetch_models.py
+
+      # ⚠ 语料与权重是**两件独立的事**，两个都在 target/ 下、都 gitignored。
+      #   只取权重曾经「看起来够了」——run 39142436305 就是那样全绿的，
+      #   而字准测试 `finished in 0.00s`，验的是一次跳过。
+      - name: Generate the synthetic OCR corpus
+        shell: pwsh
+        run: python scripts/ocrbench/gen_corpus.py
+
       - name: fmt + clippy + test
         run: |
           cargo fmt --all --check

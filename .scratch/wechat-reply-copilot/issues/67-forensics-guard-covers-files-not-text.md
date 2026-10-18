@@ -5,7 +5,7 @@
 
 **Blocked by:** None
 
-**Status:** ready-for-agent · 2026-10-18 缺口 A、缺口 B、前置二均已落地并自证；**只剩前置三**（CI 上跑 cargo test 时权重不在盘上 ⇒ 「缺件即跳过」的测试在 CI 与发版验证里永不执行）
+**Status:** ready-for-agent · 2026-10-18 缺口 A、缺口 B、前置二均已落地并自证；**只剩前置三**。⚠ 前置三已「绿过两次、两次验的都是一次跳过」（第二次是 run `39142436305`，`finished in 0.00s`）；已修（提交 `f010e9e`：CI 造语料 + 缺件即红），第三轮 dispatch run `39144160245` 未出结论
 
 ## 触发它的那个问题
 
@@ -179,8 +179,61 @@ commit `9cf53f9`），**「闸门是否存在」这一层仍然没人守**。
       必须推到分支让 CI 真跑一次，确认「权重取得到 + L3 真跑 + 不红」。
       ⚠ 风险已写进 `ci.yml` 的注释：权重来自 **modelscope.cn**（RapidOCR 的
       模型表，不是硬编 URL），而 runner 在美国；GitHub 对来自中国的流量有限制。
+
+      → ⚠⚠⚠ **2026-10-18 第二次「验证通过」验的仍然是一次跳过**（run `39142436305`）
+
+      那一轮 CI **全绿**，而日志逐字是：
+
+      ```
+      Running tests\ocr_accuracy.rs … test … ok
+      test result: ok. 1 passed; … finished in 0.00s
+      ```
+
+      **0.00 秒**，而本机真推理要 **20.61 秒**（`--nocapture` 实测）
+      ⇒ 它走的是测试里的 `return` 那一支，**根本没推理**。
+
+      **根因不是网络、不是 ort**（那两项在那一轮里其实都过了）：
+      权重由 `fetch_models.py` 取，**语料**由 `gen_corpus.py` 造，
+      而**没有任何一步调它**。两者都在 `target/` 下、都是 gitignored，
+      缺谁都是静默跳过。
+      ⚠ 而在 `cargo test` 的输出里，`return` 与通过**逐字同形**（都是 `... ok`）
+      —— 这与 `crates/perceive/tests/golden.rs` 是同一个模式，
+      也正是本票开头担心的那件事，**它发生在字准守卫自己身上**。
+
+      **修法（提交 `f010e9e`，两处都不新增配置项）**：
+
+      1. `ci.yml` 加 `Gate 7b-5 | Generate the synthetic OCR corpus`，在 Gate 8 之前。
+         Pillow 由 7b-2 的 rapidocr 依赖带进来（安装日志里可见 `Pillow-13.0.0`），不另装。
+      2. `ocr_accuracy.rs` 的缺件分支在 **`CI` 存在时改为 panic**。
+         ⚠ 判据取 `CI`（GitHub Actions 永远设它）而**不是自造变量**——
+         自造变量多出一条「两边把名字拼错 ⇒ 守卫静默失效」的路径，
+         而那正是这条要杀的东西。
+
+      ⚠⚠ **自证时撞到的一个真 bug（已修）**：`var_os` 只判**存在性**，
+      而 Windows 上把变量置成**空串仍然算存在** ⇒ 第一次自证里
+      「本机语义」那一格也红了。⇒ 改成「非空才算设」。
+      （与 `release.yml` draft 开关那次同族：空串往往不是意外，是那个上下文没有这个输入。）
+
+      **自证三方向（判据一律用退出码）**：
+
+      | 方向 | 条件 | 结果 | exit |
+      |---|---|---|---|
+      | S6a 该红的会红 | `CI=true` + 语料缺失 | panic「CI 上缺件不许跳过」 | **101** |
+      | S6c 本机不被弄坏 | `CI=''` + 语料缺失 | 仍跳过 | **0** |
+      | S6b 绿的那侧仍真跑 | `CI=true` + 语料在位 | CER **0.23%**，`finished in 20.61s` | **0** |
+
+      ⚠ **S6b 那个 `20.61s` 就是验收的判据**：`0.00s` 与 `~20s` 是
+      「跳过」与「真跑」唯一的可靠区别，而 `ok` 那三个字母两者都有。
+      ⇒ 查 CI 日志时**不要看 `ok`，要看 `finished in` 那一行**。
+
+      另加 `Gate 8b`：用 `--nocapture` 单跑那一条，让 CER / 召回 / 全对率落进日志。
+      ⚠ 刻意**不改** Gate 8 的 `cargo test --workspace`——它与 `gate.ps1` /
+      `AGENTS.md` / `CONTRIBUTING.md` / `release.yml` **四处逐字一致**是本仓约定。
+
 - [ ] **前置三的验收动作**：`push` 到分支 → CI 绿且日志里能看到
       `Fetch OCR weights` 与 L3 的真实读数（不是「跳过」）→ 才勾上一条。
+      ⚠ 判据收紧为：**`Gate 8` 与 `Gate 8b` 两行的 `finished in` 都必须是
+      十几秒量级**，`0.00s` 一律不算数。第二轮 dispatch：run `39144160245`。
 - [x] 枚举复核：`git ls-files | grep -Ei '\.(png|jpe?g|bmp|webp|gif)$'` 的输出
       与本票那张 7 行表**逐条一致**，不一致就说明期间漏进来过东西
       → `scripts/check-hooks.ps1` 已把这条做成常驻断言（白名单过期会红）

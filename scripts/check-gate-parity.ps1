@@ -169,10 +169,21 @@ if (Test-Path $confPath) {
     ForEach-Object { $_.Groups[1].Value } |
     Where-Object { $_ -match '^\.\./\.\./(target|\.\.)/' -or $_ -match '\.\./\.\./target/' } |
     Sort-Object -Unique
-  if ($outside) {
-    $wfDir = '.github\workflows'
+  # ⚠⚠ 下面这段扫描**不再被 `$outside` 门住**（原来是的）。
+  # 它同时供两条不变量用：④ bundle.resources 与 ⑥「跑测试前备夹具」，
+  # 而 ⑥ 与 resources 无关。⇒ 门住的代价是「哪天 resources 被清干净，
+  # 整段扫描连同 ⑥ 一起不再执行」，⑥ 就会**静默地不再验**——
+  # 正是本文件量具自检（`有 jobs: 却切不出 job ⇒ 红`）要防的那同一件事。
+  # 只有 ④ 那一条判定自己还留在 `if ($outside)` 里面。
+  #
+  # ⚠⚠ **别把它写成一个裸的 `{ … }` 块**：PowerShell 在语句位置会把裸块
+  # 当成要**输出**的脚本块，于是整段源码被打印出来，而里面赋的
+  # `$script:wfCount` / `$script:testJobsChecked` 全是空 ⇒ 结论行变成
+  # 「扫了  个 workflow 的 0 个 job」还 exit=0。第一次就踩了。
+  $wfDir = '.github\workflows'
     $nJobs = 0
     $script:wfCount = 0
+    $script:testJobsChecked = 0
     foreach ($wf in (Get-ChildItem $wfDir -Filter '*.yml' | Sort-Object Name)) {
       $script:wfCount++
       $wfRaw = [IO.File]::ReadAllText($wf.FullName)
@@ -221,7 +232,7 @@ if (Test-Path $confPath) {
         $block = $lines[$from..$to]
         $nJobs++
 
-        $cargoAt = -1; $fetchAt = -1
+        $cargoAt = -1; $fetchAt = -1; $testAt = -1; $corpusAt = -1
         for ($k = 0; $k -lt $block.Count; $k++) {
           $ln = $block[$k]
           if ($ln -match '^\s*#') { continue }            # 注释里的 cargo 不算
@@ -232,12 +243,45 @@ if (Test-Path $confPath) {
               ($ln -match '\bcargo\s+(clippy|test|build|check|run|deny|fmt|xtask)\b' -or
                $ln -match '\b(tauri|pnpm tauri)\s+build\b')) { $cargoAt = $k }
           if ($fetchAt -lt 0 -and $ln -match 'fetch_models\.py' -and $ln -notmatch '--check') { $fetchAt = $k }
+          # ⚠ `cargo nextest` 也是跑测试，只认字面 `cargo test` 会给它开一个后门。
+          if ($testAt -lt 0 -and $ln -match '\bcargo\s+(test\b|nextest\b)') { $testAt = $k }
+          if ($corpusAt -lt 0 -and $ln -match 'ocrbench[\\/]gen_corpus\.py') { $corpusAt = $k }
         }
+
+        # ── ⑥ 跑测试的 job 必须先造出夹具，否则「跳过」与「通过」同形 ──
+        #
+        # 不变量：**每个会跑测试的 workflow job，都要在它之前把权重与合成语料备齐。**
+        #
+        # ⚠⚠ 这条是被现实教出来的，而且**同一个不变量已经复发三次**：
+        #   ① `ci.yml` 从不取权重 ⇒ 字准守卫在 CI 上是死代码；
+        #   ② 取了权重却没造语料 ⇒ run `39142436305` 全绿，而那条测试
+        #      `finished in 0.00s`（本机真推理 20.61 s）——**验的是一次跳过**；
+        #   ③ `release.yml` 的 verify job 同款（`cargo test` 在第 69 行，
+        #      取权重在另一个 job 的第 225 行）。
+        # ⇒ 三次都是**逐个文件**修的，而范围本该从「这条不变量在哪些地方成立」推。
+        #
+        # ⚠ 为什么这条不能用上面那个 null 覆盖豁免：TAURI_CONFIG 只解决
+        #   **编得过**（tauri-build 的 glob），而字准测试要的是**文件在盘上**。
+        #   现在缺件会 panic（`CI` 存在时），所以后果从「静默跳过」变成
+        #   **整个 workflow 红、build job 被 needs 连坐跳过**——同 ① 的形状。
+        if ($testAt -ge 0) {
+          $script:testJobsChecked++
+          if ($fetchAt -lt 0 -or $fetchAt -gt $testAt) {
+            $fail.Add(('{0}.yml 的 job `{1}`：跑测试之前没有取权重（fetch_models.py）' -f $wf.BaseName, $jobStarts[$j].Name))
+          }
+          if ($corpusAt -lt 0 -or $corpusAt -gt $testAt) {
+            $fail.Add(('{0}.yml 的 job `{1}`：跑测试之前没有造合成语料（ocrbench/gen_corpus.py）' -f $wf.BaseName, $jobStarts[$j].Name))
+            $fail.Add('    ⇒ 字准守卫会走「缺件」那一支。⚠ 在 cargo test 的输出里，')
+            $fail.Add('      跳过与通过**逐字同形**（都是 `... ok`），只有一个 `finished in`')
+            $fail.Add('      能区分：0.00s 是跳过，十几秒才是真跑。')
+          }
+        }
+
         if ($cargoAt -lt 0) { continue }                  # 这个 job 不跑 cargo
 
         $jobOverride = $fileOverride -or (($block -join "`n") -match '"resources"\s*:\s*null')
         $fetchedFirst = ($fetchAt -ge 0 -and $fetchAt -lt $cargoAt)
-        if (-not ($jobOverride -or $fetchedFirst)) {
+        if ($outside -and -not ($jobOverride -or $fetchedFirst)) {
           $fail.Add(('{0}.yml 的 job `{1}`：跑 cargo 时权重还不在盘上，也没有 null 覆盖' -f $wf.BaseName, $jobStarts[$j].Name))
           $fail.Add('    ⇒ 干净 runner 上 tauri-build 会在那一步抛 GlobPathNotFound，')
           $fail.Add('      而本机有这些文件所以本地全绿。修法二选一：')
@@ -248,7 +292,6 @@ if (Test-Path $confPath) {
       }
     }
     $script:jobsChecked = $nJobs
-  }
 } else {
   Write-Output "找不到 $confPath —— resources 那条不变量本次没验。"
   exit 1
@@ -319,6 +362,16 @@ foreach ($py in $pyScope) {
   }
 }
 
+# ⚠ 量具自检：⑥ 一个跑测试的 job 都没找到 ⇒ 它此刻**什么都没验**。
+#   「量具坏了」与「量具没找到东西」在屏幕上原本长得一模一样，
+#   而这一条守卫的整个存在意义就是抓「静默跳过」——
+#   它自己静默起来是最坏的一种。⇒ 直接红。
+# ⚠ 这一段**必须在下面的判决之前**：放到判决之后，$fail 添了也没人看。
+if ($script:testJobsChecked -eq 0) {
+  $fail.Add('⑥ 一个「跑测试的 job」都没扫到 —— 这条守卫此刻什么都没验。')
+  $fail.Add('   （要么 workflow 里真的没有 cargo test，要么 job 的切分/判据坏了。别把「没查到」当「没问题」。')
+}
+
 if ($fail.Count) {
   Write-Output 'CI 与本机门禁没有对齐：'
   Write-Output ''
@@ -332,5 +385,6 @@ if ($fail.Count) {
 $j = if ($script:jobsChecked) { $script:jobsChecked } else { 0 }
 Write-Output ("gate/CI 对齐：gate.ps1 的 {0} 步在 ci.yml 里都有见证命令；" -f $steps.Count)
 Write-Output ("bundle.resources 那条：扫了 {0} 个 workflow 的 {1} 个 job，逐个都有覆盖或先取权重；" -f $script:wfCount, $j)
+Write-Output ("跑测试前备夹具那条：{0} 个跑测试的 job，逐个都在跑之前取权重并造语料。" -f $script:testJobsChecked)
 Write-Output ("Python 编码那条：扫本项目自有 .py {0} 个（不含 .agents/ 第三方），其中 {1} 个含非 ASCII，都已自己 reconfigure。" -f $pyScope.Count, $pyNonAscii)
 exit 0
