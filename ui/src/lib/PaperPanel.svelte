@@ -63,6 +63,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { onMount } from 'svelte';
   import type { Attachment } from 'svelte/attachments';
+  import PencilDefs from '$lib/PencilDefs.svelte';
 
   /**
    * 标记的**幅面档**。跟「勾还是圈」正交：勾也有大小，圈也有大小。
@@ -1190,54 +1191,9 @@
   {/if}
 </main>
 
-<svg class="cs-defs" width="0" height="0" aria-hidden="true">
-  <!--
-    石墨颗粒 + 边缘位移。与 `routes/studio/` 里那份**逐字相同**——
-    两处各写一份的话，改一边另一边就会悄悄退回单层平涂。
-
-    ⚠ `color-interpolation-filters="sRGB"` 不能省：SVG 滤镜默认走
-    linearRGB，`feComposite operator="in"` 的覆盖率会被当成亮度重新
-    映射，叠出来整体偏淡——省掉的结果是「像蒙了一层灰纱」。
-
-    颗粒来自 `feTurbulence` 的 alpha：先把三通道求和映射成 alpha，再用
-    `feComponentTransfer` 的 table 拉对比。线性映射出的 alpha 集中在
-    0.6~1.0，只是**均匀变淡**，和平涂一个毛病；拉高对比后才出现 0.1
-    附近的低谷，也就是笔尖「跳格」的断续。
-
-    位移交给合成器，不产生二值掩码，所以不会出现 `SetWindowRgn` 那种
-    硬阶梯。scale 2 ≈ 抖动 ±1px，再多就变成毛边而不是石墨了。
-  -->
-  <defs>
-    <filter
-      id="pencil"
-      x="-30%"
-      y="-30%"
-      width="160%"
-      height="160%"
-      color-interpolation-filters="sRGB"
-    >
-      <feTurbulence type="fractalNoise" baseFrequency="0.62" numOctaves="4" seed="11" result="n" />
-      <feColorMatrix
-        in="n"
-        type="matrix"
-        result="g"
-        values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.72 0.72 0.72 0 -0.30"
-      />
-      <feComponentTransfer in="g" result="gc">
-        <feFuncA type="table" tableValues="0 0.08 0.30 0.62 0.88 1" />
-      </feComponentTransfer>
-      <feComposite in="SourceGraphic" in2="gc" operator="in" result="t" />
-      <feDisplacementMap in="t" in2="n" scale="2" xChannelSelector="R" yChannelSelector="G" />
-    </filter>
-  </defs>
-</svg>
+<PencilDefs />
 
 <style>
-  /*  只用来挂 filter 定义，不占布局。 */
-  .cs-defs {
-    position: absolute;
-  }
-
   .cs-sheet {
     /* topbar / 拖拽带的定位父级。没有这一条它会去找 body，
      *  而 body 的尺寸跟面板无关 —— 窗口控制就会飘到屏幕别处。 */

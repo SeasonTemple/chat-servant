@@ -21,6 +21,7 @@
 -->
 <script lang="ts">
   import { TICK_NESTED, TICK_VIEW } from '$lib/marks';
+  import PencilDefs from '$lib/PencilDefs.svelte';
 
   /*
    * 样本与上一版相同，刻意挑成**会换行两三行**的中性句子。
@@ -153,31 +154,7 @@
   少了它那支笔就是矢量而不是红铅笔（§3.2：五层嵌套 + 羽化是一套，
   单层平涂边缘一刀切）——所以这里连滤镜一起搬，不能只搬 path。
 -->
-<svg class="cs-defs" aria-hidden="true" width="0" height="0">
-  <defs>
-    <filter
-      id="pencil"
-      x="-30%"
-      y="-30%"
-      width="160%"
-      height="160%"
-      color-interpolation-filters="sRGB"
-    >
-      <feTurbulence type="fractalNoise" baseFrequency="0.62" numOctaves="4" seed="11" result="n" />
-      <feColorMatrix
-        in="n"
-        type="matrix"
-        result="g"
-        values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.72 0.72 0.72 0 -0.30"
-      />
-      <feComponentTransfer in="g" result="gc">
-        <feFuncA type="table" tableValues="0 0.08 0.30 0.62 0.88 1" />
-      </feComponentTransfer>
-      <feComposite in="SourceGraphic" in2="gc" operator="in" result="t" />
-      <feDisplacementMap in="t" in2="n" scale="2" xChannelSelector="R" yChannelSelector="G" />
-    </filter>
-  </defs>
-</svg>
+<PencilDefs />
 
 <style>
   /* ── 现状栏：从 PaperPanel.svelte 逐字抄来，只作对照，不改 ────── */
@@ -332,12 +309,6 @@
 
   /* ── 方向三的正文与方向一共用一套排版 ───────────────────────── */
   /* ── 对照页自身的版式（与被对照物无关） ─────────────────────── */
-  .cs-defs {
-    position: absolute;
-    width: 0;
-    height: 0;
-  }
-
   .cs-ar {
     display: grid;
     grid-template-columns: repeat(3, 380px);

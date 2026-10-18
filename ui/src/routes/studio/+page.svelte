@@ -1,6 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { TICK_PATH, TICK_NESTED, RING_MARK, RING_LABEL_MARK, MARK_VIEW } from '$lib/marks';
+  import PencilDefs from '$lib/PencilDefs.svelte';
 
   /*
    *  两件事一次比完：
@@ -519,33 +520,7 @@
       硬阶梯。scale 2.0 = 约 ±1px；再多就变成毛边而不是石墨了。
     -->
     <defs>
-      <filter
-        id="pencil"
-        x="-30%"
-        y="-30%"
-        width="160%"
-        height="160%"
-        color-interpolation-filters="sRGB"
-      >
-        <feTurbulence
-          type="fractalNoise"
-          baseFrequency="0.62"
-          numOctaves="4"
-          seed="11"
-          result="n"
-        />
-        <feColorMatrix
-          in="n"
-          type="matrix"
-          result="g"
-          values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.72 0.72 0.72 0 -0.30"
-        />
-        <feComponentTransfer in="g" result="gc">
-          <feFuncA type="table" tableValues="0 0.08 0.30 0.62 0.88 1" />
-        </feComponentTransfer>
-        <feComposite in="SourceGraphic" in2="gc" operator="in" result="t" />
-        <feDisplacementMap in="t" in2="n" scale="2" xChannelSelector="R" yChannelSelector="G" />
-      </filter>
+      <PencilDefs />
 
       <!--
         `?ink=heavy` 用的加深 pass：RGB 压暗 + alpha 抬浓。

@@ -47,6 +47,8 @@
   import { IS_DEMO as DEMO } from '$lib/runtime';
   import { markShape, type MarkShape } from '$lib/mark-shape.svelte';
   import type { BudgetView, Tier } from '$lib/types';
+  import { TICK_NESTED, TICK_VIEW } from '$lib/marks';
+  import PencilDefs from '$lib/PencilDefs.svelte';
 
   /**
    * 一个供应商在**某一组**里的 key 状态。**Rust 是唯一出处**，前端不缓存。
@@ -579,6 +581,8 @@
   自己声明 `flex: 1 1 auto; min-height: 0; overflow-y: auto` ——
   少了 `min-height: 0`，flex 子项不肯小于内容高度，整屏会被撑出面板外。
 -->
+<PencilDefs />
+
 <div class="cs-set">
   <!--
     一次就说清最要紧的那件事：**改完不用重启**。
@@ -676,7 +680,15 @@
                  那在真机上根本不存在。
                  ⇒ 只让第一颗 primary。夹具自己的承诺就是「形状与真实分支
                    同构」（见上面那段注释），这一条得守住。 -->
-            <button class="cs-btn cs-btn-mini" class:primary={i === 0}>{p}</button>
+            <button class="cs-btn cs-btn-mini" class:primary={i === 0} aria-pressed={i === 0}>
+              {p}{#if i === 0}<span class="cs-chip-ring" aria-hidden="true">
+                  <svg viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}" filter="url(#pencil)">
+                    {#each TICK_NESTED as layer (layer.d)}
+                      <path d={layer.d} fill-opacity={layer.o} />
+                    {/each}
+                  </svg>
+                </span>{/if}
+            </button>
           {/each}
         </div>
         {#if g.configured}
@@ -1012,10 +1024,17 @@
             <button
               class="cs-btn cs-btn-mini"
               class:primary={p.id === g.route.provider}
+              aria-pressed={p.id === g.route.provider}
               onclick={() => applyRoute(g, p.id)}
               disabled={busy[g.id]}
             >
-              {p.label}
+              {p.label}{#if p.id === g.route.provider}<span class="cs-chip-ring" aria-hidden="true">
+                  <svg viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}" filter="url(#pencil)">
+                    {#each TICK_NESTED as layer (layer.d)}
+                      <path d={layer.d} fill-opacity={layer.o} />
+                    {/each}
+                  </svg>
+                </span>{/if}
             </button>
           {/each}
         </div>
@@ -1924,18 +1943,74 @@
     margin-top: 0.3rem;
   }
 
-  /* ⚠⚠ **厂商芯片的选中态必须单独给一条通道**（2026-10-18，
-   *   `.cs-btn-mini.primary` 从红改回墨之后补的）。
+  /* ⚠⚠ 厂商芯片的选中态：**一枚红铅笔勾**（2026-10-18，票 61）。
    *
-   *   `.primary` 的 8 处里只有这一处表达的是**状态**（当前路由是哪一家），
-   *   其余 7 处（保存 / 应用路由 / 提交模型名 / 存供应商 / 用它）都是**动作**。
-   *   动作不需要「被选中」的样子，所以统一改墨色是对的；
-   *   而芯片一旦也变墨色，「anthropic」与「openai」就**字重相同、颜色相同**，
-   *   出图确认读不出选了哪家 —— **红色一撤，选中态就没了**。
-   *   ⇒ 选中那颗加一层墨洗底，与 `SegSlider` 的药丸同一条语言
-   *     （12% tier-ink 混纸，实测 1.258 : 1）。 */
-  .cs-chips .cs-btn-mini.primary {
-    background: color-mix(in srgb, var(--cs-tier-ink) 12%, var(--cs-paper));
+   *   ⚠⚠ **上一版（2026-10-18 当天）是错的，已撤。** 那一版给选中那颗
+   *   加了一层 `12% tier-ink 混纸` 的底色，想跟 `SegSlider` 的药丸对齐。
+   *   用户的判词是「毛坯」「模型选中的阴影又是什么个意思」。
+   *   两条批评都成立，根因是**它把两件事混成了一件**：
+   *
+   *   ① `.cs-btn-mini` 全族本来就有 `drop-shadow(0 2px 4px …)` ——
+   *      那不是「选中态的阴影」，那是**材质语言**：这是一片贴在纸上的小纸片，
+   *      所以它有落影。选中与落影本来就不该有关系。
+   *   ② 我加的淡墨洗底**把落影顶出来了** ⇒ 读成「这枚按钮的阴影更重」，
+   *      而人真正要读的是「这家被选中了」。**状态被材质盖住了。**
+   *
+   *   ⇒ 现在的做法与主面板档位行**同一条语言**：
+   *     空着就是空着，**标记的位置本身就是编码**——
+   *     选中那颗右上角盖一枚圈，没选的什么都不画（`PaperPanel` 那段原话）。
+   *
+   *   ⚠ 为什么是**勾**而不是圈：主面板档位行在 Manual / Auto 上就是勾
+   *     （`mark-shape` 只在 big 档才给 ring），所以这里跟**最常出现的那一档**
+   *     同一支笔。票 57 判「勾没有能用的尺寸」是在 `SegSlider` 那个
+   *     56×34 药丸上判的（它要**盖住 12.48px 的小字**）；
+   *     而这里是**右上角一枚独立标记**、不压字，30×18 完全放得下。
+   *   ⚠ 标记必须挂 `filter="url(#pencil)"`，而那个滤镜**原来只在
+   *     `PaperPanel` 和两个 studio 页里**。设置屏没有 ⇒ `url(#id)`
+   *     找不到目标时 SVG 规范是**整个元素不渲染**，
+   *     症状是「勾整个不见了」而不是「没滤镜效果」。
+   *     ⇒ 现在统一从 `$lib/PencilDefs.svelte` 取（全仓库唯一一份）。
+   */
+  /* 勾在**左边**，不在右上角 —— 右上角被这一行的「已配置 / 未配置」徽标占着，
+     而勾压在字尾上又会把「anthropic」尾字母划花。
+     左边这一列本来就空着：四颗芯片的左对齐线在同一条，
+     所以给 `.cs-chips .cs-btn-mini` 一个固定左内边距，
+     **勾占的是一个恒定的槽位** ⇒ 四颗对齐，选中的那颗才画出来。
+     读起来就是「一组单选」，而不是「一颗按钮上贴了个东西」。 */
+  .cs-chip-ring {
+    position: absolute;
+    left: 2px;
+    top: 50%;
+    margin-top: -9px;
+    /* 56 : 34 = `TICK_VIEW` 的原始比例。⚠ 不许随便改这个比：
+       笔迹数据是按那个 viewBox 生成的，拉扁会让「勾」读成一道斜杠。 */
+    width: 30px;
+    height: 18px;
+    pointer-events: none;
+    overflow: visible;
+  }
+
+  .cs-chip-ring svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* 只有 fill、不设 fill-opacity 的兜底：透明度是**笔迹数据**的一部分
+     （`marks.js` 每层自带 `o`）。CSS 兜底会把三道叠画压成单层平涂，
+     圈会立刻变成一个生硬的矢量圆环——见 `PaperPanel` 的同款警告。 */
+  .cs-chip-ring path {
+    fill: var(--cs-pencil-red);
+  }
+
+  /* 选中那颗本来就没有底色（`primary` 只改字重），所以这条只负责
+     ① 让勾有定位父级 ② 给左侧那枚勾腾一个恒定的槽位。
+     ⚠ `padding-left` 加在**整族**上而不是只加在选中那颗：
+     只给选中那颗加 ⇒ 「选中的那颗文字往右挪一格」，
+     用户点一下，四个标签的左对齐线就跳一下。 */
+  .cs-chips .cs-btn-mini {
+    position: relative;
+    padding-left: 30px;
   }
 
   /* 供应商卡片那一支已随两组结构退场，只留仍在用的 head / name。
