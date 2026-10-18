@@ -825,11 +825,26 @@
       max={recentMax}
       step="2"
       value={recentN}
+      aria-describedby="cs-recent-scale"
+      aria-valuetext={`${recentN} 条，可调 ${recentMin} 到 ${recentMax} 条`}
       oninput={(e) => (recentN = Number(e.currentTarget.value))}
       onchange={commitRecent}
     />
     <output>{recentN} 条</output>
   </div>
+  <!--
+    ⚠ 量程两端。**没有它们，「12 条」这个数是没有参照的**——
+    拇指位置只说得出「大概在中间」，说不出能拖到 2 还是 40。
+    用户想知道的是「调到 30 会怎样」与「已经到顶了吗」，这两问都要两端。
+
+    ⚠ 10.4px 是**徽标档**（`--cs-mark` 只有 3.51 : 1，不够正文），
+      所以这里用 `--cs-pencil`（5.73 : 1），字号同样是 10.4。
+      **字号小不等于对比度就可以不要**——它读的是数字，不是徽标。
+  -->
+  <p class="cs-scale" id="cs-recent-scale">
+    <span>{recentMin} 条</span>
+    <span>{recentMax} 条</span>
+  </p>
   {#if recentNote}
     <p class="cs-note" role="status">{recentNote}</p>
   {/if}
@@ -1463,10 +1478,15 @@
     line-height: 1.5;
     border-radius: var(--cs-radius-sm);
     /* 失败方向偏保守的一段话，用极淡的红底托一下。
-     * ⚠ 这一层底实测只有 **1.18 : 1**（`live` 12% 混透明再叠到纸上），
-     *   几乎读不出来——保留是因为它是「这一块整体是坏的」的分区信号，
-     *   不是靠它承载正文；正文靠下面的 `.cs-live` 文字色。 */
-    background: color-mix(in srgb, var(--cs-live) 12%, transparent);
+     * ⚠ 这一层底原来只有 **1.18 : 1**（`live` 12% 混透明），
+     *   几乎读不出「这一块是坏的」，只比纸亮一点点。
+     *   ⇒ 提到 **20%**（实测 1.326 : 1，文字仍是 ink 的 10.64 : 1）。
+     *   ⚠ **不是靠它承载正文**（正文色是 `--cs-ink`，不红），
+     *     它只是「整块是坏的」这一层分区信号——所以宁可弱也别抢。
+     *   ⚠ 语义边界：demo 模式那句「演示模式：这里显示的是排版」
+     *     也走这一格（同一个 `fail` 字段），而它不是错误；
+     *     真机上那个位置渲染的是 Rust 传来的内容。 */
+    background: color-mix(in srgb, var(--cs-live) 20%, transparent);
     overflow-wrap: anywhere;
   }
 
@@ -1785,6 +1805,22 @@
   .cs-slider input[type='range']:focus-visible {
     outline: 2px solid var(--cs-ink);
     outline-offset: 3px;
+  }
+
+  /* 量程两端。**左右端必须与轨道对齐**，否则两行数字看着是歪的。
+   * ⚠ 那个 `2px` 不是玄学：`input[type=range]` 的 UA 样式自带
+   *   `margin: 0 2px`，所以它的盒子比 flex 行窄 4px（实测行 46..334、
+   *   轨道 48..237.6）。不补这 2px，右端会差 2px。
+   * ⚠ 右边那坨 = 读数 `min-width` 5.2rem + 行 `gap` 0.7rem + 上面那 2px。
+   * ⚠ 不用 `--cs-mark`：那支只有 3.51 : 1，标的是状态不是句子；
+   *   这里读的是数字，10.4px 也够不上大字豁免，所以用 `--cs-pencil` 5.73。 */
+  .cs-scale {
+    display: flex;
+    justify-content: space-between;
+    margin: 0.15rem calc(5.2rem + 0.7rem + 2px) 0 2px;
+    font-size: 10.4px;
+    line-height: 1.5;
+    color: var(--cs-pencil);
   }
 
   .cs-slider output {
