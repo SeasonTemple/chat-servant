@@ -118,12 +118,14 @@
         const scs = sheet ? doc.defaultView.getComputedStyle(sheet) : null;
         return {
           sheet: one('.cs-sheet'),
-          // ⚠ **红铅笔滤镜在不在**（2026-10-16 加）。
-          //   `SegSlider` 的选中态勾写的是 `filter="url(#pencil)"`，
-          //   而 `#pencil` 定义在 `PaperPanel.svelte` 的 `<defs>` 里 ——
-          //   设置屏能画出来**只因为**设置屏是 PaperPanel 渲染的。
-          //   这层耦合坏了不会报错：勾会照画，只是从「铅笔」退化成「矢量」。
-          //   ⇒ 必须有一项能量它，量到 MISSING 就是断链。
+          // ⚠ **红铅笔滤镜在不在**（2026-10-16 加，2026-10-18 改判据归属）。
+          //   滤镜消费者原本有两个：`PaperPanel` 的档位行 `.cs-tick`，
+          //   与设置屏 `SegSlider` 药丸里那枚勾。**后者 2026-10-18 删了**
+          //   （56×34 的勾盖在 12.48px 小字上，字读不出来，见 SegSlider 注释），
+          //   而它删掉前那句「设置屏能画出来只因为设置屏是 PaperPanel 渲染的」
+          //   是这层跨组件耦合的全部风险——现在**只剩 PaperPanel 自己**在用。
+          //   ⇒ 判据保留（主面板档位行每天在画，滤镜丢了不会报错，
+          //   勾会静悄悄退化成矢量），但**理由换了一个消费者，别再引旧那句**。
           pencil_defs: doc.getElementById('pencil') ? 'ok' : 'MISSING',
           // ⚠ 纸画到哪里 vs 元素框到哪（2026-10-16 加）
           //   判据：`background-size` 若是 `100% 100%`，纸就该拉满元素框；
@@ -307,7 +309,7 @@
               `below=${s.actions_roll.below} mask=${s.actions_roll.mask.slice(0, 18)}`,
             );
           }
-          // ⑥ 红铅笔滤镜在（设置屏的勾跨组件引用它，断了不会报错）。
+          // ⑥ 红铅笔滤镜在（主面板档位行的勾跨组件引用它，断了不会报错）。
           add(s.pencil_defs === 'ok', `${k}: #pencil 滤镜`, s.pencil_defs);
         }
         const failed = lines.filter((l) => l.startsWith('FAIL')).length;

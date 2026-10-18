@@ -1431,18 +1431,22 @@
     /* ⚠⚠ **两族按钮与输入框共用同一个内容盒高度**（2026-10-18）。
      *   改之前：`.cs-btn-ink` 是 `padding: 7px 18px`（约 31px）、
      *   `.cs-btn-mini` 是 `padding: 6px 11px`（约 29px），
-     *   各自按自己的字号算，**两族差 2px**；加上同样的 16px 撕边之后，
-     *   真机实测「打开」65px / 供应商按钮 62px —— 同一屏三种尺寸。
+     *   各自按自己的字号算，**两族差 2px**；加上同样的撕边之后，
+     *   真机实测同一屏出现 62 / 58.5 / 55.5 / 46 / 44 **五种高度**。
      *
-     *   ⇒ 不再用 padding 推高度，统一 `min-height: 30px` + flex 居中。
-     *     `box-sizing: border-box` 让这 30px **含**那 32px 撕边，
-     *     于是输入框（`min-height: 30px` + 同样的 16px 边）总高逐项相等。
+     *   ⇒ 不再用 padding 推高度，统一 `min-height` + flex 居中。
+     *     ⚠⚠ **`box-sizing: border-box` 下 `min-height` 量的是总高（含撕边），
+     *     不是内容盒**——2026-10-18 之前这里写「min-height: 30px + 16px 边 ⇒
+     *     逐项相等」，那句话两处都推不出来：30px 是**总高**，
+     *     而撕边本身就有 32px，于是这个 `min-height` 一直是**空转的**
+     *     （实测三档 62 / 58.5 / 55.5，各族各按自己的 padding 走）。
+     *     现在写成真值 46px：撕边 10×2 = 20 + 内容 26。
      *
      *   ⚠ 前提是这一族都写着 `class="cs-btn ..."` —— 三族
      *     （`.cs-btn-ink` / `.cs-btn-mini` / 未来的）都走这条，
      *     谁漏了 `cs-btn` 谁就掉出这条对齐。 */
     box-sizing: border-box;
-    min-height: 30px;
+    min-height: 46px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1519,7 +1523,10 @@
   .cs-btn-ink {
     align-self: flex-start;
     position: relative;
-    margin: -8px 0;
+    /* ⚠ 这个负外边距是为了抵消撕边带来的额外高度（`.cs-act` 同一手法）。
+     *   撕边 16 → 10px 后从 `-8px` 收到 `-5px`，别留着旧的，
+     *   否则这一行会比同行多出 6px 的空当。 */
+    margin: -5px 0;
     padding: 7px 18px;
     font-size: 12.5px;
     color: var(--cs-ink);
@@ -1529,11 +1536,26 @@
     transition:
       transform var(--cs-dur-fast) var(--cs-ease),
       filter var(--cs-dur-fast) var(--cs-ease);
-    /* ⚠ 与 `.cs-act` 逐项一致：同一张 `strip.png`、同一套 slice / width。
-     *   写 16px 是因为撕口的纸芯最早只在内缩 ~5.5 CSS px 处（`stripgen.py`
-     *   实测最浅一档），再薄就会啃进纸。**这一对是一套，别单独改一个。** */
-    border: 16px solid transparent;
-    border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
+    /* ⚠⚠ **撕边 16px → 10px**（2026-10-18）。
+     *
+     *   原注释说「写 16px 是因为撕口的纸芯最早只在内缩 ~5.5 CSS px 处
+     *   （`stripgen.py` 实测最浅一档），再薄就会啃进纸」。
+     *   那个 16 是**照抄 `.cs-act`（主面板动作行）来的**，
+     *   而主面板那一行的字是 20px 上下、内容盒 40px——16px 撕边占 40%。
+     *   设置页这一族内容盒只有 30px，**撕边占了 53%**：
+     *   输入框因此是 205 × 62（**高宽比 1 : 3.3**，出图确认读成一块
+     *   空荡荡的横板，不像能写字的地方），同屏按钮还因为 flex 压缩
+     *   分裂成 62 / 58.5 / 55.5 / 46 / 44 五种高度。
+     *
+     *   ⇒ 按内容盒重算：撕边 10px + 内容 26px = **46px**，
+     *     高宽比 205 : 46 = **1 : 4.5**。
+     *   `10` 与 `slice 32` 的换算关系不变（slice 量的是源图像素，
+     *   width 量的是画到边框盒多宽），**不需要重跑 `stripgen.py`**。
+     *   ⚠ 「纸芯内缩 5.5px」那条推导是相对 16px 说的（5.5/16 = 34%），
+     *   按同比例换算 10px 下是 3.4px；**这一格是出图看的，不是算出来的**，
+     *   若撕口开始啃进内容区就往回调。 */
+    border: 10px solid transparent;
+    border-image: url('/strip.png') 32 fill / 10px / 0 stretch;
     /* 投影跟着 alpha 走：`box-shadow` 画的是边框盒，
      * 撕口的透明区会漏出它的直边，在纸上就是一圈生硬的方框
      * （票 44 实测：同一列 x=203 连续暗 185~205，邻列 198/227）。
@@ -1576,13 +1598,14 @@
    *
    * 代价是**变高**：撕边上下各 16px，30px 的按钮变成约 61px。这是照着用户
    * 指定的方向换材质必然的尺寸变化，不是顺手调出来的。
-   * `16px` 与 `32` 都与 `.cs-btn-ink` 逐字绑定，别单独改一个。 */
+   * ⚠ 2026-10-18：撕边 16 → 10、内容盒 30 → 26，总高 62 → **46**，
+   *   与 `.cs-btn-ink` / `.cs-input` 同高。三个值**必须一起改**。 */
   .cs-btn-mini {
     padding: 6px 11px;
     font-size: 11.5px;
     white-space: nowrap;
-    border: 16px solid transparent;
-    border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
+    border: 10px solid transparent;
+    border-image: url('/strip.png') 32 fill / 10px / 0 stretch;
     /* 影子随 alpha 走（同 `.cs-act`）：`box-shadow` 画边框盒，会从撕口的透明区
      * 漏出矩形直边。`dy ≥ blur/2` ⇒ 高斯核不越进元素内侧，顶部不会浮出黑边。 */
     filter: drop-shadow(0 2px 4px rgb(24 18 10 / 0.16));
@@ -1607,9 +1630,21 @@
   }
 
   /* 撕边之后**「主要 / 危险」只能靠字色说**：`border-image` 一生效，
-   * `border-color` 就不再被画出来（`.cs-btn-ink` 的禁用态注释记着同一件事）。 */
+   * `border-color` 就不再被画出来（`.cs-btn-ink` 的禁用态注释记着同一件事）。
+   *
+   * ⚠⚠ **2026-10-18：`.primary` 原来也是 `var(--cs-live)`，改回墨。**
+   *   理由不是审美，是**硬约束第 4 条 + app.css 文件头「红只给不可逆」**：
+   *   全文 8 处 `.primary`（保存 / 应用路由 / 提交模型名 / 存供应商 / 用它）
+   *   **全部可逆**，而 `.danger`（删除 / 忘记）才是不可逆的那个。
+   *   两族共用一支红 ⇒ 同一行里「保存」与「删除」红得一模一样，
+   *   **可逆与不可逆在界面上读不出区别**（2026-10-18 出图确认：
+   *   那一行只有「保存」是红的，红色已经不再表示危险）。
+   *
+   *   「主要」与「普通」现在只差字重（`.cs-btn` 已统一 600），**故意的**：
+   *   这一屏每个动作都写着自己的字（保存 / 删除 / 测连通），
+   *   靠字就认得出来，不需要颜色再分一遍。 */
   .cs-btn-mini.primary {
-    color: var(--cs-live);
+    color: var(--cs-ink);
   }
 
   .cs-btn-mini.danger {
@@ -1865,17 +1900,24 @@
     /* ⚠⚠ **高度与同屏按钮对齐**（2026-10-18）。
      *   改之前这一屏实测：输入框 **24px** 高，右边那颗「保存」**62px** 高
      *   ——输入框贴在两颗撕边按钮中间，读成「一个洞旁边立着两块纸」。
-     *   `.cs-btn-ink` 与 `.cs-btn-mini` 的内容盒都是 `30px`，
-     *   加上同样的 `16px` 撕边 ⇒ 三者总高**逐项相等**。
-     *   `16px` 与 `32` 必须与两族按钮**逐字绑定**（撕口纸芯最早只内缩
-     *   ~5.5 CSS px，`stripgen.py` 实测），别单独改一个。 */
+     *   现在与两族按钮同高（内容盒 26 + 撕边 10×2 = **46**），
+     *   长宽比 205 : 46 = **1 : 4.5**，出图确认不再是空横板。
+     *   ⚠ 这一格此前写的是「内容盒都是 30px，加上 16px 撕边 ⇒ 三者逐项相等」，
+     *     同样推不出来：border-box 下 `min-height` **含**撕边，
+     *     产不出 30px 的内容盒，而实测三档是 62 / 58.5 / 55.5。
+     *     `slice 32` / `width 10px` 必须与两族按钮**逐字绑定**，
+     *     别单独改一个。 */
     box-sizing: border-box;
-    min-height: 30px;
-    /* ⚠ 左内缩比按钮多 6px：撕边吃掉 16px，文字要回到原来那个视觉位置。
+    /* ⚠ 同 `.cs-btn`：`box-sizing: border-box` 下 `min-height` 量的是**总高**。
+     *   写 26 时它是空转的（光撕边就有 20px），所以输入框的真实高度一直是
+     *   `line-height 26 + 撕边 20` = 46；现在把 46 写出来，是为了让
+     *   「同屏等高」由**这一条声明**保证，而不是由两处数值恰好相同。 */
+    min-height: 46px;
+    /* ⚠ 左内缩比按钮多 6px：撕边吃掉一圈，文字要回到原来那个视觉位置。
      * 垂直内缩是 0 —— 靠 `line-height` 居中，padding 会把单行输入框撑歪。 */
     padding: 0 12px;
     font-size: 11.5px;
-    line-height: 30px;
+    line-height: 26px;
     font-family: ui-monospace, 'Cascadia Mono', monospace;
     color: var(--cs-ink);
     background: var(--cs-paper);
@@ -1893,8 +1935,8 @@
      *     不靠「压淡到看不见」。
      *
      *   底色**仍然完全不透明**（见 app.css）：透明窗口分层合成会整层丢掉半透明底。 */
-    border: 16px solid transparent;
-    border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
+    border: 10px solid transparent;
+    border-image: url('/strip.png') 32 fill / 10px / 0 stretch;
     appearance: none; /* 清 UA 阴影/背景图与默认外观 */
     /* 影子随 alpha 走（同两族按钮）：`box-shadow` 画边框盒，会从撕口的透明区
      * 漏出矩形直边。`dy ≥ blur/2` ⇒ 高斯核不越进元素内侧，顶部不浮黑边。 */
