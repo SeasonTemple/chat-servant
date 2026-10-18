@@ -93,7 +93,7 @@
 
 {#if offline}
   <div class="cs-error" role="alert">
-    这个页面**连不上后台**，显示的不是实时数据。
+    这个页面<strong>连不上后台</strong>，显示的不是实时数据。
     <br />
     要看界面设计请打开 <code>?demo=1</code>；要真的用，请在 Tauri 窗口里打开。
   </div>

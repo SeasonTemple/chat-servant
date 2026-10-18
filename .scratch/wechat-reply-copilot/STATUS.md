@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **56** ｜ 验收项全勾 **33** ｜ 已收但留有说明项 **13** ｜ 未收 **10**
+票据总数 **57** ｜ 验收项全勾 **33** ｜ 已收但留有说明项 **14** ｜ 未收 **10**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -50,6 +50,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `33-attribution-thresholds-are-dark-theme-only.md` | 3/5 | done · 2026-10-14 真机浅色主题实测发现并已修 · 根因定位到具体数值 |
 | `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 9/10 | done · **2026-10-18 决策已下并上线**：默认引擎 = **PP-OCRv6 small**， |
 | `53-dev-ps1-run-returns-output-and-exit-code.md` | 7/8 | done · 2026-10-18。根因与实测证据见下；四个动词已改，绿红两档都自证过。 |
+| `57-settings-second-pass-review.md` | 1/6 | open · 2026-10-18。四条查出，一条已修（Markdown 外泄），三条待处理。 |
 
 ## 三、已收（验收项全勾）
 
