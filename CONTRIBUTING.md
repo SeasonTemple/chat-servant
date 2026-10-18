@@ -157,8 +157,18 @@ CI 上**没有真 key 可查**，它只做两件事：确认扫描器跑得起�
 真要查「这台机器的 key 有没有泄进仓库」，得在本机设了
 `CHATSERVANT_PROBE_KEY` 再跑 `cargo xtask secret-scan`（不设就跳过）。
 
-给 `.githooks/pre-commit` 加豁免用文件内标记 `secret-scan: allow`，**不要**习惯
+给 `.githooks/pre-commit` 加豁免用文件内标记：写 `secret-scan:` 后接一个空格、
+再写 `allow`（钩子里那个变量就是这两段拼出来的）。**不要**习惯
 `--no-verify`：一个总被绕过的钩子等于没有钩子。
+
+⚠⚠ **这条本身就踩过一次坑，记在这里免得再踩**：判据是「文件里**任何一行**
+含完整标记就豁免整个文件」，而**这段说明里若写出完整标记，这份文档就把自己
+豁免了**——2026-10-18 就是这样，`.githooks/pre-commit` 与本文件双双免检，
+往里粘一个真 key 闸门不会响（钩子已把标记拆两段修好，见那里的注释）。
+⇒ **凡是要写这个标记的地方，先确认自己没有把两段连起来写。**
+⚠ 需要加豁免的现有文件有四处（都持有**故意的假 key**）：
+`crates/core/src/redact.rs`、`crates/reason/src/transport.rs`、
+`ui/src-tauri/src/secret.rs`、`scripts/secret-scan-selfcheck.ps1`。
 
 ### 4. GitHub 上许可显示为 `Other`
 
