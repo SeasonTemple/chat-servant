@@ -10,7 +10,6 @@
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-black.svg)](https://www.rust-lang.org/)
 [![仅 Windows](https://img.shields.io/badge/platform-Windows%2010%2B-0078D4.svg)](https://learn.microsoft.com/windows/)
 [![CI](https://github.com/SeasonTemple/chat-servant/actions/workflows/ci.yml/badge.svg)](https://github.com/SeasonTemple/chat-servant/actions/workflows/ci.yml)
-[![版本: v0.1.0](https://img.shields.io/badge/release-v0.1.0-brightgreen.svg)](https://github.com/SeasonTemple/chat-servant/releases)
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [隐私边界](#隐私边界) · [跑起来](#跑起来) · [探针](#开发者探针) · [门禁](#门禁) · [参与贡献](CONTRIBUTING.md)
 
