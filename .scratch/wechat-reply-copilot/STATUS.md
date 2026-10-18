@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **67** ｜ 验收项全勾 **44** ｜ 已收但留有说明项 **13** ｜ 未收 **10**
+票据总数 **67** ｜ 验收项全勾 **45** ｜ 已收但留有说明项 **13** ｜ 未收 **9**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -31,7 +31,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-18 订正：Status 里那个「新撞出的缺陷」已不存在** | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `51-release-cannot-fetch-dict.md` | 18/20 | ready-for-human | 发版那一跳需要你授权打 tag（⚠ **打 tag 会真的发一个 release**）。 |
-| `67-forensics-guard-covers-files-not-text.md` | 7/8 | ready-for-agent · 2026-10-18 缺口 A、缺口 B、前置二均已落地并自证；**只剩前置三**（CI 上跑 cargo test 时权重不在盘上 ⇒ 「缺件即跳过」的测试在 CI 与发版验证里永不执行） | None |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
@@ -99,6 +98,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `64-window-control-still-a-web-box.md` | 10/10 |
 | `65-tick-offset-was-a-constant-not-a-relation.md` | 8/8 |
 | `66-minimize-button-was-gated-on-a-preference.md` | 9/9 |
+| `67-forensics-guard-covers-files-not-text.md` | 9/9 |
 
 ## 四、⚠ 脚本当场抓出来的漂移（Status 行自己写的数字与实点不符）
 
