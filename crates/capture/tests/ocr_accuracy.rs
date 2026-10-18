@@ -19,11 +19,16 @@
 //!   在真实缩放下的表现。**真帧字准仍然只由
 //!   `scripts/ocrbench/cer_real_frame.py` 那个人工台架负责**（见
 //!   `CONTRIBUTING.md` §维护陷阱 第 6 条）。
-//! · **在 CI 上必然跳过。** 权重（det 9.5 MB + rec 20.3 MB）在
-//!   `target/models/`、是 gitignored 的，CI 上没有 ⇒ 走「缺件即跳过」，
-//!   与 `crates/perceive/tests/golden.rs` 同一模式。
-//!   ⚠ 所以**「CI 绿」不等于「字准验过了」**——票 30 末尾踩过这个坑，
-//!   票 50 把它写成了验收项。定位是「**本地每次改 OCR 都该跑**」。
+//! · ⚠ **「CI 绿」曾经不等于「字准验过了」，现在才等于。**
+//!   权重（det 9.5 MB + rec 20.3 MB）与合成语料都在 `target/` 下、是
+//!   gitignored 的，所以这条测试历史上在 CI 上**永远走「缺件即跳过」**，
+//!   而 `cargo test` 的输出里跳过与通过**逐字同形**（都是 `... ok`）。
+//!   2026-10-18 实测 CI run `39142436305`：全绿，而这条测试
+//!   `finished in 0.00s`（本机真推理 19 s）⇒ **验的是一个跳过**。
+//!   现在 CI 会取权重（`Gate 7b-4`）、造语料（`Gate 7b-5`），
+//!   且 `CI` 环境变量在 ⇒ **缺件一律 panic**，跳不过去。
+//!   ⚠ 仍然要记住的是：**它测的是合成字**，不是真机微信帧——见上一条。
+//!   本地这台的定位仍是「每次改 OCR 都该跑」。
 //!
 //! # 跑法
 //!
@@ -57,11 +62,13 @@
 //! `det_file_present` 会过（所以不会被当成「没装模型」跳过），
 //! 而 `load_rec` 失败 ⇒ `recognize_with` 报错 ⇒ `recognize_in` 回落。
 //!
-//! ⚠ **没自证的两条**，别当成验过了：
-//! · 「缺件即跳过」这一支（CI 上走的就是它）——它是刻意的行为，
-//!   验它等于验「测试能跳过」，没有守卫价值。
+//! ⚠ **没自证的一条**，别当成验过了：
 //! · `SAMPLE` 里的 id 与 `truth.json` 对不上时的红——那是一条纯
 //!   `assert!`，逻辑只有一句「挑中的图不为空」，没有跑过注入。
+//!
+//! ⚠ 而「缺件」这一支 2026-10-18 **自证过了，方向还与原先相反**：
+//! 原本它在 CI 上是刻意跳过、不自证；现在 CI 上缺件必须 panic，
+//! 自证就是「CI 语义下缺语料 ⇒ 红」。跳过只在本机（无 `CI`）保留。
 
 use std::path::{Path, PathBuf};
 
@@ -73,7 +80,8 @@ use serde::Deserialize;
 use unicode_normalization::UnicodeNormalization;
 
 /// 台架语料与答案键的落点。**都在 `target/` 下、被 gitignore**，
-/// 所以这条测试在干净 clone 上是「跳过」而不是「绿着骗人」。
+/// 所以干净 clone 上没有它们——**本机**是「跳过」，
+/// 而 CI 上（造完语料后）缺了就是**红**，见测试里那段 `required`。
 fn corpus_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -343,19 +351,38 @@ fn the_synthetic_corpus_keeps_its_characters() {
     let dir = ocr_pp::models_dir();
 
     // ── 缺件即跳过：两样都必须在**开跑之前**确认 ──
+    //
+    // ⚠⚠⚠ **但「跳过」在 CI 上必须炸，不能跳过。** 2026-10-18 实测：
+    // CI run `39142436305` 全绿，而日志里这条测试是
+    //   `Running tests\ocr_accuracy.rs` → `test … ok` → `finished in 0.00s`
+    // —— **23 毫秒**，本机真推理要 19 秒。⇒ 它走的是 `return` 那一支。
+    // 根因：CI 取了权重（Gate 7b-4，绿）却**从没造语料**，
+    // 而 `cargo test` 的输出里 `return` 与通过**逐字同形**（都是 `... ok`）。
+    // ⇒ 票 67 前置三第一次「验证通过」验的其实是一个跳过。
+    //
+    // 判据取 `CI`（GitHub Actions 永远设它）而不是另一个自造变量：
+    // 自造变量多出一条「变量名两边拼错 ⇒ 守卫静默失效」的路径，
+    // 而那正是本条要杀的东西。`CS_OCR_CER_REQUIRED` 留给本机手动强制。
+    //
+    // ⚠ **空串算「没设」。** `var_os` 只判存在性，而 Windows 上把变量
+    // 置成空串**仍然算存在**（2026-10-18 自证撞到：清空 `CI` 之后
+    // `var_os("CI")` 照样返回 `Some("")`，本机也被强制成 CI 语义而误红）。
+    // 同族的坑在 `release.yml` 的 draft 开关上已经吃过一次。
+    let truthy = |k: &str| std::env::var(k).is_ok_and(|v| !v.trim().is_empty());
+    let required = truthy("CI") || truthy("CS_OCR_CER_REQUIRED");
     if !truth_path.is_file() {
-        eprintln!(
-            "跳过：没有 {} —— 先跑 scripts\\ocrbench\\gen_corpus.py 造合成语料。\
-             ⚠ 这条测试在 CI 上永远走这一支；它绿**不代表**字准验过了。",
+        let msg = format!(
+            "没有 {} —— 先跑 scripts\\ocrbench\\gen_corpus.py 造合成语料。",
             truth_path.display()
         );
+        assert!(!required, "CI 上缺件不许跳过：{msg}");
+        eprintln!("跳过：{msg}");
         return;
     }
     if !ocr_pp_pipeline::det_file_present(&dir) {
-        eprintln!(
-            "跳过：{} 下没有 det 权重 —— ⚠ 同样不代表字准验过了。",
-            dir.display()
-        );
+        let msg = format!("{} 下没有 det 权重。", dir.display());
+        assert!(!required, "CI 上缺件不许跳过：{msg}");
+        eprintln!("跳过：{msg}");
         return;
     }
 
