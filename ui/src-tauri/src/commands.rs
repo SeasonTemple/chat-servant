@@ -1324,12 +1324,27 @@ impl ModelGroups {
         }
     }
 
-    /// 两组其实指向同一路？（决策组没单独配 key 时就是）。
+    /// 这一组与**哪一组**共用同一格？`None` = 各配各的。
     ///
-    /// 界面上要**明说**这一点，否则用户改「决策模型」的端点时会发现
-    /// 回复模型跟着变了，却没有任何地方解释。
-    fn shared(&self) -> bool {
-        self.decision.route() == self.llm.route() && self.decision.get() == self.llm.get()
+    /// 界面上要**明说**这一点，否则用户改一节的端点时会发现另一节跟着变了，
+    /// 却没有任何地方解释。
+    ///
+    /// ⚠ 返回的是**对方是谁**，不是布尔：共享可以是任一方向借用——
+    /// 决策组没 key 时它沿用回复组那一格；反过来只配了决策组时，
+    /// 回复组沿用决策组那一格（2026-10-19 实测这条真的会走到）。
+    /// 只有一个 bool 时，界面只能把「回复模型」写死，
+    /// 于是在后一种情况下**指错了组**。
+    ///
+    /// ⚠ 判据用 [`ModelCell::same_cell`] 的**身份**而不是比值，
+    /// 见那个函数的注释。
+    fn shares_with(&self, g: ModelGroup) -> Option<ModelGroup> {
+        if !self.decision.same_cell(&self.llm) {
+            return None;
+        }
+        Some(match g {
+            ModelGroup::Decision => ModelGroup::Llm,
+            ModelGroup::Llm => ModelGroup::Decision,
+        })
     }
 }
 
@@ -1369,8 +1384,11 @@ pub struct GroupView {
     pub model: String,
     /// 关于上面那个模型名的**实话**：只列实测能通的，还是名字要你自己填。
     pub model_note: String,
-    /// 这一组是否与另一组指向同一路。
-    pub shared_with_other: bool,
+    /// 这一组与**哪一组**共用同一格（那组的显示名）。`null` = 各配各的。
+    ///
+    /// ⚠ 是**名字**而不是 bool：共享有方向（谁借用谁的），
+    /// 只给一个布尔量，界面就只能写死对方的名字，从而指错组。
+    pub shares_with: Option<String>,
 }
 
 /// 出站代理。
@@ -1510,7 +1528,7 @@ fn group_view(g: ModelGroup, models: Option<&ModelGroups>) -> GroupView {
     // 没有真实传输时这一组也要渲染——**用户正是要在没配好的时候配置它**。
     // 这与「没 key 时不列模型」是两条不同的规则：模型清单要真实，
     // 而 key 输入框必须能显示（见 `.scratch/…/40-key-input-unreachable-when-unset.md`）。
-    let (route, model, models_list, shared) = match models {
+    let (route, model, models_list, shares_with) = match models {
         None => (
             // 没有真实传输时也给一个**真值**（OpenAI 预设），
             // 而不是编一个假端点——这一格是回显「当前这一路」，
@@ -1518,7 +1536,7 @@ fn group_view(g: ModelGroup, models: Option<&ModelGroups>) -> GroupView {
             Route::preset(Provider::OpenAi).expect("OpenAI 有预设端点"),
             String::new(),
             Vec::new(),
-            false,
+            None,
         ),
         Some(m) => {
             let c = m.cell(g);
@@ -1526,7 +1544,7 @@ fn group_view(g: ModelGroup, models: Option<&ModelGroups>) -> GroupView {
                 c.route(),
                 c.get(),
                 c.models().iter().map(|s| (*s).to_string()).collect(),
-                m.shared(),
+                m.shares_with(g).map(|o| o.label().to_string()),
             )
         }
     };
@@ -1551,7 +1569,7 @@ fn group_view(g: ModelGroup, models: Option<&ModelGroups>) -> GroupView {
         models: models_list,
         model,
         model_note,
-        shared_with_other: shared,
+        shares_with,
     }
 }
 
@@ -2026,8 +2044,11 @@ const LOCKED_PEER: &str = "小号";
 ///
 /// **决策组没单独配 key 时，它与回复组是同一路。**
 ///   这是有意的默认：绝大多数用户只有一把 key，逼他配两把只会让人
-///   第一步就卡住。界面上用 `shared_with_other` **明说**这件事，
+///   第一步就卡住。界面上用 `shares_with` **明说**这件事，
 ///   而一旦在这一组填了自己的 key / 选了别的端点，两边立刻分开。
+/// ⚠ **反方向同样成立**：只配了决策组时，回复组沿用决策组那一格
+///   （`llm_cell` 那行 `unwrap_or_else(|| decision_cell.clone())`），
+///   所以提示语必须说清**借的是哪一组**，不能把对方的名字写死。
 ///
 /// 第二个返回值是两组格子的句柄。**它们不在 `LoopConfig` 里**：
 /// 循环自己不读这些格子，读它的是推理器内部——而推理器已经被
@@ -2093,7 +2114,16 @@ fn build_loop_config() -> (
         .map(|(_, c)| c.clone())
         .unwrap_or_else(|| decision_cell.clone());
 
-    let transport_ready = llm.is_some();
+    // ⚠⚠ **判据是「任一组有真实传输」，不是「回复组有」。**
+    // 2026-10-19 实测过的坏组合：只配了**决策组**的 key、没配回复组时，
+    //   · reasoner 走的是 `SplitReasoner` 缺席的那一支 —— `(Some(d), None)`
+    //     ⇒ `Box::new(d.clone())`，**三段全走真实传输、真的在出网**；
+    //   · 而原判据 `llm.is_some()` 是 false ⇒
+    //     ① 日志打「没有可用 key——用预置传输。候选是假的」，**这句是假的**；
+    //     ② `models` 整个是 `None` ⇒ 设置页两组都在，但改端点/模型名
+    //        全部返回「还没有真实传输」，**两个格子都点不动**。
+    // 也就是「真在调」与「说自己在假装」同时发生，而用户改不了配置。
+    let transport_ready = decision_owned.is_some() || llm.is_some();
     // 计数要**覆盖三段全部**：「静默期零调用」那条硬约束断言的就是
     // `calls()`，所以任何一段走了预置传输都要被如实计入（它本来就不发请求）。
     let reasoner: Box<dyn chatservant_reason::Reasoner + Send> = match (&decision_owned, &llm) {
@@ -2676,6 +2706,72 @@ mod budget_ceiling_tests {
             assert!(!covers_ink, "红点 ({x},{y}) 盖住了勾的 {before:?}");
             assert!(*x > w / 2 && *y > h / 2, "红点 ({x},{y}) 不在右下角");
         }
+    }
+}
+
+/// 「两组模型配置共用格子」这件事的测试。
+///
+/// ⚠ 这两条都对着 2026-10-19 修掉的两个真 bug：
+///   ① `shared()` 原来**比值**（route + 模型名），于是两组**各自配了同一家**
+///      时被误判成共享 ⇒ 界面谎报「改这节会连带改掉另一组」；
+///   ② 共享**有方向**，而界面上把「回复模型」写死 ⇒ 只配了决策组时指错组。
+#[cfg(test)]
+mod model_group_tests {
+    use super::*;
+    use chatservant_reason::{ModelCell, Provider as P, Route};
+
+    fn cell() -> ModelCell {
+        ModelCell::new(Route::preset(P::OpenAi).expect("OpenAI 有预设端点"))
+    }
+
+    /// **判据必须是身份，不是「内容一样」。**
+    ///
+    /// 两组独立配同一家时，两格的 `route()` 与 `get()` **逐字相同**，
+    /// 而它们**不是同一格**。比值的判据在这里必然误报。
+    #[test]
+    fn two_identically_configured_groups_are_not_the_same_cell() {
+        let a = cell();
+        let b = cell();
+        assert_eq!(a.route(), b.route(), "前置条件：两格内容必须逐字相同");
+        assert_eq!(a.get(), b.get());
+        assert!(
+            !a.same_cell(&b),
+            "内容相同不等于同一格 —— 比值会在这里误报共享"
+        );
+        assert!(a.same_cell(&a.clone()), "clone 才是同一格");
+    }
+
+    /// **共用时必须说得清借的是哪一组。**
+    ///
+    /// 两个方向都要验：只配了回复组（决策组借用）与只配了决策组
+    /// （回复组借用）在真实配置里都会发生，而界面只拿到一个布尔量时
+    /// 必然在其中一个方向上说错组。
+    #[test]
+    fn sharing_names_the_other_group_in_both_directions() {
+        let owned = cell();
+
+        // 方向一：决策组没 key，沿用回复组那一格。
+        let g = ModelGroups {
+            decision: owned.clone(),
+            llm: owned.clone(),
+        };
+        assert_eq!(g.shares_with(ModelGroup::Decision), Some(ModelGroup::Llm));
+        assert_eq!(g.shares_with(ModelGroup::Llm), Some(ModelGroup::Decision));
+
+        // 方向二：只配了决策组，回复组沿用决策组那一格。
+        let g2 = ModelGroups {
+            decision: owned.clone(),
+            llm: owned.clone(),
+        };
+        assert_eq!(g2.shares_with(ModelGroup::Llm), Some(ModelGroup::Decision));
+
+        // 各配各的（哪怕配得一模一样）⇒ 谁也不「借」谁。
+        let g3 = ModelGroups {
+            decision: cell(),
+            llm: cell(),
+        };
+        assert_eq!(g3.shares_with(ModelGroup::Decision), None);
+        assert_eq!(g3.shares_with(ModelGroup::Llm), None);
     }
 }
 

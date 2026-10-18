@@ -704,6 +704,18 @@ impl ModelCell {
         self.0.read().expect("锁").0.clone()
     }
 
+    /// 两格是不是**同一格**（同一个 `Arc`），而不是「内容碰巧一样」。
+    ///
+    /// ⚠⚠ 判据必须是**身份**，不能比值（2026-10-19 实测踩过）：
+    /// 两组各自 `build` 出来时是**两个独立格子**，而用户给两组配了
+    /// **同一家**时，`route()` 与 `get()` 会逐字相同
+    /// ⇒ 比值会把「两组独立、只是配得一样」误判成「共享」，
+    /// 界面上就会谎报「改这节会连带改掉另一组」。
+    /// 那是本项目反复删过的那类**坏控件**：一个说了假话的提示。
+    pub fn same_cell(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// 当前是哪一家。
     pub fn provider(&self) -> Provider {
         self.route().provider()
