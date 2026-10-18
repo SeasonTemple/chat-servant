@@ -154,6 +154,33 @@ commit `9cf53f9`），**「闸门是否存在」这一层仍然没人守**。
       ⇒ 票 50 刚落地的 L3 字准守卫因此**在 CI 上是死代码**。
       ⚠ 要上 CI 需三步：修通取权重、把取权重挪到 `cargo test` 之前、
       **并验证 ort 在 CI runner 上能加载 ONNX Runtime 动态库**（这一条未验）。
+
+      → **2026-10-18 已做**：`ci.yml` 在 `Gate 8 | cargo test` **之前**加
+      `Gate 7b | Fetch OCR weights for the accuracy test`（`python scripts/fetch_models.py`）。
+      ⚠ **刻意不加 `continue-on-error`**：取不到就红，不让它静默变成
+      「L3 又被跳过了」——那正是本项目反复付过学费的「守卫静默失效」。
+      ⚠ 只加在 Gate 8 之前而非 Gate 7 之前：clippy 靠 `TAURI_CONFIG:
+      resources:null` 就能编，而字准测试只需要权重**文件在盘上**
+      （`ocr_pp::models_dir()` 指向 `<repo>/target/models`，与 `bundle.resources` 无关）；
+      且 ort-sys 的链接参数在 clippy 阶段已由 build script 缓存，不必让它重跑。
+      ⚠ `fetch_models.py` 的落点是 `target/models/ppocrv6-small/`（已核实），
+      **正是 `models_dir()` 找的位置**，所以不用改 Rust 侧。
+
+      → **2026-10-18 本机近似验证已完成**（但**不等于** CI 可用）：
+      | 问题 | 结果 |
+      |---|---|
+      | ort 从零构建（含重新下载 + 重新链接） | ✅ 4m25s |
+      | ort 真跑推理（L3 通过） | ✅ CER **0.23%**，错例与迁移前**逐字相同** |
+      | 全新下载落点 | ✅ 落在 **E 盘** `target/ort-cache`（306.9 MB） |
+      | CI 上 modelscope.cn 可达 | ⚠ **未验**，只有 release dry run `39037571268` 的间接证据 |
+      | CI 上 ort 能加载并推理 | ⚠ **未验**，本机不能代表 runner |
+
+      ⚠⚠ **所以这一条还不能勾**：改动已提交但**没有 push**，
+      必须推到分支让 CI 真跑一次，确认「权重取得到 + L3 真跑 + 不红」。
+      ⚠ 风险已写进 `ci.yml` 的注释：权重来自 **modelscope.cn**（RapidOCR 的
+      模型表，不是硬编 URL），而 runner 在美国；GitHub 对来自中国的流量有限制。
+- [ ] **前置三的验收动作**：`push` 到分支 → CI 绿且日志里能看到
+      `Fetch OCR weights` 与 L3 的真实读数（不是「跳过」）→ 才勾上一条。
 - [x] 枚举复核：`git ls-files | grep -Ei '\.(png|jpe?g|bmp|webp|gif)$'` 的输出
       与本票那张 7 行表**逐条一致**，不一致就说明期间漏进来过东西
       → `scripts/check-hooks.ps1` 已把这条做成常驻断言（白名单过期会红）
