@@ -77,6 +77,12 @@ Step "version consistency" { & pwsh -NoProfile -File "$PSScriptRoot\check-versio
 #   排在编译那几步前面。
 Step "license consistency" { & pwsh -NoProfile -File "$PSScriptRoot\check-license.ps1" 2>&1 | Select-Object -Last 15 }
 
+# 底色不透明度：`app.css` 顶头那条硬约束（Tauri 透明窗口 + WebView2
+# 分层合成，半透明底色整层不绘制）**浏览器里查不出来**——
+# `?demo=1` 的出图评审、svelte-check、pnpm build 全在 Chromium 里跑。
+# 2026-10-18 实测扫到 7 处，已全部改成「混背后那张纸」。纯读文件，排在编译前。
+Step "opaque backgrounds" { & pwsh -NoProfile -File "$PSScriptRoot\check-opaque-bg.ps1" 2>&1 | Select-Object -Last 15 }
+
 Step "cargo fmt --all --check" { cargo fmt --all --check 2>&1 | Select-Object -Last 40 }
 Step "cargo clippy -D warnings" { cargo clippy --workspace --all-targets -- -D warnings 2>&1 | Select-Object -Last 60 }
 Step "cargo test --workspace"  { cargo test --workspace 2>&1 | Select-Object -Last 60 }

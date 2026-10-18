@@ -1478,15 +1478,19 @@
     line-height: 1.5;
     border-radius: var(--cs-radius-sm);
     /* 失败方向偏保守的一段话，用极淡的红底托一下。
-     * ⚠ 这一层底原来只有 **1.18 : 1**（`live` 12% 混透明），
-     *   几乎读不出「这一块是坏的」，只比纸亮一点点。
-     *   ⇒ 提到 **20%**（实测 1.326 : 1，文字仍是 ink 的 10.64 : 1）。
+     * ⚠⚠ **混纸，不混 `transparent`**（2026-10-18）。`app.css` 顶头那条
+     *   「所有底色必须完全不透明」是硬约束：Tauri 透明窗口走 WebView2
+     *   分层合成，子元素上的半透明底色**整层不绘制**（2026-10-07 实测）。
+     *   浏览器里分毫不差，真机窗口里**可能整块消失**——
+     *   而 `?demo=1` 的出图评审全在浏览器里做，**这类错浏览器查不出来**。
+     *   ⚠ 混比 12% 只有 1.184 : 1（读不出「这一块是坏的」），
+     *   **20% → 1.326 : 1**，ink 字仍有 10.64 : 1。
      *   ⚠ **不是靠它承载正文**（正文色是 `--cs-ink`，不红），
      *     它只是「整块是坏的」这一层分区信号——所以宁可弱也别抢。
      *   ⚠ 语义边界：demo 模式那句「演示模式：这里显示的是排版」
      *     也走这一格（同一个 `fail` 字段），而它不是错误；
      *     真机上那个位置渲染的是 Rust 传来的内容。 */
-    background: color-mix(in srgb, var(--cs-live) 20%, transparent);
+    background: color-mix(in srgb, var(--cs-live) 20%, var(--cs-paper));
     overflow-wrap: anywhere;
   }
 
@@ -1940,12 +1944,12 @@
    * 用在这里等于把说话人的身份色借去表示状态。 */
   .cs-badge.ok {
     color: var(--cs-ink-2);
-    background: rgb(20 26 31 / 7%);
+    background: color-mix(in srgb, var(--cs-ink) 7%, var(--cs-paper));
   }
 
   .cs-badge.ok.env {
     color: var(--cs-pencil);
-    background: rgb(20 26 31 / 5%);
+    background: color-mix(in srgb, var(--cs-ink) 5%, var(--cs-paper));
   }
 
   /* 未配置：给铅笔灰，不给红。

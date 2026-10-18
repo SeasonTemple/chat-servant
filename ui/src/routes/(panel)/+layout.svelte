@@ -138,7 +138,11 @@
 
   .cs-error code {
     font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
-    background: rgb(255 255 255 / 22%);
+    /* ⚠ 混**这根红条自己**，不混 `transparent`：`.cs-error` 的底是不透明的
+     *   `--cs-live`，而 `app.css` 顶头那条「所有底色必须完全不透明」是硬约束
+     *   （Tauri 透明窗口 + WebView2 分层合成，半透明底色整层不绘制）。
+     *   背后是红条，所以混红条而不是混纸。 */
+    background: color-mix(in srgb, #fff 22%, var(--cs-live));
     padding: 0 3px;
     border-radius: 3px;
   }

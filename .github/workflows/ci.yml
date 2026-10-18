@@ -123,6 +123,16 @@ jobs:
         shell: pwsh
         run: ./scripts/check-license.ps1
 
+      # ⚠ 底色不透明度。`app.css` 顶头那条硬约束：Tauri 透明窗口走
+      #   WebView2 分层合成，子元素上的半透明底色**整层不绘制**。
+      #   而**浏览器里查不出来**——`?demo=1` 的出图评审、svelte-check、
+      #   `pnpm build` 全在 Chromium 里跑，那里半透明底色画得好好的。
+      #   ⇒ 这类错只有真机 Tauri 窗口能看见，CI 上也没有那个窗口，
+      #      只能靠这道纯文本扫描守（2026-10-18 实测扫到 7 处并全部修掉）。
+      - name: "Gate 5b | opaque backgrounds"
+        shell: pwsh
+        run: ./scripts/check-opaque-bg.ps1
+
       - name: "Gate 6 | cargo fmt --check"
         run: cargo fmt --all --check
 

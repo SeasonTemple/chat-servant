@@ -1401,7 +1401,7 @@
   }
 
   .cs-glyph:hover {
-    background: rgb(20 26 31 / 7%);
+    background: color-mix(in srgb, var(--cs-ink) 7%, var(--cs-paper));
     color: var(--cs-ink);
   }
 
@@ -1431,7 +1431,7 @@
    *   ⚠ 与 `SegSlider` 的药丸、厂商芯片的选中态是**同一条载体语言**，
    *     别只在这一处发明明。 */
   .cs-glyph.on {
-    background: rgb(20 26 31 / 12%);
+    background: color-mix(in srgb, var(--cs-ink) 12%, var(--cs-paper));
     box-shadow: inset 0 0 0 1px var(--cs-edge);
     color: var(--cs-ink);
   }

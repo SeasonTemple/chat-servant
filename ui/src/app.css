@@ -423,7 +423,11 @@ button {
 
 .cs-set::-webkit-scrollbar-thumb,
 .cs-actions::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--cs-ink-2) 42%, transparent);
+  /* ⚠ 混纸，不混 `transparent`：滚动条画在纸上面，而半透明底色在
+   *   Tauri 透明窗口里整层不绘制（见 `--cs-paper` 的注释）。
+   *   42% 是当初定的手感，**没改**，只是把混色对象从 `transparent`
+   *   换成背后那张纸——在浏览器里逐像素等价。 */
+  background: color-mix(in srgb, var(--cs-ink-2) 42%, var(--cs-paper));
   border-radius: 1px;
 }
 

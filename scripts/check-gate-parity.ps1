@@ -62,6 +62,7 @@ $witness = [ordered]@{
   'gate/CI parity'        = 'check-gate-parity.ps1'
   'version consistency'   = 'check-version.ps1'
   'license consistency'   = 'check-license.ps1'
+  'opaque backgrounds'    = 'check-opaque-bg.ps1'
 }
 
 foreach ($p in @($gatePath, $ciPath)) {
