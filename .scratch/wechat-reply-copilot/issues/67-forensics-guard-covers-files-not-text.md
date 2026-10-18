@@ -5,7 +5,7 @@
 
 **Blocked by:** None
 
-**Status:** needs-triage · 2026-10-18 实测，两条缺口 + 一条枚举前置
+**Status:** ready-for-agent · 2026-10-18 缺口 A、缺口 B、前置二均已落地并自证；**只剩前置三**（CI 上跑 cargo test 时权重不在盘上 ⇒ 「缺件即跳过」的测试在 CI 与发版验证里永不执行）
 
 ## 触发它的那个问题
 

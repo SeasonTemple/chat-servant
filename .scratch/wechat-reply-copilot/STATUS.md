@@ -31,7 +31,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-18 订正：Status 里那个「新撞出的缺陷」已不存在** | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `51-release-cannot-fetch-dict.md` | 18/20 | ready-for-human | 发版那一跳需要你授权打 tag（⚠ **打 tag 会真的发一个 release**）。 |
-| `67-forensics-guard-covers-files-not-text.md` | 7/8 | needs-triage · 2026-10-18 实测，两条缺口 + 一条枚举前置 | None |
+| `67-forensics-guard-covers-files-not-text.md` | 7/8 | ready-for-agent · 2026-10-18 缺口 A、缺口 B、前置二均已落地并自证；**只剩前置三**（CI 上跑 cargo test 时权重不在盘上 ⇒ 「缺件即跳过」的测试在 CI 与发版验证里永不执行） | None |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
