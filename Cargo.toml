@@ -178,6 +178,14 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# 合成语料的 CER 测试（`crates/capture/tests/ocr_accuracy.rs`）要在 Rust 侧
+# 复刻 `scripts/ocrbench/bench_lib.py` 的 `normalize`——其中第一步是 NFKC。
+# ⚠ 不加它，Rust 侧只能删空白 + 小写，那与台架**不是同一把尺子**，
+# 而 ADR-0006 第（四）节反复出错的正是「拿两把尺子比」。
+# unicode-normalization 是 `Unicode Normalization Forms` 的参考实现，
+# 与 Python 的 `unicodedata.normalize("NFKC", …)` 同源（同一份 UnicodeData）。
+# 许可 MIT OR Apache-2.0，符合 ADR-0003。
+unicode-normalization = "0.1"
 
 [profile.release]
 lto = "thin"

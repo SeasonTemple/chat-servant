@@ -193,15 +193,36 @@ BSL 1.1 不在 GitHub 的许可列表里，所以仓库页面会显示 `Other`�
 ⚠ 而**真帧与答案键**也在 `target/` 下（真人会话内容，不入库），
 所以**这一步只能人工跑**。它不是缺陷，是隐私约束的必然结果。
 
+⚠⚠ **2026-10-18 起第三层多了一道机器守卫，但它守的不是真帧**
+（票 50 的 L3）：`crates/capture/tests/ocr_accuracy.rs`
+的 `the_synthetic_corpus_keeps_its_characters` 跑**完整 rec 推理**并算 CER，
+夹具是 `scripts/ocrbench/gen_corpus.py` 造的**合成语料**（逐字答案键、不含真人内容）。
+
+```bash
+cargo test -p chatservant-capture --test ocr_accuracy -- --nocapture   # 默认 12 张，约 19 秒
+$env:CS_OCR_CER_FULL='1'; cargo test -p chatservant-capture --test ocr_accuracy -- --nocapture   # 全量 60 张，约 88 秒
+```
+
+⚠ **它与下面的真帧台架不能互相替代**，两条各有各的射程：
+
+| | L3 合成语料测试 | `cer_real_frame.py` 真帧台架 |
+|---|---|---|
+| 跑进 `cargo test` | ✅ 本机有权重时自动跑 | ❌ 只能人工 |
+| 覆盖真实气泡/头像/缩放 | ❌ | ✅ |
+| 覆盖「换引擎后字全崩」 | ✅ | ✅ |
+
+⇒ 所以上面那张三层表里第三层「CI 必然跳过」的结论**没变**：
+它在本机自动跑、在 CI 上照样跳过。⚠ **别把「CI 绿」读成「字准验过了」**。
+
 ⇒ **换了引擎、改了预处理、调了 det 阈值、动了 det/rec 后处理之后，
-门禁绿了不算数**，要自己跑：
+门禁绿了不算数**。有合成语料就先跑 L3（自动），再跑真帧台架（人工）：
 
 ```bash
 pwsh -NoProfile -File target\probe\run_cer2.ps1            # 生成 4 份后端输出
 target\bench-venv\Scripts\python.exe scripts\ocrbench\cer_real_frame.py --explain
 ```
 
-⚠ 两个判据陷阱（都实测踩过）：
+⚠ 三个判据陷阱（都实测踩过）：
 
 1. **看 stderr 有没有 `WARN …回落 Windows OCR`，别只看退出码。**
    回落时退出码**仍是 0**（回落是设计内行为，不是错误）⇒ 拿退出码判会全绿。
@@ -210,6 +231,10 @@ target\bench-venv\Scripts\python.exe scripts\ocrbench\cer_real_frame.py --explai
 2. **两次跑必须用同一把尺子。** `cer_real_frame.py`（框顶 / ±30px）与
    `bench_real_cer.py`（框中心 / ±8px）算出来的数**不可比**。
    2026-10-18 就因为把这两个数并排，得出过一个错的结论（ADR-0006 第（四）节）。
+3. ⚠ **L3 与台架也必须是同一把尺子。** L3 在 Rust 侧复刻了
+   `bench_lib.normalize`（NFKC → 删全部空白 → 小写），为此专门加了
+   `unicode-normalization`——⚠ 少这一步，两边的数字**不可比**。
+   而 `normalize` 为什么删光所有空白，见 `bench_lib.py` 的模块 docstring。
 
 台架的 `--explain`（逐条看配对）、`--drop-line`（测某一行的贡献度）、
 `--tol`（扫容差、确认结论在稳定区）三个开关是定位问题的工具，

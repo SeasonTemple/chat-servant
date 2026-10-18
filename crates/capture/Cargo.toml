@@ -30,6 +30,15 @@ tract-onnx.workspace = true
 # 见根 Cargo.toml 里为什么**两个**后端都留着、以及哪个是默认。
 ort = { workspace = true }
 
+# ── 仅测试期（不进产物）──
+# `tests/ocr_accuracy.rs`：要读台架生成的 `truth.json`，且要在 Rust 侧复刻
+# `bench_lib.normalize` 的 NFKC 一步，否则与 Python 台架不是同一把尺子。
+# ⚠ `serde_json` 根 Cargo.toml 里**已经**是工作区依赖（别再抄一份版本号，
+# 那是两处会分叉的数）；`unicode-normalization` 是本轮新增。
+[dev-dependencies]
+serde_json.workspace = true
+unicode-normalization.workspace = true
+
 # ── 继承工作区 lint 策略（见根 Cargo.toml 的 `[workspace.lints]`）──
 #
 # Effective Rust Item 29：让代码 clippy-warning-free，
