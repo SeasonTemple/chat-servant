@@ -195,6 +195,34 @@
         };
       }
 
+      /**
+       * **被裁剪之后**真的画出来的那条底边（2026-10-18 第四次订正，票 60）。
+       *
+       * ## 为什么 `getBoundingClientRect()` 不够
+       *
+       * 它给的是**布局框**的下沿，不管有没有被祖先的 `overflow` 裁掉。
+       * 实测打出来的：设置屏 `.cs-hint` 的布局底是 516.2，而它所在的
+       * `.cs-set` 是 `overflow-y: auto`、视口只到 512 ⇒ 布局多出来的
+       * 4px 确实看不见，但**498~511 那一段是画出来的**，
+       * 而实心纸底在 496 ⇒ 屏底 15px 的字画在撕口里。
+       *
+       * `getClientRects().length` 也判不了：被裁掉的元素照样「有 client rect」。
+       *
+       * ⇒ 唯一可信的量法是**沿中线用 `elementFromPoint` 逐像素打靶**：
+       *   返回真元素 = 那一点真有像素。
+       */
+      const lowestVisible = (d, within, cx) => {
+        const r = within.getBoundingClientRect();
+        const x = cx === undefined ? Math.round(r.left + Math.min(r.width / 2, 60)) : cx;
+        for (let y = Math.floor(r.bottom) - 1; y >= Math.ceil(r.top); y -= 1) {
+          const hit = d.elementFromPoint(x, y);
+          // 滚动容器自身不算「内容」——那 6px 槽里本来就什么都没有。
+          if (hit && hit !== within && within.contains(hit) && !hit.classList.contains('cs-set'))
+            return y;
+        }
+        return null;
+      };
+
       /** 量一个 iframe 文档里的几何。 */
       function measure(doc) {
         const one = (sel) => {
@@ -260,20 +288,29 @@
             const el = doc.querySelector('.cs-set');
             if (!el) return null;
             // ⚠ 与 `pick_clipped` 同一条病根：内容不能画到纸外。
-            // ⚠⚠ **2026-10-18**：原来写死 `512`（= 画布 560 × 512/560，标称纸底），
-            //   现在取 **PAPER_INK.bottomFrac**（真的画出来的那条边）。
-            //   真机实测标称值比实心纸**低 12px**（撕口吃的），
-            //   按标称判 ⇒ 最后 12px 的一切「出纸」都判过。
+            // ⚠⚠⚠ **2026-10-18 第四次订正（这才是真缺陷的真身）**：
+            //   ① 先量容器底 ⇒ 量错了对象（容器自己不画东西）。
+            //   ② 改量 `scrollTop + clientHeight - paddingBottom` ⇒ 也错了：
+            //      `padding-bottom` 只在**滚到底**时起作用，而用户看到的第一屏
+            //      是 `scrollTop = 0` —— 那一屏的**可视区底**（512）本身
+            //      就比实心纸（496）低 16px，屏底那 16px **永远是撕口**。
+            //   ③ 又量了 `.cs-hint` 的布局底（516.2）⇒ 被 `.cs-set` 裁掉，
+            //      但 498~511 确实画出来了（`elementFromPoint` 命中它）。
+            // ⇒ 正解：**屏底第一条真正画出来的内容在哪**。
+            //   `lowestVisible` 沿中线用 `elementFromPoint` 逐像素打靶，
+            //   躲不开裁剪、也躲不开「纸的边界不是矩形」。
             const sr = sheet ? sheet.getBoundingClientRect() : null;
             const pb = sr ? sr.top + sr.height * PAPER_INK.bottomFrac : null;
-            const b = el.getBoundingClientRect().bottom;
+            const low = lowestVisible(doc, el);
+            const r = el.getBoundingClientRect();
             return {
               scrollH: el.scrollHeight,
               clientH: el.clientHeight,
               gutter: el.offsetWidth - el.clientWidth,
-              bottom: +b.toFixed(1),
+              bottom: +r.bottom.toFixed(1),
+              lowestContentY: low,
               paperBottom: pb === null ? null : +pb.toFixed(1),
-              over: pb === null ? null : +(b - pb).toFixed(1),
+              over: pb === null || low === null ? null : low - pb,
             };
           })(),
           topbar: one('.cs-topbar'),
@@ -311,27 +348,46 @@
           //
           //   ⚠ 这两个分数是从 SVG 手抄的。**重新生成 probe-sheet.svg 就必须同步改这里**，
           //   改法：`width`/`height`/`translate` 三个数除以 viewBox 的宽高。
+          // ⚠⚠⚠ **2026-10-18 第三次订正：这一条量错了对象。**
+          //   它量的是 `.cs-pick` 的 **border-box 底**，而 `.cs-pick`
+          //   **自己不画任何东西**：没有背景、没有边框，`gap: 0`，
+          //   画出来的是它的子元素（`.cs-pick-slot` 档位格 + `.cs-tick` 勾）。
+          //   证据（改 `padding-bottom` 时打出来的）：把 `.cs-pick` 的
+          //   `padding-bottom` 从 8 抬到 20，**底仍然是 500，一动没动**
+          //   —— padding 挪的是内容，不是容器边。
+          // ⇒ 改为量**真正有像素的两个东西**：
+          //   ① `.cs-pick-slot` 底（档位格，有边框/底色）
+          //   ② 每个 `.cs-markbox` 里 svg 的底（勾，见 `marks` 另一条）
+          //   与 `set_overflow` 同一条病：**量具必须对着会画东西的那个**。
+          // ⚠⚠ 连着犯两次的教训：把判据的**参照物**换成产物之后，
+          //   还要重新审计每一条判据**量的是不是产物**。
+          //   第一遍只换了限值、没换被测对象 ⇒ 换出一个假阳性。
           pick_clipped: (() => {
+            // ⚠⚠ 两块面板的档位行**不是同一个东西**：
+            //   主面板是 `.cs-pick`（`PaperPanel`），设置屏是 `.cs-tier`
+            //   （`TierSwitch`）。原先这里只找 `.cs-pick`，在 `settings`
+            //   状态永远 null ⇒ 「量不到 = 红」把那格永久判红，
+            //   而它其实是**选择器写错了**，不是那里真的出纸。
             const pk = doc.querySelector('.cs-pick');
-            if (!pk || !sheet) return null;
-            // ⚠⚠ 限值取自 **PAPER_INK**（真的画出来的那条边），不是 512/560。
-            //   2026-10-18 实测打出来的：真机上纸的**实心**下沿在 ≈500，
-            //   而 SVG 源图里那张纸的矩形在 512 —— **撕口吃掉约 12px**
-            //   （`PaperPanel` 自己写着「纸底破口实测 7~11px」）。
-            //   ⇒ 凡是落在 500~512 这条带里的一切，按标称值判都是「没出纸」，
-            //     而它在真机上是**画在透明区里**的。
-            //   这就是「判据的参照物必须是产物，不是它的容器」的第三次。
-            const pr = pk.getBoundingClientRect();
+            const tier = pk ? null : doc.querySelector('.cs-tier');
+            if (!pk && !tier) return null;
+            const host = pk || tier;
+            const where = pk ? '档位行内最低可见像素' : '档位组内最低可见像素';
+            if (!host) return null;
             const sr = sheet.getBoundingClientRect();
             const limit = sr.top + sr.height * PAPER_INK.bottomFrac;
+            const slotBottom = lowestVisible(doc, host);
             return {
-              bottom: +pr.bottom.toFixed(1),
+              // 布局框底只作参考：它会被祖先 `overflow` 裁掉，也可能是空容器。
+              bottom: +host.getBoundingClientRect().bottom.toFixed(1),
+              slotBottom: slotBottom,
+              where,
               paperBottom: +limit.toFixed(1),
               paperNominal: +(sr.top + sr.height * (512 / 560)).toFixed(1),
-              over: +(pr.bottom - limit).toFixed(1),
-              clipped: pr.bottom > limit + 0.5,
+              over: slotBottom === null ? null : slotBottom - limit,
+              clipped: slotBottom === null ? false : slotBottom > limit + 0.5,
               // 纸的右沿：档位格也不该横向出纸
-              right: +pr.right.toFixed(1),
+              right: +host.getBoundingClientRect().right.toFixed(1),
               paperRight: +(sr.left + sr.width * PAPER_INK.rightFrac).toFixed(1),
             };
           })(),
@@ -421,9 +477,9 @@
           //   ⇒ 现在「没量到」自己报红，不再与「量到没超」同形。
           if (s.pick_clipped) {
             add(
-              !s.pick_clipped.clipped,
+              !s.pick_clipped.clipped && s.pick_clipped.slotBottom !== null,
               `${k}: 档位格不出纸`,
-              `底 ${s.pick_clipped.bottom} vs 纸底 ${s.pick_clipped.paperBottom}（标称会是 ${s.pick_clipped.paperNominal}）`,
+              `${s.pick_clipped.slotBottom} vs 纸底 ${s.pick_clipped.paperBottom}（${s.pick_clipped.where}；布局框底 ${s.pick_clipped.bottom} 不画东西也不参与判红；标称会是 ${s.pick_clipped.paperNominal}）`,
             );
             // ② 红铅笔勾的尾巴也必须在纸内 —— 档位格在纸上不代表勾在纸上。
             // ⚠ 同一个病：原来写死 `vs 512`，而勾**本来就溢出自己的取景框**
@@ -441,11 +497,14 @@
             );
           }
           // ③ 设置屏这一列也不能画到纸外（与 ① 同一个病根、同一个新参照）。
+          //   量的是**屏底第一条真正画出来的内容**（见 `lowestVisible`）。
           if (s.set_overflow) {
             add(
-              s.set_overflow.over !== null && s.set_overflow.over <= 0,
+              s.set_overflow.lowestContentY !== null &&
+                s.set_overflow.paperBottom !== null &&
+                s.set_overflow.lowestContentY <= s.set_overflow.paperBottom,
               `${k}: 设置列不出纸`,
-              `底 ${s.set_overflow.bottom} vs ${s.set_overflow.paperBottom}`,
+              `屏底内容 y=${s.set_overflow.lowestContentY} vs 纸底 ${s.set_overflow.paperBottom}（可视区底 ${s.set_overflow.bottom}）`,
             );
           }
           // ④ 滚动条被接管。依据：原生 15px，纸族 6px。

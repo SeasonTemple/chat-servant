@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **60** ｜ 验收项全勾 **36** ｜ 已收但留有说明项 **13** ｜ 未收 **11**
+票据总数 **60** ｜ 验收项全勾 **37** ｜ 已收但留有说明项 **13** ｜ 未收 **10**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -32,7 +32,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `50-ocr-quality-floor-has-no-machine-guard.md` | 5/6 | ready-for-agent | None（验收项 1、2 可立即做；验收项 4 的实测部分需要真帧在手） |
 | `51-release-cannot-fetch-dict.md` | 18/20 | ready-for-human | 发版那一跳需要你授权打 tag（⚠ **打 tag 会真的发一个 release**）。 |
-| `60-tier-row-runs-off-paper-guard-measures-the-svg-not-the-paint.md` | 9/11 | open · 2026-10-18 · 验收项 **1/5**（**B 已做**；A / C 仍待拍板） | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
@@ -92,6 +91,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `57-settings-second-pass-review.md` | 9/9 |
 | `58-settings-third-pass-hierarchy.md` | 10/10 |
 | `59-semi-transparent-backgrounds-invisible-in-browser.md` | 8/8 |
+| `60-tier-row-runs-off-paper-guard-measures-the-svg-not-the-paint.md` | 14/14 |
 
 ## 四、⚠ 脚本当场抓出来的漂移（Status 行自己写的数字与实点不符）
 
@@ -100,7 +100,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `56-version-lives-in-four-files-but-only-one-is-gated.md` | 4/4 | 11/11 |
 | `57-settings-second-pass-review.md` | 8/8 | 9/9 |
 | `58-settings-third-pass-hierarchy.md` | 7/7 | 10/10 |
-| `60-tier-row-runs-off-paper-guard-measures-the-svg-not-the-paint.md` | 1/5 | 9/11 |
+| `60-tier-row-runs-off-paper-guard-measures-the-svg-not-the-paint.md` | 10/10 | 14/14 |
 
 > 这些不是脚本猜的，是 Status 行里的 `N/M` 与实际勾选数量对不上。
 > **按本表的数字读进度**，别按 Status 读。
