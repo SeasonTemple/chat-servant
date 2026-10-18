@@ -155,14 +155,18 @@ jobs:
 
       # ⚠⚠ 取 OCR 权重，让 `crates/capture/tests/ocr_accuracy.rs` 真的跑。
       #
-      # ## 为什么这一步是新增的
+      # ## 这一步为什么要在 cache 之后
       #
-      # 那条测试验「正文认字准」——票 50 立项前，它只是一张写在票据正文的表，
-      # 换引擎/改预处理/调阈值全都不会红。它需要真权重（`target/models/`、
-      # gitignored 的 30 MB），而**在此之前 CI 上从来没有过权重**：
-      # 本 workflow 靠 `TAURI_CONFIG: resources:null` 绕开 tauri-build 的
-      # glob 报错，于是那条测试在 CI 上一直是「缺件即跳过」。
-      # ⚠ 「跳过」在 `cargo test` 的输出里与「通过」长得一模一样。
+      # ⚠⚠ **不要每次 PR 都从网络下 30 MB。** 权重来自
+      # **modelscope.cn**（RapidOCR 的模型表，不是硬编 URL）——
+      # 那是中国的模型托管站，而 runner 在美国，且 GitHub 对来自中国的
+      # 流量有限制。把它当成「每次都得通」的依赖，等于把 CI 的可靠性
+      # 押在一个第三方站点上；那个站点一抖，**每个 PR 都红**，
+      # 比「测试被跳过」更糟（跳过至少不阻塞人）。
+      #
+      # ⇒ 先查 cache，没命中才联网。cache key 变了才会重新下载；
+      # ⚠ 且 cache 只由**默认分支**写入，特性分支上永远是 miss ——
+      #   所以「在特性分支上验证这条路」测的正是**最坏情况**（真的联网下）。
       #
       # ## 为什么放在 Gate 8 之前、而不是 Gate 7 之前
       #
@@ -172,15 +176,18 @@ jobs:
       # ⚠ 而且 ort-sys 的链接参数在 clippy 阶段已经由 build script 缓存了，
       #   之后再取权重不会、也不需要让它重跑。
       #
-      # ## 风险，如实记着
+      # ## 为什么不设 continue-on-error
       #
-      # 权重来自 **modelscope.cn**（RapidOCR 的模型表，不是硬编 URL），
-      # 而 runner 在美国。⚠ 可达性**实测过**：release 的 dry run
-      # `39037571268` 里 `Fetch PP-OCRv6 weights` 是绿的，且取回的
-      # `rec_small` 与本机那份逐字节相同。
-      # ⚠ 但 GitHub 对来自中国的流量有限制，所以**没设 continue-on-error**——
-      #   取不到就红，不让它静默变成「L3 又被跳过了」，
-      #   那正是本项目反复付过学费的「守卫静默失效」。
+      # 取不到就红。⚠ 静默跳过会让这条测试退化成「又一个 CI 全绿」，
+      # 而那正是票 50 立项前的样子——字准只是一张写在票据正文里的表。
+      - uses: actions/cache@v4
+        with:
+          path: target/models
+          # ⚠ key 要在权重换版时**手动**改，否则会一直喂旧权重。
+          #   换版后 `fetch_models.py` 的 sha256 校验会发现对不上并报错退出，
+          #   所以「忘了改 key」不会静默通过，只是报错信息绕一点。
+          key: ocr-models-v6-small-v1
+
       - name: "Gate 7b | Fetch OCR weights for the accuracy test"
         shell: pwsh
         run: python scripts/fetch_models.py
