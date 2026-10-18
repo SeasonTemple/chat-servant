@@ -555,7 +555,7 @@
    * demo 夹具：模型配置两组（模板里 `{:else if DEMO}` 那段渲染它）。
    *
    * 形状与真实分支同构，刻意覆盖**四种按钮形态**：已配置组有 `primary`
-   * 厂牌 chip + 「换一把 / 测连通 / 删除」，未配置组直接给输入框 + `primary` 保存。
+   * 厂牌 chip + 「换新 key / 测连通 / 删除」，未配置组直接给输入框 + `primary` 保存。
    * 不含真实 key、不发任何 IPC。
    */
   const DEMO_GROUPS = [
@@ -669,13 +669,20 @@
         </div>
         <p class="cs-hint">{g.hint}</p>
         <div class="cs-chips">
-          {#each g.providers as p (p)}
-            <button class="cs-btn cs-btn-mini primary">{p}</button>
+          {#each g.providers as p, i (p)}
+            <!-- ⚠ 2026-10-18 修一处**夹具与真实不同构**：
+                 真实分支是 `class:primary={p.id === g.route.provider}`
+                 ⇒ **只有当前选中的那一颗**是 primary（红）。
+                 而这里**每颗都硬写 primary** ⇒ 出图评审看到「四颗全红」，
+                 那在真机上根本不存在。
+                 ⇒ 只让第一颗 primary。夹具自己的承诺就是「形状与真实分支
+                   同构」（见上面那段注释），这一条得守住。 -->
+            <button class="cs-btn cs-btn-mini" class:primary={i === 0}>{p}</button>
           {/each}
         </div>
         {#if g.configured}
           <div class="cs-actions">
-            <button class="cs-btn cs-btn-mini">换一把</button>
+            <button class="cs-btn cs-btn-mini">换新 key</button>
             <button class="cs-btn cs-btn-mini">测连通</button>
             <button class="cs-btn cs-btn-mini danger">删除</button>
           </div>
@@ -861,7 +868,13 @@
     红色只留给那句「在你没预期的时候它会这么做」。
   -->
   <p class="cs-note">对方发来的<strong>整块画面</strong>会发给第三方模型。</p>
-  <p class="cs-warn-on">画面切分只在 1 张真实样本上验证过 —— 认错框，屏幕就出去了</p>
+  <!-- ⚠ 2026-10-18：原文「画面切分只在 1 张真实样本上验证过 —— 认错框，
+       屏幕就出去了」。前半句是在交代**我们**的验证状态（用户拿它无法行动），
+       后半句「认错框」是内部术语——用户读到「框」不会想到那是截图里
+       被框出来的一块。
+       ⇒ 换成用户能懂的**后果**。「该红」不变：那一条守的是上面
+         L859-861 的定案（红只留给「在你没预期的时候它会这么做」）。 -->
+  <p class="cs-warn-on">截图可能认错 —— 认错一张就等于把整屏发了出去</p>
   {#if imagesNote}
     <p class="cs-note" role="status">{imagesNote}</p>
   {/if}
@@ -960,7 +973,12 @@
         {#if g.shared_with_other}
           <!-- ⚠ 必须**明说**。决策组没单独配 key 时它与回复组是同一格，
                而用户改这一节的端点会连带改掉另一组——不说就是坑人。 -->
-          <p class="cs-note cs-warn">这一组还没有自己的 key，当前与「回复模型」是同一路。</p>
+          <!-- ⚠ 2026-10-18：原文「这一组还没有自己的 key，当前与「回复模型」
+               是同一路。」后半句「同一路」是内部说法，用户读到只会问
+               「哪一路」；而**真正要紧的后果**（改这节会连带改另一组）
+               被压在前半句后面当补充说明。
+               ⇒ 直接说后果，一句话说完。上面那句「必须明说」的判断不变。 -->
+          <p class="cs-note cs-warn">没单独的 key，改这节会连带改掉「回复模型」。</p>
         {/if}
 
         <!-- 厂商。**九项不是分段控件能装的**（380px 面板里一颗滑块放不下），
@@ -1028,7 +1046,12 @@
         {#if !g.route.measured}
           <!-- 端点与模型名抄自文档而没在本机跑过。**必须说出来**：
                症状是「设置成功、一调用就 404」，不说就变成玄学。 -->
-          <p class="cs-note cs-warn">这一家的端点与模型名抄自官方文档，未在本机实测。</p>
+          <!-- ⚠ 2026-10-18：原文「这一家的端点与模型名抄自官方文档，未在本机
+               实测。」要紧的是**症状**（设置成功、一调用就 404），而原文把
+               「抄自官方文档、未在本机实测」放在最前面——那是在交代我们的
+               工作状态，用户拿它无法行动，反而看不见真正会发生什么。
+               ⇒ 把症状提到最前面。上面「不说就变成玄学」的判断不变。 -->
+          <p class="cs-note cs-warn">没在本机验证过：填错的话保存照样成功，一调用才报错。</p>
         {/if}
 
         <!-- 模型名。清单只有一条时不给分段控件（一颗滑块只有一个选项，
@@ -1090,7 +1113,7 @@
                 onclick={() => (drafts[g.id] = REVEAL)}
                 disabled={busy[g.id]}
               >
-                换一把
+                换新 key
               </button>
               <!-- 连通性测试。不调模型：走只读的 models 端点，不花钱。
                    它测的是**当前这一路**，包括自己填的端点。 -->
@@ -1133,7 +1156,7 @@
             <!-- ⚠ **未配置时输入框必须直接显示**，不能套
                  `drafts[g.id] === REVEAL` 那道门（2026-10-15 修的真机死路，
                  见 `.scratch/…/40-*.md`）。那道门本来只为「已配置时不把
-                 明文 key 摆在界面上」而设，而 `REVEAL` 只有「换一把」
+                 明文 key 摆在界面上」而设，而 `REVEAL` 只有「换新 key」
                  按钮会去设——**而那个按钮在 `{#if p.configured}` 分支里**
                  ⇒ 未配置时输入框永远出不来。
 
@@ -1195,7 +1218,12 @@
         >{view.proxy.url ? '改用它' : '用它'}</button
       >
     </div>
-    <p class="cs-note">两组模型与「测连通」都走它。账号密码那部分在日志里会被抹掉。</p>
+    <!-- ⚠ 2026-10-18：原文「两组模型与「测连通」都走它。账号密码那部分在
+         日志里会被抹掉。」前半句与上面 `cs-label` 的 title **逐字重复**——
+         而 title 只在 hover 可见，等于占了一行常驻文字去重复一句看不见的
+         内容；后半句才是这一屏为数不多的隐私承诺。
+         ⇒ 去掉重复的前半句，把「留空 = 直连」这个后果提到正文。 -->
+    <p class="cs-note">留空就是直连。代理里的账号密码不会进日志。</p>
     {#if proxyNote}
       <p class="cs-note" role="status">{proxyNote}</p>
     {/if}
