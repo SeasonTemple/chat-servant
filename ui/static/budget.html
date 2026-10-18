@@ -80,6 +80,121 @@
         { key: 'many', url: '/panel/?demo=1&state=many' },
       ];
 
+      // ⚠ `measure()` 是同步的，而纸的栅格化是异步的 ⇒ 先量一次、全状态共用。
+      //   五个状态的面板都是 380×560，同一张纸，量一次就够。
+      //   ⚠ 初值带 error：万一 `measurePaper()` 没跑成，`PAPER_INK.bottomFrac`
+      //   是 undefined，而裁决里有一条专门判这个 ⇒ 不会悄悄退回 512。
+      let PAPER_INK = { error: '未测量（measurePaper 还没跑）', bottomFrac: 0, rightFrac: 0 };
+
+      /**
+       * **纸画出来之后**的真实边界（2026-10-18 加，票 60）。
+       *
+       * ## 为什么不能继续用 512 / 364
+       *
+       * 那两个数是 `probe-sheet.svg` 源图里**那张纸的矩形**，抄自源文件。
+       * 但那张纸的**下沿是撕口**——真机实测实心只到 ≈500，差 12px
+       * （`PaperPanel` 自己的注释写着「纸底破口实测 7~11px」）。
+       * ⇒ 按标称值判，最后 12px 里的任何东西都判「没出纸」，
+       *   而它在真机上是**画在透明区里**的。
+       *
+       * 这是「判据的参照物必须是产物，不是它的容器/源文件」的第三次。
+       *
+       * ## 怎么量
+       *
+       * 把同一张 SVG 画进 `<canvas>`，沿中线往下找**实心**纸色的最后一行。
+       * 「实心」= 该行及其后 3 行都过半是纸色 —— 只看单行会被撕口的
+       * 参差边沿骗到（实测上一版逐行判法一路数到 y=552，那是壁纸）。
+       *
+       * ⚠ **量不到 = 判红**，不当「没关系」。量具坏了和合规长得一模一样。
+       */
+      async function measurePaper() {
+        const W = 380;
+        const H = 560;
+        const c = document.createElement('canvas');
+        c.width = W;
+        c.height = H;
+        const g = c.getContext('2d', { willReadFrequently: true });
+        const img = new Image();
+        img.src = '/probe-sheet.svg';
+        try {
+          await img.decode();
+        } catch (e) {
+          return { error: 'probe-sheet.svg 载入/解码失败：' + String(e) };
+        }
+        g.drawImage(img, 0, 0, W, H);
+        let data;
+        try {
+          data = g.getImageData(0, 0, W, H).data;
+        } catch (e) {
+          // 同源 SVG 一般不污染画布；真污染了就必须报红，不能悄悄退回标称值。
+          return { error: '读不到画布像素（画布被污染）：' + String(e) };
+        }
+        // 纸：暖黄。R>G>B 且 R 够亮 —— 比「逐通道贴近某个 rgb」抗纹理。
+        const isPaper = (i) => {
+          const r = data[i];
+          const gg = data[i + 1];
+          const b = data[i + 2];
+          const a = data[i + 3];
+          return a > 128 && r > 205 && r > gg && gg > b && r - b > 25;
+        };
+        const x = W >> 1;
+        const NEED = 3;
+        const rowPaper = (y) => {
+          let n = 0;
+          for (let dx = -2; dx <= 2; dx += 1) {
+            if (isPaper((y * W + (x + dx)) * 4)) n += 1;
+          }
+          return n;
+        };
+        const solidBottom = (() => {
+          for (let y = H - 1; y >= 0; y -= 1) {
+            let ok = true;
+            for (let k = 0; k <= NEED; k += 1) {
+              if (y + k >= H || rowPaper(y + k) < 3) {
+                ok = false;
+                break;
+              }
+            }
+            if (ok) return y;
+          }
+          return null;
+        })();
+        const solidRight = (() => {
+          const y = H >> 1;
+          const colPaper = (xx) => {
+            let n = 0;
+            for (let dy = -2; dy <= 2; dy += 1) {
+              if (xx >= 0 && xx < W && isPaper(((y + dy) * W + xx) * 4)) n += 1;
+            }
+            return n;
+          };
+          for (let xx = W - 1; xx >= 0; xx -= 1) {
+            let ok = true;
+            for (let k = 0; k <= NEED; k += 1) {
+              if (xx + k >= W || colPaper(xx + k) < 3) {
+                ok = false;
+                break;
+              }
+            }
+            if (ok) return xx;
+          }
+          return null;
+        })();
+        if (solidBottom === null || solidRight === null) {
+          return {
+            error: '画出来的纸找不到实心边（bottom=' + solidBottom + ' right=' + solidRight + '）',
+          };
+        }
+        return {
+          bottomFrac: solidBottom / H,
+          rightFrac: solidRight / W,
+          solidBottom,
+          solidRight,
+          nominalBottomFrac: 512 / 560,
+          nominalRightFrac: 364 / 380,
+        };
+      }
+
       /** 量一个 iframe 文档里的几何。 */
       function measure(doc) {
         const one = (sel) => {
@@ -144,15 +259,21 @@
           set_overflow: (() => {
             const el = doc.querySelector('.cs-set');
             if (!el) return null;
+            // ⚠ 与 `pick_clipped` 同一条病根：内容不能画到纸外。
+            // ⚠⚠ **2026-10-18**：原来写死 `512`（= 画布 560 × 512/560，标称纸底），
+            //   现在取 **PAPER_INK.bottomFrac**（真的画出来的那条边）。
+            //   真机实测标称值比实心纸**低 12px**（撕口吃的），
+            //   按标称判 ⇒ 最后 12px 的一切「出纸」都判过。
+            const sr = sheet ? sheet.getBoundingClientRect() : null;
+            const pb = sr ? sr.top + sr.height * PAPER_INK.bottomFrac : null;
+            const b = el.getBoundingClientRect().bottom;
             return {
               scrollH: el.scrollHeight,
               clientH: el.clientHeight,
               gutter: el.offsetWidth - el.clientWidth,
-              // ⚠ 与 `pick_clipped` 同一条病根：内容不能画到纸外。
-              //   纸底 = 560 × (512/560) = 512（见 `pick_clipped` 处的推导）。
-              bottom: +el.getBoundingClientRect().bottom.toFixed(1),
-              paperBottom: 512,
-              over: +(el.getBoundingClientRect().bottom - 512).toFixed(1),
+              bottom: +b.toFixed(1),
+              paperBottom: pb === null ? null : +pb.toFixed(1),
+              over: pb === null ? null : +(b - pb).toFixed(1),
             };
           })(),
           topbar: one('.cs-topbar'),
@@ -193,19 +314,25 @@
           pick_clipped: (() => {
             const pk = doc.querySelector('.cs-pick');
             if (!pk || !sheet) return null;
-            const PAPER_BOTTOM = 512 / 560;
-            const PAPER_RIGHT = 364 / 380;
+            // ⚠⚠ 限值取自 **PAPER_INK**（真的画出来的那条边），不是 512/560。
+            //   2026-10-18 实测打出来的：真机上纸的**实心**下沿在 ≈500，
+            //   而 SVG 源图里那张纸的矩形在 512 —— **撕口吃掉约 12px**
+            //   （`PaperPanel` 自己写着「纸底破口实测 7~11px」）。
+            //   ⇒ 凡是落在 500~512 这条带里的一切，按标称值判都是「没出纸」，
+            //     而它在真机上是**画在透明区里**的。
+            //   这就是「判据的参照物必须是产物，不是它的容器」的第三次。
             const pr = pk.getBoundingClientRect();
             const sr = sheet.getBoundingClientRect();
-            const limit = sr.top + sr.height * PAPER_BOTTOM;
+            const limit = sr.top + sr.height * PAPER_INK.bottomFrac;
             return {
               bottom: +pr.bottom.toFixed(1),
               paperBottom: +limit.toFixed(1),
+              paperNominal: +(sr.top + sr.height * (512 / 560)).toFixed(1),
               over: +(pr.bottom - limit).toFixed(1),
               clipped: pr.bottom > limit + 0.5,
               // 纸的右沿：档位格也不该横向出纸
               right: +pr.right.toFixed(1),
-              paperRight: +(sr.left + sr.width * PAPER_RIGHT).toFixed(1),
+              paperRight: +(sr.left + sr.width * PAPER_INK.rightFrac).toFixed(1),
             };
           })(),
           // ⚠ 红铅笔勾的真实位置（2026-10-16 加）。
@@ -276,29 +403,71 @@
             add(false, `${k}: 载入`, s.error);
             continue;
           }
-          // ① 档位格底必须在纸内。依据：probe-sheet.svg 纸高 512 / 画布 560。
+          // ⛔ **纸的边界量到了没有**（2026-10-18，票 60）。
+          //   这一格是**整台架的地基**：纸底取的是 SVG 的标称矩形，
+          //   而真纸上那条边被撕口吃了 ~12px ⇒ 标称判据把出纸当成没出纸。
+          //   ⚠ 量不到 = 红。「拿不到量具」与「量过了没问题」在输出上同形。
+          add(
+            !PAPER_INK.error,
+            '纸的实心边界已量到',
+            PAPER_INK.error
+              ? PAPER_INK.error
+              : `实心底 ${PAPER_INK.solidBottom} / 标称 ${(PAPER_INK.nominalBottomFrac * 560).toFixed(0)}（Δ${(560 * (PAPER_INK.nominalBottomFrac - PAPER_INK.bottomFrac)).toFixed(1)}px）`,
+          );
+          // ① 档位格底必须在纸内。依据：**画出来的那条纸底**，不是 512。
+          // ⚠⚠ `pick_clipped === null` 时**原来直接跳过** ——
+          //   而真机那次恰恰是空态（`.cs-pick` 不在），于是这一条
+          //   **一次都没在出问题的那个状态上跑过**。
+          //   ⇒ 现在「没量到」自己报红，不再与「量到没超」同形。
           if (s.pick_clipped) {
             add(
               !s.pick_clipped.clipped,
               `${k}: 档位格不出纸`,
-              `底 ${s.pick_clipped.bottom} vs 纸底 ${s.pick_clipped.paperBottom}`,
+              `底 ${s.pick_clipped.bottom} vs 纸底 ${s.pick_clipped.paperBottom}（标称会是 ${s.pick_clipped.paperNominal}）`,
             );
             // ② 红铅笔勾的尾巴也必须在纸内 —— 档位格在纸上不代表勾在纸上。
+            // ⚠ 同一个病：原来写死 `vs 512`，而勾**本来就溢出自己的取景框**
+            //   （设计如此，PaperPanel 里写着），所以它的尾巴必须拿**实心纸底**比。
             const mk = (s.marks || [])[0];
+            const inkBottom = s.pick_clipped.paperBottom;
             if (mk && mk.svg) {
-              add(mk.svg[1] <= 512, `${k}: 红勾不出纸`, `勾底 ${mk.svg[1]} vs 512`);
+              add(mk.svg[1] <= inkBottom, `${k}: 红勾不出纸`, `勾底 ${mk.svg[1]} vs ${inkBottom}`);
             }
+          } else {
+            add(
+              false,
+              `${k}: 档位格不出纸`,
+              '这一状态里量不到 `.cs-pick`（空态？）—— 没量到不等于没超',
+            );
           }
-          // ③ 设置屏这一列也不能画到纸外（与 ① 同一个病根）。
+          // ③ 设置屏这一列也不能画到纸外（与 ① 同一个病根、同一个新参照）。
           if (s.set_overflow) {
-            add(s.set_overflow.over <= 0, `${k}: 设置列不出纸`, `底 ${s.set_overflow.bottom}`);
+            add(
+              s.set_overflow.over !== null && s.set_overflow.over <= 0,
+              `${k}: 设置列不出纸`,
+              `底 ${s.set_overflow.bottom} vs ${s.set_overflow.paperBottom}`,
+            );
           }
           // ④ 滚动条被接管。依据：原生 15px，纸族 6px。
+          // ⚠⚠ `.cs-set` 的槽宽是 2026-10-16 票 44 **主动归零**的
+          //   （见 `PaperPanel` 的「6 → 10 → 6 → 0」），所以这一格
+          //   **只对 `.cs-actions` 有意义**；对 `.cs-set` 判 6 是在判一个
+          //   已经被推翻的设计。真实 Windows WebView2 上是经典滚动条，
+          //   **无头 Chrome 是 overlay、不占布局** ⇒ 这一格在无头环境里
+          //   稳定误报。⇒ 改成：只判「不是 15」（漏了接管），不判「必须是 6」。
           if (s.actions_roll) {
-            add(s.actions_roll.gutter === 6, `${k}: 候选区滚动条`, `槽宽 ${s.actions_roll.gutter}`);
+            add(
+              s.actions_roll.gutter !== 15,
+              `${k}: 候选区滚动条`,
+              `槽宽 ${s.actions_roll.gutter}（15 = 原生漏接管；6 是设计值，overlay 环境量到 0 不算漏）`,
+            );
           }
           if (s.set_overflow) {
-            add(s.set_overflow.gutter === 6, `${k}: 设置区滚动条`, `槽宽 ${s.set_overflow.gutter}`);
+            add(
+              s.set_overflow.gutter !== 15,
+              `${k}: 设置区滚动条`,
+              `槽宽 ${s.set_overflow.gutter}（同上；票 44 已把这一格归零）`,
+            );
           }
           // ⑤ 溢出时底部渐隐必须真的落到计算样式上（属性 → CSS 的链路会断）。
           if (s.actions_roll) {
@@ -316,6 +485,19 @@
         lines.unshift(
           failed === 0 ? `ALL GREEN（${lines.length} 条判据）` : `FAILED ${failed}/${lines.length}`,
         );
+        // ⚠⚠ 2026-10-18：这几格红**不是台架坏了**，是判据终于对准了产物。
+        //   纸底的参照从 SVG 的标称矩形（512）换成**画出来的那条边**（实测 496，
+        //   Δ16px）之后，「档位格不出纸 / 红勾不出纸 / 设置列不出纸」三格由绿转红
+        //   —— 它们在标称参照下量到的「余 12~16px」全在撕口里，真机上画不出来。
+        //   真机实拍证据见 `.scratch/…/60-tier-row-runs-off-paper-…md`。
+        if (failed > 0) {
+          lines.splice(
+            1,
+            0,
+            '⚠ 下面这些红是真的：判据的参照物已从「SVG 标称矩形 512」换成',
+            '  「画出来的实心纸底 496」。修复方向见票 60 的「三选一」，本台架不负责改版式。',
+          );
+        }
         return lines.join('\n');
       }
 
@@ -346,31 +528,42 @@
         });
       }
 
-      for (const st of STATES) {
-        const f = document.createElement('iframe');
-        f.src = st.url;
-        host.appendChild(f);
-        (async () => {
-          await waitFor(
-            () =>
-              f.contentDocument &&
-              (f.contentDocument.querySelector('.cs-act') ||
-                f.contentDocument.querySelector('.cs-set')),
-          );
-          // 再等两帧，让字体度量与 GSAP 补间落定
-          await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-          try {
-            results[st.key] = measure(f.contentDocument);
-          } catch (e) {
-            results[st.key] = { error: String(e) };
-          }
-          if (++done === STATES.length) {
-            out.textContent = JSON.stringify(results, null, 1);
-            verdict.textContent = judge(results);
-            document.title = 'READY';
-          }
-        })();
-      }
+      // ⚠ 先量纸、再量面板。`measure()` 是同步的，取不到纸的边界就只能
+      //   退回标称值 —— 那正是票 60 里判据失灵的原因，所以宁可整台架判红。
+      // ⚠⚠ 这里**必须**包在 async IIFE 里：本文件是普通 `<script>`（不是
+      //   `type="module"`），顶层 `await` 会直接抛
+      //   「await is only valid in async functions」——
+      //   而那句话出现在控制台里、`document.title` 停在 `budget`，
+      //   **台架看起来只是「还没跑完」，不是「坏了」**。
+      (async () => {
+        PAPER_INK = await measurePaper();
+
+        for (const st of STATES) {
+          const f = document.createElement('iframe');
+          f.src = st.url;
+          host.appendChild(f);
+          (async () => {
+            await waitFor(
+              () =>
+                f.contentDocument &&
+                (f.contentDocument.querySelector('.cs-act') ||
+                  f.contentDocument.querySelector('.cs-set')),
+            );
+            // 再等两帧，让字体度量与 GSAP 补间落定
+            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+            try {
+              results[st.key] = measure(f.contentDocument);
+            } catch (e) {
+              results[st.key] = { error: String(e) };
+            }
+            if (++done === STATES.length) {
+              out.textContent = JSON.stringify({ paper_ink: PAPER_INK, states: results }, null, 1);
+              verdict.textContent = judge(results);
+              document.title = 'READY';
+            }
+          })();
+        }
+      })();
     </script>
   </body>
 </html>
