@@ -237,6 +237,52 @@ BUSL-1.1（见 `LICENSE`），而依赖白名单禁 BUSL——不矛盾，那条
 `<仓库>/target/models/`（查找顺序见该函数的文档）。⚠ 这不是随手改的默认值，
 是「装一次权重就悄悄换掉了生产引擎 + 占系统盘」两个问题叠在一起。
 
+⚠⚠ **2026-10-18 当天又抓到同一家族的第二个实例：`ort` 的运行时缓存。**
+
+`crates/capture` 依赖的 `ort`（`download-binaries` 特性）会在**构建时**
+把 ONNX Runtime 静态库下到 `%LOCALAPPDATA%\ort.pyke.io\`——
+2026-10-18 实测 **660.9 MB**（`onnxruntime.lib` 289 MB + 325 MB 两个版本，
+外加三份 `DirectML.dll`）。那也是 C 盘，也是**自动发生的**，没人显式装。
+
+⚠ **它不读任何环境变量**，`ort-sys/src/internal/dirs.rs` 写死走 Win32 API：
+
+```rust
+pub fn cache_dir() -> Option<PathBuf> {
+    known_folder_local_app_data().map(|h| h.join("ort.pyke.io"))  // SHGetKnownFolderPath
+}
+```
+
+⇒ 改 `LOCALAPPDATA` **无效**（`SHGetKnownFolderPath` 绕过环境变量）。
+唯一的 ort 侧入口 `ORT_LIB_LOCATION` 语义是「指向一套**已存在**的 lib 目录」，
+**不是缓存位置**：设了它 ort 就不再下载 ⇒ CI 上没有那些文件会**直接编译失败**。
+
+⇒ **解法是 junction**：本机已把 `%LOCALAPPDATA%\ort.pyke.io` 做成指向
+`<仓库>/target/ort-cache/` 的目录联接。ort 照旧往那个路径写，字节落在 E 盘。
+重建办法：
+
+```powershell
+robocopy "$env:LOCALAPPDATA\ort.pyke.io" "$PWD\target\ort-cache" /E
+[IO.Directory]::Delete("$env:LOCALAPPDATA\ort.pyke.io", $true)
+New-Item -ItemType Junction -Path "$env:LOCALAPPDATA\ort.pyke.io" `
+         -Target "$PWD\target\ort-cache"
+```
+
+⚠ 为什么 junction 比环境变量好：**它只在那个一个目录上生效，不污染别的项目，
+且 CI 完全不受影响**（runner 上没有这个联接，ort 照旧下到 runner 自己的
+`LOCALAPPDATA`，ephemeral 无所谓）。反之若把 `ORT_LIB_LOCATION` 写进
+`.cargo/config.toml`，CI 会因为找不到那些 `.lib` 而编译失败。
+
+⚠ **验证到什么程度（如实说）**：迁移后 `cargo test -p chatservant-capture
+--test ocr_accuracy` 通过（25.5s，真跑了 ort 推理）⇒ **链接路径可用**已证。
+但「ort 升级后 build script 重跑时不会重新下载」这一环**是读代码推断的**
+（`if !lib_dir.exists() { download }`），**没做强制重编译验证**。
+
+⚠⚠ **教训（这才是该记住的那半）**：修 `ocr_pp::models_dir()` 时我只改了
+**显式写到的那一处**，没扫依赖链上第二处——同一个红线、第二个实例，
+而且第二处是**构建时自动发生**的，连"某人手动装了"这条线索都没有。
+⇒ 判据不能是「我上次修了哪个默认值」，而是
+**「这条依赖链上还有谁会往用户目录写东西」**。
+
 判据：**问「这东西能不能再跑一遍生成」**。能 ⇒ 放 `target/`，删了不心疼；
 不能 ⇒ 才值得放用户目录并征求同意。
 
