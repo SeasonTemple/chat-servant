@@ -40,6 +40,8 @@
   import type { Attachment } from 'svelte/attachments';
   import { slideTo } from './attach';
   import { DUR, prefersReducedMotion } from './motion';
+  import { TICK_NESTED, TICK_VIEW } from '$lib/marks';
+  import PencilDefs from '$lib/PencilDefs.svelte';
   // ⚠⚠ **这里曾经 import `TICK_NESTED_BIG` / `TICK_VIEW` 并在药丸里画勾**，
   //   2026-10-18 删掉了。理由见 `.cs-pill` 的注释与本文件留档段，
   //   **不是**「手绘不如墨洗」这种口味问题，是实测三张图都读不出字。
@@ -173,6 +175,8 @@
   }
 </script>
 
+<PencilDefs />
+
 <div
   {@attach move(value)}
   {@attach reflow}
@@ -184,9 +188,24 @@
 >
   <div class="cs-pill" aria-hidden="true">
     <!--
-      ⛔ **这里原来盖着一枚红铅笔勾，2026-10-18 删掉**（实测证据在下面的
-         `.cs-pill` 注释里）。选中态改由药丸的墨洗底 + 字重承载。
+      ⚠⚠ **红铅笔勾回来了**（2026-10-18，当天删、第二天加回）。
+      删的理由是「56×34 的勾盖住 12.48px 的小字，字被吞」——
+      那个判断**方向对、尺子用错**：它是拿**原尺寸**去量一枚
+      本来就不该按原尺寸用的标记。
+      ⇒ 现在缩到 **22×13.4**（保持 `TICK_VIEW` 的 56:34），
+        并压在药丸**左端内侧**、只碰第一个字的一角。
+
+      顺带把主面板那一支也统一到同一个缩放档（原来是 30×18）——
+      **同一个概念必须同一支笔、同一把尺**，这是这一轮全部返工的根因。
+
+      药丸本身仍由 GSAP 动 `left/width`，勾在药丸**内部**绝对定位，
+      所以滑块走到哪，勾就跟到哪，不需要第二套状态。
     -->
+    <svg class="cs-pill-tick" viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}" filter="url(#pencil)">
+      {#each TICK_NESTED as layer (layer.d)}
+        <path d={layer.d} fill-opacity={layer.o} />
+      {/each}
+    </svg>
   </div>
   {#each options as o (o.id)}
     <button
@@ -292,6 +311,24 @@
     box-shadow: inset 0 0 0 1px var(--cs-edge);
     border-radius: calc(var(--cs-radius) - 2px);
     pointer-events: none;
+  }
+
+  /* 药丸里的那枚勾。⚠ 只有 fill，不设 fill-opacity 的兜底：
+     五层嵌套的每层透明度是**笔迹数据**（`marks.js` 里每层自带 `o`），
+     CSS 一兜底就把五层压成单层平涂，勾会立刻变成一个生硬的矢量对勾
+     ——而这一族的整套材质靠的就是「芯重边虚」（`PaperPanel` 同款警告）。 */
+  .cs-pill-tick {
+    position: absolute;
+    left: 1px;
+    top: 50%;
+    margin-top: -5.6px;
+    width: 18px;
+    height: 10.9px;
+    overflow: visible;
+  }
+
+  .cs-pill-tick path {
+    fill: var(--cs-pencil-red);
   }
 
   /* ── 2026-10-16 的红铅笔勾：2026-10-18 摘掉，留档 ────────────────
