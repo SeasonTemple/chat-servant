@@ -732,9 +732,14 @@ cargo clean --release          # 重新打包前再编回来
 - ⚠ **`crates/capture/fixtures/` 已 gitignore（2026-10-12）。** 那里是
   `crates/perceive/tests/golden.rs` 与 `media.rs` 用的像素级黄金基线，
   **从实机真实聊天脱敏而来**——即使只剩布局几何与配色，来源仍指向用户会话，
-  所以不入公开仓库。代价：依赖它们的用例**缺件即跳过**而不是失败。
-  本机恢复：`cargo xtask fixture --name <n> --source target\probe\<帧>.png`。
-  **别把「CI 全绿」读成「黄金基线验过了」。**
+  所以不入公开仓库。
+  ⚠⚠ **2026-10-19 订正：依赖它们的用例现在是「本机专属」（`#[ignore]`），
+  缺件**不再**是「跳过」，而是压根不跑**——但它们会出现在 `cargo test` 的
+  **汇总行**里（`... 0 failed; 2 ignored;` / `3 ignored;`），
+  ⇒ **「没验」是机器可读的，别把「CI 全绿」读成「黄金基线验过了」。**
+  本机真跑：`cargo test --workspace -- --include-ignored`（缺夹具仍**硬失败**）。
+  本机恢复夹具：`cargo xtask fixture --name <n> --source target\probe\<帧>.png`。
+  机器守卫见 `scripts/check-gate-parity.ps1` 的 ⑦。
 - 本仓库公开在 GitHub（`SeasonTemple/chat-servant`），许可为
   **BSL 1.1**（2029-10-12 转 Apache-2.0，见 `LICENSE`）。
   ⚠ 这与「依赖只允许 permissive」**不矛盾**：那条策略管的是**别人的 crate**

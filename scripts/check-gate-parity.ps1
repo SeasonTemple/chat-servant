@@ -372,6 +372,165 @@ if ($script:testJobsChecked -eq 0) {
   $fail.Add('   （要么 workflow 里真的没有 cargo test，要么 job 的切分/判据坏了。别把「没查到」当「没问题」。')
 }
 
+# ─────────────────────────────────────────────────────────────────────────
+# ⑦ 依赖 gitignored 真帧的测试，必须是「本机专属」（`#[ignore]`）
+#
+# ## 这条守卫的由来（2026-10-19）
+#
+# `d67918f` 把「缺夹具」从「跳过」改成**硬失败**，理由是「`ok` 与跳过逐字同形」
+# ——那个判断没错。但它同时写下「CI 要在 Gate 8 之前把
+# `crates/capture/fixtures/` 备齐」，而夹具是**真实会话**的脱敏帧、
+# 硬约束第 3 条禁止它们进公开仓库 ⇒ **那一步在 CI 上永远备不出来**。
+# ⇒ 「硬失败」+「夹具永远不在」= **CI 永远红**。
+# 实测：main 上连续三个 run 全红（`39236999113` / `39246826894` / `39249556236`），
+# 红的都是 `a_real_bubble_never_has_a_busy_ring`。
+#
+# ## 现在的判据（三条，缺一不可）
+#
+# 1. 依赖真帧的 `#[test]` 一律标 `#[ignore]`（本机专属）：
+#    `cargo test --workspace` 不跑它们，但它们出现在**汇总行**里
+#    （`... 0 failed; 2 ignored;`）⇒「没跑」是**机器可读**的，与「ok」不同形。
+# 2. 那条不变量**在 CI 上有替身**：合成帧版必须还在、且**不能**被 ignore
+#    （否则等于把守卫整个删掉）。
+# 3. `ci.yml` 必须写明本机怎么真跑它们（`--include-ignored`）。
+#
+# ⚠ 这条守卫抓的是**复发**：同族的四个测试当时有**三种**策略
+#   （硬失败 / 静默跳过 / 硬失败），其中 `perceive/src/media.rs` 那个
+#   至今还是「eprintln + return」——**它才是 `d67918f` 要根除的那个坑**，
+#   而那一轮漏掉了它。⇒ 策略必须由机器统一，不能靠人记得。
+#
+# ## 枚举范围：按**函数体**推，不靠名单
+#
+# 名单会漂（上一轮就漏了一个）。这里改成：凡是**函数体**（或它调用的、
+# 同文件的辅助函数）碰到 `capture/fixtures` 的 `#[test]`，都必须是 `#[ignore]`。
+# 范围能被 `git ls-files` 一次列全，不靠记忆。
+$fixtureScope = @(
+  git ls-files 'crates/*/src/*.rs' 'crates/*/src/**/*.rs' 'crates/*/tests/*.rs' 'crates/*/tests/**/*.rs'
+) | Where-Object { $_ -and $_ -notmatch '^\.agents/' } | Sort-Object -Unique
+
+if (-not $fixtureScope) {
+  $fail.Add('⑦ 一条 crates/*.rs 都没列出来 —— 扫描面本身失效了，不许当合规放过。')
+}
+
+# 解析一个 Rust 文件里的 fn：名字、缩进、body 范围、父子关系。
+# ⚠ 用**缩进**配对花括号：这些文件里的 fn 都在 `mod` 里，缩进是唯一可靠的层级信号。
+function Get-FnTree([string[]]$lines) {
+  $fns = @()
+  $stack = [System.Collections.Generic.List[object]]::new()
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    $ln = $lines[$i]
+    if ($ln -match '^(\s*)fn\s+([A-Za-z_][A-Za-z0-9_]*)') {
+      $indent = $Matches[1].Length
+      $name = $Matches[2]
+      while ($stack.Count -gt 0 -and $stack[$stack.Count - 1].indent -ge $indent) {
+        $stack.RemoveAt($stack.Count - 1)
+      }
+      $fn = [pscustomobject]@{
+        name = $name; indent = $indent; start = $i; end = ($lines.Count - 1)
+        fixture = $false; isTest = $false; ignored = $false
+      }
+      $fns += $fn
+      $stack.Add($fn)
+      continue
+    }
+    if ($ln -match '^(\s*)\}') {
+      $indent = $Matches[1].Length
+      while ($stack.Count -gt 0 -and $stack[$stack.Count - 1].indent -ge $indent) {
+        $stack.RemoveAt($stack.Count - 1)
+      }
+    }
+  }
+  foreach ($f in $fns) {
+    for ($j = $f.start + 1; $j -lt $lines.Count; $j++) {
+      if ($lines[$j] -match '^(\s*)\}' -and $Matches[1].Length -eq $f.indent) { $f.end = $j; break }
+    }
+  }
+  return $fns
+}
+
+$fixtureTests = [System.Collections.Generic.List[string]]::new()
+$fixtureTestCount = 0
+$syntheticTwinFound = $false
+
+foreach ($file in $fixtureScope) {
+  if (-not (Test-Path $file)) { continue }
+  $lines = [IO.File]::ReadAllLines((Resolve-Path $file))
+  $fns = Get-FnTree $lines
+
+  # 「依赖真帧」= body 碰到夹具路径，**或**调用了同文件里**已判定为依赖真帧**的
+  # 辅助函数。⇒ 迭代到不动点（`fixture_dir` → `load` → `check` → 测试函数，
+  # 这条链要三步才收敛）。
+  #
+  # ⚠⚠ 传播**只能来自已判定为真的函数**：写成「调用同文件任何函数就算依赖」时，
+  #   `crates/reason/src/voice.rs` 的每个测试都会被误判（它们只是互相调用）。
+  #   判据是「碰没碰真帧」，不是「有没有调用关系」。
+  do {
+    $changed = $false
+    foreach ($f in $fns) {
+      if ($f.fixture) { continue }
+      $body = ($lines[$f.start..$f.end] -join "`n")
+      $hit = ($body -match 'capture[\\/]fixtures|fixture_dir')
+      if (-not $hit) {
+        foreach ($c in $fns) {
+          if ($c -eq $f -or -not $c.fixture) { continue }
+          if ($body -match ('\b' + [regex]::Escape($c.name) + '\s*\(')) { $hit = $true; break }
+        }
+      }
+      if ($hit) { $f.fixture = $true; $changed = $true }
+    }
+  } while ($changed)
+
+  foreach ($f in $fns) {
+    # 属性行：紧挨在 fn 上方的 `#[...]` 与注释行
+    $attrs = @()
+    for ($k = $f.start - 1; $k -ge 0; $k--) {
+      $t = $lines[$k].Trim()
+      if ($t -match '^#\[' -or $t -match '^//') { $attrs += $t; continue }
+      break
+    }
+    $f.isTest = [bool]($attrs -match '^#\[test')
+    $f.ignored = [bool]($attrs -match '^#\[ignore')
+
+    if (-not $f.isTest) { continue }
+    if ($f.name -eq 'real_text_lines_stay_below_both_icon_thresholds') {
+      # 判据 ②：合成替身必须还在，且**不能**被 ignore
+      $syntheticTwinFound = $true
+      if ($f.ignored) {
+        $fail.Add("⑦ 合成替身 `real_text_lines_stay_below_both_icon_thresholds` 被标了 #[ignore] —— 那等于把守卫整个删掉")
+      }
+      if ($f.fixture) {
+        $fail.Add("⑦ 合成替身 `real_text_lines_stay_below_both_icon_thresholds` 竟然依赖真帧 —— 它该是合成的")
+      }
+      continue
+    }
+    if ($f.fixture) {
+      $fixtureTestCount++
+      $fixtureTests.Add("$file :: $($f.name)")
+      if (-not $f.ignored) {
+        $fail.Add("⑦ $file :: $($f.name) 依赖 gitignored 真帧，却没标 #[ignore]")
+        $fail.Add('   ⇒ 它的缺件路径要么 panic（CI 永远红），要么静默 return（CI 绿着但没验）。')
+        $fail.Add('     两种都不对：标 #[ignore]（本机专属），CI 上用合成替身守同一条不变量。')
+      }
+    }
+  }
+}
+
+# ⚠ 量具自检：⑦ 一个依赖真帧的测试都没扫到 ⇒ 它此刻**什么都没验**。
+#   「量具坏了」与「量具没找到东西」在屏幕上原本长得一模一样，
+#   而这一条守卫的全部意义就是抓「静默失效」——它自己静默起来最坏。⇒ 直接红。
+if ($fixtureTestCount -eq 0) {
+  $fail.Add('⑦ 一个「依赖真帧的测试」都没扫到 —— 这条守卫此刻什么都没验。')
+  $fail.Add('   （要么真帧依赖已经全被改名/挪走，要么解析器坏了。别把「没查到」当「没问题」。')
+}
+
+# 判据 ③：ci.yml 必须写明本机怎么真跑它们。
+if (-not (Test-Path $ciPath)) {
+  $fail.Add("⑦ 找不到 $ciPath —— 判据 ③ 本次没验。")
+} elseif (-not ([IO.File]::ReadAllText((Resolve-Path $ciPath)) -match '--include-ignored')) {
+  $fail.Add('⑦ ci.yml 里没有 `--include-ignored` —— 本机专属测试的跑法没写下来。')
+  $fail.Add('   ⇒ 「这些测试在 CI 上没验」这件事必须**写出来**，不能只靠一个 ignored 计数让人自己猜。')
+}
+
 if ($fail.Count) {
   Write-Output 'CI 与本机门禁没有对齐：'
   Write-Output ''
@@ -387,4 +546,5 @@ Write-Output ("gate/CI 对齐：gate.ps1 的 {0} 步在 ci.yml 里都有见证�
 Write-Output ("bundle.resources 那条：扫了 {0} 个 workflow 的 {1} 个 job，逐个都有覆盖或先取权重；" -f $script:wfCount, $j)
 Write-Output ("跑测试前备夹具那条：{0} 个跑测试的 job，逐个都在跑之前取权重并造语料。" -f $script:testJobsChecked)
 Write-Output ("Python 编码那条：扫本项目自有 .py {0} 个（不含 .agents/ 第三方），其中 {1} 个含非 ASCII，都已自己 reconfigure。" -f $pyScope.Count, $pyNonAscii)
+Write-Output ("真帧测试那条：扫到 {0} 条依赖 gitignored 真帧的 #[test]，全部标了 #[ignore]（本机专属）；合成替身在场。" -f $fixtureTestCount)
 exit 0

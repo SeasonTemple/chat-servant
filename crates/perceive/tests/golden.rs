@@ -29,19 +29,34 @@
 //! （`.gitignore` 里 `crates/capture/fixtures/`）。代价是这些黄金测试在
 //! 没有夹具的机器上**跑不起来**。
 //!
-//! ⚠⚠ **2026-10-19：缺件从「跳过」改成「失败」**（理由见 [`missing_fixture`]）。
-//! 原先这里是「缺件即跳过」，而 `libtest` **丢弃通过测试的 stderr**、
-//! `ci.yml` 又**不带** `--nocapture` ⇒ 那条「跳过」提示在 CI 日志里
-//! **一个字都看不到**，只有 `test result: ok`。
-//! ⇒ 干净 runner 上**黄金基线从未真的验过，却报通过**。
-//! 现在缺夹具就是红的理由：判据是「**守卫跑过没有**」，不是「夹具在不在」。
+//! ⚠⚠ **2026-10-19 第二次订正：缺件从「失败」改成「本机专属」（`#[ignore]`）。**
 //!
-//! ⚠ 由此带来一条**必须知道的后果**：`ci.yml` 的 `cargo test --workspace`
-//!   现在**要求夹具在场**，否则 Gate 8 会红。
-//!   CI 若要缓存/准备夹具，在那一步之前加 `cargo xtask fixture` 或
-//!   从缓存还原 `crates/capture/fixtures/` —— **别再加 `continue-on-error`**。
+//! 上一轮（`d67918f`）把缺件改成**硬失败**，理由是 `libtest` **丢弃通过测试的
+//! stderr**、`ci.yml` 又**不带** `--nocapture` ⇒ 那条「跳过」提示在 CI 日志里
+//! **一个字都看不到**，只有 `test result: ok` ⇒ 干净 runner 上黄金基线
+//! **从未真的验过，却报通过**。那个判断没错。
 //!
-//! 本机要恢复它们：重跑
+//! ⚠⚠ **但它同时留了一个永远满足不了的前置**：那一轮写下
+//! 「CI 要在 Gate 8 之前把 `crates/capture/fixtures/` 备齐」——
+//! 而夹具来自**真实会话**，硬约束第 3 条禁止它们进公开仓库
+//! ⇒ **那一步在 CI 上永远备不出来**。
+//! ⇒ 「硬失败」+「夹具永远不在」= **CI 永远红**。
+//! 实测：main 上连续三个 run 全红（`39236999113` / `39246826894` / `39249556236`）。
+//!
+//! 现在这三条测试标 `#[ignore]`（**本机专属**），缺件路径的 `panic!` 保留着：
+//!
+//! - `cargo test --workspace`（CI 与本机门禁都跑这个）⇒ 这三条**不跑**，
+//!   但它们会出现在**汇总行**里：`... 0 failed; 3 ignored;`
+//!   ⇒ 「没跑」是**机器可读**的，与「ok」不同形——这正是上一轮要的东西，
+//!   只是用 `#[ignore]` 拿到，而不是用「硬失败」拿到。
+//! - `cargo test --workspace -- --include-ignored` ⇒ 这三条**真跑**，
+//!   夹具缺了仍然**硬失败**（[`missing_fixture`]）。
+//!
+//! ⇒ 「黄金基线在 CI 上没验」这件事现在是**写着的**（`ci.yml` 的 Note 步
+//! 与本文件的这一节），不是「绿着但没人知道」。
+//! 机器守卫见 `scripts/check-gate-parity.ps1` 的 ⑦。
+//!
+//! 本机要恢复夹具：重跑
 //! `cargo xtask fixture --name wechat-dark-2side --source target\probe\<你的帧>.png`
 //! （脱敏与拒收校验都在那一步里，见 `.toml` 头部的说明）。
 
@@ -197,7 +212,7 @@ fn histogram(frame: &Frame, r: Rect) -> Vec<(Rgb, usize)> {
     v
 }
 
-/// 缺夹具时的处理。**在 CI 上是硬失败**（2026-10-19 改）。
+/// 缺夹具时的处理。**硬失败**（2026-10-19 改；`d67918f` 那一轮）。
 ///
 /// ## 为什么从「跳过」改成「红」
 ///
@@ -210,9 +225,18 @@ fn histogram(frame: &Frame, r: Rect) -> Vec<(Rgb, usize)> {
 /// 结果：干净 runner 上没有夹具 ⇒ 黄金基线**从未真正验过**，却报 3 passed。
 /// 这正是本项目反复付过学费的「`ok` 与跳过逐字同形」。
 ///
-/// ⇒ 判据：**CI 上黄金守卫必须真的跑**。缺夹具就是守卫没生效，
-///   那是红的理由，不是绿的。
-///   本机有夹具时（`crates/capture/fixtures/`）行为完全不变。
+/// ⇒ 判据：**守卫跑过没有**。缺夹具就是守卫没生效，那是红的理由，不是绿的。
+///
+/// ## ⚠⚠ 但 2026-10-19 又改了一次（第二次订正）
+///
+/// 「硬失败」的前提是**夹具能出现在 CI 上**——而它不能（真实会话脱敏帧，
+/// 硬约束第 3 条禁止入库）⇒ 硬失败 = **CI 永远红**。
+/// ⇒ 现在调用它的那三条测试标 `#[ignore]`（本机专属），
+/// `cargo test --workspace` 不会碰它们；`--include-ignored` 才会，
+/// 而那时缺夹具仍然是**硬失败**（就是这里）。
+///
+/// ⇒ 「没验」这件事现在是**写着的**（`#[ignore]` 出现在汇总行里），
+/// 而不是「绿着但没人知道」。
 fn missing_fixture(g: &Golden) -> ! {
     // ⚠ 判据按 `CI` 环境变量分档，与 `crates/capture/tests/ocr_accuracy.rs`
     //   里已有的「CI ⇒ 缺件 panic」**同构** —— 那是本项目处理这个坑的既有范式。
@@ -286,11 +310,13 @@ fn check(g: &Golden) {
 }
 
 #[test]
+#[ignore = "local-only: needs the gitignored real-session frames; pixel-exact baselines cannot be synthesized"]
 fn two_sided_conversation_matches_golden() {
     check(&TWO_SIDE);
 }
 
 #[test]
+#[ignore = "local-only: needs the gitignored real-session frames; pixel-exact baselines cannot be synthesized"]
 fn my_sided_conversation_matches_golden() {
     check(&MY_SIDE);
 }
@@ -304,6 +330,7 @@ fn my_sided_conversation_matches_golden() {
 /// 这条与生成时的守卫是同一件事，但要在测试里再锁一次：生成是一次性动作，
 /// 测试是每次提交都会跑的。
 #[test]
+#[ignore = "local-only: needs the gitignored real-session frames; pixel-exact baselines cannot be synthesized"]
 fn fixture_pane_contains_no_pixel_outside_the_layout_palette() {
     for g in [&TWO_SIDE, &MY_SIDE] {
         // ⚠ 与 `check()` 同一个坑：原来这里是 `eprintln!` + `continue`，

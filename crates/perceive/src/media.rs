@@ -397,14 +397,27 @@ mod tests {
     /// 端到端防线：真实脱敏夹具是**纯文字聊天、没有图**，检出数必须是 0。
     ///
     /// 夹具来自实机真实聊天，不入公开仓库（见 `tests/golden.rs` 的模块文档），
-    /// 所以缺件时**跳过**而不是失败——这条防线要在本机补回夹具后才真的跑。
+    /// 而硬约束第 3 条禁止它们进公开仓库 ⇒ **CI 上永远没有**。
+    /// ⚠⚠ **2026-10-19 订正**：原先这里是「缺件就 `eprintln!` + `return`」——
+    ///   那正是本仓反复付过学费的「`ok` 与跳过逐字同形」
+    ///   （`libtest` 丢弃通过测试的 stderr ⇒ CI 日志里那句提示一个字都看不到）。
+    ///   现在标 `#[ignore]`：**本机专属**，跑起来仍然硬失败（缺件 ⇒ panic）。
+    ///   机器守卫见 `scripts/check-gate-parity.ps1` 的 ⑦。
     #[test]
+    #[ignore = "local-only: needs the gitignored real-session frames; on CI the synthetic twin guards the same invariant"]
     fn a_real_text_only_frame_finds_nothing() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../capture/fixtures/wechat-dark-2side.png");
         if !path.exists() {
-            eprintln!("跳过 wechat-dark-2side：夹具不在本机（公开仓库不含真实会话的脱敏帧）");
-            return;
+            // ⚠ **缺件 = 硬失败**，不是「跳过」。
+            //   这条测试已标 `#[ignore]`（本机专属），所以它**跑起来**就意味着
+            //   有人明确要求验真帧 —— 那时缺夹具就是「没验」，
+            //   沉默地 `return` 会让「跑过」与「跳过」逐字同形。
+            panic!(
+                "缺少夹具 `wechat-dark-2side` ⇒ 这条防线没有真的跑。\n\
+                 本机恢复：`cargo xtask fixture --name wechat-dark-2side --source target\\probe\\<帧>.png`\n\
+                 （夹具 gitignored，公开仓库不含真实会话的脱敏帧）"
+            );
         }
         let img = image::open(&path).unwrap_or_else(|e| panic!("读夹具失败：{e}"));
         let (w, h) = img.dimensions();

@@ -670,6 +670,8 @@ fn real_text_lines_stay_below_both_icon_thresholds() {
 /// `Text`，头像闸不参与；而其中一段 `rgb(47,47,48)` 在 `myside` 里
 /// 是聊天里的**照片**（黄金测试里记着它的 5509 px），不是气泡。
 ///
+/// ⚠⚠ **这一段记的是上一轮（`d67918f`）的做法，已被下面第三次订正取代。**
+///
 /// ⚠⚠ **「缺件即跳过」在 2026-10-19 改成了硬失败**（原先是 `eprintln!` + `continue`）。
 ///
 /// 原因：`libtest` **丢弃通过测试的 stdout/stderr**，只有失败或 `--nocapture`
@@ -678,9 +680,37 @@ fn real_text_lines_stay_below_both_icon_thresholds() {
 /// 结果是**守卫静默失效**：干净 runner 上它从未真的跑过，却报通过。
 /// 这与本项目反复付过学费的「`ok` 与跳过逐字同形」是同一件事。
 ///
-/// ⚠ 判据是**「守卫跑过没有」**，不是「夹具在不在」。
-///   缺夹具 ⇒ 守卫没跑 ⇒ 那是红的理由。本机有夹具时行为不变。
+/// ⚠ 判据是**「守卫跑过没有」**，不是「夹具在不在」——
+///   缺夹具 ⇒ 守卫没跑 ⇒ 那是红的理由（下面那段 panic 保留着）。
+///
+/// ⚠⚠ **2026-10-19 第三次订正：这条标 `#[ignore]`，是「本机专属」测试。**
+///
+/// 上一轮（`d67918f`）把「缺件即跳过」改成**硬失败**，并写下
+/// 「CI 要在 Gate 8 之前把 `crates/capture/fixtures/` 备齐」。
+/// ⚠⚠ **那一步永远备不出来** —— 夹具是从**真实会话**抓帧脱敏来的，
+/// 而硬约束第 3 条禁止真实聊天内容进公开仓库。
+/// ⇒ 「硬失败」+「夹具永远不在」= **CI 永远红**。
+/// 实测：main 上连续三个 run 全红（`39236999113` / `39246826894` / `39249556236`），
+/// 红的都是这一条。
+///
+/// 现在标 `#[ignore]` 的理由是：它守的不变量**在 CI 上有替身**——
+/// [`real_text_lines_stay_below_both_icon_thresholds`] 用**合成帧**守同一条，
+/// 合成帧在 Rust 里画出来 ⇒ **CI 上真跑**。本条守的是**保真度**：
+/// 真帧的纹理、抗锯齿、排版比合成帧脏，那个差别只有真像素答得了。
+///
+/// ⚠ 为什么 `#[ignore]` 满足本仓「不许静默失效」的纪律：
+///   被 `libtest` 吞掉的是**通过测试的 stdout/stderr**，
+///   而 `#[ignore]` 的测试会出现在**汇总行**里 ——
+///   本包实测：lib 那份 `91 passed; 0 failed; 2 ignored;`、
+///   golden 那份 `0 passed; 0 failed; 3 ignored;`（合计 5 条）。
+///   ⇒ 「没跑」是**机器可读**的，与「ok」不同形。
+///   机器守卫见 `scripts/check-gate-parity.ps1` 的 ⑦。
+///
+/// ⚠ 本机要真跑它（夹具齐的时候）：
+///   `cargo test --workspace -- --include-ignored`
+///   夹具缺了它仍会**硬失败**（下面那段 panic 保留着）。
 #[test]
+#[ignore = "local-only: needs the gitignored real-session frames; on CI the synthetic twin guards the same invariant"]
 fn a_real_bubble_never_has_a_busy_ring() {
     use std::path::Path;
 

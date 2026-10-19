@@ -324,27 +324,33 @@ jobs:
         working-directory: ui
         run: pnpm build
 
-      # ⚠⚠ **2026-10-19 订正：这里原先写「没有夹具时它们【跳过】，不是通过」。**
+      # ⚠⚠ **2026-10-19 第二次订正：这里原先写「Gate 8 要求夹具在场」。**
       #
-      #   那句当时是**真的**，但它描述的正是本项目最贵的一个教训：
-      #   `cargo test` 的输出里「跳过」与「通过」**逐字同形**，
-      #   所以那句 note 只是在提醒读者「别把绿灯读成基线验过了」——
-      #   而守卫**本身**并没有因此失效保护，它照样报 ok。
+      #   那句话是 `d67918f` 那一轮写的，理由是「`ok` 与跳过逐字同形」——
+      #   那个判断没错。但它同时留下一个**在 CI 上永远满足不了的前置**：
+      #   夹具是**真实会话**的脱敏帧，硬约束第 3 条禁止它们进公开仓库
+      #   ⇒ **CI 上永远备不出来**。
+      # ⇒ 「硬失败」+「夹具永远不在」= **CI 永远红**。
+      #   实测：main 上连续三个 run 全红（`39236999113`/`39246826894`/`39249556236`），
+      #   红的都是 `a_real_bubble_never_has_a_busy_ring`。
       #
-      #   现在 `crates/perceive/tests/golden.rs` 的缺件路径是
-      #   **硬失败**（CI 上直接 panic，本机给出恢复指引），
-      #   理由与实测见该文件 `missing_fixture` 的文档。
+      # **现在的做法**（见票 69）：
+      #   依赖真帧的 5 条测试标 `#[ignore]`（**本机专属**）⇒ Gate 8 不跑它们，
+      #   但它们会出现在**汇总行**里：`... 0 failed; 2 ignored;` / `3 ignored;`
+      #   ⇒ 「没跑」是**机器可读**的，与「ok」不同形。
+      #   本机要真跑：`cargo test --workspace -- --include-ignored`
+      #   （缺夹具时它们仍**硬失败**）。
       #
-      # ⇒ **后果**：Gate 8 的 `cargo test --workspace` 现在**要求夹具在场**。
-      #   ⚠ 若 CI 要缓存/准备 `crates/capture/fixtures/`，在 Gate 8 之前加一步；
-      #     **绝不要**加 `continue-on-error` —— 那正是本票要根除的东西。
-      #   本机有夹具（4 个文件）时行为完全不变。
+      # ⇒ 「黄金基线在 CI 上没验」这件事现在是**写着的**（本 note），
+      #   不是「绿着但没人知道」。
+      #   机器守卫见 `scripts/check-gate-parity.ps1` 的 ⑦。
       #
       # 这与 ocr_accuracy 是两回事：后者用的是 Gate 7b-5 现场造的**合成**语料，
       # 本次 CI 里真跑，且已有独立的 `CI ⇒ 缺件 panic` 守卫。
-      - name: Note | golden fixtures are required by Gate 8
+      - name: Note | real-frame fixtures are local-only (ignored, not passed)
         run: |
-          Write-Output "::notice::crates/capture/fixtures 不在仓库里（真实会话脱敏帧）。"
-          Write-Output "::notice::⚠ 但 Gate 8 现在**要求**它在场：缺件会让 golden 测试直接失败，"
-          Write-Output "::notice::   因为「ok 与跳过同形」已让缺件守卫静默失效过一次。"
+          Write-Output "::notice::crates/capture/fixtures 不在仓库里（真实会话脱敏帧，硬约束第 3 条）。"
+          Write-Output "::notice::依赖它的 5 条测试标 #[ignore]（本机专属）：**本次 CI 没验它们**。"
+          Write-Output "::notice::它们在 Gate 8 的汇总行里以 `N ignored` 出现 ——「没跑」是可读的，不是「ok」。"
+          Write-Output "::notice::本机真跑：cargo test --workspace -- --include-ignored（缺夹具仍硬失败）。"
           Write-Output "::notice::ocr_accuracy 不同：它用 Gate 7b-5 现场造的**合成**语料，本次 CI 真跑。"
