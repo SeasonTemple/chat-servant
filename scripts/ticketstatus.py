@@ -76,7 +76,23 @@ def collect() -> list[dict[str, str]]:
         drift = ""
         m = STATUS_NUM.search(status)
         if m and (int(m.group(1)), int(m.group(2))) != (int(done), total):
-            drift = f"⚠ Status 写 {m.group(1)}/{m.group(2)}，实点 {done}/{total}"
+            # ⚠⚠ **带上原文上下文**（2026-10-19 加）。
+            #
+            # 这条判据是「Status 行里**第一个** N/M 应当是验收项的勾数」——
+            # 而 Status 行是散文，里面**别处的** N/M 会撞上来。
+            # 撞上来的实例：票 56 的 Status 写「新增守卫 + 自证 4/4」，
+            # 那个 4/4 说的是**自证组数**，不是验收项数（实际 11/11）。
+            # ⇒ 光看「Status 写 4/4，实点 11/11」会让人以为票面少勾了七项，
+            #   而真相是**量具读错了那个数**。
+            # ⇒ 把命中的那一句原文带上，读的人自己就能分辨是「票面写错」
+            #   还是「这个 N/M 本来就不是验收项数」。
+            lo = max(0, m.start() - 24)
+            hi = min(len(status), m.end() + 16)
+            ctx = status[lo:hi].replace("\n", " ").replace("`", "'")
+            drift = (
+                f"⚠ Status 写 {m.group(1)}/{m.group(2)}，实点 {done}/{total}"
+                f"（命中处原文：…{ctx}…）"
+            )
         bl = BLOCKED.search(text)
         rows.append(
             {

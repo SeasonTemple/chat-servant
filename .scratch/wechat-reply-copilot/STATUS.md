@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **68** ｜ 验收项全勾 **45** ｜ 已收但留有说明项 **13** ｜ 未收 **10**
+票据总数 **69** ｜ 验收项全勾 **45** ｜ 已收但留有说明项 **13** ｜ 未收 **11**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -31,7 +31,8 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-18 订正：Status 里那个「新撞出的缺陷」已不存在** | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `51-release-cannot-fetch-dict.md` | 19/21 | ready-for-human | 发版那一跳需要你授权打 tag（⚠ **打 tag 会真的发一个 release**）。 |
-| `68-same-draft-shown-twice.md` | 9/11 | ready-for-human · **2026-10-19 已改完并过门禁与实机 DOM 复核； | (票面没写 Blocked by) |
+| `68-same-draft-shown-twice.md` | 10/11 | ready-for-human · **2026-10-19 已改完并过门禁与实机 DOM 复核； | (票面没写 Blocked by) |
+| `69-ci-red-because-an-unreachable-precondition.md` | 10/11 | in-progress · **2026-10-19 实测定位并修完，待推上去看 CI** | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
@@ -100,12 +101,3 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `65-tick-offset-was-a-constant-not-a-relation.md` | 8/8 |
 | `66-minimize-button-was-gated-on-a-preference.md` | 9/9 |
 | `67-forensics-guard-covers-files-not-text.md` | 9/9 |
-
-## 四、⚠ 脚本当场抓出来的漂移（Status 行自己写的数字与实点不符）
-
-| 票 | Status 写的 | 机器点的 |
-|---|---|---|
-| `56-version-lives-in-four-files-but-only-one-is-gated.md` | 4/4 | 11/11 |
-
-> 这些不是脚本猜的，是 Status 行里的 `N/M` 与实际勾选数量对不上。
-> **按本表的数字读进度**，别按 Status 读。
