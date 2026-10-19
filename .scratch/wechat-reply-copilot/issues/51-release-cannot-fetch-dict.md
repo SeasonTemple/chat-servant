@@ -424,6 +424,8 @@ PyPI 来源没变、供应链面没变，去掉的只是「假定有个工具」
       本机用真装包验过（NSIS 路径级 3/3、MSI 体积级 3/3）
 - [x] **dry run 跑到最后一步**：run `39041439289`（sha `1fbbdd4`）**success**，
       核对装包内有权重 ✅、dry run 收尾 ✅、`Publish` **skipped**
+- [x] **缺陷①的第三个现场：本机 `gate.ps1`**（零覆盖，无权重机器上 clippy/test exit 101）
+      已加 `TAURI_CONFIG` 覆盖并实测 `GATE: ALL GREEN`（clippy 93.8s / test 22.4s）
 - [ ] **push 触发时 `inputs.dry_run` 为空 ⇒ 照常发布**（语义推理，验证它要打 tag）
 - [ ] **跑通一次真实发版**（需授权打 tag）
 
@@ -481,5 +483,69 @@ PyPI 来源没变、供应链面没变，去掉的只是「假定有个工具」
 - ⚠ 已加 `draft` 开关（`--draft`）：资产照样上传、整条 publish 路径真跑，
   但不进 Releases 页、不通知任何人，验收后在 UI 上一键 Publish。
   它把「跑不通」与「不发布」拆开了——自证 9/9（判据用退出码 + 参数里有无 `--draft`）。
+
+
+## 缺陷①的第三个现场：本机门禁（2026-10-19 已修）
+
+缺陷①此前只修了两个 workflow，**本机 `gate.ps1` 从来没有过这个覆盖**
+（`rg 'TAURI_CONFIG' scripts/` 当时零命中）。⇒ 在**没取过权重的机器**上
+`pwsh -NoProfile -File scripts\gate.ps1` 在 `cargo clippy` / `cargo test` 那步挂掉，
+exit 101，与 CI 上那句报错逐字相同。
+
+⇒ 这不是「CI 的问题」，是缺陷①的**范围当初从「出问题的文件在哪」推出来的**，
+不是从「这条不变量在哪些地方成立」推出来的——与缺陷⑥ 收范围那次同形。
+之所以拖到 2026-10-19 才暴露，是因为当时那台开发机上**恰好取过权重**；
+本机没有，就直接在 cargo 那一步挂。⇒ 门禁的结论跟着机器走，不跟代码走。
+
+### 已修
+
+`scripts/gate.ps1` 在 `$env:CARGO_INCREMENTAL` 旁边加同一份覆盖：
+
+```powershell
+$env:TAURI_CONFIG = '{"bundle":{"resources":null}}'
+```
+
+为什么本机可以这么干（与 CI 同一个理由）：`gate.ps1` **从不跑 `tauri build`**，
+那个 resources 映射在这里本来就不会被用到。真要打包的那条路在 `release.yml`，
+靠 `fetch_models.py` 取权重，**不能靠这个覆盖糊过去**。
+
+### 实测（本机，磁盘上确实没有权重）
+
+前置证据：`Test-Path target\models\ppocrv6-small` = **False**，
+且 `target\models\` 整个目录不存在 ⇒ 本次跑的确实是「无权重」这一支。
+
+```
+pwsh -NoProfile -Command "& scripts/gate.ps1 -Skip 'deny','ui build','secret'"
+```
+
+| 步 | 结果 |
+|---|---|
+| `gate/CI parity` | ✅ 16 步仍全部有见证命令（加 env 不影响名单） |
+| `cargo fmt --all --check` | ✅ 3.7s |
+| **`cargo clippy -D warnings`** | ✅ **93.8s** ← 修复前 exit 101 |
+| **`cargo test --workspace`** | ✅ 22.4s |
+| `ui svelte-check` / `lint` / `svelte-autofixer` | ✅ 全绿 |
+
+收尾两行：`GATE_SCOPE: PARTIAL` / **`GATE: ALL GREEN`**，`GATE_EXIT=0`，
+外层 `$LASTEXITCODE=0`。⇒ 修的是环境缺件，**代码没有退化**。
+
+### ⚠ 顺带查实的一个坑：`-Skip 'a,b'` 在 `-File` 下**什么都不跳过**
+
+`gate.ps1` 的过滤是 `$name -like "*$_*"`，逐元素比。但
+`pwsh -File x.ps1 -Skip 'deny,ui build,secret'` 会把三个名字收成
+**一个字符串**（实测 `count=1 val=[deny|ui build|secret]`），
+于是没有任何步名含那个整串 ⇒ **一步都没跳过**，
+而脚本仍会打 `GATE_SCOPE: PARTIAL`。**那一行提示在这条命令下是假的。**
+
+要让三个名字各成一个元素，得走会做表达式解析的入口：
+
+```
+pwsh -NoProfile -Command "& scripts/gate.ps1 -Skip 'deny','ui build','secret'"
+```
+
+⚠ 这是**文档缺陷**，不是本票的验收项：`AGENTS.md`「内循环」一节与
+`scripts/dev.ps1 help` 里的示例都写成 `-Skip 'deny,ui build'` 那种形式，
+照抄会得到一个「以为跳了、其实没跳」的 PARTIAL 结论。
+本票只记录，**不在这里改**（那是另一处所有权）。
 
 

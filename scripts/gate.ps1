@@ -20,6 +20,30 @@ $stepTime = [ordered]@{}
 # 关掉增量编译换一个确定的缓存位置，代价是慢一点。
 $env:CARGO_INCREMENTAL = "0"
 
+# 与 `ci.yml:42` / `release.yml:44` 同一份覆盖，**不是**本机的特殊需要——
+# 而是本地门禁从来没设过它，于是「本机能编」取决于磁盘上碰巧有没有权重：
+# 取过权重的机器绿，没取过的机器在 cargo 步骤上 exit 101。
+# 而 `target/` 是 gitignored 的，**两种机器都在正常使用**
+# ⇒ 门禁的结论跟着机器走，不跟代码走，而绿的那一侧证明不了任何东西。
+#
+# 2026-10-19 实测（无权重那支，`Test-Path target\models` = False）：
+# `cargo clippy` / `cargo test` 直接挂在 build script 上，exit 101——
+# tauri-build 在 `cargo check/clippy/test` 时就遍历 `bundle.resources`，
+# glob 匹配为空**无条件**抛 `GlobPathNotFound`（tauri-utils `resources.rs:289`）。
+# 措辞要紧：不是「文件缺失才抛」，是「匹配为空就抛」，
+# 所以目录在、内容不在也一样炸。
+#
+# 为什么是 `null` 而不是 `{}`：`TAURI_CONFIG` 走 `json_patch::merge`
+# （tauri-build `lib.rs:684`，即 RFC 7396 merge patch），**空对象是空操作**——
+# 写 `{"bundle":{"resources":{}}}` 什么都不会删。必须给 `null` 才真的删掉那个键，
+# 删掉后 `config.bundle.resources` 是 `None`，`lib.rs:745-749` 的
+# `unwrap_or(List(vec![]))` 就不会去迭代 glob。
+#
+# 为什么本机可以这么干：`gate.ps1` 从不跑 `tauri build`，那个 resources 映射
+# 在这里本来就不会被用到（与 CI 同一个理由）。**真要打包的那条路**在
+# `release.yml` 里，靠 `fetch_models.py` 取权重，不能靠这个覆盖糊过去。
+$env:TAURI_CONFIG = '{"bundle":{"resources":null}}'
+
 function Step($name, $scriptblock) {
   Write-Output ""
   Write-Output "========== $name =========="
