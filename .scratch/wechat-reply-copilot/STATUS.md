@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **71** ｜ 验收项全勾 **49** ｜ 已收但留有说明项 **13** ｜ 未收 **9**
+票据总数 **72** ｜ 验收项全勾 **50** ｜ 已收但留有说明项 **13** ｜ 未收 **9**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -23,14 +23,14 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | 票 | 勾/总 | Status | Blocked by |
 |---|---|---|---|
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
-| `21-readout-phase-never-sent.md` | 5/7 | ready-for-human · **P0 · 2026-10-12 实测，不是推断** | None（可以立刻做） |
+| `21-readout-phase-never-sent.md` | 6/7 | ready-for-human · **P0 · 2026-10-12 实测，不是推断** | None（可以立刻做） |
 | `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 4/7 | needs-triage · **2026-10-17：四个候选全部否完，可测的量已穷尽** | **要人眼**（真 WebView2 上并排四候选过一次） |
 | `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-human · **2026-10-18：措辞订正——这票已不是「待做」** | (票面没写 Blocked by) |
 | `44-candidate-action-row-is-button-geometry-on-prose.md` | 18/18 | ready-for-human · **2026-10-18 订正：只剩一条真正未决** | (票面没写 Blocked by) |
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-18 订正：Status 里那个「新撞出的缺陷」已不存在** | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `51-release-cannot-fetch-dict.md` | 19/21 | ready-for-human | 发版那一跳需要你授权打 tag（⚠ **打 tag 会真的发一个 release**）。 |
-| `68-same-draft-shown-twice.md` | 10/11 | ready-for-human · **2026-10-19 已改完并过门禁与实机 DOM 复核； | (票面没写 Blocked by) |
+| `68-same-draft-shown-twice.md` | 11/11 | ready-for-human · **2026-10-19 已改完并过门禁与实机 DOM 复核； | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
@@ -103,3 +103,4 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `69-ci-red-because-an-unreachable-precondition.md` | 11/11 |
 | `70-config-actions-gated-on-the-transport.md` | 12/12 |
 | `71-two-character-name-breaks-the-identity-gate.md` | 3/3 |
+| `72-product-read-path-hand-rolled-its-own-ocr-recipe.md` | 0/0 |
