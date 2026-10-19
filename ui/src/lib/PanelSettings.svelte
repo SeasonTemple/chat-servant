@@ -220,8 +220,10 @@
   async function commitModelName(g: GroupView) {
     delete modelErr[g.id];
     try {
-      await invoke<ModelView>('set_model', { group: g.id, model: drafts[g.id] ?? '' });
-      drafts[g.id] = '';
+      // ⚠ **用 `modelDrafts`，不是 `drafts`**——后者是 **key** 的草稿。
+      // 两者共用一个变量时，模型名会被当 key 存进凭据管理器（见 `modelDrafts` 的注释）。
+      await invoke<ModelView>('set_model', { group: g.id, model: modelDrafts[g.id] ?? '' });
+      modelDrafts[g.id] = '';
       await refresh();
     } catch (e) {
       await refresh();
@@ -245,6 +247,19 @@
    *   测连通走的也是「当前这一路」，所以卡片与它是同一个对象。
    */
   let drafts = $state<Record<string, string>>({});
+  /**
+   * **模型名**的草稿。**与 key 的草稿分开**——
+   *
+   * ⚠ 2026-10-20 修一处真机才暴露的串味：模型名输入框与 key 输入框
+   * **绑的是同一个 `drafts[g.id]`**。后果有两头：
+   *   ① 填 key ⇒ **明文 key 出现在 `type="text"` 的模型名框里**
+   *      （真机截图实拍：密码框掩着，旁边的文本框里却是 `sk-…`），
+   *      而密码框存在的意义正是「不让人一眼看见 key」；
+   *   ② 填模型名 ⇒ 模型名进了密码框 ⇒ 点「保存」会把**模型名当 key**
+   *      存进凭据管理器，而用户刚粘的那把真 key 被顶掉。
+   * 两边是**两样东西**，必须有两个变量。
+   */
+  let modelDrafts = $state<Record<string, string>>({});
   /** 自定义端点的地址草稿。**提交前不生效**——每一次换协议/换厂商都要重发。 */
   let endpoints = $state<Record<string, string>>({});
   let busy = $state<Record<string, boolean>>({});
@@ -1140,7 +1155,7 @@
               autocomplete="off"
               spellcheck="false"
               placeholder="模型名要你自己填"
-              bind:value={drafts[g.id]}
+              bind:value={modelDrafts[g.id]}
             />
             <button
               class="cs-btn cs-btn-mini primary"

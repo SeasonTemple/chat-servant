@@ -393,6 +393,17 @@ pub struct LoopConfig {
     pub provider: Provider,
     /// 「重新锁定当前会话」的一次性请求。命令层与循环共用。
     pub relock: Relock,
+    /// 两组模型配置。**循环自己要用**——
+    /// 传输变了要按**当前**格子重建（改了 key / 换了厂商要立刻生效）。
+    pub groups: crate::commands::ModelGroups,
+    /// 出站代理。重建传输时要用**同一个**代理格。
+    pub proxy: chatservant_reason::ProxyCell,
+    /// **启动时这条传输的指纹。**
+    ///
+    /// 循环拿它当「上一次重建的那一条」的基准——变了才重建。
+    /// ⚠ 必须**随传输一起交出去**：循环线程起来时全局状态可能还没建好，
+    ///   那时自己算会得到「没有」，第一圈就会误判成「传输变了」。
+    pub transport_fp: u64,
 }
 
 /// 一轮里的**可变会话状态**。合成一个结构体，而不是给 `step` 递九个 `&mut`。
@@ -802,6 +813,14 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
             s.provider = cfg.provider;
             s.relock = cfg.relock.clone();
             s.source = cfg.source.clone();
+            // 重建传输要用的两样：**同一个**格子与**同一个**代理格。
+            let groups = cfg.groups.clone();
+            let proxy = cfg.proxy.clone();
+            // 当前这条传输的指纹。**变了就重建**——
+            // 这就是「设置改动下一次生成立即生效，不用重启」那条的落点。
+            // 基准由启动时交过来（见 `LoopConfig::transport_fp`），
+            // 不在这里自己算：那时候全局状态可能还没建好。
+            let mut transport_fp = cfg.transport_fp;
             let mut last_calls = 0u32;
             let mut ticks = 0u64;
             let mut anchor: Option<PaneAnchor> = None;
@@ -833,6 +852,26 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         "tick={ticks} peer={:?} candidates={}",
                         s.peer,
                         s.candidates.len()
+                    );
+                }
+                // ⚠ **传输变了就重建。**
+                //
+                // 「设置改动下一次生成立即生效，不用重启」——这一段是它的落点。
+                // 变的三种情形：换了厂商、换了 key、key 从没有到有。
+                //
+                // ⚠ **判据是「指纹变了没有」，不是「设置页有没有被点过」**：
+                //   点过但没改（或者改回原样）不该重建——重建要起一个 tokio
+                //   runtime，不是免费的。
+                let fp = crate::commands::transport_fingerprint().unwrap_or(transport_fp);
+                if fp != transport_fp {
+                    transport_fp = fp;
+                    let (new_reasoner, ready) = crate::commands::build_reasoner(&groups, &proxy);
+                    reasoner = new_reasoner;
+                    // 计费那一档跟着**回复组**走（图片外发跟着起草走）。
+                    s.provider = groups.llm.provider();
+                    tracing::info!(
+                        transport_ready = ready,
+                        "传输已按当前设置重建（key 或厂商变了）"
                     );
                 }
                 let t_round = std::time::Instant::now();

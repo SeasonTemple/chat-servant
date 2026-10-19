@@ -55,9 +55,18 @@ struct AppState {
     /// 「用哪个模型」。**同样必须与推理器共用同一格**——
     /// 新造一个的话设置页会显示「已切到 X」，而出网时发的还是旧模型。
     ///
-    /// **两组**（`None` = 还没有真实传输）。为什么要两组见 [`ModelGroup`]：
+    /// **两组**。为什么要两组见 [`ModelGroup`]：
     /// 「决策走 A、文字走 B」在只有一格模型名时表达不了。
-    models: Option<ModelGroups>,
+    ///
+    /// ⚠⚠ **它永远存在，不因为「还没有传输」就没有**（2026-10-20 修的真机死路，
+    /// 见 `.scratch/…/70-*.md`）：这两格是**配置**（走哪一家、哪个模型名），
+    /// 而「有没有传输」是**运行时**的事，两者是两回事。
+    /// 早先把它挂在传输上（没有 key 就没有格子）⇒ 全新安装时
+    /// 「选厂商」「测连通」「填模型名」**全都**返回
+    /// 「还没接上真实传输（没有可用 key）」，
+    /// 而没配 key 正是用户来这一页的原因——
+    /// **先有鸡还是先有蛋**，产品的第一步是死的。
+    models: ModelGroups,
     /// 出站代理。**网络层的属性，两组共用**——所以界面上是单独一栏。
     proxy: chatservant_reason::ProxyCell,
     /// 发送档位。**唯一事实来源**，前端只请求改。
@@ -1310,20 +1319,35 @@ pub const PROVIDERS: &[&str] = &[
 ];
 
 /// 两组模型配置。与推理器**共用同一格**的句柄。
+///
+/// `pub(crate)`：观察循环要按当前设置**重建传输**，重建就得拿到同一格
+/// （见 [`build_reasoner`]）。
 #[derive(Clone)]
-struct ModelGroups {
-    decision: chatservant_reason::ModelCell,
-    llm: chatservant_reason::ModelCell,
+pub(crate) struct ModelGroups {
+    pub(crate) decision: chatservant_reason::ModelCell,
+    pub(crate) llm: chatservant_reason::ModelCell,
 }
 
 impl ModelGroups {
-    fn cell(&self, g: ModelGroup) -> &chatservant_reason::ModelCell {
+    /// 程序还没起来时的兜底：两组共用**默认那一格**（OpenAI 预设）。
+    ///
+    /// 那是**真值**（OpenAI 的预设端点确实存在），不是编的假端点。
+    fn default_openai() -> Self {
+        let cell = chatservant_reason::ModelCell::new(
+            Route::preset(Provider::OpenAi).expect("OpenAI 有预设端点"),
+        );
+        ModelGroups {
+            decision: cell.clone(),
+            llm: cell,
+        }
+    }
+
+    pub(crate) fn cell(&self, g: ModelGroup) -> &chatservant_reason::ModelCell {
         match g {
             ModelGroup::Decision => &self.decision,
             ModelGroup::Llm => &self.llm,
         }
     }
-
     /// 这一组与**哪一组**共用同一格？`None` = 各配各的。
     ///
     /// 界面上要**明说**这一点，否则用户改一节的端点时会发现另一节跟着变了，
@@ -1337,7 +1361,7 @@ impl ModelGroups {
     ///
     /// ⚠ 判据用 [`ModelCell::same_cell`] 的**身份**而不是比值，
     /// 见那个函数的注释。
-    fn shares_with(&self, g: ModelGroup) -> Option<ModelGroup> {
+    pub(crate) fn shares_with(&self, g: ModelGroup) -> Option<ModelGroup> {
         if !self.decision.same_cell(&self.llm) {
             return None;
         }
@@ -1488,27 +1512,38 @@ fn model_view(group: ModelGroup, cell: &chatservant_reason::ModelCell) -> ModelV
     }
 }
 
-/// 在**共享的那一格**上跑一段闭包。
+/// 在**这一组的那一格**上跑一段闭包。
 ///
-/// 拿不到格子（还没 `start()`，也就是没有可用 key）就报那句统一的话——
-/// 与其在这里造一个假格子，不如让界面知道「现在没有真东西可改」。
+/// ⚠ **拿不到格子只有一个原因：程序还没起来**（`start()` 还没跑）。
+///
+/// 早先这里是「没有可用 key ⇒ 就没有格子」，
+/// 于是「选厂商」「测连通」「填模型名」三件事在**全新安装**时**全都**被挡住，
+/// 而没配 key 正是用户来这一页的原因（见 `.scratch/…/70-*.md`）。
+/// ⇒ 那一格现在**永远存在**；这里唯一还失败的情况是程序没起来。
 fn with_cell<R>(
     group: ModelGroup,
     f: impl FnOnce(&chatservant_reason::ModelCell) -> R,
 ) -> Result<R, String> {
-    let cell = with_state(|s| s.models.as_ref().map(|m| m.cell(group).clone())).flatten();
-    cell.as_ref().map(f).ok_or_else(no_transport_note)
+    let cell = with_state(|s| s.models.cell(group).clone());
+    cell.as_ref().map(f).ok_or_else(state_not_ready)
+}
+
+/// 「程序还没起来」时那句话。
+fn state_not_ready() -> String {
+    "程序还没起来，设置改不了".to_string()
 }
 
 /// 读设置页要的那一屏。**两组各自独立 + 一栏共用代理。**
 #[tauri::command]
 pub fn get_settings() -> SettingsView {
-    let models = with_state(|s| s.models.clone()).flatten();
+    // 程序还没起来时用**默认那一格**（OpenAI 预设）——
+    // 那是一个真值，不是编的假端点。
+    let models = with_state(|s| s.models.clone()).unwrap_or_else(ModelGroups::default_openai);
     let proxy = with_state(|s| s.proxy.get()).flatten().unwrap_or_default();
     SettingsView {
         groups: ModelGroup::ALL
             .iter()
-            .map(|g| group_view(*g, models.as_ref()))
+            .map(|g| group_view(*g, &models))
             .collect(),
         proxy: ProxyView {
             url: proxy,
@@ -1524,31 +1559,32 @@ pub fn get_settings() -> SettingsView {
     }
 }
 
-fn group_view(g: ModelGroup, models: Option<&ModelGroups>) -> GroupView {
-    // 没有真实传输时这一组也要渲染——**用户正是要在没配好的时候配置它**。
-    // 这与「没 key 时不列模型」是两条不同的规则：模型清单要真实，
-    // 而 key 输入框必须能显示（见 `.scratch/…/40-key-input-unreachable-when-unset.md`）。
-    let (route, model, models_list, shares_with) = match models {
-        None => (
-            // 没有真实传输时也给一个**真值**（OpenAI 预设），
-            // 而不是编一个假端点——这一格是回显「当前这一路」，
-            // 编一个的话界面显示的地址从未生效。
-            Route::preset(Provider::OpenAi).expect("OpenAI 有预设端点"),
-            String::new(),
-            Vec::new(),
-            None,
-        ),
-        Some(m) => {
-            let c = m.cell(g);
-            (
-                c.route(),
-                c.get(),
-                c.models().iter().map(|s| (*s).to_string()).collect(),
-                m.shares_with(g).map(|o| o.label().to_string()),
-            )
-        }
+fn group_view(g: ModelGroup, models: &ModelGroups) -> GroupView {
+    let c = models.cell(g);
+    let route = c.route();
+    // 「有没有 key」这一句要问凭据管理器（I/O），
+    // 所以判据本身挪进 `group_view_with`——那边是纯函数，能被直接断言。
+    let has_key = route_has_key(g, models, &route);
+    group_view_with(g, models, &route, has_key)
+}
+
+/// 组视图。**「有没有 key」由调用方给**——
+/// 这样这一段是纯函数，可以在没有凭据的机器上断言
+/// （那一段的判据在 [`route_has_key`] 里，它要问凭据管理器）。
+fn group_view_with(g: ModelGroup, models: &ModelGroups, route: &Route, has_key: bool) -> GroupView {
+    let c = models.cell(g);
+    let model = c.get();
+    // 模型清单是**这一家自己**的目录（静态，不是传输给的），
+    // 但**没有 key 就不列**：那一格现在点了什么也不会发生——
+    // 那正是这个项目一直在删的「调了没反应的控制项」。
+    let models_list = if has_key {
+        route.models().iter().map(|s| (*s).to_string()).collect()
+    } else {
+        Vec::new()
     };
-    let model_note = if models_list.is_empty() {
+    let model_note = if !has_key {
+        no_transport_note()
+    } else if models_list.is_empty() {
         "这一路没有可选清单——模型名要你自己填。".to_string()
     } else if route.measured() {
         "只列本机实测能通的模型。".to_string()
@@ -1565,12 +1601,29 @@ fn group_view(g: ModelGroup, models: Option<&ModelGroups>) -> GroupView {
             ModelGroup::Llm => "起草与排序那两段。图片（如果外发闸开着）跟着这一组走。".into(),
         },
         providers: PROVIDERS.iter().map(|p| provider_view(g, p)).collect(),
-        route: RouteView::of(&route),
+        route: RouteView::of(route),
         models: models_list,
         model,
         model_note,
-        shares_with,
+        shares_with: models.shares_with(g).map(|o| o.label().to_string()),
     }
+}
+
+/// 这一组走**这一路**时，有没有可用 key。
+///
+/// 判据是**凭据**（凭据管理器里的，或环境变量里的），
+/// **不是「程序此刻有没有传输」**——后者只在启动时算一次，
+/// 而 key 可以是**刚存进去的**。
+///
+/// 借格子的那一组要看**被借那组**有没有 key：
+/// 决策组没单独配 key 时它借回复组那一格，走的也是回复组那把 key。
+fn route_has_key(g: ModelGroup, models: &ModelGroups, route: &Route) -> bool {
+    let provider = route.provider().key();
+    secret::status(g, provider).configured
+        || models
+            .shares_with(g)
+            .map(|other| secret::status(other, provider).configured)
+            .unwrap_or(false)
 }
 
 fn provider_view(group: ModelGroup, id: &str) -> ProviderView {
@@ -1609,13 +1662,32 @@ pub fn set_route(
 ) -> Result<GroupView, String> {
     let g = parse_group(&group)?;
     let route = route_from_input(&provider, protocol.as_deref(), base_url.as_deref())?;
-    let models = with_state(|s| s.models.clone())
-        .flatten()
-        .ok_or_else(no_transport_note)?;
-    models.cell(g).set_route(route);
+    // ⚠ **这里不要求「已经有传输」。**
+    //
+    // 「走哪一家」是**配置**，而「有没有传输」是运行时的事。
+    // 早先这里要求 `models` 存在（= 已经有 key），
+    // 于是全新安装时**选不了厂商**——而 key 只能存给默认那家，
+    // 于是**只有 OpenAI 用户能完成首次配置**（见 `.scratch/…/70-*.md`）。
+    let models = with_state(|s| s.models.clone()).ok_or_else(state_not_ready)?;
+    let applied = apply_route(&models, g, route);
     // 回包是**读回来的真实状态**（含另一组是不是与我同路），
     // 而不是把传进去的三项原样弹回去——界面必须显示程序认定的那个。
-    Ok(group_view(g, Some(&models)))
+    let mut view = group_view(g, &models);
+    // `apply_route` 返回的是**改完之后的真值**（换厂商时模型名会被重置）。
+    view.route = RouteView::of(&applied);
+    Ok(view)
+}
+
+/// 换厂商这件事本身。**纯函数**——不碰全局状态、不碰凭据。
+///
+/// 单独拎出来是为了能断言一件要紧的事：
+/// **改配置不需要传输**（没有 key 也能改）。
+/// 早先它要求「已经有传输」，而传输要 key ⇒ 全新安装时这一步直接被挡住，
+/// 于是 key 只能存给默认那家（见 `.scratch/…/70-*.md`）。
+///
+/// 返回**改完之后**这一格上的真值（换厂商时模型名会被重置成新那家的默认）。
+fn apply_route(groups: &ModelGroups, g: ModelGroup, route: Route) -> Route {
+    groups.cell(g).set_route(route)
 }
 
 /// 由界面那三项（厂商 / 协议 / 端点）造出**一条真实生效的路**。
@@ -1889,11 +1961,20 @@ pub fn forget_key(group: String, provider: String) -> Result<(), String> {
 ///
 /// 测的是**这一组当前这一路**，包括用户自己填的端点。所以它同时
 /// 是「自定义端点填对没有」的那一次验证——而界面上不会说它是另一样东西。
+///
+/// ⚠ **它不需要「已经有传输」。** 探针自己带 key、自己发请求，
+/// 而 key 是从**凭据管理器**读的（不是从传输里拿的）——
+/// 所以「刚把 key 存进去、还没重启」这一档也测得了。
+/// 早先它要求 `models` 存在，于是**全新安装时这个按钮永远失败**
+/// （见 `.scratch/…/70-*.md`）。
 #[tauri::command]
 pub fn probe_key(group: String) -> Result<bool, String> {
     let g = parse_group(&group)?;
-    let route = with_cell(g, |c| c.route())?;
-    let Some(key) = secret::load(g, route.provider().key()) else {
+    let models = with_state(|s| s.models.clone()).ok_or_else(state_not_ready)?;
+    let route = models.cell(g).route();
+    // 借格子的那一组走的是**被借那组**那把 key（共享是有方向的）。
+    let key = key_for(g, &models, &route);
+    let Some(key) = key else {
         return Err(secret::missing_hint(g, route.provider().key()));
     };
     let proxy = with_state(|s| s.proxy.get()).flatten();
@@ -2046,101 +2127,33 @@ const LOCKED_PEER: &str = "小号";
 ///   这是有意的默认：绝大多数用户只有一把 key，逼他配两把只会让人
 ///   第一步就卡住。界面上用 `shares_with` **明说**这件事，
 ///   而一旦在这一组填了自己的 key / 选了别的端点，两边立刻分开。
-/// ⚠ **反方向同样成立**：只配了决策组时，回复组沿用决策组那一格
-///   （`llm_cell` 那行 `unwrap_or_else(|| decision_cell.clone())`），
+/// ⚠ **反方向同样成立**：只配了决策组时，回复组沿用决策组那一格，
 ///   所以提示语必须说清**借的是哪一组**，不能把对方的名字写死。
 ///
-/// 第二个返回值是两组格子的句柄。**它们不在 `LoopConfig` 里**：
-/// 循环自己不读这些格子，读它的是推理器内部——而推理器已经被
-/// `Box<dyn Reasoner>` 吃掉了，从外面拿不回来。命令层要改模型与端点
-/// 就必须拿到**同一个**格子，所以在这里一并交出去。
+/// ## 格子与传输**分开**
+///
+/// 格子（走哪一家、哪个模型名）是**配置**，**永远存在**；
+/// 传输（真正出网的那条路）需要 key，没有就用预置。
+///
+/// 早先这两件事绑在一起（没有 key ⇒ 连格子都不建），
+/// 于是全新安装时「选厂商」「测连通」「填模型名」**全都**报
+/// 「还没接上真实传输（没有可用 key）」，
+/// 而没配 key 正是用户来这一页的原因——**产品的第一步是死的**
+/// （见 `.scratch/…/70-*.md`）。
+///
+/// 第二个返回值是两组格子的句柄。**它们也在 `LoopConfig` 里**：
+/// 循环要能按当前设置**重建传输**（改了 key / 换了厂商要立刻生效），
+/// 而重建就得拿到**同一个**格子。
 ///
 /// **不落盘**：这两组配置与代理都只在内存里，与 `recent_n` / 预算
 ///   那一批设置同生命周期。重启后回到预设默认——凭据本身在凭据管理器里，
 ///   但「走哪一家」要重新选。持久化不在本票范围内。
-fn build_loop_config() -> (
-    LoopConfig,
-    Option<ModelGroups>,
-    chatservant_reason::ProxyCell,
-) {
-    use chatservant_reason::{HttpReasoner, ModelCell, ProxyCell};
+fn build_loop_config() -> (LoopConfig, ModelGroups, chatservant_reason::ProxyCell) {
+    use chatservant_reason::ProxyCell;
 
     let proxy = ProxyCell::new();
-    // 谁有 key 就用谁。**默认先试 OpenAI**——设置页上它是第一个选项。
-    let order: [Provider; 3] = [Provider::OpenAi, Provider::Anthropic, Provider::MiniMax];
-
-    let build = |group: ModelGroup| -> Option<(HttpReasoner, ModelCell)> {
-        for provider in order {
-            let Some(key) = secret::load(group, provider.key()) else {
-                continue;
-            };
-            let Ok(route) = chatservant_reason::Route::preset(provider) else {
-                continue;
-            };
-            // 模型格子**先建一份**，推理器和命令层各拿一个 clone ——
-            // 两边指的是同一格，所以设置页改完下一次生成就用新的。
-            let model = ModelCell::new(route);
-            // **起不起得来传输不是「配好了」的同义词。** genai 那条路要起一个
-            // tokio runtime，那是真会失败的一步。失败就**退回预置传输**，
-            // 不能让整个面板起不来——而预置候选每条都带自曝标记，
-            // 用户不会把它当成模型输出。
-            match HttpReasoner::with_config(model.clone(), key, proxy.clone()) {
-                Ok(r) => return Some((r, model)),
-                Err(_) => {
-                    tracing::error!(
-                        "provider={} 有 key，但装不起真实传输——这一组退回预置传输",
-                        provider.key()
-                    );
-                    return None;
-                }
-            }
-        }
-        None
-    };
-
-    let llm = build(ModelGroup::Llm);
-    // 决策组优先用自己的；没有就**沿用回复组那一路**（同一个格子）。
-    let decision_owned = build(ModelGroup::Decision).or_else(|| llm.clone());
-    let decision_cell = decision_owned
-        .as_ref()
-        .map(|(_, c)| c.clone())
-        .unwrap_or_else(|| {
-            ModelCell::new(
-                chatservant_reason::Route::preset(Provider::OpenAi).expect("OpenAI 有预设端点"),
-            )
-        });
-    let llm_cell = llm
-        .as_ref()
-        .map(|(_, c)| c.clone())
-        .unwrap_or_else(|| decision_cell.clone());
-
-    // ⚠⚠ **判据是「任一组有真实传输」，不是「回复组有」。**
-    // 2026-10-19 实测过的坏组合：只配了**决策组**的 key、没配回复组时，
-    //   · reasoner 走的是 `SplitReasoner` 缺席的那一支 —— `(Some(d), None)`
-    //     ⇒ `Box::new(d.clone())`，**三段全走真实传输、真的在出网**；
-    //   · 而原判据 `llm.is_some()` 是 false ⇒
-    //     ① 日志打「没有可用 key——用预置传输。候选是假的」，**这句是假的**；
-    //     ② `models` 整个是 `None` ⇒ 设置页两组都在，但改端点/模型名
-    //        全部返回「还没有真实传输」，**两个格子都点不动**。
-    // 也就是「真在调」与「说自己在假装」同时发生，而用户改不了配置。
-    let transport_ready = decision_owned.is_some() || llm.is_some();
-    // 计数要**覆盖三段全部**：「静默期零调用」那条硬约束断言的就是
-    // `calls()`，所以任何一段走了预置传输都要被如实计入（它本来就不发请求）。
-    let reasoner: Box<dyn chatservant_reason::Reasoner + Send> = match (&decision_owned, &llm) {
-        (Some((d, _)), Some((l, _))) => Box::new(SplitReasoner {
-            decision: d.clone(),
-            llm: l.clone(),
-        }),
-        // **至少要有回复组**，否则整个程序没有真实传输。
-        (Some((d, _)), None) => Box::new(d.clone()),
-        (None, Some((l, _))) => Box::new(l.clone()),
-        (None, None) => Box::new(PresetReasoner),
-    };
-
-    let groups = ModelGroups {
-        decision: decision_cell,
-        llm: llm_cell,
-    };
+    let groups = startup_groups();
+    let (reasoner, transport_ready) = build_reasoner(&groups, &proxy);
     let provider = groups.llm.provider();
 
     (
@@ -2156,15 +2169,200 @@ fn build_loop_config() -> (
             tier: crate::watch::TierCell::default_manual(),
             relock: crate::watch::Relock::new(),
             provider,
+            groups: groups.clone(),
+            proxy: proxy.clone(),
+            // 启动时这条传输的指纹。**跟着传输一起交出去**——
+            // 循环线程起来时全局状态可能还没建好，那时算出来是「没有」，
+            // 于是第一圈会误判成「传输变了」而白重建一次。
+            transport_fp: fingerprint_of_groups(&groups),
         },
-        // **没有真实传输就没有模型格子。** 返回 `None` 而不是造一个：
-        // 造一个的话设置页会列出一堆「可选模型」，而点下去什么也不会发生
-        // ——那正是这个项目一直在删的「调了没反应的控制项」。
-        // 但 key 输入框**仍然要显示**（见 `group_view`），
-        //   因为没配 key 正是用户来这一页的原因。
-        transport_ready.then_some(groups),
+        groups,
         proxy,
     )
+}
+
+/// **启动时**两组各走哪一家、是不是同一格。
+///
+/// 判据是「谁有 key」：先试 OpenAI，再 Anthropic，再 MiniMax。
+/// 都没有 ⇒ 两组共用**默认那一格**（OpenAI 预设）——那是真值，
+/// 不是编的假端点。
+///
+/// ⚠ 共享是**有方向的**：没自己 key 的那一组借另一组那一格。
+///   借格子就是连路由一起借（key 跟格子走）。
+fn startup_groups() -> ModelGroups {
+    use chatservant_reason::ModelCell;
+
+    // 谁有 key 就用谁。**默认先试 OpenAI**——设置页上它是第一个选项。
+    let order: [Provider; 3] = [Provider::OpenAi, Provider::Anthropic, Provider::MiniMax];
+    let route_of = |g: ModelGroup| -> Route {
+        for provider in order {
+            if secret::load(g, provider.key()).is_some()
+                && let Ok(route) = Route::preset(provider)
+            {
+                return route;
+            }
+        }
+        Route::preset(Provider::OpenAi).expect("OpenAI 有预设端点")
+    };
+    let decision_route = route_of(ModelGroup::Decision);
+    let llm_route = route_of(ModelGroup::Llm);
+    let decision_own =
+        secret::load(ModelGroup::Decision, decision_route.provider().key()).is_some();
+    let llm_own = secret::load(ModelGroup::Llm, llm_route.provider().key()).is_some();
+    match (decision_own, llm_own) {
+        // 各配各的 ⇒ 两格
+        (true, true) => ModelGroups {
+            decision: ModelCell::new(decision_route),
+            llm: ModelCell::new(llm_route),
+        },
+        // 只配了决策组 ⇒ 回复组借它那一格
+        (true, false) => {
+            let c = ModelCell::new(decision_route);
+            ModelGroups {
+                decision: c.clone(),
+                llm: c,
+            }
+        }
+        // 只配了回复组 ⇒ 决策组借它那一格
+        (false, true) => {
+            let c = ModelCell::new(llm_route);
+            ModelGroups {
+                decision: c.clone(),
+                llm: c,
+            }
+        }
+        // 都没有 ⇒ 两组共用默认那一格
+        (false, false) => ModelGroups::default_openai(),
+    }
+}
+
+/// 按**当前格子与凭据管理器**组装传输。
+///
+/// 返回 `(传输, 是不是真的)`——第二个给日志与界面那句「用预置传输」用。
+///
+/// ⚠ **key 是按「这一格当前的厂商」去找的**，不是启动时那一把：
+///   用户在设置页换了厂商，key 就得跟着换；换不到就**没有传输**
+///   （那一组退回预置），而不是**拿旧 key 去问新厂商**——
+///   那是把 A 家的密钥送到 B 家的服务器上。
+pub(crate) fn build_reasoner(
+    groups: &ModelGroups,
+    proxy: &chatservant_reason::ProxyCell,
+) -> (Box<dyn chatservant_reason::Reasoner + Send>, bool) {
+    let decision = build_one(ModelGroup::Decision, groups, proxy);
+    let llm = build_one(ModelGroup::Llm, groups, proxy);
+    // ⚠⚠ **判据是「任一组有真实传输」，不是「回复组有」。**
+    // 2026-10-19 实测过的坏组合：只配了**决策组**的 key、没配回复组时，
+    //   · reasoner 走的是 `SplitReasoner` 缺席的那一支 —— `(Some(d), None)`
+    //     ⇒ `Box::new(d.clone())`，**三段全走真实传输、真的在出网**；
+    //   · 而原判据 `llm.is_some()` 是 false ⇒
+    //     ① 日志打「没有可用 key——用预置传输。候选是假的」，**这句是假的**；
+    //     ② `models` 整个是 `None` ⇒ 设置页两组都在，但改端点/模型名
+    //        全部返回「还没有真实传输」，**两个格子都点不动**。
+    // 也就是「真在调」与「说自己在假装」同时发生，而用户改不了配置。
+    let ready = decision.is_some() || llm.is_some();
+    // 计数要**覆盖三段全部**：「静默期零调用」那条硬约束断言的就是
+    // `calls()`，所以任何一段走了预置传输都要被如实计入（它本来就不发请求）。
+    let reasoner: Box<dyn chatservant_reason::Reasoner + Send> = match (decision, llm) {
+        (Some(d), Some(l)) => Box::new(SplitReasoner {
+            decision: d,
+            llm: l,
+        }),
+        (Some(d), None) => Box::new(d),
+        (None, Some(l)) => Box::new(l),
+        (None, None) => Box::new(PresetReasoner),
+    };
+    (reasoner, ready)
+}
+
+/// 一组自己的传输。**没有 key 就没有**——
+/// 那时候只能用预置（候选每条都带自曝标记）。
+fn build_one(
+    g: ModelGroup,
+    groups: &ModelGroups,
+    proxy: &chatservant_reason::ProxyCell,
+) -> Option<chatservant_reason::HttpReasoner> {
+    let route = groups.cell(g).route();
+    let key = key_for(g, groups, &route)?;
+    // **起不起得来传输不是「配好了」的同义词。** genai 那条路要起一个
+    // tokio runtime，那是真会失败的一步。失败就**退回预置传输**，
+    // 不能让整个面板起不来——而预置候选每条都带自曝标记，
+    // 用户不会把它当成模型输出。
+    match chatservant_reason::HttpReasoner::with_config(groups.cell(g).clone(), key, proxy.clone())
+    {
+        Ok(r) => Some(r),
+        Err(e) => {
+            tracing::error!(
+                "provider={} 有 key，但装不起真实传输——这一组退回预置传输：{e}",
+                route.provider().key()
+            );
+            None
+        }
+    }
+}
+
+/// 这一组走这一路时用哪把 key。
+///
+/// 自己那组有就用自己的；没有就**借另一组那把**——
+/// 共享是有方向的（决策组没单独配 key 时它借回复组那一格），
+/// 而 key 是**跟格子走的**，所以借格子就得连 key 一起借。
+fn key_for(g: ModelGroup, groups: &ModelGroups, route: &Route) -> Option<String> {
+    let provider = route.provider().key();
+    secret::load(g, provider).or_else(|| {
+        groups
+            .shares_with(g)
+            .and_then(|other| secret::load(other, provider))
+    })
+}
+
+/// 当前这一轮**应该**用哪条传输的**指纹**。
+///
+/// 只含「变了没有」需要的信息：两组各自的厂商 + 各自那把 key 的哈希。
+/// **不含 key 本身**——指纹是要进日志的。
+///
+/// 判据为什么是「厂商 + key」两样：
+/// 换了厂商而 key 没换 ⇒ 新厂商那边没有可用 key ⇒ 传输得换；
+/// key 从没有到有 ⇒ 传输得换（不然永远是预置）。
+pub(crate) fn transport_fingerprint() -> Option<u64> {
+    let groups = with_state(|s| s.models.clone())?;
+    Some(fingerprint_of_groups(&groups))
+}
+
+/// 按**当前格子与凭据**算出的传输指纹。
+///
+/// ⚠ **启动时算的那一份要跟着传输一起交出去**（[`build_loop_config`]）：
+/// 循环线程起来时全局状态**可能还没建好**，那时候算出来是「没有」，
+/// 于是第一圈会误判成「传输变了」而重建一次——那一句日志是假的。
+fn fingerprint_of_groups(groups: &ModelGroups) -> u64 {
+    let mut providers: Vec<&'static str> = Vec::with_capacity(ModelGroup::ALL.len());
+    let mut keys: Vec<Option<String>> = Vec::with_capacity(ModelGroup::ALL.len());
+    for g in ModelGroup::ALL {
+        let route = groups.cell(g).route();
+        providers.push(route.provider().key());
+        keys.push(key_for(g, groups, &route));
+    }
+    let parts: Vec<(&str, Option<&str>)> = providers
+        .iter()
+        .zip(keys.iter())
+        .map(|(p, k)| (*p, k.as_deref()))
+        .collect();
+    fingerprint_of(&parts)
+}
+
+/// 传输指纹的**纯**内核：两组各自的「厂商 + 那把 key」。
+///
+/// 判据是「任一样变了，指纹就变」：
+/// 换了厂商而 key 没换 ⇒ 新厂商那边没有可用 key ⇒ 传输得换；
+/// key 从没有到有 ⇒ 传输得换（不然永远是预置）。
+///
+/// ⚠ **只哈希，不留 key 本身**——指纹是要进日志的。
+fn fingerprint_of(parts: &[(&str, Option<&str>)]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (provider, key) in parts {
+        provider.hash(&mut h);
+        key.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// **两段式路由**：判断走一组，起草与排序走另一组。
@@ -2706,6 +2904,184 @@ mod budget_ceiling_tests {
             assert!(!covers_ink, "红点 ({x},{y}) 盖住了勾的 {before:?}");
             assert!(*x > w / 2 && *y > h / 2, "红点 ({x},{y}) 不在右下角");
         }
+    }
+}
+
+/// 「配置动作不许再被『有没有传输』挡住」这组测试。
+///
+/// ⚠ 这三条对着 2026-10-20 修掉的真死路（见 `.scratch/…/70-*.md`）：
+///   早先 `models` 是 `Option<ModelGroups>`，**没有 key 就没有格子**，
+///   于是 `set_route`（选厂商）/ `set_model`（填模型名）/ `probe_key`（测连通）
+///   **全都**返回「还没接上真实传输（没有可用 key）」，
+///   而没配 key 正是用户来这一页的原因——
+///   **先有鸡还是先有蛋**，产品的第一步是死的。
+#[cfg(test)]
+mod config_without_transport_tests {
+    use super::*;
+    use chatservant_reason::Provider as P;
+
+    /// **没有 key 也能换厂商。**
+    ///
+    /// 这一条是死路的核心：换厂商是**配置**，
+    /// 而传输要 key 才存在 ⇒ 早先这一步在全新安装时直接被挡住。
+    #[test]
+    fn the_provider_can_be_switched_before_any_key_exists() {
+        let groups = ModelGroups::default_openai();
+        // 前置：这一格此刻是 OpenAI 预设。
+        assert_eq!(groups.cell(ModelGroup::Llm).provider(), P::OpenAi);
+
+        let applied = apply_route(
+            &groups,
+            ModelGroup::Llm,
+            Route::preset(P::MiniMax).expect("MiniMax 有预设端点"),
+        );
+        assert_eq!(applied.provider(), P::MiniMax, "改完读回来必须是新那家");
+        assert_eq!(
+            groups.cell(ModelGroup::Llm).provider(),
+            P::MiniMax,
+            "这一格真的换了"
+        );
+    }
+
+    /// **模型清单按「这一路有没有 key」给，不是按「程序有没有传输」。**
+    ///
+    /// 两个方向都要断言：只有正向时，「没 key 也不列」这条会退化成
+    /// 「永远列」——而那正是「调了没反应的控制项」。
+    #[test]
+    fn the_model_list_follows_the_key_not_the_transport() {
+        let groups = ModelGroups::default_openai();
+        let route = groups.cell(ModelGroup::Llm).route();
+
+        // 没有 key ⇒ 不列清单，并说清是「还没接上真实传输」。
+        let v = group_view_with(ModelGroup::Llm, &groups, &route, false);
+        assert!(
+            v.models.is_empty(),
+            "没有 key 时列出来的模型点了什么也不会发生：{:?}",
+            v.models
+        );
+        assert_eq!(v.model_note, no_transport_note());
+
+        // 有 key ⇒ 列这一家自己的目录。
+        let v2 = group_view_with(ModelGroup::Llm, &groups, &route, true);
+        assert_eq!(v2.models, vec!["gpt-4o-mini".to_string()]);
+        assert_eq!(v2.model_note, "只列本机实测能通的模型。");
+    }
+
+    /// **传输指纹：厂商或 key 任一样变了，指纹就得变。**
+    ///
+    /// 指纹是「要不要重建传输」的判据。判据漏了一样 ⇒
+    /// 「改了设置不用重启」那条在**那一种**改动上就是假的。
+    #[test]
+    fn the_transport_fingerprint_moves_with_the_provider_or_the_key() {
+        let a = fingerprint_of(&[("openai", Some("k1")), ("minimax", None)]);
+        let same = fingerprint_of(&[("openai", Some("k1")), ("minimax", None)]);
+        let other_key = fingerprint_of(&[("openai", Some("k2")), ("minimax", None)]);
+        let other_provider = fingerprint_of(&[("minimax", Some("k1")), ("minimax", None)]);
+        let now_has_key = fingerprint_of(&[("openai", Some("k1")), ("minimax", Some("k3"))]);
+
+        assert_eq!(a, same, "什么都没变就不该重建");
+        assert_ne!(a, other_key, "key 变了必须重建");
+        assert_ne!(a, other_provider, "厂商变了必须重建");
+        assert_ne!(a, now_has_key, "从没有 key 到有 key 必须重建");
+    }
+
+    /// **机器守卫：配置命令不许再挂回「有没有传输」那道闸。**
+    ///
+    /// 这条是**类型层面**的回归（`models` 变回 `Option`，
+    /// 或某个命令又加回那句闸），靠人 review 抓不住——
+    /// 那道闸当年就是「看着挺合理」才加上的。
+    #[test]
+    fn the_settings_commands_are_not_gated_on_the_transport() {
+        let me = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands.rs");
+        let text = std::fs::read_to_string(&me).expect("读得到自己的源码");
+        // 只看**测试模块之前**的那一半——守卫自己会提到那句话的字面量。
+        let prod = text.split("#[cfg(test)]").next().unwrap_or_default();
+        for cmd in ["pub fn set_route", "pub fn set_model", "pub fn probe_key"] {
+            let start = prod
+                .find(cmd)
+                .unwrap_or_else(|| panic!("源码里找不到 {cmd}"));
+            let body = &prod[start..];
+            // fn 的收尾大括号在行首（rustfmt 就是这么排的）。
+            let end = body.find("\n}\n").unwrap_or(body.len());
+            let body = &body[..end];
+            assert!(
+                !body.contains("no_transport_note"),
+                "{cmd} 又被「有没有传输」挡住了——全新安装时这一步直接走不通"
+            );
+        }
+        // 那一格也不许退回 `Option`（那正是死路的来源）。
+        assert!(
+            !prod.contains("models: Option<ModelGroups>"),
+            "`models` 又变回 Option 了——没有 key 就没有格子 = 死路回来了"
+        );
+    }
+}
+
+/// 「key 的草稿不许出现在明文框里」这组测试。
+///
+/// ⚠ 这两条对着 2026-10-20 真机拍到的串味：
+///   模型名输入框（`type="text"`）与 key 输入框**绑的是同一个变量**，
+///   于是填完 key，**明文 key 就躺在那个文本框里**（密码框掩着，
+///   文本框里却是 `sk-…`）；反向则是模型名被当 key 存进凭据管理器。
+#[cfg(test)]
+mod key_draft_tests {
+    fn settings_source() -> String {
+        let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../src/lib/PanelSettings.svelte");
+        std::fs::read_to_string(&file).expect("读得到设置页源码")
+    }
+
+    /// **key 的草稿只许出现在密码框里。**
+    ///
+    /// 守卫按**不变量**写，不按名单：凡是绑在 `drafts[…]` 上的输入框，
+    /// **必须**是 `type="password"`。⇒ 以后再加几个输入框也不用改这条。
+    #[test]
+    fn the_key_draft_never_lands_in_a_plain_text_input() {
+        let text = settings_source();
+        let mut bad: Vec<String> = Vec::new();
+        let mut rest = text.as_str();
+        while let Some(start) = rest.find("<input") {
+            let after = &rest[start..];
+            let end = after.find("/>").map(|e| e + 2).unwrap_or(after.len());
+            let block = &after[..end];
+            if block.contains("bind:value={drafts[") && !block.contains("type=\"password\"") {
+                bad.push(block.replace('\n', " ").trim().to_string());
+            }
+            rest = &after[end..];
+        }
+        assert!(
+            bad.is_empty(),
+            "key 的草稿落在了不是密码框的输入框里（明文 key 会被人一眼看见）：\n  {}",
+            bad.join("\n  ")
+        );
+    }
+
+    /// **模型名与 key 是两样东西，各绑各的。**
+    ///
+    /// 上一条管「key 不进明文框」；这一条管**反方向**：
+    /// 模型名框不许绑到 key 的草稿上——绑了的话，
+    /// 「保存」会把模型名当 key 存进凭据管理器。
+    #[test]
+    fn the_model_name_input_does_not_bind_to_the_key_draft() {
+        let text = settings_source();
+        let mut bad: Vec<String> = Vec::new();
+        let mut rest = text.as_str();
+        while let Some(start) = rest.find("<input") {
+            let after = &rest[start..];
+            let end = after.find("/>").map(|e| e + 2).unwrap_or(after.len());
+            let block = &after[..end];
+            if block.contains("模型名要你自己填") && block.contains("bind:value={drafts[") {
+                bad.push(block.replace('\n', " ").trim().to_string());
+            }
+            rest = &after[end..];
+        }
+        assert!(
+            bad.is_empty(),
+            "模型名输入框绑到了 key 的草稿上（保存时会把模型名当 key 存进去）：\n  {}",
+            bad.join("\n  ")
+        );
     }
 }
 

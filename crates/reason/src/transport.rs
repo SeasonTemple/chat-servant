@@ -890,6 +890,19 @@ pub struct HttpReasoner {
     /// 它**不参与任何 `Debug` / `Display`**：[`std::fmt::Debug`] 是手写的，
     /// 只打那几项；对外文本一律再过 [`redact`]。
     key: Arc<std::sync::Mutex<String>>,
+    /// **这把 key 属于哪一家。**
+    ///
+    /// ## 为什么必须记着
+    ///
+    /// 路由是**活的**（设置页随时能换厂商，换完下一圈就用新地址），
+    /// 而 key 是**装在这一把里的**。两者不同步 ⇒ 换了厂商却发旧 key，
+    /// 等于**把 A 家的密钥送到 B 家的服务器上**——
+    /// 那不是「配置没生效」，那是**密钥泄漏**。
+    ///
+    /// 所以发请求前要核一次：对不上就**当场拒发**，
+    /// 而不是把 key 送出去再等一个 401 回来。
+    /// 拒发的代价是「这一轮没有候选」，那比泄漏小得多。
+    key_provider: Provider,
     /// async → sync 的桥。`current_thread` 就够：
     /// 推理层每条新消息最多 3 次**串行**调用，引入多线程运行时
     /// 只会多背依赖、多一份线程开销，买不到任何东西。
@@ -966,11 +979,14 @@ impl HttpReasoner {
             .enable_all()
             .build()
             .map_err(|e| format!("起不出异步运行时：{e}"))?;
+        // key 属于**建它时这一格上的那一家**。
+        let key_provider = model.route().provider();
         Ok(Self {
             route: model,
             proxy,
             clients: std::sync::Arc::new(std::sync::Mutex::new(ClientSlot::default())),
             key: Arc::new(std::sync::Mutex::new(api_key)),
+            key_provider,
             rt: Arc::new(rt),
             calls: std::cell::Cell::new(0),
             judge_calls: std::cell::Cell::new(0),
@@ -1101,6 +1117,20 @@ impl HttpReasoner {
     ) -> Result<String, String> {
         let req = build_request(system, user, images);
         let route = self.route.route();
+        // ⚠⚠ **key 与厂商必须对上，否则当场拒发。**
+        //
+        // 路由是活的（设置页随时能换厂商），key 是装在这一把里的。
+        // 换了厂商却发旧 key ⇒ **A 家的密钥被送到 B 家的服务器上**。
+        // 症状（401）只是表象，代价（泄漏）才是真的。
+        //
+        // ⇒ 这里直接拒发。拒发的代价是「这一轮没有候选」，
+        //   那比把密钥送出去小得多。
+        if route.provider() != self.key_provider {
+            return Err(format!(
+                "换厂商了，key 还没换（这一把属于 {}）",
+                self.key_provider.label()
+            ));
+        }
         // **空模型名不许发出去。** 本机推理与自定义端点没有默认清单，
         // 格子里就可能是空的，而 `ModelIden::new(_, "")` 出去只会换一个
         // 更难懂的 404。这里当场说清楚「还没选模型」。
@@ -1671,6 +1701,64 @@ mod tests {
             "判断请求应当带 system 提示：{}",
             seen[0].body
         );
+    }
+
+    /// **换了厂商，旧 key 不许被发出去。**
+    ///
+    /// ## 这条在防什么
+    ///
+    /// 路由是**活的**（设置页「走哪一家」随时能换，换完下一圈就用新地址），
+    /// 而 key 是**装在这一把里的**。两者不同步 ⇒ 换了厂商却发旧 key，
+    /// **A 家的密钥被送到 B 家的服务器上**。
+    ///
+    /// 症状只是 401；代价是**密钥泄漏**。所以判据不是「报没报错」，
+    /// 而是**上游一个字节都没收到**——那台假上游就在那儿收，
+    /// 收到就说明泄漏发生了。
+    ///
+    /// ⚠ 反方向也要成立：厂商没换的时候**照常发**，
+    ///   否则这条守卫会把整个功能锁死（见 `a_full_turn_over_a_real_socket`）。
+    #[test]
+    fn switching_provider_never_sends_the_old_key() {
+        let up = upstream(vec![Reply(200, openai_reply(judge_json()))]);
+        let mut r =
+            HttpReasoner::with_endpoint(Provider::OpenAi, KEY.into(), up.base_url().to_string())
+                .expect("起运行时");
+
+        // 设置页点「走哪一家 → DeepSeek」就是这一个动作。
+        r.model_cell()
+            .set_route(Route::preset(Provider::DeepSeek).expect("DeepSeek 有预设端点"));
+
+        let ctx = TurnContext::text(vec!["今晚有空吗".into()], "小号".into());
+        let e = r.judge(&ctx).expect_err("换厂商后应当拒发").to_string();
+        assert!(
+            e.contains("换厂商了"),
+            "错误要说清是「换了厂商、key 还没换」：{e}"
+        );
+        assert!(
+            up.seen().is_empty(),
+            "旧 key 被发出去了（收到 {} 个请求）",
+            up.seen().len()
+        );
+    }
+
+    /// **厂商没换的时候照常发。**
+    ///
+    /// 这是上一条的**反方向**：守卫要**只拦真的换了厂商**那一种情况。
+    /// 拦多了就是「产品不能用了」——而这种守卫最容易在只测正方向时留下。
+    #[test]
+    fn the_same_provider_still_sends() {
+        let up = upstream(vec![Reply(200, openai_reply(judge_json()))]);
+        let mut r =
+            HttpReasoner::with_endpoint(Provider::OpenAi, KEY.into(), up.base_url().to_string())
+                .expect("起运行时");
+
+        let ctx = TurnContext::text(vec!["今晚有空吗".into()], "小号".into());
+        r.judge(&ctx).expect("厂商没换，应当照常发");
+
+        let seen = up.seen();
+        assert_eq!(seen.len(), 1, "应当发出一次请求");
+        let expect = format!("Bearer {KEY}");
+        assert_eq!(seen[0].header("authorization"), Some(expect.as_str()));
     }
 
     /// **口吻样本只进起草那一段，判断那一段不许收到。**
