@@ -160,5 +160,20 @@ sends and holds no second copy of session state.
 
 ## License
 
-[Business Source License 1.1](LICENSE) © SeasonTemple — converts to
-Apache-2.0 on **2029-10-12**.
+[Business Source License 1.1](LICENSE) © SeasonTemple — source is visible and
+free to copy, modify, and redistribute, and free for non-production use;
+production use requires a commercial license from the licensor, which **is not
+currently offered**. On the Change Date (**2029-10-12**) the work becomes
+available under Apache-2.0.
+
+The `Additional Use Grant` in [`LICENSE`](LICENSE) is narrower than "non-commercial
+only": evaluation, personal use, internal use within an organization, and
+modification are always permitted. What it withholds is offering the work to
+third parties on a hosted or embedded basis as a product or service whose
+primary function is the same as, or substantially overlaps with, this project
+— read the grant's wording before relying on a summary of it.
+
+⚠ **There is no purchase channel yet.** Nothing in this repository grants a
+commercial license; `LICENSE` names the licensor, not a contact. If you need
+production rights, that is an open question to settle with the licensor before
+you build on this.
