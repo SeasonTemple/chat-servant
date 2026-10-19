@@ -228,14 +228,35 @@ impl HeaderPrint {
     ///
     /// 返回 `None` = **认不出**（顶部没找到成行的字）。调用方必须
     /// 按「认不出」处理——关闸、不起草——而不是当「是同一个」。
+    ///
+    /// ## 2026-10-20：只认**左对齐**的那一行
+    ///
+    /// 旧判据是「**最靠上**的、满足行高与墨数的那一行」。只要标题行
+    /// 因为任何原因没被认出来，推导就会**一路掉到下面别的内容**上。
+    /// 真机实测踩到过两次：
+    ///
+    /// · 「小号」（两个字）逐行墨点有 4 行低于阈值 ⇒ 标题被切碎
+    ///   ⇒ 掉到了聊天区顶部**那张图片**的顶边（y 80..103）；
+    /// · 于是闸认的是**图片**的像素 ⇒ 切走再切回来，闸**再也开不了**，
+    ///   面板一直说「锁着别的对话，切回来才继续。」；
+    /// · 名字 OCR 读的是那一行 ⇒ 面板把「小号」显示成 **「3 5」**。
+    ///
+    /// ⇒ 现在多一条**左对齐**判据（[`TITLE_LEFT_INK_X`]）：
+    /// 会话名是消息区里**最靠左**的那行文字（实测距左沿 22px），
+    /// 而图片/气泡都在 67px 以外。
+    /// 认不出标题就**返回 `None`**，不许去认别的行——
+    /// 「认错了」比「认不出」危险得多。
     pub fn discover(frame: &Frame, chat: Rect, width_cap: i32) -> Option<(Self, Rect)> {
         let band = head_search_rect(chat, width_cap);
         let rows = ink_rows(frame, band)?;
-        // `find` 给的是 `&(i32, i32, u32)`，闭包参数解构后是引用，
-        // 所以要解一层。行高与墨数都要过闸，两条都要。
-        let &(top, bottom, _ink) = rows.iter().find(|row| {
+        // `find` 给的是 `&(i32, i32, u32, i32)`，闭包参数解构后是引用，
+        // 所以要解一层。行高与墨数都要过闸，两条都要；
+        // **左对齐**那条也要过（见上）。
+        let &(top, bottom, _ink, _left) = rows.iter().find(|row| {
             let h = row.1 - row.0;
-            (MIN_ROW_H..=MAX_ROW_H).contains(&h) && row.2 >= MIN_ROW_INK
+            (MIN_ROW_H..=MAX_ROW_H).contains(&h)
+                && row.2 >= MIN_ROW_INK
+                && row.3 - band.x0 <= TITLE_LEFT_INK_X
         })?;
 
         // 对齐到行栅格：同一行在不同帧上被推出 ±1px 时仍落到同一档，
@@ -287,7 +308,58 @@ const MAX_ROW_H: i32 = 24;
 /// 名字有整行达不到阈值，于是行段被砍断、`discover` 返回 `None`——
 /// **不是「认不出」，是「行断得太碎」**。8 留得住真机的下沿，
 /// 又远高于面板底色的逐行噪声（那几行实测墨点是 0）。
+///
+/// ⚠⚠ **2026-10-20：这条会把两个字的名字切碎。**
+/// 会话名「小号」实测逐行墨点是 `12,6,12,11,6,21,8,9,17,4,4,12`——
+/// 有 4 行低于 8（那是两个字各自的笔画间隙），于是标题被切成
+/// 4 段（高 1/2/4/1 px），**每段都不到 [`MIN_ROW_H`]**。
+/// ⇒ 标题被判废、`discover` 一路掉到下面别的行（真机上是聊天区顶部
+/// 那张**图片**的顶边），把图片当成了会话身份：闸认的是图片，
+/// 面板把「小号」显示成「3 5」。
+/// ⇒ 修法是 [`ROW_GAP`]（允许笔画之间的空隙），**不是**把这条调小——
+/// 调到 4 的话，背景噪声行也会被算成字。
 const MIN_ROW_INK: u32 = 8;
+
+/// **两段之间允许隔几行空行，仍算同一段。**
+///
+/// 2026-10-20 实测：两个字的名字「小号」逐行墨点
+/// `12,6,12,11,6,21,8,9,17,4,4,12`，其中 4 行低于 [`MIN_ROW_INK`]（8）。
+/// 那些低墨点的行**不是噪声，是字的笔画之间**——两个字的笔画交点少，
+/// 有些扫描线上只擦到一两笔。
+///
+/// 取 2：实测最大空隙是 **2 行**（y 58..59），而「标题」与下一条内容
+/// （真机上是 y 80 的图片顶边）之间隔着 **19 行**
+/// ⇒ 2 足够接上笔画间隙，又绝不够把两条内容接成一段。
+///
+/// ⚠ 合并后的高度**不许超过 [`MAX_ROW_H`]**（见 `ink_rows`），
+/// 否则标题会把下面 35px 见方的头像吸进来，整段超高而两头都认不出。
+const ROW_GAP: usize = 2;
+
+/// **会话名必须左对齐**：它的墨迹要落在消息区左沿往右这么多像素内。
+///
+/// 2026-10-20 实测（真机帧，消息区 x0 = 308）：
+///
+/// | 东西 | 最左墨迹 x | 距左沿 |
+/// |---|---|---|
+/// | 会话名「小号」 | 330 | **22** |
+/// | 会话名「文件传输助手」 | 330 | **22** |
+/// | 聊天区顶部那张图片 | 375 | 67 |
+/// | 对方气泡 | 375 | 67 |
+///
+/// ⇒ 取 48：标题有余量（22 + 26），而图片/气泡（67）被排除在外。
+///
+/// ## 为什么必须有这条
+///
+/// 旧判据是「**最靠上**的那条满足行高与墨数的行」——只要标题行
+/// 因为任何原因没被认出来（字太稀、位置变了、微信改版），
+/// 推导就会**一路掉到下面别的内容**上，把图片/气泡当身份。
+/// 那不是「认不出」，那是**认错了**——而闸一旦认错，
+/// 就会拿别人的像素当「同一个会话」去放行。
+///
+/// ⇒ 认不出就**说认不出**（返回 `None` ⇒ 闸关着、面板说「没认出这是谁的对话」），
+/// 这与本模块开头的立场一致：宁可「换人了但没认出来」，
+/// 也不要「换了人却当成同一个」。
+const TITLE_LEFT_INK_X: i32 = 48;
 
 /// 头部高度对齐到这么粗的栅格。理由见 [`HeaderPrint::discover`]。
 const ROW_QUANT: i32 = 4;
@@ -316,7 +388,39 @@ fn quantize_row(h: i32) -> i32 {
 ///
 /// 背景取**整块**的众数而不是每行各自取：整块里绝大多数是面板底色，
 /// 每行取自己的众数会把「一行稀疏的字」当成背景（字比底多不了几个）。
-fn ink_rows(frame: &Frame, band: Rect) -> Option<Vec<(i32, i32, u32)>> {
+///
+/// ## 2026-10-20 改：允许笔画之间的**空隙**（`ROW_GAP`）
+///
+/// ### 起因（真机实测，不是推断）
+///
+/// 会话名「**小号**」只有两个字，它的**逐行墨点数**实测是：
+///
+/// ```text
+/// y 49..61： 12, 6, 12, 11, 6, 21, 8, 9, 17, 4, 4, 12
+/// ```
+///
+/// 有 **4 行低于 [`MIN_ROW_INK`]（8）** —— 那是两个字各自的**笔画之间**。
+/// 原来的判据是「**每一行**都要有墨才算成行」，于是标题被切成
+/// 4 段（高 1 / 2 / 4 / 1 px），**每段都不到 [`MIN_ROW_H`]（6）**
+/// ⇒ 标题被判废 ⇒ [`HeaderPrint::discover`] 一路掉到下面**别的行**
+/// （真机上是聊天区顶部那张**图片**的顶边，y 80..103），
+/// 把**图片**当成了会话身份。
+///
+/// 后果有两条，都实测到了：
+/// · 闸认的是图片的像素 ⇒ 切走再切回来，闸**再也开不了**
+///   （面板一直说「锁着别的对话，切回来才继续。」）；
+/// · 名字 OCR 读的是那一行 ⇒ 面板把「小号」显示成 **「3 5」**。
+///
+/// ### 修法
+///
+/// 允许**跳过 ≤ [`ROW_GAP`] 行的空行**再接上下一段——
+/// 「字有笔画间隙」是字形的常态，不是噪声。
+/// ⚠ 但**合并后的高度不许超过 [`MAX_ROW_H`]**：否则标题会把它下面的
+/// 头像（35px 见方）吸进来，整段变得超高而**两头都认不出**。
+///
+/// 6 个字的「文件传输助手」实测每行 23~54 墨，本来就连成一段，
+/// 这条改动对它**零影响**（回归见同名测试）。
+fn ink_rows(frame: &Frame, band: Rect) -> Option<Vec<(i32, i32, u32, i32)>> {
     let x0 = band.x0.max(0) as u32;
     let y0 = band.y0.max(0) as u32;
     let x1 = (band.x1.max(0) as u32).min(frame.width());
@@ -339,35 +443,64 @@ fn ink_rows(frame: &Frame, band: Rect) -> Option<Vec<(i32, i32, u32)>> {
 
     let w = (x1 - x0) as usize;
     let h = (y1 - y0) as usize;
-    let mut out: Vec<(i32, i32, u32)> = Vec::new();
-    // 逐行走。行段 = 连续几行里**每一行都有墨** ⇒ 合并成一条 (y0, y1, 总墨)。
-    // 中间任何一行没墨就断开——正文行之间正好有空白行断得开。
+    let mut out: Vec<(i32, i32, u32, i32)> = Vec::new();
+    // 行段 = 一串「有墨的行」。两段之间若只隔着 ≤ `ROW_GAP` 行的空行，
+    // **算同一段**（笔画间隙，见上面的实测）。
+    //
+    // 段的范围是 `[seg_start, last_ink + 1)`：段尾是**最后一行有墨的行**，
+    // 不含它后面的空行。
     let mut seg_start: Option<usize> = None;
+    let mut last_ink: usize = 0;
     let mut seg_ink: u32 = 0;
+    // 段内**最靠左**的墨迹 x（帧坐标）。左对齐判据要用它。
+    let mut seg_left: i32 = 0;
     for row in 0..h {
-        let line_ink: u32 = (0..w)
-            .filter(|&c| {
-                let l = lum[row * w + c];
-                (l as f64 - bg as f64).abs() > INK_DELTA
-            })
-            .count() as u32;
-        let y = (y0 as usize + row) as i32;
-        if line_ink >= MIN_ROW_INK {
-            if seg_start.is_none() {
-                seg_start = Some(row);
+        let mut line_ink: u32 = 0;
+        let mut line_left: i32 = i32::MAX;
+        for c in 0..w {
+            let l = lum[row * w + c];
+            if (l as f64 - bg as f64).abs() > INK_DELTA {
+                line_ink += 1;
+                if line_left == i32::MAX {
+                    line_left = (x0 as usize + c) as i32;
+                }
             }
-            seg_ink += line_ink;
-        } else if let Some(s) = seg_start {
-            // 本行没墨 ⇒ 上一段结束，段尾是**本行**（不含）。
-            out.push(((y0 as usize + s) as i32, y, seg_ink));
-            seg_start = None;
-            seg_ink = 0;
         }
+        if line_ink < MIN_ROW_INK {
+            continue;
+        }
+        if let Some(s) = seg_start {
+            let gap = row - last_ink - 1;
+            let merged_h = (row - s) as i32;
+            // 接上：空行在允许范围内，且合并后仍然不超高。
+            if gap <= ROW_GAP && merged_h <= MAX_ROW_H {
+                seg_ink += line_ink;
+                seg_left = seg_left.min(line_left);
+                last_ink = row;
+                continue;
+            }
+            // 接不上：上一段到此为止，另起一段。
+            out.push((
+                (y0 as usize + s) as i32,
+                ((y0 as usize + last_ink + 1) as i32),
+                seg_ink,
+                seg_left,
+            ));
+        }
+        seg_start = Some(row);
+        last_ink = row;
+        seg_ink = line_ink;
+        seg_left = line_left;
     }
     if let Some(s) = seg_start {
-        out.push(((y0 as usize + s) as i32, y1 as i32, seg_ink));
+        out.push((
+            (y0 as usize + s) as i32,
+            ((y0 as usize + last_ink + 1) as i32),
+            seg_ink,
+            seg_left,
+        ));
     }
-    out.retain(|&(a, b, _)| b > a);
+    out.retain(|&(a, b, _, _)| b > a);
     (!out.is_empty()).then_some(out)
 }
 
@@ -500,6 +633,129 @@ mod tests {
              修法不是调 HEAD_SEARCH_H（那只会让消息行更容易进带），\
              而是给「头部行」加一条它自己才有的判据。"
         );
+    }
+
+    /// **两个字的名字也要认得出**（2026-10-20 真机实测的形状）。
+    ///
+    /// ## 这条锁的是哪个事故
+    ///
+    /// 真机上会话名是「小号」（两个字），实测**逐行墨点数**是
+    /// `12,6,12,11,6,21,8,9,17,4,4,12` —— 有 4 行低于 `MIN_ROW_INK`(8)。
+    /// 那些行不是噪声，是**两个字的笔画之间**。
+    ///
+    /// 旧判据要求「每一行都有墨」，于是标题被切成 4 段（高 1/2/4/1 px），
+    /// 每段都不到 `MIN_ROW_H`(6) ⇒ 标题被判废 ⇒ `discover` 一路掉到
+    /// 聊天区顶部**那张图片**的顶边（y 80..103），把图片当成了会话身份。
+    ///
+    /// ## 后果（真机上都看到了）
+    ///
+    /// · 闸认的是**图片** ⇒ 切走再切回来，闸**再也开不了**，
+    ///   面板一直说「锁着别的对话，切回来才继续。」；
+    /// · 名字 OCR 读的是那一行 ⇒ 面板把「小号」显示成 **「3 5」**。
+    ///
+    /// ⇒ 夹具用**实测数字**：逐行墨点数、标题位置（y 49..61，最左墨迹
+    /// x=330）、图片块位置（x 375 起、y 80..103）都照抄真机帧。
+    /// 断言推出来的是**标题那一行**，不是下面那张图片。
+    #[test]
+    fn a_two_character_title_is_still_found_and_the_image_below_it_is_not() {
+        let f = two_char_title_frame(true);
+        let chat = Rect::new(
+            REAL_CHAT_X0,
+            REAL_CHAT_Y0,
+            REAL_CHAT_X0 + 400,
+            REAL_CHAT_Y0 + HEAD_SEARCH_H,
+        );
+        let (print, rect) = HeaderPrint::discover(&f, chat, 400)
+            .expect("两个字的名字必须认得出来——它被切碎了就只剩下面的图片了");
+        assert_eq!(
+            rect.y0, 49,
+            "推出来的不是标题那一行（y 49..61），而是 y {}..{}",
+            rect.y0, rect.y1
+        );
+        assert_eq!(rect.y1, 61, "标题行的高度变了：{:?}", rect);
+        assert!(print.pixels() > 0, "推出的那一块没有墨像素（{:?}）", rect);
+    }
+
+    /// **认不出标题就认不出，不许去认下面那块图片。**
+    ///
+    /// 这是上一条的**安全侧**：上一条保证「两个字的名字能认出来」，
+    /// 这一条保证「**万一认不出来**」时不会退化成「认了别的行」。
+    ///
+    /// 旧判据是「最靠上的、满足行高与墨数的行」——标题一被判废，
+    /// 推导就一路掉到图片上。图片的像素**会变**（滚动、重绘），
+    /// 于是闸一会儿开一会儿关；更糟的是两个会话都带图片时，
+    /// 闸会把**不同**的会话判成同一个。
+    ///
+    /// ⇒ 图像块在 x=375（距左沿 67px）⇒ 不是左对齐 ⇒ **不许**被当成会话名。
+    /// 认不出就返回 `None`（闸关着、面板说「没认出这是谁的对话」）。
+    #[test]
+    fn a_block_that_is_not_left_aligned_is_never_taken_as_the_title() {
+        let f = two_char_title_frame(false);
+        let chat = Rect::new(
+            REAL_CHAT_X0,
+            REAL_CHAT_Y0,
+            REAL_CHAT_X0 + 400,
+            REAL_CHAT_Y0 + HEAD_SEARCH_H,
+        );
+        assert!(
+            HeaderPrint::discover(&f, chat, 400).is_none(),
+            "没有标题时，把下面那块图片当成了会话名 ⇒ 闸会拿图片的像素当身份，\
+             换个会话它就认不出来了（这是「认错了」，比「认不出」危险得多）"
+        );
+    }
+
+    /// 真机实测的「小号」**逐行墨点数**（2026-10-20，微信 4.0 深色主题）。
+    ///
+    /// 帧 1175x900，消息区 x0=308。标题在 y 49..61，最左墨迹 x=330。
+    const TWO_CHAR_TITLE_INK: [(i32, u32); 12] = [
+        (49, 12),
+        (50, 6),
+        (51, 12),
+        (52, 11),
+        (53, 6),
+        (54, 21),
+        (55, 8),
+        (56, 9),
+        (57, 17),
+        (58, 4),
+        (59, 4),
+        (60, 12),
+    ];
+    const REAL_CHAT_X0: i32 = 308;
+    const REAL_CHAT_Y0: i32 = 31;
+    const REAL_TITLE_LEFT_X: i32 = 330;
+    const REAL_IMAGE_X0: i32 = 375;
+    const REAL_IMAGE_Y0: i32 = 80;
+    const REAL_IMAGE_Y1: i32 = 103;
+
+    /// 按实测数字造一帧：底色深、标题浅（逐行墨点数照抄），
+    /// 聊天区顶部再放一块**右移的亮块**（真机上那张图片的位置）。
+    ///
+    /// `with_title = false` 时**不画标题**——用来验「认不出就不认」。
+    fn two_char_title_frame(with_title: bool) -> Frame {
+        let w = 800u32;
+        let h = 200u32;
+        frame_of(
+            |x, y| {
+                let x = x as i32;
+                let y = y as i32;
+                // 聊天区顶部那张图片：整块亮 ⇒ 每一行都有很多墨。
+                if (REAL_IMAGE_Y0..REAL_IMAGE_Y1).contains(&y) && (REAL_IMAGE_X0..517).contains(&x)
+                {
+                    return [190, 190, 194];
+                }
+                if with_title {
+                    for (ty, n) in TWO_CHAR_TITLE_INK {
+                        if ty == y && x >= REAL_TITLE_LEFT_X && x < REAL_TITLE_LEFT_X + n as i32 {
+                            return [225, 225, 229];
+                        }
+                    }
+                }
+                [30, 30, 31]
+            },
+            w,
+            h,
+        )
     }
 
     fn frame_of(f: impl Fn(u32, u32) -> [u8; 3], w: u32, h: u32) -> Frame {

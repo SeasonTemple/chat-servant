@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **70** ｜ 验收项全勾 **48** ｜ 已收但留有说明项 **13** ｜ 未收 **9**
+票据总数 **71** ｜ 验收项全勾 **49** ｜ 已收但留有说明项 **13** ｜ 未收 **9**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -102,3 +102,4 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `67-forensics-guard-covers-files-not-text.md` | 9/9 |
 | `69-ci-red-because-an-unreachable-precondition.md` | 11/11 |
 | `70-config-actions-gated-on-the-transport.md` | 12/12 |
+| `71-two-character-name-breaks-the-identity-gate.md` | 3/3 |
