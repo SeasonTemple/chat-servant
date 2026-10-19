@@ -1024,6 +1024,90 @@ fn snapshot(
     }
 }
 
+/// 一轮「读」的结果。
+struct Round {
+    /// OCR 一共读到几行（**没按 ROI 过滤之前**）。诊断用。
+    total_lines: usize,
+    /// 落在本轮 ROI 里的行（**消息区坐标**）。
+    lines: Vec<chatservant_capture::ocr::OcrLine>,
+    /// 归类结果（行 → 对话人 / 噪声）。
+    attrs: Vec<chatservant_perceive::Attribution>,
+    /// 归并出来的消息。
+    messages: Vec<Message>,
+    /// 真正送进 OCR 的像素数。
+    ocr_pixels: u64,
+}
+
+/// **一轮「读」：从帧里读出本轮该管的消息。**
+///
+/// ## 它为什么必须与探针走同一条路
+///
+/// 这就是**产品读帧路径**。它必须与 [`chatservant_perceive::read_lines`]
+/// （端到端探针那条路）**逐字同一套配方**：OCR 看哪一块画面、放大几倍、
+/// 行坐标怎么换算回消息区。
+///
+/// 曾经这份配方在这里**手抄了一遍**——「整帧 + `OCR_UPSCALE` 倍」，
+/// 而那是 **WinRT** 实测要的那一组（2026-10-07）。默认引擎 PP-OCR 要的
+/// 恰恰相反：**只给消息区 + 1 倍**（2026-10-18 实测）。
+///
+/// ⇒ 两边分叉，**而分叉不报错**：门禁全绿、探针全绿，
+/// 只有真机上的消息数是 0（票 72）。
+///
+/// ## 为什么值得抽成一个函数
+///
+/// 配方写在 [`step`] 里面的时候，**没有任何机器判据能发现它写错了**——
+/// 那段代码「看起来」完全合理。于是它变成一段只能靠真机发现的代码。
+/// 抽出来之后：
+/// · 配方由 [`chatservant_perceive::read_lines`] 提供，**只有一处**；
+/// · 「产品路径 ≡ 探针路径」变成一条可测的判据（见
+///   `the_product_read_path_agrees_with_the_probe_path`）；
+/// · 「产品路径递进去的那张图对不对」也能测（见
+///   `the_product_read_path_hands_ocr_the_view_the_engine_asks_for`）。
+fn read_round(
+    frame: &chatservant_capture::Frame,
+    pane: &chatservant_capture::Frame,
+    anchor: &PaneAnchor,
+    roi: chatservant_core::frame::Rect,
+    source: &impl chatservant_perceive::LineSource,
+) -> Result<Round, String> {
+    // 画面与倍数**由引擎决定**。这里不许再手抄一份——抄一份就会分叉，
+    // 而分叉的后果是「看得见行、归成 0 条消息」，不报错。
+    let ocr = chatservant_perceive::read_lines(frame, anchor.chat, source)
+        .map_err(|e| format!("读行失败：{e}"))?;
+
+    // 总行数要先取：**下面要把 `ocr.lines` 移走**。
+    let total_lines = ocr.lines.len();
+
+    // ROI 过滤：只留本轮该管的那些行。**ROI 与行框都是消息区坐标**
+    // （`read_lines` 已经把行换算回消息区了），两边可以直接比。
+    let lines: Vec<chatservant_capture::ocr::OcrLine> = ocr
+        .lines
+        .into_iter()
+        .filter(|l| {
+            l.rect.y1 > roi.y0 && l.rect.y0 < roi.y1 && l.rect.x1 > roi.x0 && l.rect.x0 < roi.x1
+        })
+        .collect();
+
+    let palette = chatservant_perceive::Palette::learn(frame, anchor.chat)
+        .ok_or_else(|| "学不到配色（消息区太平）".to_string())?;
+
+    // ⚠ 归类采样要用的帧，**必须与行框同一坐标系**。
+    // 行框是**消息区相对**的，所以这里给的是**消息区裁剪件**（`pane`），
+    // 不是整帧。给整帧的话，外圈探针采到的是别处的像素，
+    // 于是每行都被判成「不在气泡里」⇒ 消息数为 0。
+    let attrs = chatservant_perceive::classify_all(&lines, pane, &palette);
+    let messages = chatservant_perceive::group(&attrs);
+
+    Ok(Round {
+        total_lines,
+        lines,
+        attrs,
+        messages,
+        // 开销口径与真正递进去的那张图**逐字一致**，不在这里手算。
+        ocr_pixels: chatservant_perceive::ocr_input_pixels(frame, anchor.chat, source),
+    })
+}
+
 /// 跑一轮。`Ok(Some(anchor))` = 有新内容；`Ok(None)` = 静默期。
 fn step(
     watcher: &mut PaneWatcher,
@@ -1130,9 +1214,13 @@ fn step(
         return Ok(None);
     };
 
-    // ③ **OCR 整帧（放大后），再按 ROI 过滤行——不要裁一块去 OCR。**
+    // ③ **OCR 的画面与倍数由引擎决定**，产品路径与探针走同一个入口
+    // （[`chatservant_perceive::read_lines`]）。这里不再自己拼配方。
     //
-    // 实测（2026-10-07，同一块画面）：
+    // ## 曾经的配方，以及它为什么在这台机上把消息读没了
+    //
+    // 这里原先手抄的是「**整帧** + `OCR_UPSCALE` 倍」，
+    // 而那是 **WinRT** 实测要的那一组：
     //
     // ```text
     // 整帧 2x        5 行，读到「乐」（对方消息）
@@ -1145,49 +1233,34 @@ fn step(
     // 与其为裁剪框反复试参数，不如**永远 OCR 整帧**——这也顺带消掉了
     // 「裁剪坐标 ↔ 帧坐标 ↔ 消息区坐标」三套换算，正是坐标 bug 的来源。
     //
-    // 配方与 `perceive::read_lines` 完全一致（放大 → OCR → 换算到消息区坐标），
-    // 别在这里自己改一套。
-    let sc = chatservant_perceive::OCR_UPSCALE;
-    let view = frame
-        .upscaled_nearest(sc)
-        .ok_or_else(|| "整帧放大失败".to_string())?;
-    let ocr = chatservant_capture::ocr::recognize(&view).map_err(|e| format!("OCR 失败：{e}"))?;
+    // ⚠ **上面这段结论只对 WinRT 成立**（2026-10-07）。默认引擎 PP-OCR
+    // 要的是**反过来**的那一组：**只给消息区 + 1 倍**（2026-10-18 实测，
+    // 见 `chatservant_capture::ocr::crops_to_pane`）。而两个引擎要的
+    // 画面**不一样**，这件事由**引擎自己**决定，不由调用方决定。
+    //
+    // 抄错的后果不是「慢一点」，是**一条消息都读不出来**：
+    // PP-OCR 的 det 在 2 倍的整帧上把**头像和正文框进同一块**，
+    // 外圈探针于是采到头像的杂色 ⇒ 判成「图里的字」⇒ 消息数 0。
+    // 真机实测：OCR 总行 56、本轮行 10、**归类 10、消息 0**。
+    let Round {
+        total_lines,
+        lines,
+        attrs,
+        messages,
+        ocr_pixels,
+    } = read_round(
+        &frame,
+        &full,
+        &anchor,
+        roi,
+        &chatservant_perceive::SystemOcr,
+    )?;
     s.ocr_calls += 1;
 
-    let palette = chatservant_perceive::Palette::learn(&frame, anchor.chat)
-        .ok_or_else(|| "学不到配色（消息区太平）".to_string())?;
-
-    // 行框：放大后的视图坐标 → 整帧（除以倍数）→ **消息区坐标**（减 chat 原点）。
-    // 然后按 ROI 裁掉本轮不该管的那些行——ROI 本身就是消息区坐标。
-    let lines: Vec<chatservant_capture::ocr::OcrLine> = ocr
-        .lines
-        .iter()
-        .map(|l| {
-            let f = |v: i32| v / sc as i32 - anchor.chat.x0;
-            let g = |v: i32| v / sc as i32 - anchor.chat.y0;
-            chatservant_capture::ocr::OcrLine {
-                text: l.text.clone(),
-                rect: chatservant_core::frame::Rect::new(
-                    f(l.rect.x0),
-                    g(l.rect.y0),
-                    f(l.rect.x1),
-                    g(l.rect.y1),
-                ),
-                words: vec![],
-            }
-        })
-        // 按 ROI 过滤：只留本轮该管的那些行。ROI 是消息区坐标，
-        // 行框也已经换算到消息区坐标，两边可以直接比。
-        .filter(|l| {
-            l.rect.y1 > roi.y0 && l.rect.y0 < roi.y1 && l.rect.x1 > roi.x0 && l.rect.x0 < roi.x1
-        })
-        .collect();
-    let attrs = chatservant_perceive::classify_all(&lines, &full, &palette);
-    let messages = chatservant_perceive::group(&attrs);
     tracing::debug!(
         target: "chat_servant::watch",
         "roi={roi:?} ocr总行={} 本轮行={} 归类={} 消息={}",
-        ocr.lines.len(),
+        total_lines,
         lines.len(),
         attrs.len(),
         messages.len()
@@ -1217,12 +1290,18 @@ fn step(
         attrs.as_slice(),
     ));
 
-    // 开销账。`ocr_pixels` 是**放大后的整帧**，不是 ROI——
-    // 见下面 ③ 那段实测记录：裁 ROI 去 OCR 会漏行，所以送进去的确实是整帧。
-    // 报成 ROI 面积的话，用户会以为「调小 ROI 就能省 OCR」，而那调了没用。
+    // 开销账。`ocr_pixels` 是**真正送进 OCR 的那张图的面积**，不是 ROI。
+    //
+    // 送进去的是整帧还是消息区、放大几倍，**由引擎决定**
+    // （见 [`chatservant_perceive::ocr_input_pixels`]）——这里不再手算：
+    // 手算过一次，而那次把 2 倍放大算成了 ×2（实际是 ×4），
+    // 还把 PP-OCR 的「只给消息区」报成了整帧。
+    //
+    // 报成 ROI 面积的话，用户会以为「调小 ROI 就能省 OCR」，而那调了没用：
+    // ROI 只决定**读哪几行**，送进 OCR 的画面根本没变小。
     record_cost(
         last_boxes,
-        u64::from(frame.width()) * u64::from(frame.height()) * u64::from(sc),
+        ocr_pixels,
         Some(pane_area(roi)),
         pane_area(anchor.chat),
         1,
@@ -1834,12 +1913,15 @@ impl chatservant_reason::Summarizer for NoSummary {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTO_COOLDOWN, AutoGate, BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message, Phase,
-        Readout, RecentN, Relock, SESSION, Scratch, Speaker, TierCell, TokenBudget,
-        apply_gate_closed, apply_relock, collect_images, header_print, park_on_other_conversation,
-        snapshot,
+        AUTO_COOLDOWN, AutoGate, BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message,
+        PaneAnchor, Phase, Readout, RecentN, Relock, SESSION, Scratch, Speaker, TierCell,
+        TokenBudget, apply_gate_closed, apply_relock, collect_images, header_print,
+        park_on_other_conversation, read_round, snapshot,
     };
-    use chatservant_perceive::{Decision, PaneWatcher};
+    use chatservant_capture::Frame;
+    use chatservant_capture::ocr::{OcrError, OcrLine, OcrText};
+    use chatservant_core::frame::Rect;
+    use chatservant_perceive::{Decision, LineSource, PaneWatcher, ViewPlan, ViewPolicy};
     use chatservant_reason::context;
 
     // ── `Auto` 档自动发送的护栏 ──────────────────────────────────────
@@ -3291,6 +3373,309 @@ mod tests {
             now,
             header_print(&frame_with(0), &anchor).expect("取得到").0,
             "重锁之后基准必须换成当前的会话"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 票 72：产品读帧路径的 OCR 配方
+    //
+    // 病根：产品路径（`watch.rs`）手抄了一份 OCR 配方，而抄的那份是
+    // **WinRT** 的（整帧 + 2 倍），默认引擎 **PP-OCR** 要的是
+    // **只给消息区 + 1 倍**。两边分叉**不报错**——门禁全绿、探针全绿，
+    // 只有真机上的消息数是 0。
+    //
+    // 下面这几条把它钉成机器判据。
+    // ─────────────────────────────────────────────────────────────────
+
+    /// 合成一张「微信式」的帧，**带真墨色**，并给出它的锚点。
+    ///
+    /// ## 为什么不用仓里的脱敏夹具
+    ///
+    /// 脱敏会把文字刷成底色，于是 `probe_bubble_bg` 量到的 `ink`/`contrast`
+    /// 恒为零，分类判据无从测量（见 `perceive::pipeline` 的模块注释）。
+    /// ⇒ 分类这一层**必须**用带墨色的合成帧，而合成帧**不含任何真人数据**。
+    ///
+    /// ## 几何与 `perceive` 的测试帧一致
+    ///
+    /// 侧边栏 192 宽、标题栏 27 高、输入框上沿在 426——这样
+    /// `anchor::derive` 推出来的消息区是 `(192,27)-(800,426)`，
+    /// 本模块才能拿 `perceive::read`（**探针那条路**）当参照。
+    fn wechat_frame_with_ink() -> (Frame, PaneAnchor) {
+        const W: u32 = 800;
+        const H: u32 = 600;
+        const SIDEBAR_W: u32 = 192;
+        const HEADER_H: u32 = 27;
+        const INPUT_TOP: u32 = 426;
+        const PANEL: [u8; 3] = [30, 30, 31];
+        const CHROME: [u8; 3] = [51, 51, 51];
+        const THEIR_BUBBLE: [u8; 3] = [47, 47, 48];
+        const THEIR_INK: [u8; 3] = [225, 225, 229];
+        const GRAY_INK: [u8; 3] = [123, 123, 128];
+
+        /// 侧边栏画成**横条纹**，不是一块纯色。
+        ///
+        /// ## 为什么不能是纯色
+        ///
+        /// 真机上那一列是**满的**——联系人名、头像、消息预览，颜色不统一。
+        /// 采样落错地方（拿整帧去采消息区坐标的行框）时，外圈纯度会掉到
+        /// `RING_PURITY_MIN` 以下 ⇒ 那一行被判成「图里的字」⇒
+        /// **一条消息都读不出来**——这正是真机上的症状。
+        ///
+        /// 夹具若把侧边栏画成纯色，采错地方也一样「干净」⇒ 守卫永远绿。
+        /// ⇒ 这条纹不是装饰，是**让错误看得见**。
+        const SIDEBAR_STRIPES: [[u8; 3]; 4] =
+            [[34, 34, 51], [62, 48, 96], [40, 74, 58], [96, 52, 64]];
+
+        let mut px = vec![0u8; (W * H * 3) as usize];
+        for y in 0..H {
+            for x in 0..W {
+                let c = if x < SIDEBAR_W {
+                    SIDEBAR_STRIPES[((y / 4) as usize) % SIDEBAR_STRIPES.len()]
+                } else if y < HEADER_H || y == INPUT_TOP {
+                    CHROME
+                } else {
+                    PANEL
+                };
+                let i = ((y * W + x) * 3) as usize;
+                px[i..i + 3].copy_from_slice(&c);
+            }
+        }
+        // 对方气泡（近灰底 + 亮字）⇒ 归类为「对方说的」。
+        fill_rect(&mut px, W, Rect::new(224, 156, 416, 184), THEIR_BUBBLE);
+        stroke_rect(&mut px, W, Rect::new(240, 164, 400, 176), THEIR_INK);
+        // 面板上的一行灰字（时间戳）⇒ 归类为噪声，**不许**进消息流。
+        stroke_rect(&mut px, W, Rect::new(400, 250, 500, 262), GRAY_INK);
+
+        let f = Frame::from_rgb(W, H, px).expect("合成帧");
+        let anchor = chatservant_capture::anchor::derive(&f).expect("锚点推得出来");
+        (f, anchor)
+    }
+
+    fn fill_rect(px: &mut [u8], w: u32, r: Rect, c: [u8; 3]) {
+        for y in r.y0.max(0) as u32..r.y1.max(0) as u32 {
+            for x in r.x0.max(0) as u32..r.x1.max(0) as u32 {
+                let i = ((y * w + x) * 3) as usize;
+                px[i..i + 3].copy_from_slice(&c);
+            }
+        }
+    }
+
+    /// 在框内画两道 2 px 横笔——真实字形就这个粗细。
+    ///
+    /// 画成实心块的话外圈众数会被拉偏，测的就不是真实情形了。
+    fn stroke_rect(px: &mut [u8], w: u32, r: Rect, c: [u8; 3]) {
+        for y in [r.y0 + 3, r.y0 + 7] {
+            for dy in 0..2i32 {
+                for x in (r.x0 + 4)..(r.x1 - 4) {
+                    let i = (((y + dy) as u32 * w + x as u32) * 3) as usize;
+                    px[i..i + 3].copy_from_slice(&c);
+                }
+            }
+        }
+    }
+
+    /// 一个**看得见自己收到的是哪张图**的假引擎。
+    ///
+    /// 真引擎对画面是有脾气的：PP-OCR 收整帧会漏行、WinRT 收裁剪件会漏行
+    /// （`perceive::pipeline` 里两组实测）。这个假引擎把那种脾气做成可测的：
+    /// **只有收到配方规定的那张图，它才给出行**；收到别的就一行不给。
+    ///
+    /// 票 72 的病正是这个形状：产品路径把 **WinRT 的配方**喂给了 **PP-OCR**，
+    /// 真机上的症状是「OCR 总行 56、本轮行 10、**归类 10、消息 0**」。
+    struct PickyEngine {
+        plan: ViewPlan,
+        /// 消息区（换算行框要用）。
+        chat: Rect,
+        /// 配方规定的那张图的尺寸。收到别的就装死。
+        expect_view: (u32, u32),
+        /// 行框写在**帧坐标**里；源按配方换算成视图坐标。
+        lines: Vec<(String, Rect)>,
+        /// 实际收到的那张图的尺寸（诊断用）。
+        seen: std::cell::RefCell<Option<(u32, u32)>>,
+    }
+
+    impl PickyEngine {
+        fn new(plan: ViewPlan, chat: Rect, frame: &Frame) -> Self {
+            let expect_view = match plan.policy {
+                ViewPolicy::WholeFrame => {
+                    (frame.width() * plan.upscale, frame.height() * plan.upscale)
+                }
+                ViewPolicy::ChatPane => (chat.width() as u32, chat.height() as u32),
+            };
+            PickyEngine {
+                plan,
+                chat,
+                expect_view,
+                // 对方那条 + 面板上的一行灰字（时间戳）。
+                lines: vec![
+                    ("对方那条".to_string(), Rect::new(240, 164, 400, 176)),
+                    ("时间戳".to_string(), Rect::new(400, 250, 500, 262)),
+                ],
+                seen: std::cell::RefCell::new(None),
+            }
+        }
+    }
+
+    impl LineSource for PickyEngine {
+        fn read(&self, view: &Frame) -> Result<OcrText, OcrError> {
+            *self.seen.borrow_mut() = Some((view.width(), view.height()));
+            if (view.width(), view.height()) != self.expect_view {
+                // 收到的不是配方规定的那张图 ⇒ 真引擎在这里会**读不到东西**。
+                return Ok(OcrText {
+                    text: String::new(),
+                    lines: vec![],
+                });
+            }
+            let s = self.plan.upscale as i32;
+            let lines = self
+                .lines
+                .iter()
+                .map(|(t, r)| {
+                    let rect = match self.plan.policy {
+                        // 整帧视图：视图坐标 = 帧坐标 × 倍数。
+                        ViewPolicy::WholeFrame => Rect::new(r.x0 * s, r.y0 * s, r.x1 * s, r.y1 * s),
+                        // 裁剪视图：视图坐标已经就是消息区相对坐标。
+                        ViewPolicy::ChatPane => Rect::new(
+                            r.x0 - self.chat.x0,
+                            r.y0 - self.chat.y0,
+                            r.x1 - self.chat.x0,
+                            r.y1 - self.chat.y0,
+                        ),
+                    };
+                    OcrLine {
+                        text: t.clone(),
+                        rect,
+                        words: vec![],
+                    }
+                })
+                .collect();
+            Ok(OcrText {
+                text: String::new(),
+                lines,
+            })
+        }
+
+        fn view_plan(&self) -> ViewPlan {
+            self.plan
+        }
+    }
+
+    /// **产品路径递进 OCR 的那张图，必须是引擎要的那一张。**
+    ///
+    /// 判据有两条：① 引擎**收到**的尺寸 = 配方规定的尺寸；
+    /// ② 按配方喂进去之后，**对方那条消息真的被读出来了**。
+    ///
+    /// 第二条是重点：配方错了的时候症状是「看得见行、归成 0 条消息」，
+    /// 那正是真机上票 72 的样子——**不报错、不告警，只是读不到**。
+    #[test]
+    fn the_product_read_path_hands_ocr_the_view_the_engine_asks_for() {
+        let (frame, anchor) = wechat_frame_with_ink();
+        let pane = frame.crop(anchor.chat).expect("裁得出消息区");
+        let roi = Rect::new(0, 0, anchor.chat.width(), anchor.chat.height());
+
+        for plan in [ViewPlan::PPOCR, ViewPlan::WINRT] {
+            let src = PickyEngine::new(plan, anchor.chat, &frame);
+            let expect_view = src.expect_view;
+            let round = read_round(&frame, &pane, &anchor, roi, &src).expect("读帧成功");
+            assert_eq!(
+                *src.seen.borrow(),
+                Some(expect_view),
+                "配方 {plan:?}：引擎收到的那张图不是它要的那一张"
+            );
+            let theirs: Vec<_> = round
+                .messages
+                .iter()
+                .filter(|m| m.speaker == Speaker::Them)
+                .collect();
+            assert_eq!(
+                theirs.len(),
+                1,
+                "配方 {plan:?}：对方那条没被读出来——{:?}",
+                round
+                    .messages
+                    .iter()
+                    .map(|m| (&m.text, m.speaker))
+                    .collect::<Vec<_>>()
+            );
+            assert!(theirs[0].text.contains("对方那条"));
+            // 面板上的灰字（时间戳）不许进消息流。
+            assert!(
+                !round.messages.iter().any(|m| m.text.contains("时间戳")),
+                "灰字混进消息流了：{:?}",
+                round.messages.iter().map(|m| &m.text).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// **产品路径与探针路径必须给出同一个答案。**
+    ///
+    /// 探针那条路是 `chatservant_perceive::read`（`xtask perceive` 走它）。
+    /// 两条路读同一张帧、用同一个引擎，答案必须一致——
+    /// **不一致就说明产品路径自己抄了一份配方**，而分叉的后果是
+    /// 「探针全绿、真机消息为 0」（票 72）。
+    ///
+    /// ⚠ 比较时给产品路径的 ROI 覆盖**整个消息区**：探针那条路没有 ROI
+    /// 这一层，两条路只在「本轮该管哪些行」上不同。
+    #[test]
+    fn the_product_read_path_agrees_with_the_probe_path() {
+        let (frame, anchor) = wechat_frame_with_ink();
+        let pane = frame.crop(anchor.chat).expect("裁得出消息区");
+        let roi = Rect::new(0, 0, anchor.chat.width(), anchor.chat.height());
+
+        for plan in [ViewPlan::PPOCR, ViewPlan::WINRT] {
+            let product = read_round(
+                &frame,
+                &pane,
+                &anchor,
+                roi,
+                &PickyEngine::new(plan, anchor.chat, &frame),
+            )
+            .expect("产品路径读帧成功");
+            let probe =
+                chatservant_perceive::read(&frame, &PickyEngine::new(plan, anchor.chat, &frame))
+                    .expect("探针路径读帧成功");
+
+            assert_eq!(
+                product.messages.len(),
+                probe.messages.len(),
+                "配方 {plan:?}：两条路读出的条数不同——产品路径抄了自己的配方？"
+            );
+            for (a, b) in product.messages.iter().zip(probe.messages.iter()) {
+                assert_eq!(a.speaker, b.speaker, "配方 {plan:?}：说话人不同");
+                assert_eq!(a.text, b.text, "配方 {plan:?}：正文不同");
+                assert_eq!(a.rect, b.rect, "配方 {plan:?}：位置不同");
+            }
+        }
+    }
+
+    /// **生产代码不许自己拼 OCR 配方。**
+    ///
+    /// 这条是**接线**层面的守：配方由
+    /// `chatservant_perceive::read_lines` 提供，调用方只许调它。
+    /// 手抄一份的代价，票 72 已经付过一次了。
+    #[test]
+    fn the_watch_layer_does_not_hand_roll_the_ocr_recipe() {
+        let source = include_str!("watch.rs");
+        let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            prod.contains("chatservant_perceive::read_lines("),
+            "产品路径没走 `perceive::read_lines`——接线断了"
+        );
+        // `peer_name_from_header` 那一处放大是**另一件事**（读会话名，
+        // 不是读消息），所以不能一刀切禁掉 `upscaled_nearest`。
+        // 真正要禁的是**消息读帧路径**里出现它。
+        let read_round_body = prod
+            .split("fn read_round(")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .unwrap_or("");
+        assert!(
+            !read_round_body.contains("upscaled_nearest"),
+            "读帧路径里又自己放大画面了——配方必须由引擎决定"
+        );
+        assert!(
+            !read_round_body.contains("OCR_UPSCALE"),
+            "读帧路径里又写死放大倍数了——配方必须由引擎决定"
         );
     }
 }

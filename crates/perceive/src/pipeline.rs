@@ -336,6 +336,41 @@ pub fn read_lines(
     Ok(lines_into_pane(ocr, chat, plan.upscale, origin))
 }
 
+/// **这一轮真正送进 OCR 的像素数。**
+///
+/// 口径必须与 [`read_lines`] 递进去的那张图**逐字一致**：
+/// 整帧那条路是「整帧面积 × 倍数²」，裁剪那条路是「消息区面积 × 倍数²」。
+///
+/// ## 为什么要有这个函数
+///
+/// 界面上的「OCR 开销」用它，而这个数字**曾经是手写的**
+/// （`watch.rs` 里 `frame.width() * frame.height() * OCR_UPSCALE`）。
+/// 手写的后果有两处：
+/// · **倍数算错**：放大 2 倍面积是 ×**4**，不是 ×2；
+/// · **画面算错**：默认引擎 PP-OCR 看的是**消息区**，报成整帧面积
+///   会让用户以为「调小 ROI 就能省 OCR」——而 ROI 只决定**读哪几行**，
+///   送进 OCR 的画面根本没变小。
+///
+/// ⇒ 口径只留这一处，调用方不许自己乘。
+pub fn ocr_input_pixels(frame: &Frame, chat: Rect, source: &impl LineSource) -> u64 {
+    let plan = source.view_plan();
+    let (w, h) = match plan.policy {
+        ViewPolicy::WholeFrame => (frame.width(), frame.height()),
+        ViewPolicy::ChatPane => {
+            // 裁剪件的实际尺寸由 `Frame::crop` 裁到帧边界，所以这里也得裁一次。
+            // 抄 `crop` 的钳位而不是拿 `chat` 的标称尺寸：锚点落在帧外时
+            // 两者不一样，而这个数字是**开销账**，不许虚报。
+            let x0 = chat.x0.clamp(0, frame.width() as i32);
+            let x1 = chat.x1.clamp(0, frame.width() as i32);
+            let y0 = chat.y0.clamp(0, frame.height() as i32);
+            let y1 = chat.y1.clamp(0, frame.height() as i32);
+            ((x1 - x0).max(0) as u32, (y1 - y0).max(0) as u32)
+        }
+    };
+    let n = u64::from(plan.upscale);
+    u64::from(w) * u64::from(h) * n * n
+}
+
 /// 跑完整条链路。`source` 只负责取文本框，其余全真跑。
 pub fn read(frame: &Frame, source: &impl LineSource) -> Result<Read, ReadError> {
     let anchor = anchor::derive(frame)?;
@@ -828,5 +863,35 @@ mod tests {
             matches!(err, ReadError::Anchor(_)),
             "应报锚点失败，实际 {err}"
         );
+    }
+
+    /// **开销账 = 真正送进 OCR 的那张图的面积。**
+    ///
+    /// 两个引擎要的**画面**不一样（整帧 vs 消息区），**倍数**也不一样
+    /// （2× vs 1×）；而 2 倍放大的面积是 ×**4**，不是 ×2。
+    ///
+    /// 这个数字曾经由调用方手写（`watch.rs` 里
+    /// `frame.width() * frame.height() * OCR_UPSCALE`），手写的后果是
+    /// 「报成整帧面积」⇒ 用户以为「调小 ROI 就能省 OCR」，
+    /// 而 ROI 只决定**读哪几行**，送进 OCR 的画面根本没变小。
+    #[test]
+    fn the_ocr_cost_is_the_area_of_the_view_actually_sent() {
+        let f = synthetic_frame();
+        let chat = Rect::new(192, 27, 800, 426);
+        // 整帧 2×：800 × 600 × 4
+        let whole = ocr_input_pixels(&f, chat, &RecordedLines(vec![]));
+        assert_eq!(whole, 800 * 600 * 4, "整帧那条路的口径变了");
+        // 消息区 1×：(800-192) × (426-27) × 1
+        let pane = ocr_input_pixels(
+            &f,
+            chat,
+            &CroppedLines(OcrText {
+                text: String::new(),
+                lines: vec![],
+            }),
+        );
+        assert_eq!(pane, 608 * 399, "裁剪那条路的口径变了");
+        // 两条路必须**不相等**——相等就说明有一边没跟着配方走。
+        assert_ne!(whole, pane, "两条路的开销被算成了同一个数");
     }
 }
