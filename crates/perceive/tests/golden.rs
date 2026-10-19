@@ -27,8 +27,19 @@
 //! 夹具是从**实机抓帧**脱敏而来的，而实机抓帧对应的是**用户自己的真实聊天**。
 //! 即使脱敏后只剩布局几何与配色，来源仍然指向真实会话，因此**不入公开仓库**
 //! （`.gitignore` 里 `crates/capture/fixtures/`）。代价是这些黄金测试在
-//! 没有夹具的机器上**不跑**——所以它们一律「缺件即跳过」而不是失败：
-//! 跳过要说清缺的是哪几个，别让 CI 的绿灯被读成「黄金基线验过了」。
+//! 没有夹具的机器上**跑不起来**。
+//!
+//! ⚠⚠ **2026-10-19：缺件从「跳过」改成「失败」**（理由见 [`missing_fixture`]）。
+//! 原先这里是「缺件即跳过」，而 `libtest` **丢弃通过测试的 stderr**、
+//! `ci.yml` 又**不带** `--nocapture` ⇒ 那条「跳过」提示在 CI 日志里
+//! **一个字都看不到**，只有 `test result: ok`。
+//! ⇒ 干净 runner 上**黄金基线从未真的验过，却报通过**。
+//! 现在缺夹具就是红的理由：判据是「**守卫跑过没有**」，不是「夹具在不在」。
+//!
+//! ⚠ 由此带来一条**必须知道的后果**：`ci.yml` 的 `cargo test --workspace`
+//!   现在**要求夹具在场**，否则 Gate 8 会红。
+//!   CI 若要缓存/准备夹具，在那一步之前加 `cargo xtask fixture` 或
+//!   从缓存还原 `crates/capture/fixtures/` —— **别再加 `continue-on-error`**。
 //!
 //! 本机要恢复它们：重跑
 //! `cargo xtask fixture --name wechat-dark-2side --source target\probe\<你的帧>.png`
@@ -116,11 +127,16 @@ fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../capture/fixtures")
 }
 
-/// 夹具在**公开仓库里不存在**（见模块文档），所以「没有」是一种正常状态，
-/// 不是错误。缺件时返回 `None` 让调用方跳过，而不是 panic。
+/// 夹具在**公开仓库里不存在**（见模块文档）。缺件时返回 `None`，
+/// 由调用方走 [`missing_fixture`] —— 那里**在 CI 上是硬失败**。
+///
+/// ⚠ 2026-10-19 订正：这段注释原先写的是「让调用方跳过，而不是 panic」。
+///   那个行为本身是本项目反复付过学费的坑：`libtest` 丢弃通过测试的
+///   stderr ⇒ 「跳过」在 CI 上不可见、报 `ok` ⇒ 守卫静默失效。
+///   现在「跳过」是红的理由，理由见 [`missing_fixture`]。
 ///
 /// 先判 png 在不在，**再**去读 `.toml` manifest —— 两者同属被 gitignore 的目录，
-/// 顺序反了会卡在「读 manifest 失败」上，丢掉跳过这条路径。
+/// 顺序反了会卡在「读 manifest 失败」上，丢掉缺件这条路径。
 fn load(name: &str) -> Option<Frame> {
     let dir = fixture_dir();
     let path = dir.join(format!("{name}.png"));
@@ -181,15 +197,44 @@ fn histogram(frame: &Frame, r: Rect) -> Vec<(Rgb, usize)> {
     v
 }
 
+/// 缺夹具时的处理。**在 CI 上是硬失败**（2026-10-19 改）。
+///
+/// ## 为什么从「跳过」改成「红」
+///
+/// 原来这里是 `eprintln!(...)` + `return`。而 **`libtest` 会丢弃通过测试的
+/// stdout/stderr** —— 只有失败或 `--nocapture` 才显示。`ci.yml:243` 跑的是
+/// `cargo test --workspace`，**不带 `--nocapture`** ⇒ 那条「跳过」提示
+/// 在 CI 日志里**一个字都看不到**，输出只有 `test result: ok`。
+///
+/// ⚠ 而补救措施恰好选在了**会被吞掉的那条路上**。
+/// 结果：干净 runner 上没有夹具 ⇒ 黄金基线**从未真正验过**，却报 3 passed。
+/// 这正是本项目反复付过学费的「`ok` 与跳过逐字同形」。
+///
+/// ⇒ 判据：**CI 上黄金守卫必须真的跑**。缺夹具就是守卫没生效，
+///   那是红的理由，不是绿的。
+///   本机有夹具时（`crates/capture/fixtures/`）行为完全不变。
+fn missing_fixture(g: &Golden) -> ! {
+    // ⚠ 判据按 `CI` 环境变量分档，与 `crates/capture/tests/ocr_accuracy.rs`
+    //   里已有的「CI ⇒ 缺件 panic」**同构** —— 那是本项目处理这个坑的既有范式。
+    //   为什么不是一律 panic：`cargo test` 在本机随手跑时不该因缺夹具就炸，
+    //   而 CI 上「守卫没跑」必须变红，否则又是一次静默失效。
+    let on_ci = std::env::var_os("CI").is_some();
+    let how = if on_ci {
+        "CI 上缺夹具 ⇒ **守卫没有真的跑**，不能报通过。"
+    } else {
+        "本机缺夹具 ⇒ 这条守卫没有真的跑（CI 上同一情形会直接失败）。"
+    };
+    panic!(
+        "缺少夹具 `{}`：{how}\n\
+         本机恢复：`cargo xtask fixture --name <n> --source target\\probe\\<帧>.png`\n\
+         （夹具 gitignored，公开仓库不含真实会话的脱敏帧）",
+        g.name
+    )
+}
+
 fn check(g: &Golden) {
-    // 夹具不在公开仓库里。缺件要说清是缺哪个，别让「跳过」在 CI 日志里
-    // 只留下一行 test result: ok，被读成「黄金基线验过了」。
     let Some(frame) = load(g.name) else {
-        eprintln!(
-            "跳过 {}：夹具不在本机（公开仓库不含真实会话的脱敏帧）",
-            g.name
-        );
-        return;
+        missing_fixture(g);
     };
     assert_eq!(
         (frame.width(), frame.height()),
@@ -261,9 +306,10 @@ fn my_sided_conversation_matches_golden() {
 #[test]
 fn fixture_pane_contains_no_pixel_outside_the_layout_palette() {
     for g in [&TWO_SIDE, &MY_SIDE] {
+        // ⚠ 与 `check()` 同一个坑：原来这里是 `eprintln!` + `continue`，
+        // 而通过测试的 stderr 被 libtest 丢弃 ⇒ CI 上「跳过」不可见、报 ok。
         let Some(frame) = load(g.name) else {
-            eprintln!("跳过 {}：夹具不在本机", g.name);
-            continue;
+            missing_fixture(g);
         };
         for (r, n) in histogram(&frame, g.chat) {
             assert!(

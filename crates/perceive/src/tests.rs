@@ -670,7 +670,16 @@ fn real_text_lines_stay_below_both_icon_thresholds() {
 /// `Text`，头像闸不参与；而其中一段 `rgb(47,47,48)` 在 `myside` 里
 /// 是聊天里的**照片**（黄金测试里记着它的 5509 px），不是气泡。
 ///
-/// 夹具不在公开仓库里，所以**缺件即跳过**而不是失败。
+/// ⚠⚠ **「缺件即跳过」在 2026-10-19 改成了硬失败**（原先是 `eprintln!` + `continue`）。
+///
+/// 原因：`libtest` **丢弃通过测试的 stdout/stderr**，只有失败或 `--nocapture`
+/// 才显示；而 `ci.yml` 跑的是 `cargo test --workspace`（**不带** `--nocapture`）
+/// ⇒ 那条「跳过」提示在 CI 日志里一个字都看不到，输出只有 `test result: ok`。
+/// 结果是**守卫静默失效**：干净 runner 上它从未真的跑过，却报通过。
+/// 这与本项目反复付过学费的「`ok` 与跳过逐字同形」是同一件事。
+///
+/// ⚠ 判据是**「守卫跑过没有」**，不是「夹具在不在」。
+///   缺夹具 ⇒ 守卫没跑 ⇒ 那是红的理由。本机有夹具时行为不变。
 #[test]
 fn a_real_bubble_never_has_a_busy_ring() {
     use std::path::Path;
@@ -680,7 +689,8 @@ fn a_real_bubble_never_has_a_busy_ring() {
     for name in ["wechat-dark-2side", "wechat-dark-myside"] {
         let path = dir.join(format!("{name}.png"));
         if !path.exists() {
-            eprintln!("跳过 {name}：夹具不在本机（公开仓库不含真实会话的脱敏帧）");
+            // 少一份夹具就少验一份，**不允许悄悄降级成通过**。
+            eprintln!("缺夹具 {name}（公开仓库不含真实会话的脱敏帧）");
             continue;
         }
         let img = image::open(&path).unwrap_or_else(|e| panic!("读夹具 {name} 失败：{e}"));
@@ -722,6 +732,12 @@ fn a_real_bubble_never_has_a_busy_ring() {
         );
     }
     if sampled_total == 0 {
-        eprintln!("跳过：两份夹具都不在本机");
+        // ⚠ **一份都没验到 = 这条守卫等于不存在**，不能报通过。
+        //   判据是「守卫跑过没有」，不是「夹具在不在」（理由见函数文档）。
+        panic!(
+            "两份夹具都不在本机 ⇒ `a_real_bubble_never_has_a_busy_ring` **一条都没验**。\n\
+             本机恢复：`cargo xtask fixture --name <n> --source target\\probe\\<帧>.png`\n\
+             （夹具 gitignored，公开仓库不含真实会话的脱敏帧）"
+        );
     }
 }

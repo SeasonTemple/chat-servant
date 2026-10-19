@@ -324,10 +324,27 @@ jobs:
         working-directory: ui
         run: pnpm build
 
-      # 黄金测试的夹具来自真实会话，不入公开仓库，没有夹具时它们**跳过**。
-      # 这里显式记一句，免得 CI 绿灯被读成「像素级基线验过了」。
-      - name: Note | golden fixtures are absent by design
+      # ⚠⚠ **2026-10-19 订正：这里原先写「没有夹具时它们【跳过】，不是通过」。**
+      #
+      #   那句当时是**真的**，但它描述的正是本项目最贵的一个教训：
+      #   `cargo test` 的输出里「跳过」与「通过」**逐字同形**，
+      #   所以那句 note 只是在提醒读者「别把绿灯读成基线验过了」——
+      #   而守卫**本身**并没有因此失效保护，它照样报 ok。
+      #
+      #   现在 `crates/perceive/tests/golden.rs` 的缺件路径是
+      #   **硬失败**（CI 上直接 panic，本机给出恢复指引），
+      #   理由与实测见该文件 `missing_fixture` 的文档。
+      #
+      # ⇒ **后果**：Gate 8 的 `cargo test --workspace` 现在**要求夹具在场**。
+      #   ⚠ 若 CI 要缓存/准备 `crates/capture/fixtures/`，在 Gate 8 之前加一步；
+      #     **绝不要**加 `continue-on-error` —— 那正是本票要根除的东西。
+      #   本机有夹具（4 个文件）时行为完全不变。
+      #
+      # 这与 ocr_accuracy 是两回事：后者用的是 Gate 7b-5 现场造的**合成**语料，
+      # 本次 CI 里真跑，且已有独立的 `CI ⇒ 缺件 panic` 守卫。
+      - name: Note | golden fixtures are required by Gate 8
         run: |
           Write-Output "::notice::crates/capture/fixtures 不在仓库里（真实会话脱敏帧）。"
-          Write-Output "::notice::依赖它的 golden 测试在本次 CI 里是【跳过】，不是通过。"
-          Write-Output "::notice::⚠ 这与 ocr_accuracy 是两回事：后者用的是 Gate 7b-5 现场造的**合成**语料，本次 CI 里是真跑的。"
+          Write-Output "::notice::⚠ 但 Gate 8 现在**要求**它在场：缺件会让 golden 测试直接失败，"
+          Write-Output "::notice::   因为「ok 与跳过同形」已让缺件守卫静默失效过一次。"
+          Write-Output "::notice::ocr_accuracy 不同：它用 Gate 7b-5 现场造的**合成**语料，本次 CI 真跑。"
