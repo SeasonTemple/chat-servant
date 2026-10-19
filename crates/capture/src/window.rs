@@ -13,7 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
     ShowWindow,
 };
-use windows::core::{BOOL, PWSTR};
+use windows::core::{BOOL, Owned, PWSTR};
 
 use crate::surface::ChatSurface;
 
@@ -130,21 +130,28 @@ unsafe fn describe(hwnd: HWND) -> Option<WindowHit> {
 fn process_exe_name(pid: u32) -> Option<String> {
     // SAFETY: 只申请进程查询权限（`PROCESS_QUERY_LIMITED_INFORMATION`），
     // 不申请读写内存——这里只读可执行文件的路径。
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    // `Owned` 在 drop 时调 `CloseHandle`。这里用 guard 而不是在末尾手动关：
+    // 后面还有提前返回的路（下面 `QueryFullProcessImageNameW` 失败的 `?`，
+    // 以及 `file_name()` 取不到时的 `None`），逐条补 `CloseHandle` 迟早会漏一条。
+    //
+    // 实测（2026-10-19）：改成 guard 之前**每次调用泄漏一个句柄**，
+    // 500 次调用把本进程句柄数从 683 抬到 1183。这条在热路径上——
+    // `describe` 对**每个可见顶层窗口**调一次，`load_frame` 又每个观察 tick
+    // 跑一遍，所以泄漏速率是「可见窗口数 × tick 数」，常驻数小时就是数万个。
+    //
+    // SAFETY: `raw` 是上面 `OpenProcess` 成功返回的、**本函数独占**的进程句柄，
+    // 还没交给过别人；`Owned` 接管它并在 drop 时关闭，正是它该去的所有权终点。
+    let handle = unsafe { Owned::new(raw) };
     let mut buf = [0u16; 1024];
     // `size` 是**入参也是出参**：入参写容量，出参写实际字符数。
     // 必须先填上真实容量，否则 Win32 认为缓冲区是 0 字节、直接失败。
     let mut size = buf.len() as u32;
     // SAFETY: `buf` 是 1024 个 u16 的栈数组、容量已如实写进 `size`；
     // `size` 是栈上 u32。Win32 只往这块内存里写，不多写。
-    //
-    // 另注：`handle` 在这里**没有 CloseHandle**——函数是 `Option<String>`，
-    //   中途有若干个 `?` 提前返回，统一清理需要改成 guard。
-    //   进程句柄由系统在进程退出时回收，短期泄漏可接受，
-    //   但**每次调用泄漏一个**这件事要知道（`enumerate_for` 每个窗口调一次）。
     unsafe {
         QueryFullProcessImageNameW(
-            handle,
+            *handle,
             PROCESS_NAME_FORMAT(0),
             PWSTR(buf.as_mut_ptr()),
             &raw mut size,

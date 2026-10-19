@@ -385,8 +385,17 @@ pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
     let deadline = Instant::now() + READBACK_TIMEOUT;
     let mut last_err = String::from("尚未回读");
     while Instant::now() < deadline {
-        // 整个回读窗口都持锁：中途放开会让别的线程换掉剪贴板内容，
-        // 那时回读到的就不是我们写的东西——那样的「证据」毫无意义。
+        // 锁的实际持有范围：**只有 `read_clipboard` 这一次调用**。两轮之间的
+        // `sleep(20ms)` 是放开的，所以别的线程/进程完全可能在两轮之间换掉剪贴板，
+        // 下面那句「已被别的程序改动」正是为这种情况准备的。
+        //
+        // 放开仍然安全，因为读取的那一瞬间 `OpenClipboard` 由 `read_clipboard`
+        // 自己去开、成对 `CloseClipboard`：跨进程那侧的原子性由 Win32 这一对调用
+        // 保证，不依赖这把 Rust 锁。这把锁只管**本进程内**的线程互斥。
+        //
+        // 早先这里写的是「整个回读窗口都持锁」——那是**承诺了代码没做的事**，
+        // 读代码的人会照着它以为中途不能被打断。要真按那句话实现，就得把 `sleep`
+        // 挪进锁里、让整个回读窗口变成临界区，那是另一个产品决定，不在本次改动里。
         let got = {
             let _guard = lock_clipboard();
             read_clipboard()
