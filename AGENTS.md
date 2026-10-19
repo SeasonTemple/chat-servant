@@ -152,7 +152,8 @@ pwsh -NoProfile -File scripts\shotwin.ps1 <hwnd> <out.png>   # 截窗口
 
 ### 内循环：不要每次都跑全门禁（2026-10-16 加）
 
-上面那条是**完整门禁**，代价是热缓存下也要 128.7s（实测 10 步分步耗时见下）。
+上面那条是**完整门禁**，代价是热缓存下也要 94.4s（2026-10-19 并行化后实测；
+⚠ **别数「几步」，也别照抄这个数**——它会过期，以 `gate.ps1` 自打的那份为准）。
 改一行代码时按改动范围选入口，别每轮都付全价：
 
 ```bash
@@ -176,7 +177,40 @@ pwsh -NoProfile -File scripts\gate.ps1 -Only 'cargo,ui'
 ⚠ `dev.ps1` 的动词里**没有** `cargo deny` 与 `secret-scan`：
    那两步要联网 / 要密钥，本来也不该进内循环。
 
-热缓存下各步实测耗时（2026-10-16，PowerShell 7）：
+### 门禁是**四轨并行**的（2026-10-19 改）
+
+`gate.ps1` 现在把 16 步分到四条轨，**同时**跑，父进程流式转发输出：
+
+| 轨 | 步骤 | 为什么这么分 |
+|---|---|---|
+| `cheap` | mojibake、sheetpack、parity、version、opaque、hooks | 纯读文件，彼此零共享 |
+| `rust` | license、fmt、clippy、test、secret scan | 共用 `target/` 的 cargo 构建锁，**只能**串行 |
+| `net` | cargo deny | 联网拉 advisory-db，与本机编译零共享 |
+| `ui` | check ∥ lint ∥ autofixer → build | 三步只读可并行；build 最后（vite 与 `svelte-kit sync` 都写 `.svelte-kit`） |
+
+⚠ `license consistency` 归 `rust` 轨**反直觉**：它看着像纯读文件，
+但里面有 `cargo metadata`，吃同一把锁。
+
+实测：**229.3s → 94.4s**（热缓存，16 核本机）。⚠ 这张数字会过期，
+`gate.ps1` 每轮都打印自己的分步耗时，**以它为准**。
+
+⚠⚠ **并行化之后读分步耗时的方式变了**：每步的秒数是它**自己那条轨上**的耗时，
+四条轨是同时跑的 ⇒ **各步秒数之和 ≠ 门禁墙钟**（脚本会同时打
+「最慢的一步」与「步秒之和」两行，别把后者当墙钟）。
+并行组那三步的秒数是**整组的墙钟**，不是各自耗时。
+
+⚠⚠ **每步仍打自己的 `==== name ====` 与 `>>> name OK|FAILED [Ns] (exit=N)`**，
+可诊断性没牺牲。唯一的差别是**步与步的输出不再按声明顺序出现**。
+
+⚠⚠ **新增步必须登记轨**，否则它**不会被任何轨跑到**，而门禁照样报 ALL GREEN。
+`gate.ps1` 里的 `Assert-Lanes` 会直接红掉这种漏登记（还有「laneOf 里留了
+已删步名」的镜像情形）。⚠ 这条断言是并行化**新增**的必需品：
+串行版本里「忘了写一行」是显然的，并行版本里它变成**静默**的。
+
+⚠ 手工传 `-Child <lane>` 可单跑一条轨（内部用；四轨并列 `cheap`/`rust`/`net`/`ui`）。
+
+热缓存下各步实测耗时（2026-10-16，PowerShell 7）——⚠ **这张表已过期**，
+它记的是**并行化之前**的串行耗时；现在请以 `gate.ps1` 每轮自打的那份为准：
 
 | 步 | 秒 | 步 | 秒 |
 |---|---|---|---|
@@ -260,13 +294,17 @@ pub fn cache_dir() -> Option<PathBuf> {
 唯一的 ort 侧入口 `ORT_LIB_LOCATION` 语义是「指向一套**已存在**的 lib 目录」，
 **不是缓存位置**：设了它 ort 就不再下载 ⇒ CI 上没有那些文件会**直接编译失败**。
 
-⇒ **解法是 junction**：本机已把 `%LOCALAPPDATA%\ort.pyke.io` 做成指向
+⇒ **解法是 junction**：本机把 `%LOCALAPPDATA%\ort.pyke.io` 做成指向
 `<仓库>/target/ort-cache/` 的目录联接。ort 照旧往那个路径写，字节落在 E 盘。
 重建办法：
 
 ```powershell
-robocopy "$env:LOCALAPPDATA\ort.pyke.io" "$PWD\target\ort-cache" /E
-[IO.Directory]::Delete("$env:LOCALAPPDATA\ort.pyke.io", $true)
+# ⚠ 复制要用**字面绝对路径**（见「工具调用纪律」里 bash 策略那条）：
+#   变量拼出来的目标在工作区内会被安全策略判成「无法静态校验」而拦下。
+Copy-Item -LiteralPath "C:\Users\<you>\AppData\Local\ort.pyke.io\dfbin\x86_64-pc-windows-msvc\<hash>\onnxruntime\lib\onnxruntime.lib" `
+          -Destination "E:\workspace\chat-servant\target\ort-cache\dfbin\x86_64-pc-windows-msvc\<hash>\onnxruntime\lib\onnxruntime.lib" -Force
+# 删原目录走**可恢复删除**（硬安全策略禁永久删除命令）：
+& "$env:USERPROFILE\.minimax\bin\mavis-trash.cmd" "$env:LOCALAPPDATA\ort.pyke.io"
 New-Item -ItemType Junction -Path "$env:LOCALAPPDATA\ort.pyke.io" `
          -Target "$PWD\target\ort-cache"
 ```
@@ -276,16 +314,49 @@ New-Item -ItemType Junction -Path "$env:LOCALAPPDATA\ort.pyke.io" `
 `LOCALAPPDATA`，ephemeral 无所谓）。反之若把 `ORT_LIB_LOCATION` 写进
 `.cargo/config.toml`，CI 会因为找不到那些 `.lib` 而编译失败。
 
-⚠ **验证到什么程度（如实说）**：迁移后 `cargo test -p chatservant-capture
---test ocr_accuracy` 通过（25.5s，真跑了 ort 推理）⇒ **链接路径可用**已证。
-但「ort 升级后 build script 重跑时不会重新下载」这一环**是读代码推断的**
-（`if !lib_dir.exists() { download }`），**没做强制重编译验证**。
+⚠⚠ **2026-10-19：这个联接会消失，而且当时那句话是假的。**
+本轮开工时实测 `fsutil reparsepoint query` 报「不是重解析点」——
+**联接早没了，C 盘又有 306.9 MiB**，而 AGENTS.md 这里却写着「本机已把……做成
+目录联接」。⇒ 「已做过」的陈述**不等于**「现在还成立」，每轮都得实测一次：
+
+```powershell
+fsutil reparsepoint query "$env:LOCALAPPDATA\ort.pyke.io"   # 期望含 Mount Point
+```
+
+⚠ **为什么会消失**（推断，未直接抓到现场）：`cargo clean -p <包>` 之类操作
+会把 `%LOCALAPPDATA%\ort.pyke.io` 当**普通目录**删掉重建 ⇒ 联接变回真目录，
+字节就又落回 C 盘。⇒ 每次跑过 `cargo clean` 后都要复查上面那条。
+
+⚠ **验证到什么程度（2026-10-19 补做，结论比原来强）**：
+原来只验了「链接路径可用」，「ort 的 build script 重跑时会不会把联接吃掉」
+**是读代码推断的**。本轮补做了强制重编译验证：
+
+```powershell
+cargo clean -p ort-sys        # 只清这一个包 ⇒ 它的 build script 必然重跑
+cargo build -p chatservant-capture
+fsutil reparsepoint query "$env:LOCALAPPDATA\ort.pyke.io"   # 实测仍是 Mount Point ✓
+```
+
+⇒ 结论：**build script 重跑不会吃掉联接**（`ort-sys` 被重编译、
+`Compiling ort-sys v2.0.0-rc.10` 实打实出现过，9.44s，联接存活、
+306.9 MiB 仍在 E 盘）。⚠ 但这只证明了「重跑不吃掉」，
+**没解释「当初为什么消失」**——那句话仍是推断，别当已证。
 
 ⚠⚠ **教训（这才是该记住的那半）**：修 `ocr_pp::models_dir()` 时我只改了
 **显式写到的那一处**，没扫依赖链上第二处——同一个红线、第二个实例，
 而且第二处是**构建时自动发生**的，连"某人手动装了"这条线索都没有。
 ⇒ 判据不能是「我上次修了哪个默认值」，而是
 **「这条依赖链上还有谁会往用户目录写东西」**。
+
+⚠⚠ **2026-10-19 追加的第三处**：`%APPDATA%\dev.chatservant.app\models\`
+里还躺着 14.9 MiB 的旧权重（两个 `.onnx`）。**现在的代码根本不读那里**——
+`ocr_pp::models_dir()` 的查找顺序是「环境变量 > 外壳 > 仓库 target/models >
+exe 旁 > `%TEMP%`」，**没有 `%APPDATA%`**（`ocr_pp.rs:147-168`；
+守卫 `main.rs:369 models_dir_still_finds_the_repo_weights_without_a_shell`
+会断言落点不含 `AppData`）。⇒ 那是旧版留下的**死文件**，已删。
+⚠ 同目录下的 `close_behavior.txt` / `mark_shape.txt` **必须留着**：
+它们是**用户设置**（关闭行为、记号形状），按上面那条判据
+「不能 ⇒ 才值得放用户目录并征求同意」，用户设置就该留在用户目录。
 
 判据：**问「这东西能不能再跑一遍生成」**。能 ⇒ 放 `target/`，删了不心疼；
 不能 ⇒ 才值得放用户目录并征求同意。

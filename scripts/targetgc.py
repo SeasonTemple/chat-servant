@@ -64,6 +64,22 @@
 2. `aged` —— 保留原来的行为：只回收超过 N 天没被动过的 `incremental/` 与
    `deps/` 产物。适合「放着不构建、只想腾地方」的场合。
 
+⚠⚠ **两个模式扫的地方不一样（2026-10-19 实测）**：
+   · `superseded`（默认）**只扫 `deps/` 下的散落文件**（`os.scandir` 且
+     `entry.is_file()`），`incremental/` 下的**目录**它一个都不看。
+   · `aged` 才碰 `incremental/`（连目录带里面的文件一起删）。
+   ⇒ 想清 `incremental/` 必须显式 `--mode aged`。
+   ⚠ 2026-10-19 实测：`superseded` 在一台「产物全是 12h 内建的」机器上
+   扫到 0 个，而 `--mode aged` 一次清掉 **690.3 MiB**（全在 incremental）。
+   ⇒ **看到 superseded 扫到 0 个，先跑一次 `--mode aged --dry-run`**，
+     别直接判定「没垃圾可清」。
+
+⚠ **superseded 扫到 0 个不一定是失效**（2026-10-19 实测，判据是对的）：
+   脚本会报「cargo 报告在用 992 个产物」，而 deps 里超 12h 的 853 个文件
+   **全部在那个集合内**（集合外 0 个）—— cargo 的 `compiler-artifact`
+   消息会把它**知道的所有**哈希都列出来，包括当前 plan 用不到的旧哈希。
+   ⇒ 按「宁可漏扫」的纪律，不删是对的；那 1.39 GiB **不是垃圾**。
+
 安全边界（为什么删了不会编译出坏东西）
 ----------------------------------------
 Cargo 判断「要不要重编」靠 `target/<profile>/.fingerprint`，不靠文件是否存在。
@@ -72,6 +88,11 @@ Cargo 判断「要不要重编」靠 `target/<profile>/.fingerprint`，不靠文
 ⇒ 所以本脚本**绝不删 `.fingerprint`**，也不删 `build/`（删了会整棵依赖重编）。
 ⚠ 删不掉是正常的：Windows 上正在被链接器/杀软占用的文件会拒绝删除。
   脚本对每个失败**静默跳过并计数**，绝不因为一个锁住的文件就中断或报错。
+⚠ **删 `incremental/` 不会触发重编**（2026-10-19 实测）：清掉 690.3 MiB 后
+  `cargo test --workspace` 仍 22.8s、**零 `Compiling` 行**、测试全过。
+  增量目录只影响编译**速度**，Cargo 判断要不要重编靠 `.fingerprint`。
+⚠ 但 `deps/` 下的产物是**会**触发重编的（cargo 发现产物缺失就重编那个包）。
+  ⇒ 删完必须验证一次「零 `Compiling`」，别只看省了多少字节。
 
 用法：
     python scripts/targetgc.py                    # 超阈值 + 过了冷却期才动手
@@ -212,6 +233,16 @@ def sweep_aged(base, age_days, dry_run):
     cutoff = time.time() - age_days * 86400
     removed = 0
     skipped = 0
+    # ⚠⚠ dry-run 也必须**累加字节数**（2026-10-19 修）。
+    #   原来这里只 `removed += 1`，字节数只在真删时累加，而调用处的
+    #   `freed = counted if dry_run else before - after` 取的是 `counted`——
+    #   而 `sweep_aged` 只返回**两个**值，`counted` 永远是调用前的 0。
+    # ⇒ `--mode aged --dry-run` 永远报「扫了 2850 个文件、would free 0.0 B」。
+    #   那正是本文件自己骂过的那句话：「一条**永远显示「什么都不省」**的报告，
+    #   比没有报告更糟」—— 同一个坑换了个模式又踩了一遍。
+    #   而它有实际代价：dry-run 是**唯一**能在动手前评估收益的通道，
+    #   报 0 字节就没法判断该不该删。
+    freed = 0
     for name in SWEEPABLE:
         d = base / name
         if not d.is_dir():
@@ -230,17 +261,23 @@ def sweep_aged(base, age_days, dry_run):
             else:
                 victims = [entry.path]
             for v in victims:
+                try:
+                    size = os.path.getsize(v)
+                except OSError:
+                    size = 0
                 if dry_run:
                     removed += 1
+                    freed += size
                     continue
                 try:
                     os.remove(v)
                     removed += 1
+                    freed += size
                 except OSError:
                     skipped += 1
             if not dry_run and entry.is_dir():
                 shutil.rmtree(entry.path, ignore_errors=True)
-    return removed, skipped
+    return removed, skipped, freed
 
 
 def main():
@@ -281,7 +318,9 @@ def main():
     debug = base / "debug"
     counted = 0
     if a.mode == "aged":
-        removed, skipped = sweep_aged(debug, a.age_days, a.dry_run)
+        # ⚠ 必须接住第三个返回值（字节数）。原来这里只接两个，
+        #   `counted` 恒为 0 ⇒ dry-run 报「would free 0.0 B」。
+        removed, skipped, counted = sweep_aged(debug, a.age_days, a.dry_run)
     else:
         # ---- 冷却：列举要跑一次 cargo（实测十几秒），不该每轮门禁都付 ----
         # 残留是**逐轮叠加**出来的，一天清一次与一小时清一次效果几乎一样，
