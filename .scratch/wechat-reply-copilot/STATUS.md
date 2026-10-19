@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **69** ｜ 验收项全勾 **46** ｜ 已收但留有说明项 **13** ｜ 未收 **10**
+票据总数 **70** ｜ 验收项全勾 **48** ｜ 已收但留有说明项 **13** ｜ 未收 **9**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -25,7 +25,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
 | `21-readout-phase-never-sent.md` | 5/7 | ready-for-human · **P0 · 2026-10-12 实测，不是推断** | None（可以立刻做） |
 | `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 4/7 | needs-triage · **2026-10-17：四个候选全部否完，可测的量已穷尽** | **要人眼**（真 WebView2 上并排四候选过一次） |
-| `40-key-input-unreachable-when-unset.md` | 8/9 | ready-for-human · **2026-10-16 修复合入并过门禁（`976735e`，此后每轮十步全绿）；只剩一项要真 key 的端到端，那项卡在你本机提供的 key 上** | (票面没写 Blocked by) |
 | `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-human · **2026-10-18：措辞订正——这票已不是「待做」** | (票面没写 Blocked by) |
 | `44-candidate-action-row-is-button-geometry-on-prose.md` | 18/18 | ready-for-human · **2026-10-18 订正：只剩一条真正未决** | (票面没写 Blocked by) |
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-18 订正：Status 里那个「新撞出的缺陷」已不存在** | (票面没写 Blocked by) |
@@ -79,6 +78,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `36-message-roi-left-edge-collapsed-to-zero.md` | 0/0 |
 | `37-seg-pill-narrower-than-active-item.md` | 0/0 |
 | `38-measured-bubble-color-in-comments-no-longer-occurs.md` | 0/0 |
+| `40-key-input-unreachable-when-unset.md` | 9/9 |
 | `42-settings-page-still-native-controls-and-scrollbar.md` | 8/8 |
 | `43-model-config-two-groups-custom-endpoint-proxy.md` | 9/9 |
 | `46-judge-surface-rescans-the-same-rect-four-times.md` | 5/5 |
@@ -101,3 +101,4 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `66-minimize-button-was-gated-on-a-preference.md` | 9/9 |
 | `67-forensics-guard-covers-files-not-text.md` | 9/9 |
 | `69-ci-red-because-an-unreachable-precondition.md` | 11/11 |
+| `70-config-actions-gated-on-the-transport.md` | 12/12 |
