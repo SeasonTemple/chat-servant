@@ -467,7 +467,7 @@ mod tests {
             |x, y| {
                 let y = y as i32;
                 // 背景
-                if y >= msg_top && y < msg_top + msg_h && x >= 20 && x < 300 {
+                if (msg_top..msg_top + msg_h).contains(&y) && (20..300).contains(&x) {
                     [225, 225, 229]
                 } else {
                     [30, 30, 31]
