@@ -10,10 +10,29 @@ param(
   [string[]]$Only = @()
 )
 
+# ⚠⚠ **必须拆逗号**（2026-10-19 补）。`-Skip` 声明成 `[string[]]`，
+# 而 `pwsh -File x.ps1 -Skip 'a,b'` **不会**按逗号切分 —— 它把整个
+# `'a,b'` 收成**一个元素**，于是逐元素 `-like "*a,b*"` 全不命中，**一步都跳不掉**。
+#
+# 后果不是「跳多了」而是「跳少了」，而那正是本项目反复付过学费的形状：
+#   `pwsh -File gate.ps1 -Skip 'deny,ui build,secret'` → 16 步全跑，
+#   脚本照样打 `GATE_SCOPE: PARTIAL —— 跳过了部分步骤（-Skip deny,ui build,secret）`，
+#   **那行提示读起来像是跳过了三步，实际一步都没跳**。而外层 `$LASTEXITCODE` 是 0。
+#
+# ⇒ 两手都要：① 这里把逗号拆开，让文档里的写法真的生效；
+#   ② 下面 `GATE_SCOPE` 那行按**实际命中的步数**说话，不再照抄用户给的参数。
+$script:skipArgs = @($Skip  | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$script:onlyArgs = @($Only  | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
 $ErrorActionPreference = "Continue"
 Set-Location $PSScriptRoot\..
 $fail = 0
 $stepTime = [ordered]@{}
+# 实际被跳过的**步名**（不是用户给的参数）。-Skip 'a,b' 没按逗号切分时，
+# 参数看着像跳了三步、实际一步没跳，那行提示就会说谎（2026-10-19 实测）。
+$script:skippedNames = @()
+# 全部步名（含被跳过的）。用来核对 -Skip/-Only 的每个片段是否真的匹配到了什么。
+$script:allStepNames = @()
 
 # 本机 target/ 在 E: 盘上，cargo 的增量编译目录偶尔会被另一个进程锁住
 # （os error 5 拒绝访问），clippy 会因此以 101 退出——那不是代码红。
@@ -47,15 +66,20 @@ $env:TAURI_CONFIG = '{"bundle":{"resources":null}}'
 function Step($name, $scriptblock) {
   Write-Output ""
   Write-Output "========== $name =========="
+  $script:allStepNames += $name   # 供结论处核对「哪些片段没匹配到任何一步」
 
   # 过滤：子串匹配、大小写不敏感（-Skip deny / -Skip 'ui build' 都认）。
-  if ($Only.Count -gt 0 -and -not ($Only | Where-Object { $name -like "*$_*" })) {
+  # ⚠ 用 `$script:skipArgs` / `$script:onlyArgs`（上面拆过逗号的），
+  #   不用 `$Skip` / `$Only` 原值 —— 后者在 `-Skip 'a,b'` 下是单个元素。
+  if ($script:onlyArgs.Count -gt 0 -and -not ($script:onlyArgs | Where-Object { $name -like "*$_*" })) {
     Write-Output ">>> $name SKIPPED（-Only 未选中）"
+    $script:skippedNames += $name
     $global:LASTEXITCODE = 0   # 跳过绝不能留下上一个命令的退出码
     return
   }
-  if ($Skip.Count -gt 0 -and ($Skip | Where-Object { $name -like "*$_*" })) {
+  if ($script:skipArgs.Count -gt 0 -and ($script:skipArgs | Where-Object { $name -like "*$_*" })) {
     Write-Output ">>> $name SKIPPED（-Skip 命中）"
+    $script:skippedNames += $name
     $global:LASTEXITCODE = 0
     return
   }
@@ -200,8 +224,37 @@ if ($stepTime.Count -gt 0) {
 # 带 -Skip / -Only 的运行**不是完整门禁**。这行必须紧挨着结论，
 # 否则「跳过 deny 之后全绿」会被读成「全绿」——那正是 2026-10-11
 # 踩过的同一个形状（局部结论被当成全局结论，还据此提交了）。
-if ($Skip.Count -gt 0 -or $Only.Count -gt 0) {
-  Write-Output "GATE_SCOPE: PARTIAL —— 跳过了部分步骤（-Skip $($Skip -join ',') / -Only $($Only -join ',')），结论只覆盖跑过的那几步"
+#
+# ⚠⚠ **报实际跳过的步名，不报用户给的参数**（2026-10-19 实测后改）。
+# 原来的写法是 `跳过了部分步骤（-Skip $($Skip -join ',')）`，
+# 而 `-Skip 'deny,ui build'` 在 `-File` 下没按逗号切分 ⇒ 一步都没跳，
+# 可那行**照抄用户给的参数**，读起来像是跳过了两步。
+# ⇒ 用户传的参数与实际行为不符时，这行就成了**假凭据** ——
+#   比没有提示更糟：没有提示时人会怀疑，假的提示会让人相信跳过了。
+if ($script:skippedNames.Count -gt 0) {
+  Write-Output "GATE_SCOPE: PARTIAL —— 实际跳过 $($script:skippedNames.Count) 步（$($script:skippedNames -join ' / ')），结论只覆盖跑过的那 $($stepTime.Count) 步"
+}
+
+# ⚠⚠ **传了却匹配不到任何一步**也要说（2026-10-19 补）。
+# `-Skip` / `-Only` 是子串匹配，于是拼错一个字母就静默不命中，
+# 而「我没跳过」与「我跳过了」在结论里长得**一模一样**（都是 ALL GREEN）。
+# 用户以为自己跳过了三步、实际全跑了一遍 —— 于是按内循环的假设读结论，
+# 而那个假设根本不成立。
+$asked = @($script:skipArgs + $script:onlyArgs)
+if ($asked.Count -gt 0 -and $script:skippedNames.Count -eq 0) {
+  Write-Output "GATE_SCOPE_WARN: 传了 -Skip/-Only（$($asked -join ',')）却**一步都没跳过** —— 检查写法（子串匹配，见脚本头部「必须拆逗号」那条）"
+}
+elseif ($asked.Count -gt 0) {
+  # 部分命中也要点出来：`-Skip 'deny,ui build,dne'` 里 `dne` 是拼错的，
+  # 而提示若只说「跳过了 2 步」用户不会知道第三个没生效。
+  $allSteps = @($stepTime.Keys) + @($script:allStepNames)
+  $missed = @()
+  foreach ($pat in $script:skipArgs + $script:onlyArgs) {
+    if (-not ($allSteps | Where-Object { $_ -like "*$pat*" })) { $missed += $pat }
+  }
+  if ($missed.Count -gt 0) {
+    Write-Output "GATE_SCOPE_WARN: 这些 -Skip/-Only 片段**没匹配到任何一步**（子串匹配）：$($missed -join ', ')"
+  }
 }
 
 if ($fail -eq 0) { Write-Output "GATE: ALL GREEN" } else { Write-Output "GATE: FAILED" }

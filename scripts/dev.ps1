@@ -141,6 +141,12 @@ chat-servant 开发入口（用 pwsh 7 运行）
   }
 
   'gate' {
+    # ⚠ 这里用数组转发，`-Skip 'deny,ui build'` 会正确变成两个参数
+    #   （`-Skip` / `deny,ui build`），而 gate.ps1 头部会把它按逗号再拆一次。
+    #   ⇒ 两种写法都生效：`-Skip 'deny,ui build'` 与 `-Skip 'deny','ui build'`。
+    #   那个「拆逗号」是 2026-10-19 补的：`-File` 不会按逗号切分 `[string[]]`，
+    #   原先文档里的写法一步都跳不掉，而 GATE_SCOPE 却照抄参数、
+    #   让人以为跳过了（详见 gate.ps1 头部那条）。
     $gargs = @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'gate.ps1'))
     if ($Skip.Count) { $gargs += @('-Skip') + $Skip }
     if ($Only.Count) { $gargs += @('-Only') + $Only }
