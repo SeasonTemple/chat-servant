@@ -204,6 +204,24 @@
   const allCandidates = $derived(readout?.phase === 'drafted' ? readout.candidates : []);
 
   /**
+   * 动作区要列的备选，**每一项带上它在原始候选数组里的下标**（票 68，2026-10-19）。
+   *
+   * ⚠⚠ **不能只写 `allCandidates.slice(1)` 然后照常遍历** ——
+   *   那样 `{#each ... as c, i}` 的 `i` 会从 **0 重排**，第一条备选拿到 `i === 0`，
+   *   而 `i === 0` 在这一带意味着「首选」：墨色手绘勾、`cs-act-lead` 变体、
+   *   `aria-label` 写「按这个候选」。
+   *   ⇒ 面板上出现**两条自称首选的候选**，且票 44 的「三变体分工」当场失效。
+   *
+   *   ⚠ `{#each arr.filter((_, i) => i > 0) as c, i}` **也是错的** ——
+   *     过滤后的数组同样从 0 编号。两条路都踩过，别再改回去。
+   *
+   * ⇒ 所以把 `{ text, id, probability, index }` 一起带出来，
+   *   模板里判「是不是首选」一律用 `row.index`（**原始**下标），
+   *   而 `key` 用 `row.id`。
+   */
+  const altCandidates = $derived(allCandidates.slice(1).map((c, k) => ({ ...c, index: k + 1 })));
+
+  /**
    * 候选区**下面还有没有东西**（票 44，2026-10-16）。
    *
    * ## 为什么需要知道
@@ -921,7 +939,38 @@
     -->
       <div class="cs-draft">
         {#if drafted}
-          <p class="cs-draft-text">{drafted.text}</p>
+          <!--
+            ⚠⚠ **这一行就是第一条候选**（票 68，2026-10-19）。
+
+            原来它是一个纯文字 `<p>`，而下面的动作区又把 `candidates[0]`
+            渲染了一遍 —— **同一句话在面板上出现两次**。
+            根因是两个派生式喂的是同一个元素：
+
+                const drafted       = $derived(... readout.candidates[0] ...)   // :194
+                const allCandidates = $derived(... readout.candidates     ...)   // :204
+
+            ⚠ 而 `:983` 那段布局注释写着「**正文写的是第一条候选**，按钮就排在这组
+              下面」⇒ 「正文 = 第一条候选」是**设计**，不是 bug。
+            真重复的是动作区那一份：它是**可点**的那些条，
+            而正文这一条**不可点**，只是文字。
+
+            ⇒ 所以正解不是砍掉任何一边，而是**让正文行自己可点**：
+              正文保留（大字整段、`user-select: text`，面板唯一能选中复制的地方），
+              动作区从**第 2 条起**开始列（见下面 `{#each}` 的 `i > 0` 过滤）。
+            两者职责合并，重复自然消失，且**没有丢掉任何可点入口**。
+
+            ⚠ 砍动作区那条而不改这里会丢掉首选的点击入口 ⇒ 票 20 的两档验收
+              无从做起（动作行是那套安全模型的唯一可点对象），所以这条路不走。
+          -->
+          <button
+            type="button"
+            class="cs-draft-lead"
+            disabled={sending}
+            onclick={() => void dispatchCandidate(drafted.id)}
+            aria-label="按这个候选：{drafted.text}"
+          >
+            <p class="cs-draft-text">{drafted.text}</p>
+          </button>
         {:else if readout?.phase === 'drafting'}
           <!--
           这句是 Rust 的 `Phase::status_hint()`，**不在这里写死**。
@@ -992,6 +1041,18 @@
         发不发由档位决定。⚠ 尤其在「自动发送」档下，按钮若写着「发送」
         会让人以为这里还有一个独立的确认步骤，而那里没有。
       -->
+      <!--
+        ⚠ 容器条件是 `allCandidates.length > 0`，**不是** `altCandidates.length > 0`
+        （票 68，2026-10-19）。
+
+        首选移进正文行之后，`Auto` 档那条红字警告「按下去就发出去了」仍然必须显示 ——
+        **首选现在就在正文行里，而它在 Auto 档下同样是点一下就发出去**。
+        容器若跟着 `altCandidates` 走，则「只有一条候选」时
+        （`altCandidates` 为空）整个警告连同容器一起消失 ⇒
+        用户点正文行那条就直接发出去了，而屏幕上**一个不可逆提示都没有**。
+
+        ⇒ 容器看**全部候选**（有没有可点的东西），纸条列表才看备选。
+      -->
       {#if allCandidates.length > 0}
         <div class="cs-actions" data-no-drag {@attach markOverflow} data-more={moreBelow}>
           <!--
@@ -1009,7 +1070,29 @@
             <p class="cs-act-warn">「自动发送」档：按下去就发出去了，收不回来。</p>
           {/if}
 
-          {#each allCandidates as c, i (c.id)}
+          <!--
+            ⚠⚠ **跳过第一条**（票 68，2026-10-19）。
+
+            第一条候选由**正文行**承担（`cs-draft-lead`，上面那段）——
+            它用 21px 仿宋整段呈现、可点、且是面板唯一 `user-select: text`
+            的地方。在这里再渲染一遍就是同一句话显示两次。
+            ⇒ 动作区只列**备选**（第 2 条起）。
+
+            ⚠⚠ **`i` 必须是**原始**下标**，来自 `row.index`**（2026-10-19 踩到两次）。
+
+            第一版 `{#each allCandidates.filter((_, i) => i > 0) as c, i (c.id)}`，
+            第二版 `allCandidates.slice(1)` 配普通 `{#each ... as c, i}` ——
+            **两版都错**：`{#each}` 的第二个变量永远是**过滤/切片后数组**的序号，
+            于是第一条备选拿到 `i === 0`，而 `i === 0` 在这一带意味着「首选」：
+            墨色手绘勾、`cs-act-lead` 变体、`aria-label` 写「按这个候选」。
+            实测截图上就是**两条自称首选的候选**，且票 44 的「三变体分工」当场失效。
+
+            ⇒ 所以 `altCandidates` 在数据层就把原始下标带出来（`row.index`），
+              模板里判「是不是首选」一律用它。
+          -->
+          {#each altCandidates as row (row.id)}
+            {@const c = row}
+            {@const i = row.index}
             <!--
               票 44：**候选是「从这张纸上撕下来的一片」，不是按钮。**
 
@@ -2555,6 +2638,66 @@
    *  ⚠ 仿宋比楷体**细**。这条要盯：若实机上出现断笔，先加粗重或退回楷体，
    *    不要靠降字号解决（降字号正是 §4.2a 否掉的那条路）。
    */
+  /* 正文行兼**第一条候选的按钮**（票 68，2026-10-19）。
+   *
+   * 原来这里是纯文字 `<p class="cs-draft-text">`，而动作区又把 `candidates[0]`
+   * 渲染了一遍 ⇒ 同一句话显示两次。现在首选移到这里，可点。
+   *
+   * ⚠⚠ **这个按钮必须完全透明地继承排版**，理由有三个，缺一个就破版：
+   *
+   *  ① `all: unset` 而不是只 reset 几项：`button` 有 UA 默认样式
+   *     （`font-family` 会掉回系统 UI 体、`display: inline-block`、有自己的
+   *     `padding`）。而 `.cs-draft-text` 的定案值（仿宋 21px / 行高 1.5）
+   *     是按**段落**量出来的 —— 一旦字体继承断了，**折行数就变**，
+   *     而面板纵向只剩 9.4px 余量（§4.2c-bis 实测），多一行就溢出。
+   *
+   *  ② `text-align: inherit`：按钮默认 `text-align: center`，
+   *     而正文是左对齐。不改这一条，文字会居中 —— 看着像卡片不像正文。
+   *
+   *  ③ `cursor: pointer` + `display: block`：`all: unset` 会把 `display` 也清掉，
+   *     而内层的 `<p>` 是块级，父级塌成 inline 会让宽度计算失真。
+   *
+   * ⚠ **不给这条加撕边/描边/背景**：正文是「读」的地方，
+   *   下面那组撕边纸条才是「挑」的地方。两者材质不同是有意的
+   *   —— 加了边框就又变成 `.cs-act` 那一族，票 44 绕了三轮的那场打架会回来。
+   *   这里的可点提示只靠 hover 时的一层极淡墨（≤ 4%），
+   *   幅度比纸条小得多：它不是「一张纸」，是「纸上的一段字」。
+   */
+  .cs-draft-lead {
+    all: unset;
+    display: block;
+    text-align: inherit;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: background var(--cs-dur-fast) var(--cs-ease);
+  }
+
+  /* ⚠⚠ **hover 底色必须 `color-mix` 混纸，不能混 `transparent`**（2026-10-19 被
+   * `check-opaque-bg.ps1` 拦下，票 59）。第一版写的是
+   * `background: rgb(24 18 10 / 4%)` —— 半透明底色在 **Tauri 透明窗口 +
+   * WebView2 分层合成**下**整层不绘制**，而浏览器 dev server 里画得好好的。
+   * ⇒ 这一处 hover 反馈在真机上会**完全消失**，且只靠真机才看得见。
+   * 混背后那张纸就绕开了分层合成这条路径。
+   *
+   * 幅度只 4%：正文是「读」的地方，下面那组撕边纸条才是「挑」的地方，
+   * 两者材质不同是有意的。可点提示只给一层几乎察觉不到的墨，
+   * 不做成「一张纸」—— 做了就又变成 `.cs-act` 那一族，
+   * 票 44 绕了三轮的那场打架会回来。 */
+  .cs-draft-lead:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--cs-ink) 4%, var(--cs-paper));
+  }
+
+  .cs-draft-lead:focus-visible {
+    /* ⚠ 焦点环是**无障碍必需**，不能因为「这张纸很素」就撤掉。
+       forced-colors 下 UA 会接管，这里不与之冲突（没写 outline 颜色）。 */
+    outline: 2px solid var(--cs-ink);
+    outline-offset: 2px;
+  }
+
+  .cs-draft-lead:disabled {
+    cursor: default;
+  }
+
   .cs-draft-text {
     margin: 0;
     font-family: FangSong, STFangsong, '仿宋', serif;
