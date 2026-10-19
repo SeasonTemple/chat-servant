@@ -824,6 +824,13 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
             let mut last_calls = 0u32;
             let mut ticks = 0u64;
             let mut anchor: Option<PaneAnchor> = None;
+            // 上一轮推给界面的是不是「失败」那一帧。
+            //
+            // ⚠ 它是**恢复**那条判据的开关：失败之后，采集恢复的那一轮
+            // 「什么都没变」，于是**不发** ⇒ 界面会一直挂着
+            // 「没写成：抓不到：窗口已最小化——还原它才能抓到」，
+            // 而用户明明已经还原了窗口（真机，2026-10-20）。
+            let mut last_failed = false;
             // 最近一次认出的会话名。**认不出来就是空串**，
             // 界面据此显示「没认出会话」，不显示空白。
             // 最近一次认出的会话名由 `step` 写进 `s.peer`，这里直接读。
@@ -900,23 +907,29 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         last_calls = reasoner.calls();
                         let st = reasoner.stage_calls();
                         // 阶段由 Rust 判，不让界面去猜 `candidates` 空不空。
-                        let phase = if s.candidates.is_empty() {
-                            Phase::Read {
-                                messages: s.messages.clone(),
-                            }
-                        } else {
-                            Phase::Drafted {
-                                messages: s.messages.clone(),
-                                candidates: s.candidates.clone(),
-                            }
-                        };
+                        let phase = current_phase(&s);
                         let out = snapshot(&s, anchor, phase, ticks, last_calls, st, &s.reason);
                         if let Ok(mut g) = latest_bg.lock() {
                             *g = Some(out);
                         }
+                        last_failed = false;
                     }
                     Ok(None) => {
                         // 什么都没变。**不发**——前端不需要知道「循环还活着」。
+                        //
+                        // ⚠ **除非上一轮是失败**：那时采集已经恢复了，
+                        // 而界面还挂着「没写成：抓不到：窗口已最小化——
+                        // 还原它才能抓到」。用户明明已经还原了窗口，
+                        // 界面却还在催他还原（真机，2026-10-20）。
+                        // ⇒ 补一帧正常态，让界面自己回到常态。
+                        if let Some(phase) = phase_to_push(&s, false, last_failed) {
+                            let st = reasoner.stage_calls();
+                            let out = snapshot(&s, anchor, phase, ticks, last_calls, st, &s.reason);
+                            if let Ok(mut g) = latest_bg.lock() {
+                                *g = Some(out);
+                            }
+                        }
+                        last_failed = false;
                     }
                     Err(e) => {
                         // 失败这一轮也要报分段计数——**出错的段就在数字里**。
@@ -934,6 +947,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         }
                         // 失败后歇一拍，别把错误刷成瀑布
                         std::thread::sleep(Duration::from_millis(2500));
+                        last_failed = true;
                     }
                 }
                 std::thread::sleep(TICK);
@@ -1106,6 +1120,48 @@ fn read_round(
         // 开销口径与真正递进去的那张图**逐字一致**，不在这里手算。
         ocr_pixels: chatservant_perceive::ocr_input_pixels(frame, anchor.chat, source),
     })
+}
+
+/// 当前这一刻的阶段：**有没有候选**决定是 `Read` 还是 `Drafted`。
+///
+/// 阶段由 Rust 判，不让界面去猜 `candidates` 空不空。
+fn current_phase(s: &Scratch) -> Phase {
+    if s.candidates.is_empty() {
+        Phase::Read {
+            messages: s.messages.clone(),
+        }
+    } else {
+        Phase::Drafted {
+            messages: s.messages.clone(),
+            candidates: s.candidates.clone(),
+        }
+    }
+}
+
+/// 这一轮要不要给界面推一帧，推的是什么阶段。
+///
+/// - `changed`：这一轮有内容变化（`step` 返回 `Ok(Some)`）。
+/// - `last_failed`：上一轮推的是不是 `Failed`。
+///
+/// ## 「失败之后补一帧」为什么必须在这儿
+///
+/// 真机（2026-10-20）：微信窗口被最小化 ⇒ 采集失败 ⇒ 界面挂上
+/// 「没写成：抓不到：窗口已最小化——还原它才能抓到」。
+/// 用户还原窗口 ⇒ 采集恢复 ⇒ **恢复后的第一轮「什么都没变」**，
+/// 于是那一支**不发** ⇒ **界面永远挂着那句话**——
+/// 用户明明已经还原了，界面还在催他还原。
+///
+/// ⇒ 失败之后的**第一轮成功**必须补一帧正常态。
+///
+/// ⚠ 另一半也必须成立：`last_failed == false` 时**不许推**
+/// ——那是「静默期零调用」（硬约束第 6 条）：每一圈都推一帧，
+/// 前端就被白刷一遍，界面上的「安静」也没了。
+fn phase_to_push(s: &Scratch, changed: bool, last_failed: bool) -> Option<Phase> {
+    if changed || last_failed {
+        Some(current_phase(s))
+    } else {
+        None
+    }
 }
 
 /// 跑一轮。`Ok(Some(anchor))` = 有新内容；`Ok(None)` = 静默期。
@@ -1916,7 +1972,7 @@ mod tests {
         AUTO_COOLDOWN, AutoGate, BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message,
         PaneAnchor, Phase, Readout, RecentN, Relock, SESSION, Scratch, Speaker, TierCell,
         TokenBudget, apply_gate_closed, apply_relock, collect_images, header_print,
-        park_on_other_conversation, read_round, snapshot,
+        park_on_other_conversation, phase_to_push, read_round, snapshot,
     };
     use chatservant_capture::Frame;
     use chatservant_capture::ocr::{OcrError, OcrLine, OcrText};
@@ -3646,6 +3702,39 @@ mod tests {
                 assert_eq!(a.rect, b.rect, "配方 {plan:?}：位置不同");
             }
         }
+    }
+
+    /// **失败之后必须补一帧正常态**——采集恢复了，界面不能一直挂着错误。
+    ///
+    /// 真机（2026-10-20）：微信窗口被最小化 ⇒ 采集失败 ⇒ 界面挂上
+    /// 「没写成：抓不到：窗口已最小化——还原它才能抓到」；
+    /// 用户还原窗口 ⇒ 采集恢复 ⇒ 但**恢复后的第一轮「什么都没变」**，
+    /// 那一支**不发** ⇒ 界面永远挂着那句话——
+    /// 用户明明已经还原了，界面还在催他还原。
+    #[test]
+    fn a_failure_is_followed_by_a_normal_frame_once_the_capture_recovers() {
+        let s = Scratch::new(RecentN::new(12));
+        // 静默期：**不许**推（硬约束第 6 条——静默期零调用、零推送）。
+        assert!(
+            phase_to_push(&s, false, false).is_none(),
+            "静默期不许推帧——每一圈都推会把界面刷成瀑布"
+        );
+        // 失败过之后，即使这一轮「什么都没变」，也必须补一帧。
+        let pushed = phase_to_push(&s, false, true).expect("失败之后必须补一帧");
+        assert!(
+            !matches!(pushed, Phase::Failed { .. }),
+            "补的那一帧不能又是 Failed"
+        );
+        // 有变化那一支照旧推。
+        assert!(phase_to_push(&s, true, false).is_some(), "有变化必须推帧");
+
+        // 接线：**函数测了但忘了调**就是空守卫。
+        let source = include_str!("watch.rs");
+        let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            prod.contains("phase_to_push(&s, false,"),
+            "「什么都没变」那一支没调 phase_to_push——恢复后补帧那条判据没接上"
+        );
     }
 
     /// **生产代码不许自己拼 OCR 配方。**
