@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **72** ｜ 验收项全勾 **50** ｜ 已收但留有说明项 **13** ｜ 未收 **9**
+票据总数 **73** ｜ 验收项全勾 **51** ｜ 已收但留有说明项 **13** ｜ 未收 **9**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -23,7 +23,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | 票 | 勾/总 | Status | Blocked by |
 |---|---|---|---|
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
-| `21-readout-phase-never-sent.md` | 6/7 | ready-for-human · **P0 · 2026-10-12 实测，不是推断** | None（可以立刻做） |
+| `21-readout-phase-never-sent.md` | 7/7 | ready-for-human · **P0 · 2026-10-12 实测，不是推断** | None（可以立刻做） |
 | `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 4/7 | needs-triage · **2026-10-17：四个候选全部否完，可测的量已穷尽** | **要人眼**（真 WebView2 上并排四候选过一次） |
 | `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-human · **2026-10-18：措辞订正——这票已不是「待做」** | (票面没写 Blocked by) |
 | `44-candidate-action-row-is-button-geometry-on-prose.md` | 18/18 | ready-for-human · **2026-10-18 订正：只剩一条真正未决** | (票面没写 Blocked by) |
@@ -104,3 +104,4 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `70-config-actions-gated-on-the-transport.md` | 12/12 |
 | `71-two-character-name-breaks-the-identity-gate.md` | 3/3 |
 | `72-product-read-path-hand-rolled-its-own-ocr-recipe.md` | 0/0 |
+| `73-panel-stuck-on-a-stale-error-after-capture-recovers.md` | 0/0 |
