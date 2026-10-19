@@ -162,3 +162,27 @@ Tee 到 `target/gate.log`；**别自己套管道截断**——
 因为「能不能拿到材料」这一条就不同。
 ⇒ **别看到「ocr_accuracy 缺件 panic」就以为真帧那侧也该 panic**：
 那是把 CI 永久钉红的做法（实测三个 run 全红）。
+
+## 自证怎么复现（两条，都不需要额外工具）
+
+**S1 · 守卫会不会响**
+
+```powershell
+# 去掉 perceive/src/tests.rs 里那行 #[ignore = "local-only: ..."]
+pwsh -NoProfile -File scripts\check-gate-parity.ps1   # ⇒ exit=1，报「依赖 gitignored 真帧，却没标 #[ignore]」
+# 改回去后同一命令 ⇒ exit=0
+```
+
+⚠ 恢复文件时**重写内容**而不是复制备份（`File.Copy` 会把 mtime 设成源文件的，
+cargo 按 mtime 判新鲜度 ⇒ 后面几轮验的是陈旧产物）。
+本轮的做法：`[IO.File]::WriteAllText($p, $orig, $enc)`。
+
+**S2 · 守卫还是不是真的**
+
+```powershell
+Move-Item crates\capture\fixtures crates\capture\fixtures.__stashed__
+cargo test -p chatservant-perceive -- --include-ignored   # ⇒ exit=101，缺夹具硬失败
+Move-Item crates\capture\fixtures.__stashed__ crates\capture\fixtures
+```
+
+⇒ 两条合起来说明：**跑起来就必须验到**，而**没跑时机器看得见**。
