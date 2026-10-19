@@ -162,6 +162,35 @@ impl PaneWatcher {
         self.pending = None;
     }
 
+    /// **读完但没有对方说话**时确认这段已经看过，只清 `pending`、**不推进水位线**。
+    ///
+    /// ## 为什么必须单独有这个方法（2026-10-19 补，硬约束第 6 条）
+    ///
+    /// ⚠⚠ 原来调用方只有一条通路：`if let Some(y) = newest { watcher.commit(y) }`
+    ///   （`ui/src-tauri/src/watch.rs:1386`）。于是有一条**成功路径**两者都不做：
+    ///
+    ///   **读成功了，但带子里只有我方消息**（`newest == None`）。
+    ///
+    ///   而 `observe` 里 `pending` 命中时**先于像素比对直接返回 `Decision::Read`**
+    ///   （`:130-132`）⇒ 下一帧还是 `Read` ⇒ 再下一帧还是 ……
+    ///   **之后每一帧都重读同一段，永不停止**。
+    ///
+    ///   这与本文件开头写的「没有新的对方消息时，一次 OCR 都不跑」
+    ///   **直接矛盾**。实测形态：对方不说话的一段时间里，
+    ///   程序每秒做一次全消息区 OCR —— 静默期不是零调用，是**持续满速**。
+    ///
+    /// ## 为什么水位线不能动
+    ///
+    /// 这段**确实读过了**，但**没有被消费**（没有对方消息可归类）。
+    /// 水位线的语义是「这里以下的我已经处理完」——
+    /// 没处理就不该推进，否则新消息落在同一段里会被水位线跳过。
+    /// 而 `pending` 的语义是「这段我发起了读取但没结束」，那个是真的结束了。
+    ///
+    /// ⇒ 两个语义必须由两个方法表达。合成一个就是这次的漏洞。
+    pub fn acknowledge(&mut self) {
+        self.pending = None;
+    }
+
     /// **把水位线退回顶部**，下一帧会重读整段消息区。
     ///
     /// ## 什么时候必须调
@@ -242,6 +271,70 @@ mod tests {
             paint(&mut px, a, b, INK);
         }
         Frame::from_rgb(W, H, px).expect("pane")
+    }
+
+    /// **读完但没有对方说话 ⇒ 下一帧必须是 `Quiet`，不是再读一次。**
+    ///
+    /// 这是硬约束第 6 条「静默期零调用」的守卫。
+    ///
+    /// ## 这条守的是什么（2026-10-19 修的真漏洞）
+    ///
+    /// 调用方原来只有 `if let Some(y) = newest { watcher.commit(y) }`，
+    /// 而「读成功了但带子里只有我方消息」这条路 `newest == None`
+    /// ⇒ 既不 commit 也不清 `pending`。
+    /// 而 `observe` 里 `pending` 命中**先于像素比对**返回 `Decision::Read`
+    /// ⇒ 之后**每一帧都重读同一段，永不停止**。
+    ///
+    /// 症状在真机上就是「对方不说话时程序仍在每秒做一次全量 OCR」——
+    /// 静默期不是零调用，是持续满速。⚠ 而所有既有测试都**不会红**：
+    /// 它们的调用方要么 commit、要么 rewind，**从没走过这条路径**。
+    #[test]
+    fn acknowledging_a_read_with_no_message_from_them_goes_quiet() {
+        // 一帧画面稳定不变（只有我方的行，对方没说话）。
+        let pane = pane(&[(100, 112)], None);
+        let mut w = PaneWatcher::new(0);
+
+        // 第一帧：没有参照物，必然读。
+        assert!(
+            matches!(w.observe(&pane), Decision::Read { .. }),
+            "第一帧没有参照物，必然要读"
+        );
+
+        // 读成功了，但带子里只有我方消息 ⇒ 调用方走 acknowledge()。
+        w.acknowledge();
+
+        // ⚠ 这一帧画面**逐字节没变** —— 本该走 Quiet。
+        //   修复前 pending 还在，于是无视像素变化直接返回 Read，
+        //   于是再下一帧还是 Read……永不停止。
+        assert!(
+            matches!(w.observe(&pane), Decision::Quiet),
+            "静默期必须 Quiet —— 重新 Read 意味着对方不说话时每秒重读一次 \
+             （硬约束第 6 条）。检查调用方是不是漏了 acknowledge()。"
+        );
+    }
+
+    /// **`acknowledge()` 只清 `pending`，**不**推进水位线。**
+    ///
+    /// 两者语义不同，合成一个就是 2026-10-19 那个漏洞的根源：
+    /// · `pending` = 「这段我发起了读取但没结束」
+    /// · `watermark` = 「这里以下的我已经处理完」
+    ///
+    /// 「读到了但没有对方消息」这段**看过但没被消费**（没东西可归类），
+    /// 所以 `pending` 该清、水位线不该动 —— 水位线动了，
+    /// 之后落在同一段里的新消息会被**跳过**。
+    #[test]
+    fn acknowledging_does_not_move_the_watermark() {
+        let pane = pane(&[(100, 112)], None);
+        let mut w = PaneWatcher::new(0);
+        assert!(matches!(w.observe(&pane), Decision::Read { .. }));
+
+        w.acknowledge();
+
+        assert_eq!(
+            w.watermark(),
+            0,
+            "acknowledge 不得推进水位线 —— 那段还没被消费，推进会跳过之后的新消息"
+        );
     }
 
     /// **重锁之后必须能重读整段消息区。**

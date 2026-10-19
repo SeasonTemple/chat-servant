@@ -1382,9 +1382,19 @@ fn step(
         s.reason = "这一段里没有对方说的话".into();
     }
 
-    // 没读到对方的话时**不推进**——下一帧会重试同一段。
-    if let Some(y) = newest {
-        watcher.commit(y);
+    // ⚠⚠ 这里原来是 `if let Some(y) = newest { watcher.commit(y) }`，
+    // 而「读成功了但带子里只有我方消息」（`newest == None`）这条路
+    // **既不 commit 也不清 pending** ⇒ `observe` 里 `pending` 命中就
+    // 先于像素比对返回 `Read`（`stream.rs:130`）⇒ **之后每帧都重读同一段**。
+    // 与硬约束第 6 条「静默期零调用」直接矛盾（对方不说话时每秒一次全量 OCR）。
+    //
+    // ⇒ 「读到没有」和「读到但没有对方说话」要分开表达：
+    //     有对方消息 → `commit(y)`：推进水位线（处理完了）+ 清 pending；
+    //     没有       → `acknowledge()`：只清 pending（水位线不动，那段还没被消费）。
+    // 两条缺一不可，合成一条就是这次的漏洞。
+    match newest {
+        Some(y) => watcher.commit(y),
+        None => watcher.acknowledge(),
     }
     Ok(Some(anchor))
 }
