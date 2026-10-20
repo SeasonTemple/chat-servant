@@ -177,6 +177,28 @@ pwsh -NoProfile -File scripts\gate.ps1 -Only 'cargo,ui'
 ⚠ `dev.ps1` 的动词里**没有** `cargo deny` 与 `secret-scan`：
    那两步要联网 / 要密钥，本来也不该进内循环。
 
+#### ⚠⚠⚠ `-Skip` / `-Only` 在 2026-10-20 之前**根本没有生效**（实测后修）
+
+过滤逻辑（`Should-Run`）跑在 **lane 子进程**里，而起子进程时**只传了
+`-Child $lane`**，`-Skip` / `-Only` **没传下去** ⇒ 子进程里 `Should-Run`
+恒为真 ⇒ **每条轨都跑自己轨上的全部步**。
+
+实测：`-Only 'ui svelte-check'` 跑出了 cheap / rust / net 三轨的**全部**步，
+外加 ui 轨的整个并行组 ⇒ 「只跑一步」实际跑的是**完整门禁**。
+
+⚠⚠ **假绿的方向不止是慢**：父进程收到的 `##GATE##SKIP` 标记也是空的
+⇒ 连 `GATE_SCOPE: PARTIAL` 那行**根本不会出现**
+⇒ 用户以为自己跳过了几步，报告却显示「没跳过任何步」。
+本仓的 `dev.ps1` 转发是对的，断点一直在 `gate.ps1` 内部。
+
+⇒ 同一次修的还有两处**从未被激活过**的分支（一激活就露馅）：
+① 计时回传把秒数硬写成 `0` ⇒ 耗时表里并行组三步显示 `0.0s`；
+② 跳过名单用 `List.Add(数组)` ⇒ 数组被 `ToString()` 成一条**假步名**，
+   混进「实际跳过 N 步」的计数与列表。
+
+⇒ **判据纪律同族：一个从未被执行过的分支，不等于它是对的。**
+这条分支藏了四天，因为它上游的前提（过滤生效）从来没成立过。
+
 ### 门禁是**四轨并行**的（2026-10-19 改）
 
 `gate.ps1` 现在把 16 步分到四条轨，**同时**跑，父进程流式转发输出：
@@ -198,6 +220,19 @@ pwsh -NoProfile -File scripts\gate.ps1 -Only 'cargo,ui'
 四条轨是同时跑的 ⇒ **各步秒数之和 ≠ 门禁墙钟**（脚本会同时打
 「最慢的一步」与「步秒之和」两行，别把后者当墙钟）。
 并行组那三步的秒数是**整组的墙钟**，不是各自耗时。
+
+⚠⚠ **耗时表里并行组折叠成一行，只计一次**（2026-10-20 加）：
+三步共用同一份组墙钟，若各记一次，「步秒之和」会**多算 2×组墙钟**
+——修完计时回传那处硬写的 `0` 之后，步秒之和实测从 **96.2s 跳到 230.8s**，
+而上面那个「并行化**之前**的串行基线」正好是 **229.3s**
+⇒ 下一个读表的人会直接读成「并行化白做了」。
+⇒ 现在表里是一行 `ui-static（并行组 3 步：…）`，只计一次。
+
+⚠ **折叠的判据是「模式」不是「数值相同」**：组里只要有一步被
+`-Skip` / `-Only` 过滤掉，整组就**退回逐个跑**（各步是自己的耗时）
+⇒ 那时**不折叠**（否则会把三个不同的耗时说成一个）。
+⇒ 想看 ui 那三步**各自**的真实耗时，用 `-Only 'ui svelte-check'`
+（单步跑会让整组退回逐个）；`-Only 'ui'` 仍命中三步 ⇒ 拿到的还是组墙钟。
 
 ⚠⚠ **每步仍打自己的 `==== name ====` 与 `>>> name OK|FAILED [Ns] (exit=N)`**，
 可诊断性没牺牲。唯一的差别是**步与步的输出不再按声明顺序出现**。
@@ -373,7 +408,7 @@ exe 旁 > `%TEMP%`」，**没有 `%APPDATA%`**（`ocr_pp.rs:147-168`；
 | **待办与进展**（做到哪一步、验收过没有） | `.scratch/<feature>/issues/*.md` | 勾 `- [x]`，与提交同 commit |
 | 设计规范、未决设计问题 | `docs/设计规范.md` / `docs/面板设计.md` | `§` 编号，可引用 |
 | **前端做到哪一步了** | `docs/前端设计进度.md` | 单一出处，别在别处重复 |
-| **整体还剩什么、卡在哪** | `.scratch/<feature>/STATUS.md` | **机器生成**（`python scripts/ticketstatus.py`），⚠ 别手改 |
+| **整体还剩什么、卡在哪** | `.scratch/<feature>/STATUS.md` | **机器生成**（`uv run --no-project python scripts/ticketstatus.py`），⚠ 别手改 |
 | 环境事实（依赖版本、当前状态） | **直接跑命令** | `git log` / `cargo deny check` |
 
 ⚠ **「整体还剩什么」为什么是生成的**：2026-10-15 问「推送里有现状说明吗」
@@ -710,10 +745,17 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
      代价是 clippy 产物不在清单里、会被回收，下一轮 clippy 重跑一次（20.5s）。
      配 24 小时冷却后，这笔账是划算的。
    ```bash
-   python scripts/targetgc.py --dry-run   # 只报告，不动手（不受冷却限制）
-   python scripts/targetgc.py --force     # 无视冷却，立刻收一次
-   python scripts/targetgc.py --report    # 只出体积报告
+   uv run --no-project python scripts/targetgc.py --dry-run   # 只报告，不动手（不受冷却限制）
+   uv run --no-project python scripts/targetgc.py --force     # 无视冷却，立刻收一次
+   uv run --no-project python scripts/targetgc.py --report    # 只出体积报告
    ```
+
+   ⚠⚠ **Python 一律走 `uv run --no-project`，不写裸 `python`**（2026-10-20 实测）：
+   本机 PATH 上**没有裸 `python`**（`python scripts/targetgc.py` 直接 exit 9009），
+   Python 由 uv 管理、装在**项目盘**（`G:\tools\uv\python`，不在 C 盘）。
+   ⇒ `gate.ps1` 与 `dev.ps1` 本来就是这个写法，**文档与脚本头部曾各写着一份裸
+   `python`** ⇒ 照着文档敲的人当场 exit 9009，而文档本身不会红。
+   ⇒ 改这些命令时**连同脚本 docstring 一起改**，否则下次又分叉。
 
    ⚠ **「超过阈值却一件没扫到」必须自己喊**。原来只打
    `swept 0 ... freed 0.0 B`，读起来和「一切正常」完全一样——而那正是

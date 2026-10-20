@@ -8,15 +8,43 @@
 #
 # -Child 是**内部用**的（2026-10-19 加）：把一条轨交给子进程，见下面「分轨并行」。
 # 手工不要传——父进程自己会按轨把它开起来。
+# ⚠⚠⚠ **过滤参数必须写成「一个字符串 + 按名传」**（2026-10-20 实测后改）。
+#
+# 原先是 `[string[]]$Skip` / `[string[]]$Only`，而 **`pwsh -File` 对数组参数的
+# 绑定有一条极隐蔽的规矩**（实测，`target\argtest.ps1`）：
+#
+#   pwsh -File x.ps1 -Skip deny 'ui build'
+#     ⇒ $Skip = @('deny')     ← 只拿到紧跟其后的**一个**值
+#     ⇒ $Only = @('ui build')  ← **第二个值被按位置绑给了下一个参数！**
+#
+# ⇒ 传两个片段时，`-Skip` 的第二个片段**静默地变成了 `-Only`**，
+#   过滤语义整个反过来：实测「跳过 deny 与 ui build」变成了
+#   「**只有** ui build 跑，其余 15 步全被跳」。
+#   ⚠⚠ 这是本仓最熟的那个形状：**参数与实际行为不符，而报告读起来完全正常**。
+#
+# ⚠ 而重复参数名是**报错**的（实测）：`-Skip a -Skip b` ⇒
+#   「无法绑定参数，因为多次指定了参数 'Skip'」⇒ 那条路至少是响的。
+#   危险的是**位置式**的第二个值（上面那个），它一声不响。
+#
+# ⇒ 两手都要：
+#   ① 参数声明成 `[string]`（逗号分隔的多个片段写在一个值里），
+#      并关掉位置绑定（`PositionalBinding = $false`）⇒ 位置式的第二个值
+#      **无处可绑 ⇒ 直接报错**，不再静默错位；
+#   ② 内部自己按逗号拆（脚本头部那两行），不指望调用方拆。
+#
+# ⚠ 改动的兼容性：`-Skip 'deny,ui build'`（逗号形式，AGENTS.md 里的写法）
+#   **完全不受影响**；`-Skip 'deny','ui build'` 现在会**报错**（响的，好过静默）。
+[CmdletBinding(PositionalBinding = $false)]
 param(
-  [string[]]$Skip = @(),
-  [string[]]$Only = @(),
+  [string]$Skip = '',
+  [string]$Only = '',
   [string]$Child = ''
 )
 
-# ⚠⚠ **必须拆逗号**（2026-10-19 补）。`-Skip` 声明成 `[string[]]`，
-# 而 `pwsh -File x.ps1 -Skip 'a,b'` **不会**按逗号切分 —— 它把整个
-# `'a,b'` 收成**一个元素**，于是逐元素 `-like "*a,b*"` 全不命中，**一步都跳不掉**。
+# ⚠⚠ **必须拆逗号**（2026-10-19 补，2026-10-20 改写措辞）。
+# 参数现在是 `[string]`（一个值里逗号分隔的多个片段），拆的是**这个值**：
+# `pwsh -File gate.ps1 -Skip 'deny,ui build,secret'` ⇒ 拆成三个片段，
+# 逐片段 `-like "*片段*"` ⇒ 三步都跳得掉。
 #
 # 后果不是「跳多了」而是「跳少了」，而那正是本项目反复付过学费的形状：
 #   `pwsh -File gate.ps1 -Skip 'deny,ui build,secret'` → 16 步全跑，
@@ -363,10 +391,21 @@ exit `$LASTEXITCODE
     #   这里再截一次是为了吸收 stderr 的 `[err]` 行。
     $h.Buf | Select-Object -Last 40 | ForEach-Object { Write-Output $_ }
     $code = $h.Proc.ExitCode
-    Write-Output ("{0}STEP`t{1}`t{2}`t{3}" -f $script:mark, $h.Name, $code, 0)
+    # ⚠⚠ 秒数**不能写 0**（2026-10-20 实测）：父进程靠这个标记回填
+    #   `$script:stepTime`（`##GATE##STEP\t<名>\t<code>\t<秒>`），
+    #   写 0 ⇒ 完整门禁自打的耗时表里这三步显示 `0.0s`，
+    #   而**同一轮**下面那行 `>>> <名> [24.6s]` 打的是整组墙钟
+    #   ⇒ 同一个门禁里两个地方报同一件事，一个 0.0、一个 24.6。
+    #   而 AGENTS.md 明说「以 gate.ps1 每轮自打的那份为准」——
+    #   那份对这三步当时**不可信**（不是"它们没跑"，是"没记上"）。
+    #   ⚠ 语义是「三步共用整组墙钟」，不是各自耗时（注释见计时表那段）。
+    #   ⇒ 步秒之和会因此多算 2×组墙钟，那是有意的：
+    #     墙钟下界看「最慢的一步」那行，别拿步秒之和当墙钟。
+    $groupWall = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    Write-Output ("{0}STEP`t{1}`t{2}`t{3}" -f $script:mark, $h.Name, $code, $groupWall)
     Write-Output (">>> {0} [{1:N1}s] (exit={2})" -f
       $(if ($code -ne 0) { "$($h.Name) FAILED" } else { "$($h.Name) OK" }),
-      $sw.Elapsed.TotalSeconds, $code)
+      $groupWall, $code)
     if ($code -ne 0) { $script:fail = 1 }
   }
 }
@@ -566,7 +605,28 @@ function Invoke-Lanes {
   foreach ($lane in $script:lanes) {
     $psi = [Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $pwshExe.Source
-    foreach ($a in @('-NoProfile', '-File', $gatePath, '-Child', $lane)) { [void]$psi.ArgumentList.Add($a) }
+    $laneArgs = @('-NoProfile', '-File', $gatePath, '-Child', $lane)
+    # ⚠⚠⚠ **必须把 -Skip / -Only 传进子进程**（2026-10-20 实测后补）：
+    #   过滤（`Should-Run`）跑在**子进程**里——父进程只负责起进程、转发输出，
+    #   **它自己不跑步**。而原来这里只传了 `-Child $lane`
+    #   ⇒ 子进程的 `$script:skipArgs` / `$script:onlyArgs` 是**空的**
+    #   ⇒ `Should-Run` 恒为真 ⇒ **每条轨都跑自己轨上的全部步**。
+    #
+    #   实测（2026-10-20）：`pwsh -File scripts\gate.ps1 -Only 'ui svelte-check'`
+    #   跑出了 cheap / rust / net 三条轨的**全部**步，外加 ui 轨的整个并行组。
+    #   ⇒ 「只跑一步」实际跑的是**完整门禁**。
+    #   ⚠⚠ 假绿的方向不止是慢：父进程收到的 `##GATE##SKIP` 标记也是空的
+    #   ⇒ 连 `GATE_SCOPE: PARTIAL` 那行**根本不会出现**
+    #   ⇒ 用户以为自己跳过了几步，报告却显示「没跳过任何步」。
+    #   这与本仓最熟的那个形状同形：**没跑**与**跑了但报 0** 在观测上一样，
+    #   而这次更甚——连「我跳过了」这个提示本身也没了。
+    #   ⇒ 转发的是**一个逗号合并的字符串**：`-Skip` / `-Only` 现在都是 `[string]`，
+    #     而 `pwsh -File` 的数组绑定会把第二个值**静默绑给下一个参数**
+    #     （实测 `-Skip deny 'ui build'` ⇒ $Only 拿到了 'ui build'）⇒
+    #     必须合并成一个值再传，子进程头部再拆一次（幂等）。
+    if ($script:skipArgs.Count -gt 0) { $laneArgs += @('-Skip', ($script:skipArgs -join ',')) }
+    if ($script:onlyArgs.Count -gt 0) { $laneArgs += @('-Only', ($script:onlyArgs -join ',')) }
+    foreach ($a in $laneArgs) { [void]$psi.ArgumentList.Add($a) }
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -617,7 +677,18 @@ function Invoke-Lanes {
           } elseif ($line -like "$($script:mark)SKIP`t*") {
             $script:skippedNames += ($line -split "`t")[1]
           } elseif ($line -like "$($script:mark)SKIPPED`t*") {
-            $sawSkipped.Add((($line -split "`t")[1] -split '\|'))
+            # ⚠⚠ **必须展开数组**（2026-10-20 修）：
+            #   `-split '\|'` 得到的是**数组**，而 `List[string].Add(数组)`
+            #   会把整个数组当成**一个元素**加进去（`Add` 不展开 `IEnumerable`）
+            #   ⇒ 元素被 `ToString()` 成一条「所有步名用空格连起来」的**假步名**
+            #   ⇒ 后面 `GATE_SCOPE: PARTIAL —— 实际跳过 N 步` 的 N 虚高，
+            #     而且那行列出的名字里混着一长串没人看得懂的东西。
+            #   ⚠⚠ 这条路径**在 -Skip/-Only 真正生效之前从来没被激活过**
+            #   （skippedNames 恒空 ⇒ 这行从不打印）⇒ 它自己的 bug 藏了整整四天。
+            #   ⇒ 教训同族：**一个从未被执行过的分支，不等于它是对的**。
+            foreach ($nm in (($line -split "`t")[1] -split '\|')) {
+              if ($nm) { $sawSkipped.Add($nm) }
+            }
           }
         }
       }
@@ -712,9 +783,26 @@ $ErrorActionPreference = "Continue"
 # ⚠⚠ **并行化之后这里的数字要换一种读法**（2026-10-19）：
 #   每步的秒数是它**自己那条轨上**的耗时，而四条轨是同时跑的，
 #   所以「各步秒数之和」**不再等于**门禁墙钟。
-#   并行组那三步的秒数是**整组的墙钟**（三步共用），不是各自耗时——
-#   想知道 ui 那三步各自的真实耗时，去看 `-Only ui` 的单轨跑。
+#   并行组那三步的秒数是**整组的墙钟**（三步共用），不是各自耗时。
+#   ⇒ 想知道 ui 那三步**各自**的真实耗时，用 `-Only 'ui svelte-check'`
+#     单步跑：组里另两步会被过滤掉 ⇒ 整组退回逐个跑 ⇒ 那一行才是它自己的耗时。
+#     （`-Only ui` 仍会命中三步 ⇒ 仍是并行组 ⇒ 拿到的还是组墙钟。）
 #   ⇒ 真正该看的对比是「MAX（各步秒数）」与本行 TOTAL 之间的差。
+#
+# ⚠⚠⚠ **并行组在表里折叠成一行，只计一次**（2026-10-20 加）：
+#   三步共用同一份组墙钟，若各记一次，「步秒之和」会**多算 2×组墙钟**。
+#   那不是小数点的事：修完计时回传（`##GATE##STEP` 原来把秒数硬写成 0，
+#   于是这三步在表里显示 0.0s）之后，步秒之和实测从 **96.2s 跳到 230.8s**，
+#   而 AGENTS.md 里「并行化**之前**的串行基线」正好是 **229.3s**
+#   ⇒ 下一个读表的人会直接读成「并行化白做了」。
+#   ⇒ 折叠成一行后，步秒之和回到「每份墙钟只算一次」的口径。
+#
+# ⚠⚠ **折叠的判据是「模式」，不是「数值相同」**（同一条纪律的第二轴）：
+#   组里只要有一步被 `-Skip` / `-Only` 过滤掉，整组就**退回逐个跑**
+#   （见 Invoke-Lane 里 `$anySkipped` 那条）⇒ 每步的秒数是**各自真实耗时**，
+#   此时折叠成一行就是**错的**（会把三个不同的耗时说成一个）。
+#   ⇒ 判据用「组内成员有没有被跳过」这个**行为事实**（父进程收到
+#     `##GATE##SKIP` 标记才知道），不是「三行秒数恰好一样」。
 $total = 0.0
 $maxStep = 0.0
 foreach ($k in $script:stepTime.Keys) {
@@ -723,8 +811,41 @@ foreach ($k in $script:stepTime.Keys) {
 }
 if ($script:stepTime.Count -gt 0) {
   Write-Output "---------- timing (steps, 四轨并行) ----------"
-  foreach ($k in ($script:stepTime.Keys | Sort-Object { $script:stepTime[$_] } -Descending)) {
-    Write-Output ("  {0,7:N1}s  {1}" -f $script:stepTime[$k], $k)
+
+  # 判哪些组该折叠：组内**没有任何一步**被跳过 ⇒ 它是并行跑的。
+  $skippedUniq = @($script:skippedNames | Select-Object -Unique)
+  $foldRows = [ordered]@{}   # 显示名 -> 秒数
+  $foldedMembers = @{}       # 被折叠掉的成员步名
+  foreach ($setKey in $script:parallelSets.Keys) {
+    $members = @($script:parallelSets[$setKey])
+    $anySkipped = @($members | Where-Object { $skippedUniq -contains $_ }).Count -gt 0
+    if ($anySkipped) { continue }
+    $first = $null
+    $allPresent = $true
+    foreach ($n in $members) {
+      if (-not $script:stepTime.Contains($n)) { $allPresent = $false; break }
+      if ($null -eq $first) { $first = $n }
+    }
+    if (-not $allPresent) { continue }
+    $label = "{0}（并行组 {1} 步：{2}）" -f $setKey, $members.Count, ($members -join ' / ')
+    $foldRows[$label] = $script:stepTime[$first]
+    foreach ($n in $members) { $foldedMembers[$n] = $true }
+  }
+  # 折叠掉的成员不再单独计一次（否则步秒之和会多算 2×组墙钟）。
+  foreach ($n in $foldedMembers.Keys) {
+    $total -= $script:stepTime[$n]
+  }
+
+  $rows = @()
+  foreach ($k in $script:stepTime.Keys) {
+    if ($foldedMembers.ContainsKey($k)) { continue }
+    $rows += [pscustomobject]@{ Sec = $script:stepTime[$k]; Name = $k }
+  }
+  foreach ($label in $foldRows.Keys) {
+    $rows += [pscustomobject]@{ Sec = $foldRows[$label]; Name = $label }
+  }
+  foreach ($r in ($rows | Sort-Object Sec -Descending)) {
+    Write-Output ("  {0,7:N1}s  {1}" -f $r.Sec, $r.Name)
   }
   Write-Output ("  {0,7:N1}s  最慢的一步（并行下的下界）" -f $maxStep)
   Write-Output ("  {0,7:N1}s  步秒之和（并行下**不等于**墙钟，只看它会高估）" -f $total)

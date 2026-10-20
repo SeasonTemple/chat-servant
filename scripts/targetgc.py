@@ -95,12 +95,15 @@ Cargo 判断「要不要重编」靠 `target/<profile>/.fingerprint`，不靠文
   ⇒ 删完必须验证一次「零 `Compiling`」，别只看省了多少字节。
 
 用法：
-    python scripts/targetgc.py                    # 超阈值 + 过了冷却期才动手
-    python scripts/targetgc.py --dry-run          # 只报告，不动手（不受冷却限制）
-    python scripts/targetgc.py --force            # 无视冷却，立刻收一次
-    python scripts/targetgc.py --report           # 只出体积报告，不判阈值
-    python scripts/targetgc.py --mode aged        # 回到「按 mtime 回收」的老路
-    python scripts/targetgc.py --threshold-gb 6 --min-age-hours 6 --max-hours 12
+    # ⚠ 一律用 `uv run --no-project`：本机 PATH 上**没有裸 `python`**
+    #   （2026-10-20 实测：`python scripts/targetgc.py` 直接 exit 9009），
+    #   Python 由 uv 管理并装在**项目盘**（不在 C 盘）。
+    uv run --no-project python scripts/targetgc.py                    # 超阈值 + 过了冷却期才动手
+    uv run --no-project python scripts/targetgc.py --dry-run          # 只报告，不动手（不受冷却限制）
+    uv run --no-project python scripts/targetgc.py --force            # 无视冷却，立刻收一次
+    uv run --no-project python scripts/targetgc.py --report           # 只出体积报告，不判阈值
+    uv run --no-project python scripts/targetgc.py --mode aged        # 回到「按 mtime 回收」的老路
+    uv run --no-project python scripts/targetgc.py --threshold-gb 6 --min-age-hours 6 --max-hours 12
 """
 
 import argparse

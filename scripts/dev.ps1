@@ -22,9 +22,14 @@ param(
   # test 的过滤串，直接透传给 `cargo test`（`cargo test <filter>`）。
   [string]$Filter,
 
-  # gate 的步骤过滤，子串匹配，例如 -Skip 'deny,ui build'。
-  [string[]]$Skip = @(),
-  [string[]]$Only = @(),
+  # gate 的步骤过滤，子串匹配，**一个值里逗号分隔**（例如 -Skip 'deny,ui build'）。
+  # ⚠⚠ **必须是 [string] 而不是 [string[]]**（2026-10-20 实测后改）：
+  #   `pwsh -File` 对数组参数的绑定会把**第二个值按位置绑给下一个参数**
+  #   （`-Skip deny 'ui build'` ⇒ $Skip=@('deny')、**$Only=@('ui build')**）
+  #   ⇒ 过滤语义整个反过来，且**一声不响**。
+  #   改成 [string] 后，写成数组会**直接报错**（响的，好过静默错位）。
+  [string]$Skip = '',
+  [string]$Only = '',
 
   # clean 的透传开关。`targetgc.py` 自带 24 小时冷却（两次**真回收**之间），
   #   而门禁每跑一次就可能写冷却戳 —— 于是「用户明确说要清理、脚本却什么都没做」。
@@ -150,15 +155,17 @@ chat-servant 开发入口（用 pwsh 7 运行）
   }
 
   'gate' {
-    # ⚠ 这里用数组转发，`-Skip 'deny,ui build'` 会正确变成两个参数
-    #   （`-Skip` / `deny,ui build`），而 gate.ps1 头部会把它按逗号再拆一次。
-    #   ⇒ 两种写法都生效：`-Skip 'deny,ui build'` 与 `-Skip 'deny','ui build'`。
-    #   那个「拆逗号」是 2026-10-19 补的：`-File` 不会按逗号切分 `[string[]]`，
+    # ⚠ **转发成一个逗号合并的值**（2026-10-20 改）。
+    #   原来写的是 `@('-Skip') + $Skip`（逐元素）⇒ 传两个片段时命令行变成
+    #   `-Skip deny ui build` ⇒ `pwsh -File` 把 `deny` 绑给 $Skip、
+    #   把 **`ui build` 绑给了 $Only** ⇒ 语义整个反过来。
+    #   合并成一个值后，gate.ps1 头部会再拆一次（幂等）。
+    #   ⚠ 内部拆逗号是 2026-10-19 补的：`-File` 不会按逗号切分，
     #   原先文档里的写法一步都跳不掉，而 GATE_SCOPE 却照抄参数、
     #   让人以为跳过了（详见 gate.ps1 头部那条）。
     $gargs = @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'gate.ps1'))
-    if ($Skip.Count) { $gargs += @('-Skip') + $Skip }
-    if ($Only.Count) { $gargs += @('-Only') + $Only }
+    if ($Skip) { $gargs += @('-Skip', $Skip) }
+    if ($Only) { $gargs += @('-Only', $Only) }
     & $pwsh @gargs
     exit $LASTEXITCODE
   }

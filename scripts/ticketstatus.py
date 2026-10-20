@@ -13,9 +13,15 @@ Status 行连续三次与自己验收项矛盾（「真机未验」而验收项�
 ⇒ 所以这份 STATUS 是**生成的**，不是写的。改完票就重跑：
 
 ```bash
-python scripts/ticketstatus.py
-python scripts/ticketstatus.py --check   # 只报漂移，不写文件
+uv run --no-project python scripts/ticketstatus.py
+uv run --no-project python scripts/ticketstatus.py --check   # 只报漂移，不写文件
 ```
+
+⚠⚠ **为什么是 `uv run` 而不是 `python`**（2026-10-20 实测）：
+本机 PATH 上**没有裸 `python`**（`python scripts/ticketstatus.py` 直接 exit 9009），
+Python 由 uv 管理并装在**项目盘**（`G:/tools/uv/python`，不在 C 盘）。
+⇒ 本仓所有 Python 命令一律写 uv 形式；`scripts/gate.ps1` 与 `scripts/dev.ps1`
+早就是这个写法，只有文档与本脚本的头部还写着裸 `python`。
 
 ⚠ **勾数 ≠ 进度**。很多票的 Status 写着 done 却仍有 1~2 项未勾，
 那些是**条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -160,7 +166,7 @@ def render(rows: list[dict[str, str]]) -> str:
         "# 进展现状（**机器生成，勿手改**）",
         "",
         "> 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：",
-        "> `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。",
+        "> `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。",
         "",
         f"票据总数 **{len(rows)}** ｜ 验收项全勾 **{len(closed)}** ｜ "
         f"已收但留有说明项 **{len(closed_with_notes)}** ｜ 未收 **{len(open_rows)}**",
@@ -232,10 +238,10 @@ def main() -> int:
     text = render(rows)
     if args.check:
         if not OUT.exists():
-            print("DRIFT: STATUS.md does not exist - run: python scripts/ticketstatus.py")
+            print("DRIFT: STATUS.md does not exist - run: uv run --no-project python scripts/ticketstatus.py")
             return 1
         if OUT.read_text(encoding="utf-8") != text:
-            print("DRIFT: STATUS.md is stale - run: python scripts/ticketstatus.py")
+            print("DRIFT: STATUS.md is stale - run: uv run --no-project python scripts/ticketstatus.py")
             return 1
         print("STATUS.md up to date")
         return 0
