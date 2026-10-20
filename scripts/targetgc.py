@@ -130,6 +130,10 @@ for _stream in (sys.stdout, sys.stderr):
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# 与 `scripts/gate.ps1` / `scripts/dev.ps1` **逐字相同**的那份 TAURI_CONFIG 覆盖。
+# 守卫在 `scripts/check-gate-parity.ps1` 的 ⑧：三处必须一模一样，改一处就要改三处。
+TAURI_CONFIG_NO_RESOURCES = '{"bundle":{"resources":null}}'
+
 # 只碰这两处。刻意**不含** .fingerprint / build/：前者是 Cargo 的真相来源，
 # 后者是构建脚本产物，删了会让依赖被整棵重编，得不偿失。
 SWEEPABLE = ("incremental", "deps")
@@ -174,10 +178,26 @@ def live_artifacts():
     """
     cmd = ["cargo", "test", "--workspace", "--all-targets", "--no-run",
            "--message-format=json"]
+    # ⚠⚠ 必须带上与 `scripts/gate.ps1` **逐字相同**的那份 TAURI_CONFIG 覆盖。
+    #
+    # 2026-10-20 实测（这台机器 `Test-Path target\models` = False）：
+    # 这条列举命令原本直接 exit 101 —— tauri-build 的 build script 在
+    # `cargo test --no-run` 时就遍历 `tauri.conf.json` 的 `bundle.resources`
+    # （`../../target/models/ppocrv6-small/*`），glob 匹配为空**无条件**抛
+    # `GlobPathNotFound`（tauri-utils `resources.rs:289`）⇒ 活产物清单拿不到
+    # ⇒ 清理脚本**永远不删任何东西**，而它不报错，只打一行「本轮不删任何文件」。
+    #
+    # 为什么这样修是**加强**判据而不是放松它：
+    #   · 那条 resources 映射只影响**装机打包**，不改变编译产物本身；
+    #   · 门禁本来就在这个覆盖下编译（gate.ps1:75），而本文件自己的规矩是
+    #     「环境必须一致，否则列举出来的产物集与实际使用的不符——那就会误删」。
+    #     ⇒ 列举必须与门禁同环境，缺了这层它测的是另一个世界。
+    env = dict(os.environ)
+    env["TAURI_CONFIG"] = TAURI_CONFIG_NO_RESOURCES
     try:
         proc = subprocess.run(
             cmd, cwd=str(ROOT), capture_output=True, text=True,
-            timeout=1800, errors="replace")
+            timeout=1800, errors="replace", env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         print(f">>> live_artifacts: `cargo test --no-run` 列举失败"
               f"（{e.__class__.__name__}）")

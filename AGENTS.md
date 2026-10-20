@@ -596,6 +596,20 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
   因为 null 只解决「编得过」而字准测试要的是「文件在盘上」）。
   ⚠ 判据是**逐 job**不是逐文件：一个 workflow 里可以同时有「取好权重才打包的 build job」
   与「什么都没取的 verify job」，文件级判断会把两者混成一句。详见 `CONTRIBUTING.md` §6b。
+- ⚠⚠ **本机凡是跑 cargo 的入口，都必须带同一份 `TAURI_CONFIG` 覆盖**——
+  现在是**三处**：`scripts/gate.ps1:75`、`scripts/dev.ps1`（`check`/`test` 两个动词）、
+  `scripts/targetgc.py`（列举活产物那次）。
+  起因：`tauri.conf.json` 的 `bundle.resources` 指向 `../../target/models/ppocrv6-small/*`，
+  而 `target/` 是 gitignored 的 ⇒ 干净检出上那个目录不存在，tauri-build 遍历 resources
+  时 glob 匹配为空**无条件**抛 `GlobPathNotFound` ⇒ 每个编 `chat-servant-app` 的
+  cargo 步骤都 exit 101。
+  ⚠ **2026-10-20 实测**：少了这份覆盖的 `targetgc.py` 会**永远不删任何东西**，
+  而它不报错、只打一行「本轮不删任何文件」——读起来像「没什么可清」。
+  少它的 `dev.ps1 check`/`test` 恒红，而红的原因与代码无关。
+  ⇒ 守卫是 `scripts/check-gate-parity.ps1` 的**第 ⑧ 条**：三处**逐字比对**，
+  剥掉整行注释后再匹配（注释里写着那串 JSON 不等于代码里设了它）。
+  ⚠ `'app'` 动词**故意不给**这份覆盖：真机缺权重应当**响**（编不过），
+  而不是悄悄回落到 Windows OCR（票 39 / 41 记的就是那个回落）。
 - ⚠ **自证用「复制备份」恢复注入，会把 mtime 一起还原 ⇒ cargo 认为没改过、不重编**
   ⇒ 后面几轮自证全在验陈旧产物。症状极像「守卫没修好」（恢复后本该绿那次仍红，
   且红在无关字段上）。⇒ 恢复时**重写文件内容**而不是 `File.Copy`，

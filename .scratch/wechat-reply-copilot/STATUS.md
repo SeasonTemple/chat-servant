@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **73** ｜ 验收项全勾 **51** ｜ 已收但留有说明项 **13** ｜ 未收 **9**
+票据总数 **74** ｜ 验收项全勾 **52** ｜ 已收但留有说明项 **13** ｜ 未收 **9**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -105,3 +105,4 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `71-two-character-name-breaks-the-identity-gate.md` | 3/3 |
 | `72-product-read-path-hand-rolled-its-own-ocr-recipe.md` | 0/0 |
 | `73-panel-stuck-on-a-stale-error-after-capture-recovers.md` | 0/0 |
+| `74-local-cargo-entries-lack-the-tauri-config-override.md` | 7/7 |

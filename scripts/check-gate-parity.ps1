@@ -531,6 +531,79 @@ if (-not (Test-Path $ciPath)) {
   $fail.Add('   ⇒ 「这些测试在 CI 上没验」这件事必须**写出来**，不能只靠一个 ignored 计数让人自己猜。')
 }
 
+# ─────────────────────────────────────────────────────────────────────────
+# ⑧ 本机跑 cargo 的入口，必须都带**同一份** TAURI_CONFIG 覆盖
+#
+# ## 这条守卫的由来（2026-10-20）
+#
+# `tauri.conf.json` 的 `bundle.resources` 指向 `../../target/models/ppocrv6-small/*`，
+# 而 `target/` 是 gitignored 的 ⇒ **干净检出上那个目录不存在**，tauri-build 的
+# build script 在每个 cargo 步骤抛 `GlobPathNotFound`（tauri-utils `resources.rs:289`）。
+#
+# 门禁早就知道这件事（`gate.ps1:75` 设了 `TAURI_CONFIG` 覆盖），
+# 而**本机还有两个入口会直接跑 cargo**：
+#   · `scripts/targetgc.py` —— 列举活产物时跑 `cargo test --no-run`；
+#   · `scripts/dev.ps1` —— `check` / `test` 两个动词直接跑 cargo。
+#
+# 2026-10-20 实测（`Test-Path target\models` = False）：这两个入口 exit 101，
+# 后果是**两个方向都坏**：
+#   · targetgc 拿不到活产物清单 ⇒ **清理脚本永远不删任何东西**，
+#     而它不报错，只打一行「本轮不删任何文件」——看着像「没什么可清」；
+#   · `dev.ps1 check` / `test` 恒红，而红的原因与代码无关。
+#
+# ⇒ 与 ⑥ 同族：**同一个不变量散在多个文件里，逐个修就会复发**
+#   （票 51 修完 `ci.yml` 忘了 `release.yml`，同一个形状）。
+#   这次改成机器逐字比对：三处必须**一模一样**，改一处就要改三处。
+#
+# ⚠ 匹配前必须剥掉**整行注释**（与本文件上方那条同理由）：
+#   注释里写着那串 JSON，不等于代码里真的设了它。
+$localCargoEntries = @(
+  @{ Path = 'scripts\gate.ps1';    Label = 'scripts/gate.ps1' },
+  @{ Path = 'scripts\dev.ps1';     Label = 'scripts/dev.ps1' },
+  @{ Path = 'scripts\targetgc.py'; Label = 'scripts/targetgc.py' }
+)
+$canonicalOverride = '{"bundle":{"resources":null}}'
+$script:overrideEntriesChecked = 0
+foreach ($e in $localCargoEntries) {
+  if (-not (Test-Path $e.Path)) {
+    $fail.Add(("⑧ 本机 cargo 入口 {0} 不存在 —— 这条守卫此刻什么都没验" -f $e.Label))
+    continue
+  }
+  $raw = [IO.File]::ReadAllText((Resolve-Path $e.Path))
+  $codeLines = ($raw -split "`r?`n") |
+    Where-Object { $_ -notmatch '^\s*#' -and $_ -match 'TAURI_CONFIG' }
+  $script:overrideEntriesChecked++
+  if (-not $codeLines) {
+    $fail.Add(("⑧ {0} 里没有任何（非注释的）TAURI_CONFIG 设置" -f $e.Label))
+    $fail.Add('   ⇒ 这台机器没装 OCR 权重时，cargo 会挂在 tauri-build 的 resources glob 上（exit 101）。')
+    continue
+  }
+  # 取出那串 JSON（嵌套一层大括号），去掉空白后逐字比对
+  $vals = [System.Collections.Generic.List[string]]::new()
+  foreach ($ln in $codeLines) {
+    foreach ($m in [regex]::Matches($ln, '\{[^{}]*\{[^{}]*\}[^{}]*\}')) {
+      $vals.Add(($m.Value -replace '\s', ''))
+    }
+  }
+  if (-not $vals.Count) {
+    $fail.Add(("⑧ {0} 提到了 TAURI_CONFIG，但取不到那串覆盖 JSON" -f $e.Label))
+    continue
+  }
+  foreach ($v in $vals) {
+    if ($v -ne ($canonicalOverride -replace '\s', '')) {
+      $fail.Add(("⑧ {0} 的 TAURI_CONFIG 覆盖与门禁那份不一致" -f $e.Label))
+      $fail.Add(("   它是：{0}" -f $v))
+      $fail.Add(("   门禁那份必须是：{0}" -f $canonicalOverride))
+      $fail.Add('   ⇒ 必须是 null：TAURI_CONFIG 走 json_patch::merge，空对象是空操作。')
+    }
+  }
+}
+
+# ⚠ 量具自检：一个入口都没扫到 ⇒ 它此刻**什么都没验**（同上那条理由）。
+if ($script:overrideEntriesChecked -eq 0) {
+  $fail.Add('⑧ 一个本机 cargo 入口都没扫到 —— 这条守卫此刻什么都没验。')
+}
+
 if ($fail.Count) {
   Write-Output 'CI 与本机门禁没有对齐：'
   Write-Output ''
@@ -547,4 +620,5 @@ Write-Output ("bundle.resources 那条：扫了 {0} 个 workflow 的 {1} 个 job
 Write-Output ("跑测试前备夹具那条：{0} 个跑测试的 job，逐个都在跑之前取权重并造语料。" -f $script:testJobsChecked)
 Write-Output ("Python 编码那条：扫本项目自有 .py {0} 个（不含 .agents/ 第三方），其中 {1} 个含非 ASCII，都已自己 reconfigure。" -f $pyScope.Count, $pyNonAscii)
 Write-Output ("真帧测试那条：扫到 {0} 条依赖 gitignored 真帧的 #[test]，全部标了 #[ignore]（本机专属）；合成替身在场。" -f $fixtureTestCount)
+Write-Output ("本机 cargo 入口那条：{0} 个入口（gate.ps1 / dev.ps1 / targetgc.py），逐个都带着同一份 TAURI_CONFIG 覆盖。" -f $script:overrideEntriesChecked)
 exit 0

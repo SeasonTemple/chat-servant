@@ -94,6 +94,13 @@ chat-servant 开发入口（用 pwsh 7 运行）
   }
 
   'check' {
+    # 与 `scripts/gate.ps1:75` **逐字相同**的那份 TAURI_CONFIG 覆盖。
+    # 没有权重的机器上（`target/` 是 gitignored 的，干净检出就没有），
+    # cargo 一编 chat-servant-app 就挂在 tauri-build 的 resources glob 上、
+    # exit 101 ⇒ clippy 与 test 一起红，而红的原因跟代码无关。
+    # ⚠ 只给**跑 cargo 的动词**设，`'app'` 那条不给：真机要带着权重才跑，
+    #   缺了应当**响**，而不是悄悄回落到 Windows OCR（票 39 / 41）。
+    $env:TAURI_CONFIG = '{"bundle":{"resources":null}}'
     # 这两条是改 Rust 之后最常跑的两条，也是最便宜的两条。
     # `cargo check` 不是其中之一：clippy 已经要编译，改用它不会更快。
     Run 'cargo fmt --all --check' { & cargo fmt --all --check }
@@ -104,6 +111,8 @@ chat-servant 开发入口（用 pwsh 7 运行）
   }
 
   'test' {
+    # 同上：覆盖要逐字相同（守卫 ⑧ 在 `scripts/check-gate-parity.ps1`）。
+    $env:TAURI_CONFIG = '{"bundle":{"resources":null}}'
     $targs = @('test', '--workspace')
     if ($Filter) { $targs += $Filter }
     Run "cargo test $($targs -join ' ')" { & cargo @targs }
