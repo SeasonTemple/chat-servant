@@ -93,6 +93,34 @@ function Remove-YamlComment($line) {
   }
   return $line                                    # 引号不成对（多半是跨行的 run: | 块），原样留
 }
+
+# 切出 `jobs:` 之后每个 job 的块（闭区间行号）。
+#
+# ⚠ **行级文本扫描**，不是 YAML 解析——那会给一个守卫脚本拖进一个 YAML 依赖。
+#   切分规则：`jobs:` 之后**两空格缩进**的 `name:` 切块。
+#
+# ⚠⚠ **这里只存一份**：本文件里凡是「某条不变量在哪个 job 里成立」的判据，
+#   都必须用这一个切法。⚠ 写了第二份切法，两份迟早漂——而漂了没人看得出来
+#   （与「三处文档都说对应并不让那句话更真一点」是同一个陷阱）。
+function Get-JobSpans([string[]]$lines) {
+  $starts = @()
+  $inJobs = $false
+  $sawJobs = $false
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($lines[$i] -match '^jobs:\s*$') { $inJobs = $true; $sawJobs = $true; continue }
+    if ($inJobs -and $lines[$i] -match '^  ([A-Za-z0-9_-]+):\s*$') {
+      $starts += [pscustomobject]@{ Name = $Matches[1]; Line = $i }
+    }
+  }
+  $spans = @()
+  for ($j = 0; $j -lt $starts.Count; $j++) {
+    $from = $starts[$j].Line
+    $to = if ($j + 1 -lt $starts.Count) { $starts[$j + 1].Line - 1 } else { $lines.Count - 1 }
+    $spans += [pscustomobject]@{ Name = $starts[$j].Name; From = $from; To = $to }
+  }
+  return [pscustomobject]@{ SawJobs = $sawJobs; Spans = $spans }
+}
+
 $ci = (($ciRaw -split "`r?`n") | ForEach-Object { Remove-YamlComment $_ }) -join "`n"
 
 # 步名按出现顺序取，判据是**有向覆盖**，不比较条数。
@@ -205,30 +233,22 @@ if (Test-Path $confPath) {
         break
       }
 
-      # 切出 jobs 之后每个 job 的块
-      $sawJobs = $false
-      $jobStarts = @()
-      $inJobs = $false
-      for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^jobs:\s*$') { $inJobs = $true; $sawJobs = $true; continue }
-        if ($inJobs -and $lines[$i] -match '^  ([A-Za-z0-9_-]+):\s*$') {
-          $jobStarts += [pscustomobject]@{ Name = $Matches[1]; Line = $i }
-        }
-      }
+      # 切出 jobs 之后每个 job 的块（切法只有一份，见 Get-JobSpans）
+      $jobInfo = Get-JobSpans $lines
       # ⚠ 有 `jobs:` 却一个 job 都切不出来 ⇒ **量具失效**，不能当成「没发现问题」。
       #   真实来源：自证组 M 的一次正则写错（末尾 `.*\n` 配 `(?s)` 贪婪）
       #   把整个 workflow 吃掉，只剩 27 行，守卫对着残文件报「合规」。
       #   「量具坏了」和「量具没找到东西」在屏幕上原本长得一模一样。
-      if ($sawJobs -and $jobStarts.Count -eq 0) {
+      if ($jobInfo.SawJobs -and $jobInfo.Spans.Count -eq 0) {
         $fail.Add(('{0}.yml 里有 jobs: 却一个 job 都切不出来 —— 本守卫此刻什么都没验' -f $wf.BaseName))
         $fail.Add('    （要么 job 的缩进写法变了，要么文件被改坏了。别把「没查到」当「没问题」。）')
         continue
       }
-      if ($jobStarts.Count -eq 0) { continue }
+      if ($jobInfo.Spans.Count -eq 0) { continue }
 
-      for ($j = 0; $j -lt $jobStarts.Count; $j++) {
-        $from = $jobStarts[$j].Line
-        $to = if ($j + 1 -lt $jobStarts.Count) { $jobStarts[$j + 1].Line - 1 } else { $lines.Count - 1 }
+      for ($j = 0; $j -lt $jobInfo.Spans.Count; $j++) {
+        $from = $jobInfo.Spans[$j].From
+        $to = $jobInfo.Spans[$j].To
         $block = $lines[$from..$to]
         $nJobs++
 
@@ -267,10 +287,10 @@ if (Test-Path $confPath) {
         if ($testAt -ge 0) {
           $script:testJobsChecked++
           if ($fetchAt -lt 0 -or $fetchAt -gt $testAt) {
-            $fail.Add(('{0}.yml 的 job `{1}`：跑测试之前没有取权重（fetch_models.py）' -f $wf.BaseName, $jobStarts[$j].Name))
+            $fail.Add(('{0}.yml 的 job `{1}`：跑测试之前没有取权重（fetch_models.py）' -f $wf.BaseName, $jobInfo.Spans[$j].Name))
           }
           if ($corpusAt -lt 0 -or $corpusAt -gt $testAt) {
-            $fail.Add(('{0}.yml 的 job `{1}`：跑测试之前没有造合成语料（ocrbench/gen_corpus.py）' -f $wf.BaseName, $jobStarts[$j].Name))
+            $fail.Add(('{0}.yml 的 job `{1}`：跑测试之前没有造合成语料（ocrbench/gen_corpus.py）' -f $wf.BaseName, $jobInfo.Spans[$j].Name))
             $fail.Add('    ⇒ 字准守卫会走「缺件」那一支。⚠ 在 cargo test 的输出里，')
             $fail.Add('      跳过与通过**逐字同形**（都是 `... ok`），只有一个 `finished in`')
             $fail.Add('      能区分：0.00s 是跳过，十几秒才是真跑。')
@@ -282,7 +302,7 @@ if (Test-Path $confPath) {
         $jobOverride = $fileOverride -or (($block -join "`n") -match '"resources"\s*:\s*null')
         $fetchedFirst = ($fetchAt -ge 0 -and $fetchAt -lt $cargoAt)
         if ($outside -and -not ($jobOverride -or $fetchedFirst)) {
-          $fail.Add(('{0}.yml 的 job `{1}`：跑 cargo 时权重还不在盘上，也没有 null 覆盖' -f $wf.BaseName, $jobStarts[$j].Name))
+          $fail.Add(('{0}.yml 的 job `{1}`：跑 cargo 时权重还不在盘上，也没有 null 覆盖' -f $wf.BaseName, $jobInfo.Spans[$j].Name))
           $fail.Add('    ⇒ 干净 runner 上 tauri-build 会在那一步抛 GlobPathNotFound，')
           $fail.Add('      而本机有这些文件所以本地全绿。修法二选一：')
           $fail.Add('      · 在跑 cargo 之前加一步取权重（python scripts/fetch_models.py）；')
@@ -604,6 +624,105 @@ if ($script:overrideEntriesChecked -eq 0) {
   $fail.Add('⑧ 一个本机 cargo 入口都没扫到 —— 这条守卫此刻什么都没验。')
 }
 
+# ─────────────────────────────────────────────────────────────────────────
+# ⑨ Python 侧依赖：装的地方必须指向钉了版本的那份文件，且开了 pip 缓存
+#
+# ## 这条守卫的由来（2026-10-20）
+#
+# `pip install rapidocr omegaconf` 原来写在**三个**地方（ci.yml 一次、
+# release.yml 两次），每轮都从 PyPI 重新下 **27.3 MB**（实测：rapidocr-3.10.0
+# wheel 27.3 MB + omegaconf 254 kB + 15 个传递包，单步 19s），
+# 而同一份 workflow 里 node 有 `cache: pnpm`、Rust 有 toolchain cache、
+# 30 MB 的权重有 `actions/cache` ⇒ **只有 pip 是裸的**。
+#
+# ⚠⚠ 更要紧的不是耗时，是**版本浮着**：`scripts/fetch_models.py` 刻意
+#   **不硬编**权重 URL 与 SHA256，而是从 `rapidocr` 包自带的模型表里读
+#   ⇒ **换 rapidocr 版本 = 换权重来源**；而词典的 SHA256 是本地钉死的
+#   ⇒ 上游一换版就对不上 ⇒ 同一个 tag 隔两周重跑可能失败。
+#   **发版结果不可复现。**
+#
+# ⇒ 规则（缺一不可）：
+#   ① 仓库里有一份 `requirements-ocr.txt`，顶层包**必须钉版本**（`==`）；
+#   ② workflow 里的 `pip install` 必须指向那份文件（不许裸写包名）；
+#   ③ 装它的那个 job 必须开 `cache: 'pip'`，且**必须显式**写
+#      `cache-dependency-path`——默认 glob 找的是 `**/requirements.txt`，
+#      本仓没有那个名字的文件，而 `.agents/skills/ui-styling/scripts/requirements.txt`
+#      是第三方 skill 的 ⇒ 不显式指定的话，**缓存 key 由别人的文件决定**。
+#
+# ⚠ 判据从**不变量**推，不从「哪几个文件出过事」推（与 ④⑥⑦ 同一纪律）：
+#   以后新加一个 workflow 装 Python 依赖，这三条照样适用。
+$reqFile = 'requirements-ocr.txt'
+$script:pipJobsChecked = 0
+
+if (-not (Test-Path $reqFile)) {
+  $fail.Add("⑨ 仓库里没有 $reqFile —— 这条守卫此刻什么都没验。")
+}
+else {
+  $reqRaw = [IO.File]::ReadAllText((Resolve-Path $reqFile))
+  $reqLines = ($reqRaw -split "`r?`n") | Where-Object {
+    $t = $_.Trim()
+    $t -and -not $t.StartsWith('#')
+  }
+  if (-not $reqLines) {
+    $fail.Add("⑨ $reqFile 里一条要求都没有 —— 这条守卫此刻什么都没验。")
+  }
+  foreach ($ln in $reqLines) {
+    if ($ln -notmatch '==') {
+      $fail.Add(("⑨ {0} 里的 `{1}` 没有钉版本" -f $reqFile, $ln))
+      $fail.Add('   ⇒ 换版本 = 换权重来源（模型表就住在 rapidocr 包里），发版结果不可复现。')
+      $fail.Add('     钉法：`rapidocr==X.Y.Z`（顶层包钉住即可，传递依赖随它解析）。')
+    }
+  }
+}
+
+foreach ($wf in (Get-ChildItem $wfDir -Filter '*.yml' | Sort-Object Name)) {
+  $wfRaw = [IO.File]::ReadAllText($wf.FullName)
+  $wfLines = $wfRaw -split "`r?`n"
+  # 剥掉注释再找 `pip install`（注释里写着那行不算真的装）
+  for ($i = 0; $i -lt $wfLines.Count; $i++) {
+    $code = Remove-YamlComment $wfLines[$i]
+    if ($code -notmatch 'pip\s+install') { continue }
+    if ($code -notmatch 'requirements-ocr\.txt') {
+      $fail.Add(("⑨ {0}:{1} 的 pip install 没有指向 {2}" -f $wf.BaseName, ($i + 1), $reqFile))
+      $fail.Add('   ⇒ 裸写包名 = 版本浮着 = 权重来源浮着 = 发版结果不可复现。')
+    }
+  }
+  # 逐 job：装依赖的那个 job 必须开 pip 缓存、并显式指依赖文件
+  $jobInfo = Get-JobSpans $wfLines
+  foreach ($span in $jobInfo.Spans) {
+    $block = $wfLines[$span.From..$span.To]
+    $pipInBlock = $false
+    $hasPipCache = $false
+    $hasDepPath = $false
+    foreach ($b in $block) {
+      $bCode = Remove-YamlComment $b
+      if ($bCode -match 'pip\s+install') { $pipInBlock = $true }
+      # ⚠ 逐行判，不把整个块拼成一行再匹配 `$`——
+      #   .NET 的 `$`（无 Multiline）只匹配整个输入的末尾，块中间的行会被漏掉。
+      if ($bCode -match "cache:\s*['""]?pip['""]?[ \t]*$") { $hasPipCache = $true }
+      if ($bCode -match 'cache-dependency-path:.*requirements-ocr\.txt') { $hasDepPath = $true }
+    }
+    if (-not $pipInBlock) { continue }
+    $script:pipJobsChecked++
+    if (-not $hasPipCache) {
+      $fail.Add(("⑨ {0} 的 job `{1}`：装了 Python 依赖却没开 pip 缓存" -f $wf.BaseName, $span.Name))
+      $fail.Add('   ⇒ 每轮白下 27 MB（实测单步 19s），而同一份 workflow 里 node/Rust/权重都有缓存。')
+      $fail.Add("     修法：actions/setup-python 的 with 里加 cache: 'pip'。")
+    }
+    if (-not $hasDepPath) {
+      $fail.Add(("⑨ {0} 的 job `{1}`：开了 pip 缓存却没显式写 cache-dependency-path" -f $wf.BaseName, $span.Name))
+      $fail.Add('   ⇒ 默认 glob 找的是 **/requirements.txt，本仓没有那个名字的文件；')
+      $fail.Add('     而 .agents/skills/ui-styling/scripts/requirements.txt 是第三方 skill 的')
+      $fail.Add('     ⇒ 不显式指定的话，缓存 key 由别人的文件决定。')
+    }
+  }
+}
+
+# ⚠ 量具自检：一个「装了 Python 依赖的 job」都没扫到 ⇒ 它此刻**什么都没验**。
+if ($script:pipJobsChecked -eq 0) {
+  $fail.Add('⑨ 一个「装了 Python 依赖的 job」都没扫到 —— 这条守卫此刻什么都没验。')
+}
+
 if ($fail.Count) {
   Write-Output 'CI 与本机门禁没有对齐：'
   Write-Output ''
@@ -621,4 +740,5 @@ Write-Output ("跑测试前备夹具那条：{0} 个跑测试的 job，逐个都
 Write-Output ("Python 编码那条：扫本项目自有 .py {0} 个（不含 .agents/ 第三方），其中 {1} 个含非 ASCII，都已自己 reconfigure。" -f $pyScope.Count, $pyNonAscii)
 Write-Output ("真帧测试那条：扫到 {0} 条依赖 gitignored 真帧的 #[test]，全部标了 #[ignore]（本机专属）；合成替身在场。" -f $fixtureTestCount)
 Write-Output ("本机 cargo 入口那条：{0} 个入口（gate.ps1 / dev.ps1 / targetgc.py），逐个都带着同一份 TAURI_CONFIG 覆盖。" -f $script:overrideEntriesChecked)
+Write-Output ("Python 依赖那条：{0} 个装了 Python 依赖的 job，逐个都指向钉了版本的 requirements-ocr.txt 且开了 pip 缓存。" -f $script:pipJobsChecked)
 exit 0

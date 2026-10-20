@@ -78,10 +78,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          # ⚠ pip 缓存 + 钉版本：见仓库根的 `requirements-ocr.txt`。
+          #   `cache: 'pip'` **必须**配 `cache-dependency-path`——默认 glob 找的是
+          #   `**/requirements.txt`，本仓没有那个名字的文件，而
+          #   `.agents/skills/ui-styling/scripts/requirements.txt` 是第三方 skill 的
+          #   ⇒ 不显式指定的话，缓存 key 由别人的文件决定。
+          cache: 'pip'
+          cache-dependency-path: requirements-ocr.txt
 
       - name: Install OCR model-table dependencies
         shell: pwsh
-        run: python -m pip install --disable-pip-version-check rapidocr omegaconf
+        run: python -m pip install --disable-pip-version-check -r requirements-ocr.txt
 
       - uses: actions/cache@v4
         with:
@@ -255,9 +262,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          # ⚠ pip 缓存 + 钉版本：见仓库根的 `requirements-ocr.txt`。
+          #   理由与 verify job 里那份**逐字相同**——两份副本漂了没人看得出来
+          #   （本仓记过好几次这个形状）。
+          cache: 'pip'
+          cache-dependency-path: requirements-ocr.txt
 
       - name: Install OCR model-table dependencies
-        run: python -m pip install --disable-pip-version-check rapidocr omegaconf
+        run: python -m pip install --disable-pip-version-check -r requirements-ocr.txt
 
       - name: Fetch PP-OCR weights
         run: python scripts/fetch_models.py

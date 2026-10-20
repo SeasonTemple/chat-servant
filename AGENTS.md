@@ -610,6 +610,20 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
   剥掉整行注释后再匹配（注释里写着那串 JSON 不等于代码里设了它）。
   ⚠ `'app'` 动词**故意不给**这份覆盖：真机缺权重应当**响**（编不过），
   而不是悄悄回落到 Windows OCR（票 39 / 41 记的就是那个回落）。
+- ⚠⚠ **Python 侧依赖必须钉版本，且装它的地方必须开 pip 缓存**——
+  依赖钉在仓库根的 `requirements-ocr.txt`（`rapidocr==3.10.0` / `omegaconf==2.4.0`），
+  CI 与发版那**三处**都 `pip install -r requirements-ocr.txt`。
+  ⚠ **要紧的不是耗时（实测每轮重下 27.3 MB、单步 19s），是「权重来源浮着」**：
+  `scripts/fetch_models.py` 刻意**不硬编**权重 URL 与 SHA256，而是从 `rapidocr`
+  包自带的模型表里读 ⇒ **换 rapidocr 版本 = 换权重来源**；而词典的 SHA256 是
+  本地钉死的 ⇒ 上游换版就对不上 ⇒ **同一个 tag 隔两周重跑可能失败**。
+  Rust 侧有 `Cargo.lock` 钉死，Python 侧原本**没有锁文件**。
+  ⇒ 守卫是 `scripts/check-gate-parity.ps1` 的**第 ⑨ 条**（逐 job 判）：
+  ① 要求文件里的顶层包必须带 `==`；② workflow 里的 `pip install` 必须指向它；
+  ③ 装它的那个 job 必须开 `cache: 'pip'` **且显式**写 `cache-dependency-path`
+  （默认 glob 找的是 `**/requirements.txt`，本仓没有那个名字的文件，而
+  `.agents/skills/ui-styling/scripts/requirements.txt` 是第三方 skill 的
+  ⇒ 不显式指定的话，**缓存 key 由别人的文件决定**）。
 - ⚠ **自证用「复制备份」恢复注入，会把 mtime 一起还原 ⇒ cargo 认为没改过、不重编**
   ⇒ 后面几轮自证全在验陈旧产物。症状极像「守卫没修好」（恢复后本该绿那次仍红，
   且红在无关字段上）。⇒ 恢复时**重写文件内容**而不是 `File.Copy`，

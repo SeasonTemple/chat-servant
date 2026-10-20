@@ -1,0 +1,26 @@
+# OCR 模型表依赖 —— CI 与发版都用这一份（见 `scripts/fetch_models.py`）。
+#
+# ⚠⚠ **版本必须钉死**，理由不是"复现环境"，是**权重来源**：
+# `scripts/fetch_models.py` 刻意**不硬编**权重 URL 与 SHA256，而是从
+# `rapidocr` 包自带的模型表里读（`rapidocr.inference_engine.base.MODEL_URL_PATH`）。
+# ⇒ **换 rapidocr 版本 = 换权重来源。**
+# 而词典的 SHA256 是本地钉死的（脚本里的 `DICT_SHA256`）⇒ 上游一换版就对不上，
+# 脚本报错退出。这是设计意图（宁可发版失败，也不要装来路不明的权重），
+# 但**浮着装**意味着同一个 tag 隔两周重跑可能失败 ⇒ **发版结果不可复现**。
+#
+# 只钉这两个顶层包：影响行为的只有它们（模型表的来源 + 它的 YAML 解析器）。
+# 传递依赖（numpy / opencv-python-headless / Pillow / shapely …）仍随解析浮动，
+# 那影响的是"装出来的东西"，不影响"权重从哪来"。
+#
+# ## 为什么这个文件同时是 pip 缓存开关的前提
+#
+# `actions/setup-python` 的 `cache: 'pip'` **要求有一个依赖文件来算 cache key**，
+# 默认 glob 是 `**/requirements.txt` ⇒ 本仓**没有**那个名字的文件
+# （`.agents/skills/ui-styling/scripts/requirements.txt` 是第三方 skill 的内容，
+# 被默认 glob 命中就意味着**缓存 key 由别人的文件决定**）。
+# ⇒ 所以三个 workflow 里都**显式**写 `cache-dependency-path: requirements-ocr.txt`。
+#
+# 守卫在 `scripts/check-gate-parity.ps1` 的 ⑨：装它的地方必须指向这个文件、
+# 这个文件必须钉版本、且那个 job 必须开 pip 缓存。
+rapidocr==3.10.0
+omegaconf==2.4.0

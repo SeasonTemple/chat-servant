@@ -39,6 +39,12 @@ CI 上没有 wheel，安装包也带不出 30MB 的 ONNX。
     target\\bench-venv\\Scripts\\python.exe scripts\\fetch_models.py
     target\\bench-venv\\Scripts\\python.exe scripts\\fetch_models.py --check
 
+⚠ **版本来自仓库根的 `requirements-ocr.txt`**（钉死 `rapidocr==3.10.0`）。
+本脚本从 rapidocr 包里读模型表 ⇒ **换 rapidocr 版本 = 换权重来源**，
+而词典的 SHA256 是本地钉死的 ⇒ 上游换版就对不上。
+⇒ 装依赖一律 `pip install -r requirements-ocr.txt`，**别裸写包名**
+（CI 与发版都这么做；守卫在 `scripts/check-gate-parity.ps1` 的 ⑨）。
+
 `--check` 做两件事，**都不需要权重在场**：
 1. 本文件的文件名清单与 Rust 侧 `ModelSet` 逐个对齐（改一边忘另一边 ⇒ 红）；
 2. 权重在场时再核对齐全性与 SHA256。
