@@ -134,11 +134,24 @@ cargo test --workspace
 cargo deny check                 # 许可证/advisory/来源合规，见 ADR-0003
 cd ui && pnpm check && pnpm lint
 
-# ⚠ `cargo deny` 要联网拉 advisory-db。**本机直连 github.com 实测可用**
+# ⚠ `cargo deny` 要联网拉 advisory-db。**直连 github.com 实测可用**
 # （2026-10-15：`git ls-remote .../advisory-db HEAD` ⇒ exit=0），
-# 而本机并没有 `127.0.0.1:7897` 那个代理。`scripts/deny.ps1` 因此**默认直连**，
-# 代理只在设了 `CHATSERVANT_PROXY` / `HTTPS_PROXY` 时才启用。
-# ⇒ 跑完整门禁直接 `pwsh -NoProfile -File scripts\gate.ps1`，不必先挂代理。
+# ⚠⚠ **2026-10-21 订正**：原文接着写「而本机并没有 `127.0.0.1:7897` 那个代理」——
+#   **那句当时是真的，今天不是了**：Clash Verge（`verge-mihomo`）今天在监听 7897，
+#   实测走代理 `ls-remote` 1.1s / `gh api` 0.9s，**直连也通**（3.5s）⇒ 两条路都可用。
+#   ⇒ 真正会出事的是**「代理开着、但 Clash 关了」**：指向无人监听的端口
+#     ⇒ 表现为 TLS 握手失败 / EOF / `error: daemon terminated` 式的假象
+#     （2026-10-19 那次 cargo-deny 假红、2026-10-21 这次 git 提交卡 2 分钟，都是它）。
+# `scripts/deny.ps1` 因此**默认直连**，代理只在设了 `CHATSERVANT_PROXY` /
+# `HTTPS_PROXY` 时才启用。
+# ⇒ 跑完整门禁直接 `pwsh -NoProfile -File scripts\gate.ps1`，不必先挂代理；
+#   **要加速**再自己挂，且**先确认 Clash 在跑**。
+# ⚠ **同属本机环境事实（2026-10-21 实测）**：本机 git 全局已设
+#   `core.fsmonitor = false` —— 开着时 `git fsmonitor--daemon` 会僵死，
+#   凡是**要读索引**的 git 操作（`git add` / `commit` / `show :file`）都会卡住，
+#   症状是「git 命令挂住不返回」+ 一串 `error: daemon terminated`。
+# ⚠ **教训（与「票面里的存在性断言」同族）**：「本机有没有 X」是**状态**，不是常量——
+#   写进文档时必须带日期且可复验；今天实测到的结论，明天可能是假的。
 pwsh -NoProfile -File scripts\gate.ps1
 
 # 启动与探针
