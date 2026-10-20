@@ -3,9 +3,9 @@
 **What to build:** 让「干净机器上能从零构建」这件事成立。
 现在它**不成立，而且是静默的**：本机有权重，于是本地门禁全绿；CI 与发版机器上没有，于是它们红。
 
-**Blocked by:** 发版那一跳需要你授权打 tag（⚠ **打 tag 会真的发一个 release**）。
+**Blocked by:** 无 —— 2026-10-20 已授权打 tag 并真发 v0.1.1，本票已收。
 
-**Status:** ready-for-human
+**Status:** done · 21/21 · 2026-10-20 真发 v0.1.1 跑通，最后一跳已在真 runner 上验过
 
 ## 根因（一句话）
 
@@ -426,8 +426,13 @@ PyPI 来源没变、供应链面没变，去掉的只是「假定有个工具」
       核对装包内有权重 ✅、dry run 收尾 ✅、`Publish` **skipped**
 - [x] **缺陷①的第三个现场：本机 `gate.ps1`**（零覆盖，无权重机器上 clippy/test exit 101）
       已加 `TAURI_CONFIG` 覆盖并实测 `GATE: ALL GREEN`（clippy 93.8s / test 22.4s）
-- [ ] **push 触发时 `inputs.dry_run` 为空 ⇒ 照常发布**（语义推理，验证它要打 tag）
-- [ ] **跑通一次真实发版**（需授权打 tag）
+- [x] **push 触发时 `inputs.dry_run` 为空 ⇒ 照常发布**（2026-10-20 真发 v0.1.1，
+      run `39386012596`：闸门打出 `event_name=push` / `inputs.dry_run=[]` /
+      `publish_would_run=true` / `tauri_version=0.1.1` / `tag_version=0.1.1`）
+- [x] **跑通一次真实发版**（2026-10-20 run `39386012596` success；
+      外部核对 `gh release view v0.1.1`：非草稿、非预发布，资产
+      `chat-servant_0.1.1_x64-setup.exe` 38.4 MiB /
+      `chat-servant_0.1.1_x64_en-US.msi` 45.2 MiB，正文含 `## 中文` + `## English`）
 
 ## 最后一跳：无法零风险预演，于是改成让它自报（2026-10-18 收尾）
 
@@ -476,13 +481,34 @@ PyPI 来源没变、供应链面没变，去掉的只是「假定有个工具」
 ⚠ `publish_would_run=false` 这一行是**第一次在真 runner 上打出来的**，
 而不是本地推理出来的。
 
-### 仍未证实
+### ✅ 已证实（2026-10-20 真发 v0.1.1）
 
-- **push 触发时 `inputs.dry_run` 为空 ⇒ 照常发布**（验证它要打 tag）
-- **`gh release create` 这一发本身**（验证它要发一个东西，dry run 到不了）
-- ⚠ 已加 `draft` 开关（`--draft`）：资产照样上传、整条 publish 路径真跑，
-  但不进 Releases 页、不通知任何人，验收后在 UI 上一键 Publish。
-  它把「跑不通」与「不发布」拆开了——自证 9/9（判据用退出码 + 参数里有无 `--draft`）。
+- **push 触发时 `inputs.dry_run` 为空 ⇒ 照常发布**：run `39386012596` 的
+  `Report publish gate` 步骤打出 `inputs.dry_run = []` 与
+  `publish_would_run = true` ⇒ publish 步真的跑了，release **非草稿**。
+- **`gh release create` 这一发本身**：发出了真的 release。判据是**外部核对**
+  （`gh release list` / `gh release view` 看资产与正文），不是只看 workflow 的
+  conclusion——「跑完了」与「发出去了」在 job 对象上是同形的。
+- ⚠ `draft` 开关保留：dispatch + `draft=true` 仍能建草稿（资产照样上传、
+  整条 publish 路径真跑、但不进 Releases 页、不通知任何人，UI 上一键 Publish）。
+  自证 9/9（判据用退出码 + 参数里有无 `--draft`）。
+
+### ⚠ 发版链路的闸门是「机器判 + 一次人工决定」，没有第二次点击
+
+打 tag 那一下**就是**「这一版叫什么、要不要发」的决定（`release.yml` 开头
+写明：版本号是人打的 tag，不是从 commit 算出来的）。所以**不设**「再点一下
+批准」的人工闸门——那等于把同一个决定问两遍，而第二遍没有新信息。
+
+误发的兜底全在 publish 之前的四道机器闸上：
+
+| 闸 | 判据 | 红了会怎样 |
+|---|---|---|
+| verify job | 完整门禁十六步 | build 被 `needs` 连坐跳过，发版链路一步走不到 |
+| 版本闸 | tag 版本 == `tauri.conf.json` 的 version | 打包前几秒内 `exit 1` |
+| 双语发布说明闸 | `docs/release-notes/<tag>.md` 必须有 `## 中文` + `## English` | throw，不发 |
+| 装包权重核对 | `verify_bundle.ps1` 翻安装包内部 | throw，不发 |
+
+⇒ 剩下的误发可能只有「打错了一个**正确的**版本号」，而那本来就是人的决定。
 
 
 ## 缺陷①的第三个现场：本机门禁（2026-10-19 已修）
