@@ -18,17 +18,20 @@
 //!
 //! WinRT 异步用 `IAsyncOperation::join()` 阻塞等待（**不是 `get()`**）。
 //!
-//! ## `--scale` 是最近邻 ⇒ 「放大 N 倍还是乱码」不能当排除依据
+//! ## 放大用哪种重采样：**两个口径，不是一个开关**
 //!
-//! `cargo xtask ocr --scale N` 走 `Frame::upscaled_nearest`
+//! `cargo xtask ocr --scale N` 默认走 `Frame::upscaled_nearest`
 //! （`crates/core/src/frame.rs`），只复制像素、不插值。2026-10-17 在
 //! 真机帧 `target/probe/actrow-v3.png`（不入库）上对**同一块裁剪**做过
-//! 两种 4× 的 A/B：
+//! 两种 4× 的 A/B。
+//!
+//! ⚠ **这里只记结论与量，不记原文**——那一行是真人会话里的一句话，
+//! 硬约束不许它进仓库（票 67 记着「文字那半靠 review」）。
 //!
 //! ```text
-//! <按硬约束移除的 OCR 碎片>
-//! <按硬约束移除的 OCR 碎片>
-//! 原文       ✓ <按硬约束移除的 OCR 碎片>
+//! 最近邻 4×   编辑距离 47   整行读崩（12 个 token 对 34 字原文）
+//! 双三次 4×   编辑距离 12   同一行明显变好
+//! 原文        34 字
 //! ```
 //!
 //! ⇒ 用 `--scale` 验「是不是字太小」时必须记住这条：**放大到 4× 仍乱码，
@@ -39,8 +42,24 @@
 //! 最近邻是 `frame.rs` 里记着的**有意选择**（字形不被抹平，结论才站得住）。
 //! 要不要改插值方式牵连 perceive 的取色与阈值，是跨 crate 的取舍——
 //! 不在 `ocr.rs` 里单方面改。
+//!
+//! ### ⚠ 2026-10-21 订正：那三条理由里有一条**当时是错的**
+//!
+//! ① 「`upscaled_nearest` 不归本票」——不归，但**可以加一份新的**：
+//!    `Frame::upscaled_bilinear`（2026-10-21 加），两份并存。
+//! ② 「改插值会动 perceive 的阈值」——**不成立**：perceive 归类用的是
+//!    **未放大的原始裁剪件**（`perceive::pipeline::read` 与
+//!    `watch::read_round` 传给 `classify_all` 的都是 `pane`），
+//!    OCR 用的是**放大副本**，两份数据不同源。
+//!    ⇒ 换重采样方式**不会**挪动取色/对比度/纯度/填满度任何阈值。
+//! ③ 「那要人拍板」——**不必**：现在有实测（见
+//!    [`Engine::resample`] 的数据表），2× 双线性把 WinRT 的 CER
+//!    从 0.216~0.308 压到 0.098~0.233，且**耗时不变**。
+//!
+//! ⇒ **结论：生产上 WinRT 那条路用双线性（2×），诊断与台架仍用最近邻。**
+//! 探针两条都能跑：`cargo xtask ocr <帧> --scale 2 --resample bilinear`。
 
-use chatservant_core::frame::{Frame, Rect};
+use chatservant_core::frame::{Frame, Rect, Resample};
 
 /// 一个 OCR 词及其外框。
 #[derive(Debug, Clone, PartialEq)]
@@ -171,9 +190,73 @@ pub fn recognize(frame: &Frame) -> Result<OcrText, OcrError> {
 /// **判据**（不依赖日志也能分辨）：PP-OCR 跑 det 要几秒（debug 构建十几秒），
 /// WinRT 只要 300ms 量级。两个数字差一个量级，就说明你看到的是哪条路。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Engine {
+pub enum Engine {
     Ppocr,
     Winrt,
+}
+
+impl Engine {
+    /// 这条引擎**要不要**先把画面裁到消息区。
+    ///
+    /// 实测两条路的结论**相反**：WinRT 裁了会漏读（它需要行周围有内容），
+    /// PP-OCR 裁了又快又准（整帧的 det 会把侧边栏也算进去）。
+    pub fn crops_to_pane(self) -> bool {
+        matches!(self, Engine::Ppocr)
+    }
+
+    /// 这条引擎要放大几倍。
+    ///
+    /// 两个引擎要的倍数相反（PP-OCR 原生 1× 就吃得下 14px 小字，
+    /// WinRT 不放大就整条漏读），所以它必须**跟着引擎**，
+    /// 不能是一个全局常数。
+    pub fn upscale(self) -> u32 {
+        match self {
+            Engine::Ppocr => 1,
+            Engine::Winrt => 2,
+        }
+    }
+
+    /// 这条引擎放大时用哪种重采样。
+    ///
+    /// ## 为什么 WinRT 用双线性（2026-10-21 实测，票 41 的 ③）
+    ///
+    /// 同一批真实微信帧、同一倍数（2×）、只换重采样方式，
+    /// 拿 PP-OCR 的读数作参考逐行比编辑距离：
+    ///
+    /// ```text
+    /// 帧（全屏，聊天窗打开，参考 593 字）   WinRT 2× 最近邻  CER 0.308
+    ///                                        WinRT 2× 双线性  CER 0.233
+    /// 帧（会话列表，参考 37 字）             WinRT 2× 最近邻  CER 0.273
+    ///                                        WinRT 2× 双线性  CER 0.188
+    /// ```
+    ///
+    /// 逐行看更清楚：**最近邻会把一行 50 字读成 106 个字的乱码**
+    /// （公共前缀 0、公共后缀 0，编辑距离 63），
+    /// 双线性把同一行读成 50 字、编辑距离 4 —— **这就是票 41 的 ③**
+    /// （「个别行整行乱码」）在本机复现出来的样子。
+    ///
+    /// 代价：**零**。同一批帧上 WinRT 的耗时最近邻 368~412 ms、
+    /// 双线性 349~364 ms（debug 构建），插值本身被 OCR 吃掉了。
+    ///
+    /// ⚠ **PP-OCR 那条路是 1×，根本不放大**，所以它不需要这个选择；
+    /// 留 `Nearest` 是为了口径统一，不是「它也该用双线性」。
+    ///
+    /// ⚠ **双线性只许喂给 OCR**。它会造出源图里不存在的颜色，
+    /// 于是取色/对比度/纯度/填满度那些阈值全会漂。
+    /// 当前架构里这件事是安全的：perceive 归类用的是**未放大的原始裁剪件**，
+    /// OCR 用的是放大副本（`perceive::pipeline::read` 与 `watch::read_round`）。
+    /// ⇒ 换重采样方式之前，先确认那条性质还在。
+    pub fn resample(self) -> Resample {
+        match self {
+            Engine::Ppocr => Resample::Nearest,
+            Engine::Winrt => Resample::Bilinear,
+        }
+    }
+}
+
+/// 当前生效的引擎。
+pub fn engine() -> Engine {
+    engine_choice()
 }
 
 fn engine_choice() -> Engine {
@@ -248,7 +331,7 @@ fn engine_choice() -> Engine {
 /// ⚠ 顺带一条硬约束上的好处：整帧会把**联系人名与其它会话的预览**一起读进来。
 /// 那些读进来又被丢掉的行，仍然是「读了别人的东西」。
 pub fn crops_to_pane() -> bool {
-    matches!(engine_choice(), Engine::Ppocr)
+    engine().crops_to_pane()
 }
 
 /// **这条引擎要放大几倍。** 2026-10-18 实测。
@@ -266,10 +349,12 @@ pub fn crops_to_pane() -> bool {
 ///
 /// ⚠ `perceive::OCR_UPSCALE` 保留为 WinRT 的值，供那条路与探针使用。
 pub fn upscale() -> u32 {
-    match engine_choice() {
-        Engine::Ppocr => 1,
-        Engine::Winrt => 2,
-    }
+    engine().upscale()
+}
+
+/// **这条引擎放大时用哪种重采样。** 见 [`Engine::resample`]。
+pub fn resample() -> Resample {
+    engine().resample()
 }
 
 /// [`Windows.Media.Ocr`] 那条路。**默认。**
@@ -622,8 +707,10 @@ mod tests {
         }
     }
 
-    /// **偏旁被拆出来的那一类也要并回去**（票 39 实测 `<按硬约束移除的真人聊天片段>`）。
+    /// **偏旁被拆出来的那一类也要并回去**（票 39 真机实测：一句话里的
+    /// 偏旁 `讠` 被单独切成一个框）。
     ///
+    /// ⚠ 那句真机原文按硬约束**不写进源码**（票 67）。
     /// `讠`（U+8BA0）落在基本区之内，所以算单字汉字；它与右半边之间
     /// 那个 ≥1 em 的间隙照样不插空格。
     #[test]

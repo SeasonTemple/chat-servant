@@ -3762,6 +3762,18 @@ mod tests {
             !read_round_body.contains("upscaled_nearest"),
             "读帧路径里又自己放大画面了——配方必须由引擎决定"
         );
+        // ⚠ **双线性同样不许出现在读帧路径里**（2026-10-21 加）。
+        // 重采样方式也是**引擎的属性**（`ocr::Engine::resample`）：
+        // WinRT 那条路要双线性、PP-OCR 那条路是 1× 不放大。
+        // 谁在这里手写一份，谁就在两条路之间造出了第三个配方。
+        assert!(
+            !read_round_body.contains("upscaled_bilinear"),
+            "读帧路径里又自己挑重采样方式了——配方必须由引擎决定"
+        );
+        assert!(
+            !read_round_body.contains("Resample::"),
+            "读帧路径里又写死了重采样方式——配方必须由引擎决定"
+        );
         assert!(
             !read_round_body.contains("OCR_UPSCALE"),
             "读帧路径里又写死放大倍数了——配方必须由引擎决定"

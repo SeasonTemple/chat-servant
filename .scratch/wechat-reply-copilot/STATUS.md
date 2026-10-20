@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **76** ｜ 验收项全勾 **55** ｜ 已收但留有说明项 **13** ｜ 未收 **8**
+票据总数 **76** ｜ 验收项全勾 **55** ｜ 已收但留有说明项 **14** ｜ 未收 **7**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -25,7 +25,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
 | `21-readout-phase-never-sent.md` | 7/7 | ready-for-human · **P0 · 2026-10-12 实测，不是推断** | None（可以立刻做） |
 | `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 4/7 | needs-triage · **2026-10-17：四个候选全部否完，可测的量已穷尽** | **要人眼**（真 WebView2 上并排四候选过一次） |
-| `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 3/7 | ready-for-human · **2026-10-18：措辞订正——这票已不是「待做」** | (票面没写 Blocked by) |
 | `44-candidate-action-row-is-button-geometry-on-prose.md` | 18/18 | ready-for-human · **2026-10-18 订正：只剩一条真正未决** | (票面没写 Blocked by) |
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-18 订正：Status 里那个「新撞出的缺陷」已不存在** | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
@@ -47,6 +46,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `24-small-type-floor-remeasure.md` | 6/7 | done · **2026-10-14 量具重建 + 三档数据 + 字重对照，结论如下** |
 | `33-attribution-thresholds-are-dark-theme-only.md` | 3/5 | done · 2026-10-14 真机浅色主题实测发现并已修 · 根因定位到具体数值 |
 | `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 9/10 | done · **2026-10-18 决策已下并上线**：默认引擎 = **PP-OCRv6 small**， |
+| `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 6/7 | done · **2026-10-21：③ 也修了，票面那一行的「原文」仍然没找回来** |
 | `53-dev-ps1-run-returns-output-and-exit-code.md` | 7/8 | done · 2026-10-18。根因与实测证据见下；四个动词已改，绿红两档都自证过。 |
 
 ## 三、已收（验收项全勾）

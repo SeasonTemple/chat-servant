@@ -187,6 +187,98 @@ impl Frame {
         }
         Frame::from_rgb(w, h, out)
     }
+
+    /// 双线性放大 `n` 倍。
+    ///
+    /// ## 它和 [`upscaled_nearest`] 是两件事，不是同一个开关的两档
+    ///
+    /// 最近邻那份的职责是**诊断**：只复制像素，字形一字不差，
+    /// 所以「放大 N 倍还是乱码」能推导出关于**字号**的结论。
+    /// 它写明了这个用途，也写明了「换成插值就说不清了」——
+    /// 那句话约束的是**诊断**，不是**生产**。
+    ///
+    /// 生产要的是**读对**。小字（10~12px）在最近邻放大下，笔画边缘是
+    /// 锯齿块，识别器会把字形结构读崩；双线性把边缘抹平之后，
+    /// 字反而更像它本来的样子（票 41 的 ③ 实测，2026-10-21）。
+    ///
+    /// ⚠ **它只许喂给 OCR，不许喂给任何「按像素做判定」的东西。**
+    /// 插值会造出源图里不存在的颜色（两色之间），于是取色、对比度、
+    /// 纯度、填满度这些阈值全部会漂。当前架构里这件事是安全的：
+    /// perceive 归类用的是**未放大的原始裁剪件**，OCR 用的是放大副本，
+    /// 两份数据不同源（`perceive::pipeline::read` 与 `watch::read_round`）。
+    /// ⇒ 换插值之前，先确认那条「测量用原始像素」的性质还在。
+    ///
+    /// `n <= 1` 原样返回自己。
+    pub fn upscaled_bilinear(&self, n: u32) -> Option<Self> {
+        if n <= 1 {
+            return Some(self.clone());
+        }
+        let (w, h) = (self.width.checked_mul(n)?, self.height.checked_mul(n)?);
+        let mut out = Vec::with_capacity((w as usize).checked_mul(h as usize)?.checked_mul(3)?);
+        let n_f = n as f32;
+        for y in 0..h {
+            // 源坐标按**像素中心**对齐：目标像素 (x,y) 的中心落在源图的
+            // (x+0.5)/n - 0.5 处。少这半像素，整幅图会整体偏半像素，
+            // 而字形边缘恰好在最要命的位置上。
+            let sy = (y as f32 + 0.5) / n_f - 0.5;
+            let (ya, yb, fy) = span(sy, self.height as i32);
+            for x in 0..w {
+                let sx = (x as f32 + 0.5) / n_f - 0.5;
+                let (xa, xb, fx) = span(sx, self.width as i32);
+                let w00 = (1.0 - fx) * (1.0 - fy);
+                let w10 = fx * (1.0 - fy);
+                let w01 = (1.0 - fx) * fy;
+                let w11 = fx * fy;
+                for c in 0..3 {
+                    let p00 = f32::from(self.rgb[((ya * self.width as usize) + xa) * 3 + c]);
+                    let p10 = f32::from(self.rgb[((ya * self.width as usize) + xb) * 3 + c]);
+                    let p01 = f32::from(self.rgb[((yb * self.width as usize) + xa) * 3 + c]);
+                    let p11 = f32::from(self.rgb[((yb * self.width as usize) + xb) * 3 + c]);
+                    let v = p00 * w00 + p10 * w10 + p01 * w01 + p11 * w11;
+                    out.push(v.round().clamp(0.0, 255.0) as u8);
+                }
+            }
+        }
+        Frame::from_rgb(w, h, out)
+    }
+}
+
+/// 双线性采样在**一个轴**上的取值：返回 `(下标0, 下标1, 权重)`。
+///
+/// 越界时**延拓边缘像素**，不回绕、也不补黑——补黑会在画面边上造出一条
+/// 黑边，而黑边会被 OCR 当成字读。
+fn span(v: f32, limit: i32) -> (usize, usize, f32) {
+    let i0 = v.floor();
+    let f = v - i0;
+    let a = (i0 as i32).clamp(0, limit - 1) as usize;
+    let b = (i0 as i32 + 1).clamp(0, limit - 1) as usize;
+    (a, b, f)
+}
+
+/// 放大时用哪种重采样。
+///
+/// **为什么不是一个整数开关**：最近邻与双线性在同一个倍数下**不可比**——
+/// 一个只复制像素、一个造出源图里没有的颜色。混在一个开关里，
+/// 「只换重采样方式」的对照实验就做不出来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resample {
+    /// 只复制像素，字形一字不差（**诊断**口径）。
+    Nearest,
+    /// 边缘按邻域插值（**生产**口径）。
+    Bilinear,
+}
+
+impl Frame {
+    /// 按 `resample` 放大 `n` 倍。
+    ///
+    /// 这是**唯一的放大入口**：调用方不许自己去挑重采样方式，
+    /// 因为「用哪种」是**引擎的属性**（见 `chatservant_capture::ocr`）。
+    pub fn upscaled(&self, n: u32, resample: Resample) -> Option<Self> {
+        match resample {
+            Resample::Nearest => self.upscaled_nearest(n),
+            Resample::Bilinear => self.upscaled_bilinear(n),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -254,5 +346,39 @@ mod tests {
         let r = Rect::new(0, 0, 10, 10);
         assert!(r.translate_to(50, 50).is_none());
         assert_eq!(r.translate_to(4, 3), Some(Rect::new(-4, -3, 6, 7)));
+    }
+
+    /// 双线性放大必须**真的插值**——不然它就是最近邻换了个名字，
+    /// 而「换插值能让小字读对」这个结论会落空。
+    #[test]
+    fn bilinear_blends_the_middle_pixels_and_keeps_the_edges_exact() {
+        let f = Frame::from_rgb(2, 1, vec![0, 0, 0, 255, 255, 255]).expect("frame");
+        let up = f.upscaled_bilinear(2).expect("upscale");
+        assert_eq!((up.width(), up.height()), (4, 2));
+        let row: Vec<u8> = (0..4).map(|x| up.pixel(x, 0).expect("px")[0]).collect();
+        // 像素中心对齐 ⇒ 0.25/0.75 处各留一个混合像素，两端仍是原值。
+        assert_eq!(row, vec![0, 64, 191, 255]);
+    }
+
+    /// 纯色放大后必须**还是那个纯色**——插值不许造出源图里没有的颜色。
+    /// 这条是「这份画面只许喂给 OCR」的底线：一旦有人拿它去做取色，
+    /// 纯色变出第二种颜色，整条阈值链都会漂。
+    #[test]
+    fn bilinear_keeps_a_solid_color_exactly() {
+        let f = solid(3, 2, [100, 120, 140]);
+        let up = f.upscaled_bilinear(4).expect("upscale");
+        assert_eq!((up.width(), up.height()), (12, 8));
+        for y in 0..8 {
+            for x in 0..12 {
+                assert_eq!(up.pixel(x, y), Some([100, 120, 140]), "({x},{y}) 漂了");
+            }
+        }
+    }
+
+    #[test]
+    fn both_upscalers_are_identity_below_two() {
+        let f = solid(2, 2, [7, 8, 9]);
+        assert_eq!(f.upscaled_nearest(1).expect("n"), f);
+        assert_eq!(f.upscaled_bilinear(1).expect("b"), f);
     }
 }

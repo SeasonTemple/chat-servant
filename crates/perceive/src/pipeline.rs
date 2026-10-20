@@ -31,7 +31,7 @@ use std::borrow::Cow;
 
 use chatservant_capture::anchor::{self, AnchorError, PaneAnchor};
 use chatservant_capture::ocr::{self, OcrError, OcrText};
-use chatservant_core::frame::{Frame, Rect};
+use chatservant_core::frame::{Frame, Rect, Resample};
 
 use crate::attribute::{Attribution, Palette};
 use crate::merge::{self, Message};
@@ -100,12 +100,13 @@ pub trait LineSource {
     }
 }
 
-/// OCR 看到的画面该有多大、放大几倍。**两个引擎要的不是一个。**
+/// OCR 看到的画面该有多大、放大几倍、用哪种重采样。**两个引擎要的不是一个。**
 ///
 /// | | WinRT | PP-OCRv6 |
 /// |---|---|---|
 /// | 画面 | **必须整帧** | **只给消息区** |
 /// | 放大 | **2×** | **1×** |
+/// | 重采样 | **双线性** | 最近邻（1×，不放大） |
 /// | 依据 | 裁掉侧边栏后「乐」消失；1× 读不到对方短消息 | 整帧 1146ms/50 行 vs 裁剪 455ms/5 行且逐字更准；1× 已零漏检 |
 ///
 /// ⚠ 这不是「谁更讲究」，是**两个识别器对上下文与分辨率的要求不同**。
@@ -121,6 +122,13 @@ pub struct ViewPlan {
     pub policy: ViewPolicy,
     /// 喂给 OCR 之前放大几倍。
     pub upscale: u32,
+    /// 放大用哪种重采样。
+    ///
+    /// ⚠ **它只作用于 OCR 那份画面**。perceive 归类采样用的是
+    /// **未放大的原始裁剪件**，两者不同源——所以换重采样方式
+    /// 不会挪动取色/对比度/纯度/填满度那些阈值。
+    /// 那条性质由 `the_classification_still_measures_the_raw_pixels` 钉住。
+    pub resample: Resample,
 }
 
 /// OCR 看到的画面该有多大。**两个引擎要的不是一个，这是实测逼出来的分叉。**
@@ -146,13 +154,34 @@ impl ViewPlan {
     pub const WINRT: ViewPlan = ViewPlan {
         policy: ViewPolicy::WholeFrame,
         upscale: 2,
+        resample: Resample::Bilinear,
     };
 
     /// PP-OCRv6 实测要的那一组。
     pub const PPOCR: ViewPlan = ViewPlan {
         policy: ViewPolicy::ChatPane,
         upscale: 1,
+        resample: Resample::Nearest,
     };
+
+    /// **按引擎算出这份配方。**
+    ///
+    /// 为什么要它：上面那两个常量是**静态描述**，
+    /// 而「引擎要什么」是**引擎的属性**（`chatservant_capture::ocr::Engine`）。
+    /// 两者各写一份就会漂——而且漂了不报错。
+    /// ⇒ 生产路径走这个函数，常量只当「每个引擎长什么样」的说明书，
+    /// 由 `the_view_plan_constants_match_the_engines` 钉住它们不许漂。
+    pub fn from_engine(engine: chatservant_capture::ocr::Engine) -> Self {
+        ViewPlan {
+            policy: if engine.crops_to_pane() {
+                ViewPolicy::ChatPane
+            } else {
+                ViewPolicy::WholeFrame
+            },
+            upscale: engine.upscale(),
+            resample: engine.resample(),
+        }
+    }
 }
 
 /// 真的调 Windows OCR。纯本地，不出网。
@@ -167,11 +196,7 @@ impl LineSource for SystemOcr {
     /// 猜错的后果有两个：给 WinRT 裁了图（对方短消息整条消失），
     /// 或者给 PP-OCR 放大 2 倍（慢一倍、还一条都不多读）。
     fn view_plan(&self) -> ViewPlan {
-        if ocr::crops_to_pane() {
-            ViewPlan::PPOCR
-        } else {
-            ViewPlan::WINRT
-        }
+        ViewPlan::from_engine(ocr::engine())
     }
 }
 
@@ -330,7 +355,7 @@ pub fn read_lines(
         ViewPolicy::ChatPane => Cow::Owned(frame.crop(chat).ok_or(ReadError::NoPane)?),
     };
     let view = base
-        .upscaled_nearest(plan.upscale)
+        .upscaled(plan.upscale, plan.resample)
         .ok_or(ReadError::NoPane)?;
     let ocr = source.read(&view)?;
     Ok(lines_into_pane(ocr, chat, plan.upscale, origin))
@@ -529,6 +554,148 @@ mod tests {
                 lines: self.0.clone(),
             })
         }
+    }
+
+    /// 把**递给它的那张画面**记下来的假引擎。
+    ///
+    /// 用来验「OCR 看到的到底是哪份像素」——那件事从外面看不出来：
+    /// 画面被换掉之后，输出**照样是一堆行**，只是读得更差或更好。
+    struct CapturedView {
+        plan: ViewPlan,
+        seen: std::cell::RefCell<Option<Frame>>,
+    }
+
+    impl LineSource for CapturedView {
+        fn read(&self, view: &Frame) -> Result<OcrText, OcrError> {
+            *self.seen.borrow_mut() = Some(view.clone());
+            Ok(OcrText::default())
+        }
+
+        fn view_plan(&self) -> ViewPlan {
+            self.plan
+        }
+    }
+
+    /// **配方常量不许与引擎漂。**
+    ///
+    /// `ViewPlan::PPOCR` / `ViewPlan::WINRT` 是**静态描述**，
+    /// 「引擎要什么」是**引擎的属性**（`chatservant_capture::ocr::Engine`）。
+    /// 两者各写一份就会漂，而漂了**不报错**——只是那条路悄悄变慢或变不准。
+    /// ⇒ 生产路径走 [`ViewPlan::from_engine`]，常量只当说明书，
+    /// 由这条钉住它们不许漂。
+    #[test]
+    fn the_view_plan_constants_match_the_engines() {
+        assert_eq!(
+            ViewPlan::from_engine(chatservant_capture::ocr::Engine::Ppocr),
+            ViewPlan::PPOCR,
+            "PPOCR 这份配方与引擎对不上"
+        );
+        assert_eq!(
+            ViewPlan::from_engine(chatservant_capture::ocr::Engine::Winrt),
+            ViewPlan::WINRT,
+            "WINRT 这份配方与引擎对不上"
+        );
+    }
+
+    /// **`read_lines` 必须按配方里的重采样方式造那张画面。**
+    ///
+    /// 这条量的是**接线**（配方有没有被真的用上），不是配置：
+    /// 黑白两像素放大 2× 之后，最近邻只会得到 {0, 255}，
+    /// 双线性才会造出中间灰。
+    /// ⇒ 有人把 `read_lines` 里的重采样写死成最近邻时，这条立刻红。
+    ///
+    /// ⚠ 顺带钉住另一头：**WinRT 那条路真的按双线性走**。
+    /// 票 41 的 ③（「个别行整行乱码」）就是这么修的——
+    /// 最近邻把小字边缘留成锯齿块，识别器会把一行读崩
+    /// （实测一行 50 字被读成 106 字的乱码）。
+    #[test]
+    fn the_ocr_view_follows_the_plans_resampler() {
+        let f = Frame::from_rgb(2, 1, vec![0, 0, 0, 255, 255, 255]).expect("frame");
+        let chat = Rect::new(0, 0, 2, 1);
+
+        let src = CapturedView {
+            plan: ViewPlan {
+                policy: ViewPolicy::WholeFrame,
+                upscale: 2,
+                resample: Resample::Bilinear,
+            },
+            seen: std::cell::RefCell::new(None),
+        };
+        read_lines(&f, chat, &src).expect("读行失败");
+        let view = src.seen.borrow().clone().expect("OCR 画面没被递进来");
+        assert_eq!((view.width(), view.height()), (4, 2), "放大倍数不对");
+        let row: Vec<u8> = (0..view.width())
+            .map(|x| view.pixel(x, 0).expect("像素")[0])
+            .collect();
+        assert!(
+            row.iter().any(|&v| v > 0 && v < 255),
+            "双线性配方却没插值：{row:?}"
+        );
+
+        // 同一张图、同一倍数，只把重采样换成最近邻 ⇒ 必须**没有**中间色。
+        // 这一头是给「接线」用的：证明上一条量到的差异确实来自重采样方式。
+        let src = CapturedView {
+            plan: ViewPlan {
+                policy: ViewPolicy::WholeFrame,
+                upscale: 2,
+                resample: Resample::Nearest,
+            },
+            seen: std::cell::RefCell::new(None),
+        };
+        read_lines(&f, chat, &src).expect("读行失败");
+        let view = src.seen.borrow().clone().expect("OCR 画面没被递进来");
+        let row: Vec<u8> = (0..view.width())
+            .map(|x| view.pixel(x, 0).expect("像素")[0])
+            .collect();
+        assert!(
+            row.iter().all(|&v| v == 0 || v == 255),
+            "最近邻不该造出中间色：{row:?}"
+        );
+    }
+
+    /// **WinRT 那条路按引擎的配方走，而那份配方是双线性。**
+    ///
+    /// 上一条量的是接线（`read_lines` 听不听话），这条量的是**配方本身**：
+    /// 引擎说双线性，常量也说双线性，两边不许有一边是最近邻。
+    #[test]
+    fn the_winrt_recipe_is_bilinear() {
+        assert_eq!(
+            ViewPlan::from_engine(chatservant_capture::ocr::Engine::Winrt).resample,
+            Resample::Bilinear,
+            "WinRT 那条路的重采样方式变了——票 41 的 ③ 会回来"
+        );
+    }
+
+    /// **归类必须量原始像素，不能量 OCR 那份放大过的画面。**
+    ///
+    /// 双线性会造出源图里不存在的颜色，于是取色、对比度、纯度、
+    /// 填满度、外圈色种数那些阈值全会漂。当前架构里两件事是**分开的**：
+    /// `read()` 把**未放大的原始裁剪件** `pane` 交给归类，
+    /// OCR 用的是放大副本。
+    ///
+    /// 这条是**接线**层面的守：架构一旦被改成「归类也用 OCR 视图」，
+    /// 那些阈值会静默漂掉，而症状是「归类结果变了」——看不出原因。
+    #[test]
+    fn the_classification_measures_the_raw_pixels_not_the_ocr_view() {
+        let source = include_str!("pipeline.rs");
+        let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let body = prod
+            .split("pub fn read(")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .unwrap_or("");
+        assert!(
+            body.contains("let pane = frame.crop(anchor.chat)"),
+            "原始裁剪件没了——归类可能已经在量放大过的画面"
+        );
+        assert!(
+            body.contains("classify_all(&ocr.lines, &pane, &palette)"),
+            "归类拿到的不是原始裁剪件"
+        );
+        assert!(
+            !body.contains("&view"),
+            "归类不许拿 OCR 视图当测量对象——插值过的颜色会挪动所有阈值"
+        );
     }
 
     /// 一个**声明自己要裁到消息区**的假引擎：它按**视图坐标**给行框，

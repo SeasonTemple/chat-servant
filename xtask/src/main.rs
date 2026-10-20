@@ -28,6 +28,19 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// 放大用的重采样方式。
+///
+/// **为什么单列一个类型**：最近邻与双线性在同一个 `--scale` 下**不可比**——
+/// 一个只复制像素、一个造出源图里没有的颜色。混在一个整数开关里，
+/// 「只换重采样方式」的对照实验就做不出来。
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Resample {
+    /// 只复制像素，字形一字不差（诊断口径）。
+    Nearest,
+    /// 边缘按邻域插值（生产候选）。
+    Bilinear,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// 采集能力体检：这台机器到底支不支持 WGC
@@ -76,6 +89,13 @@ enum Cmd {
         /// OCR 前的放大倍数。1 = 原尺寸
         #[arg(long, default_value_t = 1)]
         scale: u32,
+        /// 放大用哪种重采样：`nearest`（诊断口径）或 `bilinear`（生产候选）
+        ///
+        /// **为什么要有这个开关**：最近邻是**诊断**口径（字形一字不差，
+        /// 结论才站得住），而生产要的是**读对**。两者不是同一个开关的两档，
+        /// 必须能并排跑同一帧、同一倍数、只换重采样方式。
+        #[arg(long, default_value = "nearest")]
+        resample: Resample,
         /// 只量 det 的框粒度与行组装，不打印识别文本
         ///
         /// **这是「识别成一堆单字框」的定位工具。** 最终文本分不出
@@ -251,16 +271,17 @@ fn main() -> Result<()> {
         Cmd::Ocr {
             file,
             scale,
+            resample,
             stats,
             prob,
             repeat,
         } => {
             if let Some(spec) = prob {
-                probe_ocr_prob(&file, scale, &spec)
+                probe_ocr_prob(&file, scale, resample, &spec)
             } else if stats {
-                probe_ocr_stats(&file, scale)
+                probe_ocr_stats(&file, scale, resample)
             } else {
-                probe_ocr(&file, scale, repeat)
+                probe_ocr(&file, scale, resample, repeat)
             }
         }
         Cmd::Measure { file } => probe_measure(file),
@@ -581,23 +602,33 @@ fn window_rect(hwnd_raw: isize) -> Result<(i32, i32, i32, i32)> {
 /// 两者对应的修法完全不同，混在一起报「归类阈值失效」会把人引向错误方向。
 /// 这个命令把归类那层剥掉，只回答第一个问题。
 ///
-/// `--scale` 在 OCR **之前**最近邻放大，用来检验「字太小识别器不收」
-/// 这类假设——放大必须是最近邻，插值会把字形边缘抹掉，掩盖真实问题。
+/// `--scale` 在 OCR **之前**放大，用来检验「字太小识别器不收」这类假设。
+/// 放大用哪种重采样由 `--resample` 选：默认最近邻（**诊断口径**：字形一字不差，
+/// 所以「放大 N 倍还是乱码」能推导出关于**字号**的结论），
+/// `bilinear` 是**生产候选**（边缘插值，字更像它本来的样子，
+/// 但也造出了源图里没有的颜色 ⇒ 只能喂给 OCR，不能喂给按像素判定的东西）。
+///
+/// ⚠ 这两个口径**不是同一个开关的两档**：混成一个整数开关，
+/// 「只换重采样方式」的对照实验就做不出来。
 ///
 /// `--repeat N` 跑 N 遍并把**每一遍**的耗时都打出来。生产里 OCR 在长驻
 /// 进程里跑，第一遍要建会话、按形状编译图，那是**冷启动**；
 /// 能不能踩进 `TICK`（`watch.rs`，1000ms）看的是**后面那几遍**。
-fn probe_ocr(file: &Path, scale: u32, repeat: u32) -> Result<()> {
+fn probe_ocr(file: &Path, scale: u32, resample: Resample, repeat: u32) -> Result<()> {
     set_dpi_aware();
     let (w, h) = file_png_dims(file)?;
-    let frame = load_frame(file, scale)?;
+    let frame = load_frame(file, scale, resample)?;
 
     println!("来源   = {}", file.display());
     println!(
-        "尺寸   = {}x{}  放大 {}x -> {}x{}",
+        "尺寸   = {}x{}  放大 {}x ({}) -> {}x{}",
         w,
         h,
         scale,
+        match resample {
+            Resample::Nearest => "nearest",
+            Resample::Bilinear => "bilinear",
+        },
         frame.width(),
         frame.height()
     );
@@ -639,8 +670,14 @@ fn probe_ocr(file: &Path, scale: u32, repeat: u32) -> Result<()> {
     print_readability(&ocr);
 
     for (i, l) in ocr.lines.iter().enumerate() {
+        // ⚠ **x 与宽度必须打出来**：只有 y 的话，
+        // 分不清这一行落在**侧边栏**（会话列表）还是**消息区**——
+        // 2026-10-21 那次量票 41 的 ③ 就是因为缺 x，
+        // 把「联系人名」当成了「对方的消息」，白跑一轮对照。
         println!(
-            "{i:>3} | y={:>4} h={:>2} | {}",
+            "{i:>3} | x={:>4} w={:>4} y={:>4} h={:>2} | {}",
+            l.rect.x0,
+            l.rect.width(),
             l.rect.y0,
             l.height(),
             l.text
@@ -743,9 +780,9 @@ fn print_readability(ocr: &chatservant_capture::ocr::OcrText) {
 ///
 /// 印的是几何量，**不印识别文本**——`target/probe/` 下的帧可能含真实
 /// 聊天内容，而这份输出是要给人看、也可能被贴进票据的。
-fn probe_ocr_stats(file: &Path, scale: u32) -> Result<()> {
+fn probe_ocr_stats(file: &Path, scale: u32, resample: Resample) -> Result<()> {
     set_dpi_aware();
-    let frame = load_frame(file, scale)?;
+    let frame = load_frame(file, scale, resample)?;
 
     println!("来源   = {}", file.display());
     let (w, h) = file_png_dims(file)?;
@@ -806,9 +843,9 @@ fn probe_ocr_stats(file: &Path, scale: u32) -> Result<()> {
 /// 纵轴是原图的 y（每一行都缩到 1 个字符行），横轴每 `step` 个像素取一个样。
 /// 字符按概率分档，`#` 最亮。看得见「概率图到底盖住了多少字形高度」，
 /// 而不只是「框有多高」。
-fn probe_ocr_prob(file: &Path, scale: u32, spec: &str) -> Result<()> {
+fn probe_ocr_prob(file: &Path, scale: u32, resample: Resample, spec: &str) -> Result<()> {
     set_dpi_aware();
-    let frame = load_frame(file, scale)?;
+    let frame = load_frame(file, scale, resample)?;
     let parts: Vec<i32> = spec
         .split(':')
         .map(|p| p.parse::<i32>().context("--prob 的坐标必须是整数"))
@@ -885,10 +922,12 @@ fn pct(sorted: &[i32], q: f64) -> i32 {
     sorted[i.min(sorted.len() - 1)]
 }
 
-/// 读一张 PNG 成帧，`--scale` 先做最近邻放大。
+/// 读一张 PNG 成帧，`--scale` 先做放大。
 ///
-/// 放大必须是最近邻，插值会把字形边缘抹掉，掩盖真实问题。
-fn load_frame(file: &Path, scale: u32) -> Result<chatservant_capture::Frame> {
+/// **放大方式由 `--resample` 选**：默认最近邻（诊断口径，字形一字不差），
+/// `bilinear` 是生产候选。做「只换重采样方式」的对照实验时，
+/// 两个口径必须能并排跑同一帧、同一倍数。
+fn load_frame(file: &Path, scale: u32, resample: Resample) -> Result<chatservant_capture::Frame> {
     let img = image::open(file)
         .with_context(|| format!("打开 PNG 失败：{}", file.display()))?
         .to_rgb8();
@@ -896,9 +935,11 @@ fn load_frame(file: &Path, scale: u32) -> Result<chatservant_capture::Frame> {
     let base = chatservant_capture::Frame::from_rgb(w, h, img.into_raw())
         .context("源图尺寸与缓冲区不匹配")?;
     if scale <= 1 {
-        Ok(base)
-    } else {
-        base.upscaled_nearest(scale).context("放大后的尺寸溢出")
+        return Ok(base);
+    }
+    match resample {
+        Resample::Nearest => base.upscaled_nearest(scale).context("放大后的尺寸溢出"),
+        Resample::Bilinear => base.upscaled_bilinear(scale).context("放大后的尺寸溢出"),
     }
 }
 

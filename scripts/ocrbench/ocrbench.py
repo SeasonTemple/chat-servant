@@ -26,6 +26,13 @@
 放大倍数、规范化、编辑距离、对齐规则全部来自 `bench_lib` 与 `SCALES`，
 两条路线拿到的输入图与判据完全一致。唯一允许不同的是推理引擎本身。
 
+⚠ **这里的重采样是「受控实验」，不是生产配方**（2026-10-21 起）：
+生产上 WinRT 那条路已经改成 **2× 双线性**（`chatservant_capture::ocr::Engine::resample`），
+而本台架两条路线**都用最近邻**——为的是「只换引擎」这一个变量。
+⇒ 本台架报出的 WinRT 数字**不是**生产那条路的数字。
+生产配方的实测见 `docs/adr/0006-ocr-engine-evaluation.md` 的
+「重采样：生产口径」一节（CER 0.308 → 0.233，同一批真机帧）。
+
 ## 冷/热的定义（两条路线不共用同一个口径，必须分别说）
 
 - **A**：每个 (图, 倍数) 是一个**独立进程**，所以该进程的第 1 次调用
@@ -86,7 +93,15 @@ for _stream in (sys.stdout, sys.stderr):
 
 RE_ITER = re.compile(r"^第 (\d+)/(\d+) 遍：OCR (\d+) ms")
 RE_WARM = re.compile(r"^冷启动 (\d+) ms\s+稳态 min/中位/max = (\d+)/(\d+)/(\d+) ms")
-RE_LINE = re.compile(r"^\s*(\d+) \| y=\s*(\d+) h=\s*(\d+) \| (.*)$")
+# ⚠ **逐行记录的格式**：`xtask ocr` 的输出格式改过一次
+# （2026-10-21 加了 x 与宽度，2026-10-22 又没再动）。
+# 正则对不上时**不会报错**，只会解析出 0 行——那看起来像「读不出字」，
+# 于是量具坏了却报出一个像结论的数字。⇒ 下面有「解析到 0 行就报红」的检查。
+RE_LINE = re.compile(
+    r"^\s*(\d+) \| x=\s*(\d+) w=\s*(\d+) y=\s*(\d+) h=\s*(\d+) \| (.*)$"
+)
+# 输出头里那句「逐行 N 行」——用来跟实际解析到的条数对账。
+RE_ROWS = re.compile(r"逐行 (\d+) 行")
 
 
 def build_jobs(truth: dict) -> list[dict]:
@@ -144,8 +159,18 @@ def run_route_a(jobs: list[dict]) -> list[dict]:
             m = RE_LINE.match(line)
             if not m:
                 continue
-            y0, h = int(m.group(2)), int(m.group(3))
-            hyps.append(Hyp(m.group(4), y0, y0 + h))
+            y0, h = int(m.group(4)), int(m.group(5))
+            hyps.append(Hyp(m.group(6), y0, y0 + h))
+        # **量具自检**：输出头说有 N 行，逐行记录却只解析出 0 条 ⇒
+        # 正则与输出格式对不上（格式改过就会这样）。
+        # 这种失败**不能**变成「读出 0 行」——那看起来像「这张图读不出字」，
+        # 于是量具坏了却报出一个像结论的数字。⇒ 响。
+        claimed = RE_ROWS.search(text)
+        if claimed and int(claimed.group(1)) > 0 and not hyps:
+            sys.exit(
+                f"量具坏了：{j['id']} 的输出说「逐行 {claimed.group(1)} 行」，"
+                f"但一条都没解析出来——`RE_LINE` 与 `xtask ocr` 的输出格式对不上。"
+            )
         recs.append({**j, "ms": ms, "hyps": [(h.text, h.y0, h.y1) for h in hyps]})
         print(f"  A {j['id']} x{j['scale']} {len(ms)} calls {ms}", flush=True)
     return recs
