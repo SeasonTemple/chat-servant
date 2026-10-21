@@ -313,10 +313,32 @@ commit `9cf53f9`），**「闸门是否存在」这一层仍然没人守**。
 
 - 本地：`git reflog expire --expire=now --all` + `git gc --prune=now`
   ⇒ 旧历史对象**不在本地库里**了（复查：那些 sha 已经 `not a valid object name`）。
-- ⚠ **回收站里还有一份**：删镜像仓库时走的是**可恢复删除**
-  （硬安全策略禁永久删除命令）⇒ 回收站里那份镜像**仍带着旧历史**
-  ⇒ 要彻底清掉，**手动清空回收站**。
+  → 2026-10-22 复核：`git fsck --unreachable` **0 行**；
+  `git worktree list` **只有本仓库**（没有共享对象库的旁支 worktree）。
+- ✅ **回收站那条已经落地**（2026-10-22 实测）：
+  删镜像仓库时走的是**可恢复删除**（硬安全策略禁永久删除命令）
+  ⇒ 镜像当时进了 Windows 回收站。
+  **2026-10-22 02:11:11 回收站被清空过**（`E:\$RECYCLE.BIN\<SID>\` 的目录 mtime；
+  该目录现在**只剩 `desktop.ini`**，我 01:47 trashed 的两张真帧也不在里面）
+  ⇒ **全盘搜 `rewrite.git` 零命中**（`E:\devSpace`、`C:\Users\SeasonTemple`、
+  `D:\`、`G:\`，深度 4）⇒ **带旧历史的那份镜像已经不在盘上**。
+  ⇒ **「手动清空回收站」这条尾巴作废**。
+- ⚠ **CI 侧确认不用管**（2026-10-22 查 `ci.yml`）：
+  `actions/cache` 只缓存 `target/models`（OCR 权重），
+  `actions/checkout` 默认 `fetch-depth=1`（浅克隆），runner 工作区每次临时新建
+  ⇒ **runner 上不会留旧历史**。
 - 远端：`main` 与两个标签都已 force-push；
   但 **GitHub 的缓存视图**（旧 commit 页、分享链接、代码搜索索引）
   **不会**因为 force-push 立刻消失 ⇒ 彻底清掉需向 GitHub Support
   提「移除敏感数据」工单。
+  → 2026-10-22 实测补充：**旧 sha 仍可直接向 GitHub 取到**
+  （`gh api repos/…/contents/crates/capture/src/ocr.rs?ref=9113d2a8` 返回 200，
+  内容与 HEAD **不同** ⇒ 重写前那版文件此刻仍能下载）
+  ⇒ 工单要做两件事：**清缓存视图** + **GC 掉那些不可达的旧对象**。
+- ⚠ **还剩一份持有旧历史的拷贝**：本机 `E:\devSpace\chat-servant`（10-07 的老副本）。
+  全盘扫过，**它是唯一一个**（D:/G:/C:\Users 下无其它副本）。
+  改法是四步，缺一步都不彻底：
+  `git fetch origin --prune --tags` → `git reset --hard origin/main`
+  → `git reflog expire --expire=now --all` → `git gc --prune=now`。
+  ⚠ **只 fetch+reset 是不够的**：旧对象会变成不可达但**仍在 `.git` 里**；
+  ⚠ **只 gc 不 expire 也等于没做**：reflog 仍把旧提交算作可达。
