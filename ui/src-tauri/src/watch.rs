@@ -1807,115 +1807,6 @@ fn header_print(
     chatservant_perceive::identity::HeaderPrint::discover(frame, anchor.chat, HEAD_BAND_W)
 }
 
-/// OCR 读会话名用的带高，**与指纹那块刻意不同**。
-///
-/// ## ⚠ 2026-10-21 订正：决定读不读得到的**不是带高，是放大倍数**
-///
-/// 这块注释先后写错过两次，两次都是**量错了变量**：
-///
-/// 1. 2026-10-07 那张表「40px 0 行 / 60px 1 行 / 100px 1 行」——
-///    今天复现不出来（原始带子已不可考），而且当时**只量了一个倍率**。
-/// 2. 2026-10-21 我自己写过一版「PP-OCR 40~200px 全稳、WinRT 要 200px 才稳」
-///    ——**那张表也量错了**：它是在**放大 2×** 下去扫带高，
-///    于是把「2× 读不到」读成了「这个带高读不到」。
-///
-/// 今天按**生产几何**复刻的那条带子（真机帧 `chat.y0 = 31`、推导出的头部行
-/// y49..61 ⇒ 带子 (308,31)-(708,91) = 400×60），**只改放大倍数**：
-///
-/// ```text
-/// 倍率   PP-OCR（生产默认）      WinRT（回退）
-///  1×    1 行 / 2 字 ✓          0 行 ✗
-///  2×    1 行 / 2 字 ✓          0 行 ✗   ← 原先这条路的倍数
-///  3×    1 行 / 2 字 ✓          1 行 / 2 字 ✓
-///  4×    1 行 / 2 字 ✓          1 行 / 2 字 ✓
-/// ```
-///
-/// ⇒ **PP-OCR 在 1×~4× 全稳**（它本来就吃得下 14px 小字，不挑倍率）；
-///   **WinRT 要 ≥3× 才读得到**（2× 读不到，3×/4× 都读得到）。
-/// ⇒ **带高不是变量**：36px 与 60px 两种带子在同一倍率下结果完全一样。
-/// ⇒ **颜色也不是变量**：原色与反色结果一样
-///   （探针那段「原色 / 反色」对照的**反色**那一遍其实是 4×，
-///   见 [`PEER_NAME_UPSCALE`]——不查清楚就会把「反色有用」写进生产代码）。
-///
-/// ## 所以：带高 72 不构成约束，**倍数**才是
-///
-/// 生产默认引擎是 PP-OCR，它在 1× 就读得出 ⇒ 带高 72 对它不构成约束 ⇒ 不动。
-/// WinRT 回退路径在 **2×** 下读不到名字 ⇒ 面板标题空、提示词里没有对方名；
-/// 但**闸照常工作**（闸比的是像素指纹，不是名字，见 `header_print`），
-/// 所以影响面是「看不到名字」，**不是**「锁错人 / 不推理」。
-///
-/// 2026-10-14 票 31：这行原先写的是「指纹那块继续用 `HEAD_BAND_H`」，
-///   而那个常量**连同 `header_band_rect` 一起删掉了**——闸那块不再有固定高度，
-///   高度由 `HeaderPrint::discover` 从像素推出（真机实测 11 ⇒ 量化到 12）。
-///   这个 72 只管**这里**（取名字时的 OCR 窗口），与闸的取样范围无关。
-const PEER_NAME_BAND_H: i32 = 72;
-
-/// 读会话名那条路的**放大倍数**——**它自己的**，不是消息那条路的。
-///
-/// ## 为什么不能跟消息共用一个
-///
-/// 消息那条路的 2×（[`chatservant_perceive::OCR_UPSCALE`]）是给**整帧**定的，
-/// 而这里是**一条窄带子**里的一个 11px 小字——两者的需求**相反方向**：
-/// 窄带在 2× 下 WinRT 读不到（见 [`PEER_NAME_BAND_H`] 那张表），要 3×。
-///
-/// ⚠ 顺带纠正探针一个**标签骗人**的地方：`xtask perceive` 那段
-/// 「原色 / 反色」对照里，**反色**那一遍其实是把 2× 的视图**再放大一次**（4×）
-/// ⇒ 它能读到的原因是**倍率**，不是**反色**。
-///
-/// 3× 是**两边都过的最小值**：PP-OCR 1×~4× 都读得到，WinRT 要 ≥3×。
-const PEER_NAME_UPSCALE: u32 = 3;
-
-/// 从**推导出的头部行**里读会话名。坐标系要求同 [`header_print`]——**整帧**。
-///
-/// ## 这里原来读的是消息区顶部、再改到 `chat.y0` 之上，两次都读不出名字
-///
-/// 票 30 真机 `peer=""` 查了三轮取证才落到「那块像素里没有名字」这个事实上；
-/// 修的时候又按「标题栏在 `chat.y0` 之上」猜了一次，**仍然读不出**——
-/// 真机上会话名在 `chat.y0` **之下**（y 49..59，`chat.y0 = 31`）。
-///
-/// ⇒ 现在**不猜**：矩形由
-/// [`chatservant_perceive::identity::HeaderPrint::discover`] 从像素里推出来，
-/// 这里直接用它。判据
-/// `identity::tests::discover_follows_the_header_line_wherever_it_moves`
-/// 守着「挪了位置也跟得上」；把它退回写死 y 时那条立刻红。
-///
-/// 带子的**位置**不写死：高度由推导出的行加上余量凑成（余量是给
-/// 「窄带不收」那种引擎留的，见 [`PEER_NAME_BAND_H`] 的实测），
-/// 且不越过 `chat` 的下沿。
-fn peer_name_from_header(
-    frame: &chatservant_capture::Frame,
-    head: chatservant_core::frame::Rect,
-    chat: chatservant_core::frame::Rect,
-) -> Option<String> {
-    use chatservant_core::frame::Rect;
-    // 上下各留一点余量：11px 的行直接丢给 OCR，它会返回 0 行。
-    let pad = (PEER_NAME_BAND_H - head.height()).max(0) / 2;
-    let y0 = (head.y0 - pad).max(chat.y0);
-    let y1 = (head.y1 + pad).min(chat.y1);
-    if y1 <= y0 {
-        return None;
-    }
-    let strip = frame.crop(Rect::new(head.x0, y0, head.x1, y1))?;
-    // 小字要放大才认得准——与 `read_lines` 同一个理由（ADR-0002 补记）。
-    //
-    // ⚠ **倍数是这条路自己的（3×），重采样方式跟引擎走**（2026-10-21，票 77）：
-    // 「放大几倍」在这条路上**不能**沿用消息那条路的 2×
-    // （窄带在 2× 下 WinRT 读不到，见 [`PEER_NAME_UPSCALE`]），
-    // 而「用哪种重采样」是**引擎的属性**——手写一份就会在换引擎时漂
-    // （票 72 已经为消息那条路付过一次这个代价）。
-    // 实测**换重采样对读数零影响**（PP-OCR 两种逐字相同，编辑距离 0；
-    // WinRT 在 3× 下两种也相同）⇒ 跟引擎走不是为了今天的读数，
-    // 是为了**换引擎时它不会悄悄漂**。
-    let resample = chatservant_capture::ocr::engine().resample();
-    let view = strip.upscaled(PEER_NAME_UPSCALE, resample)?;
-    let ocr = chatservant_capture::ocr::recognize(&view).ok()?;
-    ocr.lines
-        .iter()
-        .map(|l| l.text.trim())
-        .find(|t| !t.is_empty())
-        .map(str::to_string)
-}
-
 /// **头部像素没变就不重读会话名。**
 ///
 /// ## 为什么能拿指纹当缓存键
@@ -1955,7 +1846,7 @@ fn refresh_peer(
     // 指纹变了但**没推出头部矩形**（`discover` 认不出）⇒ 不动已认出的名字。
     //   「认不出」不是「名字变了」，也不是「没有名字」。
     if let Some(rect) = head {
-        if let Some(name) = peer_name_from_header(frame, rect, anchor.chat) {
+        if let Some(name) = chatservant_perceive::read_peer_name(frame, rect, anchor.chat) {
             s.peer = name;
         }
     }
@@ -3829,70 +3720,23 @@ mod tests {
             "读帧路径里又写死放大倍数了——配方必须由引擎决定"
         );
 
-        // ⚠⚠ **读会话名那条路也不许挑重采样方式**（2026-10-21 加，票 77）。
+        // ⚠⚠ **读会话名那条路已经搬走了**（2026-10-21，票 77）：
+        // 它原先在本文件里（自己裁带子、自己放大、自己喂 OCR），
+        // 而 `xtask perceive` 那条**探针**另写了一套 ⇒ **两条不同的路**，
+        // 于是探针那行「OCR 读到的会话名」**证明不了产品**。
+        // ⇒ 现在实现住在 `chatservant_perceive::peer`，产品与探针**共用一份**，
+        // 配方守卫也跟着搬到那边（`perceive::peer` 的
+        // `the_name_path_does_not_hand_roll_the_ocr_recipe`）。
         //
-        // 它读的不是消息，但**配方同样由引擎决定**：那里的放大倍数是
-        // **写死的**（11px 的小字必须放大），而「用哪种重采样」不是——
-        // 手写一份就会在换引擎时悄悄漂（票 72 为消息那条路付过一次）。
-        //
-        // ⚠ 这条守卫量的对象是**事实来源**：它断言的是「这条路上没有
-        // 硬编码的重采样」，而不是「某个常量的值」——
-        // 引擎换了要跟着换，守卫才绿。
-        let name_body = prod
-            .split("fn peer_name_from_header(")
-            .nth(1)
-            .and_then(|s| s.split("\n}\n").next())
-            .unwrap_or("");
+        // 这里只守**接线**：产品必须调那一份，且**不许**在本文件里
+        // 又长出一份读名字的实现。
         assert!(
-            !name_body.is_empty(),
-            "没找到 `peer_name_from_header` 的函数体——这条守卫已经空转"
+            prod.contains("chatservant_perceive::read_peer_name("),
+            "产品路径没走 `perceive::read_peer_name`——接线断了"
         );
         assert!(
-            !name_body.contains("upscaled_nearest") && !name_body.contains("upscaled_bilinear"),
-            "读会话名那条路又自己挑重采样方式了——配方必须由引擎决定"
-        );
-        assert!(
-            !name_body.contains("Resample::"),
-            "读会话名那条路又写死了重采样方式——配方必须由引擎决定"
-        );
-        assert!(
-            name_body.contains("ocr::engine()"),
-            "读会话名那条路没向引擎要配方——重采样方式该由引擎决定"
-        );
-        // ⚠ **也不许沿用消息那条路的倍数**（2×，2026-10-21 加，票 77）：
-        // 消息那个 2× 是给**整帧**定的，而这里是**窄带里 11px 的一个词**——
-        // 真机实测 WinRT 在 2× 下读不到、3× 才读得到（`PEER_NAME_UPSCALE`）。
-        assert!(
-            !name_body.contains("OCR_UPSCALE"),
-            "读会话名那条路又用上消息那条路的 2× 了——窄带在 2× 下 WinRT 读不到名字"
-        );
-        assert!(
-            name_body.contains("PEER_NAME_UPSCALE"),
-            "读会话名那条路没用自己的倍数常量——它的需求与整帧相反"
-        );
-    }
-
-    /// 读会话名那条路的**放大倍数必须是 3**。
-    ///
-    /// 判据来自 2026-10-21 的真机实测（`target/probe/name/`，不入库）：
-    /// 按**生产几何**复刻的那条带子（`chat.y0 = 31`、头部行 y49..61
-    /// ⇒ 400×60），WinRT 在 **2× 读不到、3× 读到**；
-    /// PP-OCR 在 1×~4× **都**读到 ⇒ **3 是两边都过的最小值**。
-    ///
-    /// ⚠ 这条是**源码级**断言，**不是** `assert!(PEER_NAME_UPSCALE >= 3)`：
-    /// 后者的条件是编译期常量 ⇒ clippy 的 `assertions_on_constants` 判它
-    /// 「这个断言的值是常量」而**报错**（`-D warnings` ⇒ 门禁红）。
-    /// ⇒ 改成扫源码里那行字面量：倍数被改成 2 就立刻红。
-    ///
-    /// ⚠ 它钉的是**常数**，不是**行为**——行为那半（真机帧上读得到名字）
-    /// **在 CI 上验不了**（帧是本机专属、gitignored），由票 77 记着。
-    #[test]
-    fn the_name_band_scale_is_three() {
-        let source = include_str!("watch.rs");
-        let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
-        assert!(
-            prod.contains("const PEER_NAME_UPSCALE: u32 = 3;"),
-            "读会话名的倍数被改了——WinRT 在 2× 下读不到窄带里的名字（2026-10-21 实测）"
+            !prod.contains("fn peer_name_from_header"),
+            "本文件里又长出了一份读会话名的实现——必须只有 perceive 那一份"
         );
     }
 }

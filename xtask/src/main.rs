@@ -1423,11 +1423,28 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
     //   那个 80 是第三次修复留下的（票 30），同样属于「猜坐标」。
     let name_upper = head.map_or(r.anchor.chat.y0, |rect| rect.y1);
     match chatservant_perceive::conversation_name(&r.attributions, name_upper) {
-        Some(name) => println!("  OCR 读到的会话名：{name}"),
-        None => println!("  OCR 读到的会话名：（没读出标题行）"),
+        Some(name) => println!("  整帧归类读到的会话名：{name}"),
+        None => println!("  整帧归类读到的会话名：（没读出标题行）"),
+    }
+    // ⚠⚠ **生产那条路**（窄带 OCR）——与产品**共用一份实现**
+    // （`perceive::read_peer_name`）⇒ **这行才证明得了产品**。
+    //
+    // 2026-10-21 之前这里只有上一行（整帧归类），而产品走的是窄带 ⇒
+    // 「探针读到名字」与「产品读不到名字」可以**同时为真**，
+    // 而没有任何报错（票 77）。⇒ 两行都打，且**标明来源**。
+    match head.and_then(|rect| chatservant_perceive::read_peer_name(&frame, rect, r.anchor.chat)) {
+        Some(name) => println!("  生产路径读到的会话名：{name}"),
+        None => println!("  生产路径读到的会话名：（这条路上没读出来）"),
     }
 
     // ── 会话名到底住在哪（2026-10-14 诊断，票 30）────────────────────
+    //
+    // ⚠⚠ **这段是「诊断」，不是产品那条路**（2026-10-21，票 77）：
+    // 产品的读名字走 `perceive::read_peer_name`（上面那行「生产路径读到的会话名」）。
+    // ⚠ 而且这段的**反色那一遍其实不是「反色」**：它把 2× 的视图**又放大一次**
+    // ⇒ 那是 **4×**。所以「反色读到」的真实原因是**倍率**，不是颜色
+    // （实测：原色在 3×/4× 也读得到，颜色根本不是变量）。
+    // ⇒ 别把「反色有用」当结论。
     //
     // 2026-10-14 票 31：这段原先是票 30 的探索脚手架——「会话名住哪」，
     //   里面裁了**三个写死的矩形**（窗口标题栏 `0..header_top`、
