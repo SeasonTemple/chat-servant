@@ -3,10 +3,17 @@
 #
 # **本脚本只报可见窗口。** 「窗口根本没被创建」和「窗口被创建了但被藏起来」
 #   在这里长得一模一样——两者都不会出现在输出里。诊断「窗口不见了」时，
-#   先用 `target/probe/pidwins.ps1 <pid>` 枚举**某个进程的**全部顶层窗口
+#   先用 `scripts/pidwin.ps1 <pid>` 枚举**某个进程的**全部顶层窗口
 #   （含不可见的）再下结论。2026-10-11 票 17 就是被这一点带偏过：
 #   设置窗口停在 (-32000,-32000)、vis=False，本脚本里根本不出现，
 #   一度被当成「没建」。（真相是本 crate 的 `park_settings` 主动藏的。）
+#
+# ⚠ 2026-10-21 订正：本文件原先**头部写的是 `target/probe/pidwins.ps1`**，
+#   而那个路径下**没有这个文件**（真身是 `scripts/pidwin.ps1`，单数 `win`），
+#   ⇒ 照着头部去跑必然「找不到文件」。同理，正文里那句
+#   「外加任何 WeChat 窗口（哪怕不可见）」与代码**对不上**：
+#   条件里有 `$vis` ⇒ **不可见**的 WeChat 窗口**不**出现在输出里。
+#   两处都按**代码的真实行为**改正（下面那行注释也已改）。
 $ErrorActionPreference = 'Stop'
 Add-Type @"
 using System;
@@ -41,7 +48,9 @@ $cb = [WS+EnumProc]{
     [void][WS]::GetWindowRect($h, [ref]$r)
     $w = $r.R - $r.L
     $ht = $r.B - $r.T
-    # 只保留有标题的可见窗口，外加任何 WeChat 窗口（哪怕不可见）
+    # 只保留**可见**窗口：有标题的都要，WeChat 那种无标题的也算。
+    # ⚠ **不可见的一律不报**（哪怕它是 WeChat）——要枚举不可见的，
+    #   用 `scripts/pidwin.ps1 <pid>`（见本文件头部的说明）。
     $vis = [WS]::IsWindowVisible($h)
     $isWx = $t.ToString() -match '微信|WeChat' -or $c.ToString() -match 'WeChat'
     if ($vis -and ($t.Length -gt 0 -or $isWx)) {
