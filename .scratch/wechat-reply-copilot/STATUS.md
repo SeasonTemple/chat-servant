@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **76** ｜ 验收项全勾 **55** ｜ 已收但留有说明项 **14** ｜ 未收 **7**
+票据总数 **77** ｜ 验收项全勾 **55** ｜ 已收但留有说明项 **14** ｜ 未收 **8**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -29,6 +29,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-18 订正：Status 里那个「新撞出的缺陷」已不存在** | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `68-same-draft-shown-twice.md` | 11/11 | ready-for-human · **2026-10-19 已改完并过门禁与实机 DOM 复核； | (票面没写 Blocked by) |
+| `77-winrt-fallback-cannot-read-the-session-name.md` | 5/7 | 进行中 · **2026-10-21 定位并记账；注释与配方已改、守卫已加并双向自证， | 回退路径**只在没装 PP-OCR 权重时**才会走 |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 

@@ -1809,18 +1809,39 @@ fn header_print(
 
 /// OCR 读会话名用的带高，**与指纹那块刻意不同**。
 ///
-/// 实测（2026-10-07，同一块像素只改高度）：
+/// ## ⚠ 2026-10-21 订正：原来那张表**不可复现**，而且它把两个引擎混成了一张
+///
+/// 原来写的是「2026-10-07 实测：40px 0 行 / 60px 1 行 / 100px 1 行」。
+/// 今天用同样方法重测（同一块真机像素，只改带高，放大 2×，两个引擎各跑一遍），
+/// **那张表对不上**（当年的原始带子已不可考，见 `.scratch/…/77-*.md`）：
 ///
 /// ```text
-/// 40 px  0 行  ← 读不到「G8W」
-/// 60 px  1 行  ← 读到
-/// 100 px 1 行
+/// 带高    PP-OCR（生产默认）          WinRT（回退）
+///  40px   1 行 / 2 字 ✓              0 行 ✗
+///  60px   1 行 / 2 字 ✓              0 行 ✗
+///  72px   1 行 / 2 字 ✓              0 行 ✗   ← 本常量
+/// 100px   1 行 / 2 字 ✓              1 行 / **1 字** ✗（只读出半个名字）
+/// 140px   1 行 / 2 字 ✓              0 行 ✗   ← 更高反而更差
+/// 200px   1 行 / 2 字 ✓              1 行 / 2 字 ✓
 /// ```
 ///
-/// 带子太窄、里面又只有一个小字时，`Windows.Media.Ocr` **不收**——
-/// 与「乐」气泡那次是同一类毛病：它需要周围有内容。
+/// ⇒ **PP-OCR 在 40~200px 全稳**。原来那句「带子太窄、里面又只有一个小字时
+///   OCR 不收——它需要周围有内容」是把 WinRT 的毛病套在了它身上：
+///   PP-OCR 本来就收，不挑余量。
+/// ⇒ **WinRT 要 200px 才稳，140px 反而读不到**：这不是「带子太窄」，
+///   是那个引擎对「窄带 + 一个小字」本就不收。
 ///
-/// 2026-10-14 票 31：这行原先写的是「指纹那块继续用 [`HEAD_BAND_H`]」，
+/// ## 为什么仍然是 72
+///
+/// 生产默认引擎是 PP-OCR（`ocr::engine()`），它在这个带高上**稳定读出**，
+/// 72 对它不构成约束 ⇒ 不动。
+/// WinRT 回退路径在这个带高上**读不到名字** ⇒ 面板标题空、提示词里没有对方名；
+/// 但**闸照常工作**（闸比的是像素指纹，不是名字，见 `header_print`），
+/// 所以影响面是「看不到名字」，**不是**「锁错人 / 不推理」。
+/// ⇒ 缺口单独记在票 77，**不靠加高带子修**：200px 才稳、140px 反而不稳，
+///   而且带子加高会把别的内容一起带进来。
+///
+/// 2026-10-14 票 31：这行原先写的是「指纹那块继续用 `HEAD_BAND_H`」，
 ///   而那个常量**连同 `header_band_rect` 一起删掉了**——闸那块不再有固定高度，
 ///   高度由 `HeaderPrint::discover` 从像素推出（真机实测 11 ⇒ 量化到 12）。
 ///   这个 72 只管**这里**（取名字时的 OCR 窗口），与闸的取样范围无关。
@@ -1840,8 +1861,9 @@ const PEER_NAME_BAND_H: i32 = 72;
 /// `identity::tests::discover_follows_the_header_line_wherever_it_moves`
 /// 守着「挪了位置也跟得上」；把它退回写死 y 时那条立刻红。
 ///
-/// 带高不写死：OCR 需要周围有内容才肯收（见 [`PEER_NAME_BAND_H`] 的实测），
-/// 所以在推导出的行**上下各留一点余量**，且不越过 `chat` 的下沿。
+/// 带子的**位置**不写死：高度由推导出的行加上余量凑成（余量是给
+/// 「窄带不收」那种引擎留的，见 [`PEER_NAME_BAND_H`] 的实测），
+/// 且不越过 `chat` 的下沿。
 fn peer_name_from_header(
     frame: &chatservant_capture::Frame,
     head: chatservant_core::frame::Rect,
@@ -1857,7 +1879,15 @@ fn peer_name_from_header(
     }
     let strip = frame.crop(Rect::new(head.x0, y0, head.x1, y1))?;
     // 小字要放大才认得准——与 `read_lines` 同一个理由（ADR-0002 补记）。
-    let view = strip.upscaled_nearest(chatservant_perceive::OCR_UPSCALE)?;
+    //
+    // ⚠ **倍数固定 2×，重采样方式跟引擎走**（2026-10-21，票 77）：
+    // 「放大几倍」在这条路上是**写死的**（名字是 11px 的小字，不放大读不动），
+    // 而「用哪种重采样」是**引擎的属性**——手写一份就会在换引擎时漂
+    // （票 72 已经为消息那条路付过一次这个代价）。
+    // 实测今天**零行为变化**：PP-OCR 两种重采样逐字相同，
+    // WinRT 两种在这个带高下都读不到（见 [`PEER_NAME_BAND_H`] 的表）。
+    let resample = chatservant_capture::ocr::engine().resample();
+    let view = strip.upscaled(chatservant_perceive::OCR_UPSCALE, resample)?;
     let ocr = chatservant_capture::ocr::recognize(&view).ok()?;
     ocr.lines
         .iter()
@@ -3751,7 +3781,7 @@ mod tests {
             "产品路径没走 `perceive::read_lines`——接线断了"
         );
         // `peer_name_from_header` 那一处放大是**另一件事**（读会话名，
-        // 不是读消息），所以不能一刀切禁掉 `upscaled_nearest`。
+        // 不是读消息），所以不能一刀切禁掉放大。
         // 真正要禁的是**消息读帧路径**里出现它。
         let read_round_body = prod
             .split("fn read_round(")
@@ -3777,6 +3807,37 @@ mod tests {
         assert!(
             !read_round_body.contains("OCR_UPSCALE"),
             "读帧路径里又写死放大倍数了——配方必须由引擎决定"
+        );
+
+        // ⚠⚠ **读会话名那条路也不许挑重采样方式**（2026-10-21 加，票 77）。
+        //
+        // 它读的不是消息，但**配方同样由引擎决定**：那里的放大倍数是
+        // **写死的**（11px 的小字必须放大），而「用哪种重采样」不是——
+        // 手写一份就会在换引擎时悄悄漂（票 72 为消息那条路付过一次）。
+        //
+        // ⚠ 这条守卫量的对象是**事实来源**：它断言的是「这条路上没有
+        // 硬编码的重采样」，而不是「某个常量的值」——
+        // 引擎换了要跟着换，守卫才绿。
+        let name_body = prod
+            .split("fn peer_name_from_header(")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .unwrap_or("");
+        assert!(
+            !name_body.is_empty(),
+            "没找到 `peer_name_from_header` 的函数体——这条守卫已经空转"
+        );
+        assert!(
+            !name_body.contains("upscaled_nearest") && !name_body.contains("upscaled_bilinear"),
+            "读会话名那条路又自己挑重采样方式了——配方必须由引擎决定"
+        );
+        assert!(
+            !name_body.contains("Resample::"),
+            "读会话名那条路又写死了重采样方式——配方必须由引擎决定"
+        );
+        assert!(
+            name_body.contains("ocr::engine()"),
+            "读会话名那条路没向引擎要配方——重采样方式该由引擎决定"
         );
     }
 }
