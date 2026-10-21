@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **77** ｜ 验收项全勾 **55** ｜ 已收但留有说明项 **14** ｜ 未收 **8**
+票据总数 **77** ｜ 验收项全勾 **56** ｜ 已收但留有说明项 **14** ｜ 未收 **7**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -29,7 +29,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-18 订正：Status 里那个「新撞出的缺陷」已不存在** | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `68-same-draft-shown-twice.md` | 11/11 | ready-for-human · **2026-10-19 已改完并过门禁与实机 DOM 复核； | (票面没写 Blocked by) |
-| `77-winrt-fallback-cannot-read-the-session-name.md` | 5/7 | 进行中 · **2026-10-21 定位并记账；注释与配方已改、守卫已加并双向自证， | 回退路径**只在没装 PP-OCR 权重时**才会走 |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
@@ -47,8 +46,8 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `24-small-type-floor-remeasure.md` | 6/7 | done · **2026-10-14 量具重建 + 三档数据 + 字重对照，结论如下** |
 | `33-attribution-thresholds-are-dark-theme-only.md` | 3/5 | done · 2026-10-14 真机浅色主题实测发现并已修 · 根因定位到具体数值 |
 | `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 9/10 | done · **2026-10-18 决策已下并上线**：默认引擎 = **PP-OCRv6 small**， |
-| `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 6/7 | done · **2026-10-21：③ 也修了，票面那一行的「原文」仍然没找回来** |
 | `53-dev-ps1-run-returns-output-and-exit-code.md` | 7/8 | done · 2026-10-18。根因与实测证据见下；四个动词已改，绿红两档都自证过。 |
+| `77-name-band-needs-three-times-not-a-taller-band.md` | 6/7 | done · **2026-10-21 定位并修完（名字带子改 3×），并订正了本票上一版写下的错表** |
 
 ## 三、已收（验收项全勾）
 
@@ -79,6 +78,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `37-seg-pill-narrower-than-active-item.md` | 0/0 |
 | `38-measured-bubble-color-in-comments-no-longer-occurs.md` | 0/0 |
 | `40-key-input-unreachable-when-unset.md` | 9/9 |
+| `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 7/7 |
 | `42-settings-page-still-native-controls-and-scrollbar.md` | 8/8 |
 | `43-model-config-two-groups-custom-endpoint-proxy.md` | 9/9 |
 | `46-judge-surface-rescans-the-same-rect-four-times.md` | 5/5 |
