@@ -167,6 +167,37 @@ pwsh -NoProfile -File scripts\winscan.ps1    # 只报可见窗口
 pwsh -NoProfile -File scripts\shotwin.ps1 <hwnd> <out.png>   # 截窗口
 ```
 
+### 「切会话」这类路径怎么在真机上验（2026-10-23 实测）
+
+**这台机器禁止输入注入**：`SetCursorPos` 直接返回 `False`（光标纹丝不动），
+UIA 的 `Invoke` 在微信 4.0 的 Qt 单元（`mmui::ChatSessionCell`）上是空操作。
+⇒ **点不动别的程序**，「让用户手动切一下再读日志」是唯一剩下的办法。
+
+但**不必靠人点**：应用有**夹具帧源**，`CHATSERVANT_FIXTURE=<png>` 时
+**每一轮都重读那个文件** ⇒ **把文件换掉就等于「屏幕内容变了」**。
+于是「切走 → 切回」可以这样验（真实 OCR + 生产接缝，零 GUI）：
+
+```powershell
+# 1) 两张同尺寸的**真机帧**（不同会话），拷到一个会被反复读的工作文件上
+Copy-Item target\probe\wechat-now.png target\probe\fixture-swap.png -Force
+# 2) 起应用（夹具模式），等它锁定第一张帧
+$env:CHATSERVANT_FIXTURE = (Resolve-Path target\probe\fixture-swap.png).Path
+# 3) 「切走」：把工作文件换成第二张帧（**先写临时文件再 Move-Force**，
+#    否则应用可能读到写了一半的 PNG）
+Copy-Item target\probe\wechat-ftt.png target\probe\_t.png -Force
+Move-Item target\probe\_t.png target\probe\fixture-swap.png -Force
+# 4) 「切回」：换回第一张
+```
+
+判读日志（`RUST_LOG=info,chat_servant::watch=debug,chat_servant::pump=debug`）：
+`emit readout ... peer="X" messages=N` 那一行是证据行——
+`messages=0` = 停泊时面板没显示锁定会话的内容；
+`phase=read`（**不是** `drafting`）= 切回来**没有**重复推理；
+`一轮 Nms` = 该轮耗时（静默期约 1.06s）。
+
+⚠ 夹具帧是**别人的真实对话**（`target/probe/` 已被 gitignore）：
+**不许**把它们的内容写进提交信息、注释或测试夹具。
+
 ### 内循环：不要每次都跑全门禁（2026-10-16 加）
 
 上面那条是**完整门禁**，代价是热缓存下也要 94.4s（2026-10-19 并行化后实测；
