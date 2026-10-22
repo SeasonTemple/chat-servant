@@ -93,15 +93,34 @@ Deno 安装器（我们是 Node）、esbuild 自己的 dev server（我们用 Vi
 
 - [x] Rust 侧扫过：`cargo deny check advisories` → **ok**
 - [x] npm 侧扫过：6 条（1 high / 3 moderate / 2 low）⇒ **修完 0 条**
+      ⚠ **2026-10-22 同步远程后复核**：`pnpm audit --registry=https://registry.npmjs.org`
+      → **No known vulnerabilities found** ⇒ 修复在锁文件更新后**仍然成立**
 - [x] `vite` 升到 6.4.5，`pnpm build` / `pnpm check` / `pnpm lint` 全过
 - [x] `cookie` override 到 0.7.2，**dev server 实跑**（含畸形 cookie）不炸
 - [x] `esbuild` 的 override **试过并实测失败**，原因写进配置（别再试）
 - [x] Go 侧核实：仓库无 Go 代码、CI 无 Go 系 action、Go 的面只有 esbuild
 - [x] CI 的 Node 运行时核实：`node-version: 22` → setup-node 取最新 22.x
       ⇒ 自动拿到 22.23.4（含昨天那批修复）⇒ **不用改**
-- [ ] **本机 Node**：v24.20.0 < 修复版 **24.22.1** ⇒ 要仓库主人自己升（fnm）
-- [ ] **本机 Go**：go1.27.0 < 修复版 **1.27.3** ⇒ 要仓库主人自己升
+- [ ] **本机 Node**：**2026-10-22 实测 v24.11.0** < 修复版 **24.22.1** ⇒ 要仓库主人自己升
+      ⚠⚠ **订正（2026-10-22 实测）**：原票面写「v24.20.0 …… 自己升（fnm）」——
+      **版本号与工具两处都写错了**：
+      · 本机 node 是 **v24.11.0**（不是 24.20.0）⇒ 差距比原票面写的更大；
+      · 本机 node **不由 fnm 管**（`fnm list` 只有 `* system`）⇒ 实际是 **nvm-windows**
+        （`C:\nvm4w\nodejs\node.exe` 是符号链接 → `G:\nvm`；已装 24.11.0 / 20.11.1）
+        ⇒ 升级命令是 **`nvm install 24.22.1` + `nvm use 24.22.1`**
+        （建符号链接要管理员权限），**不是 fnm**。
+      ⚠ 影响面：本机 node 只跑 **本地 dev server**（vite）与门禁的 ui 步，
+      **CI 不受影响**（CI 用 `node-version: 22` → 自动拿 22.23.4）。
+- [ ] **本机 Go**：**2026-10-22 实测 go1.24.12**（`D:\Go\bin\go.exe`）< 修复版 **1.27.3**
+      ⇒ 要仓库主人自己升
+      ⚠ 原票面写「go1.27.0」，**实测是 1.24.12** ⇒ 差的是**一个大版本**，不是小版本落后
       ⚠ 且 Go 公告明说：**只更新环境不重新编译，程序仍曝露**
+      ⚠⚠ **但对本仓而言这条的风险是零**（2026-10-22 补的推论）：
+      本仓**没有 Go 代码** ⇒ 本机 go 版本**不参与**任何构建。
+      唯一进仓的 Go 产物是 **esbuild 的预编译二进制**（留在 0.25.12），
+      而它**不做 TLS、不做证书校验**（上面「四条路径本仓一条都不走」那段）
+      ⇒ Go 那批中间证书拦截公告在本仓**没有可达路径**。
+      ⇒ 升 Go 是**机器卫生**，不是本仓的欠账；**不必为它卡住本仓的活**。
 - [ ] **加门禁步「npm audit」**：现在 npm 侧零覆盖 ⇒ 要加
       ⚠ 但按本仓规矩，**新增门禁步要四处一起改**
       （`gate.ps1` + `ci.yml` + `release.yml` + `AGENTS.md` + `CONTRIBUTING.md`
