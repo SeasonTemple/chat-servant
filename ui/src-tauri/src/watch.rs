@@ -492,6 +492,18 @@ struct Scratch {
     /// 闸现在是开着还是关着。**推给界面用**——见 [`Readout::gate_open`]
     /// 上那条为什么不能靠 `reason` 的关键词来判断。
     gate_open: bool,
+    /// **面板当前停在别的会话上**（指纹确实不同，不是「认不出头部」）。
+    ///
+    /// ## 它只管**显示**，不管状态
+    ///
+    /// 锁定会话的消息流留在 [`Scratch::messages`] 里，**切走时不清**——
+    /// 切回来时要原样恢复（见 [`park_on_other_conversation`]）。
+    /// 但停泊期间**面板不许显示它们**：屏幕上那块是别人的会话，
+    /// 面板却挂着锁定会话的对话，那就是票 32 说的「停泊面板说假话」。
+    ///
+    /// ⇒ 「状态留着」与「显示清空」必须分开，否则只能二选一：
+    /// 留着就骗人，清空就丢历史。
+    parked_on_other: bool,
     /// 一帧从哪来。见 [`FrameSource`]。
     source: FrameSource,
     /// 现场模式下最近一次用到的窗口句柄。给日志与投递用。
@@ -601,6 +613,7 @@ impl Scratch {
             provider: chatservant_reason::Provider::OpenAi,
             prev_gate_open: None,
             gate_open: true,
+            parked_on_other: false,
             // 默认现场；`spawn` 会用 `LoopConfig` 里的那份覆盖。
             source: FrameSource::Live,
             last_hwnd: None,
@@ -1016,6 +1029,18 @@ fn snapshot(
     } else {
         Some(GATE_CLOSED_HINT.to_owned())
     };
+    // ⚠⚠ **停泊在别的会话上时，消息列表恒为空**（2026-10-23 改）。
+    //
+    // `s.messages` 记的是**锁定会话**的历史，而停泊时屏幕上那块是
+    // 别人的对话 ⇒ 原样推出去就是「停泊面板说假话」（票 32）。
+    //
+    // 历史**留在状态里**（`s.messages` 没被清过）⇒ 切回来原样恢复，
+    // 不用靠整段重读把历史长出来（那会触发重复推理）。
+    let phase = if s.parked_on_other {
+        blank_messages(phase)
+    } else {
+        phase
+    };
     Readout {
         anchor,
         peer: s.peer.clone(),
@@ -1164,6 +1189,26 @@ fn phase_to_push(s: &Scratch, changed: bool, last_failed: bool) -> Option<Phase>
     }
 }
 
+/// **闸刚刚打开了吗？** 顺便把闸的状态记成「开着」，把停泊标记清掉。
+///
+/// 返回 `true` = 刚从关变成开 ⇒ **必须推一帧**。
+///
+/// ## 为什么需要它
+///
+/// 停泊期间面板显示的是「锁着别的对话，切回来才继续。」，
+/// 而切回来那一轮**很可能什么都没变**（没有新消息）⇒
+/// `observe` 返回 `Quiet` ⇒ 本来不会推帧 ⇒ 面板就一直停在停泊态，
+/// **明明已经切回来了**。
+///
+/// ⇒ 闸从关变成开，要推一帧把锁定会话的历史恢复出来。
+fn gate_opened(s: &mut Scratch) -> bool {
+    let just_opened = s.prev_gate_open == Some(false);
+    s.prev_gate_open = Some(true);
+    // 面板不再是停泊态：锁定会话的消息可以显示了。
+    s.parked_on_other = false;
+    just_opened
+}
+
 /// 跑一轮。`Ok(Some(anchor))` = 有新内容；`Ok(None)` = 静默期。
 fn step(
     watcher: &mut PaneWatcher,
@@ -1249,15 +1294,23 @@ fn step(
     if !peer_ok {
         // 连水位线一起退，否则切回锁定会话时只读得到底部那条缝。
         //   见 `park_on_other_conversation`——面板清空和引擎退位必须同一次做。
-        let just_closed =
-            park_on_other_conversation(s, watcher, discovered.as_ref().map(|(p, _)| p));
+        let just_closed = park_on_other_conversation(s, discovered.as_ref().map(|(p, _)| p));
         // 闸关着 = 这一帧没读任何像素。**照样记账**，
         // 否则界面挂着上一帧的数字，用户以为程序还在给那个新会话干活。
         record_cost(last_boxes, 0, None, pane_area(anchor.chat), 0);
         return Ok(if just_closed { Some(anchor) } else { None });
     }
     // 闸是开的。记一笔，供下次关闸时判断「是不是刚刚才关的」。
-    s.prev_gate_open = Some(true);
+    //
+    // ⚠ 同时要判断「是不是刚刚才**开**的」——**闸重新打开时必须推一帧**。
+    //
+    // 停泊期间面板显示的是「锁着别的对话，切回来才继续。」，
+    // 而切回来这一轮**很可能什么都没变**（没有新消息）⇒
+    // `observe` 返回 `Quiet` ⇒ 本来不会推帧 ⇒ 面板就一直停在
+    // 「切回来才继续」，**明明已经切回来了**。
+    //
+    // ⇒ 闸从关变成开，要推一帧把锁定会话的历史恢复出来。
+    let just_opened = gate_opened(s);
     // 推给界面的那份也一样要跟着变——否则用户切回锁定会话之后，
     // 面板还挂着上一轮「闸关着」的横幅。
     s.gate_open = true;
@@ -1267,7 +1320,9 @@ fn step(
         // 没变：一行都没读。**这是硬约束第 6 条的落点**，
         // 而「这一帧 0 像素 / 0 次 OCR」正是它唯一可信的证据。
         record_cost(last_boxes, 0, None, pane_area(anchor.chat), 0);
-        return Ok(None);
+        // ⚠ 但「刚从停泊切回来」这一轮**要推一帧**：面板还停在
+        // 「锁着别的对话，切回来才继续。」，而我们已经切回来了。
+        return Ok(if just_opened { Some(anchor) } else { None });
     };
 
     // ③ **OCR 的画面与倍数由引擎决定**，产品路径与探针走同一个入口
@@ -1621,12 +1676,17 @@ fn apply_relock(s: &mut Scratch) {
 /// 真帧、真 OCR、真 Reasoner 才跑得起来，于是这段「关闸时到底清了什么」
 /// 一次都没被断言过。
 ///
-/// ## 为什么确认换了会话要连消息一起清
+/// ## 「确认换了会话」时清的是**显示**，不是**状态**
 ///
 /// `s.peer` 每轮都在跟着真实窗口更新，所以闸一关，标题已经是新会话的名字了。
 /// 这时候下面还挂着**锁定会话**的历史，读起来就是「这是新会话的对话」——
 /// 而它不是。硬约束第 1 条要求这道闸是**看得见的**，一个会说谎的面板比
 /// 一条没反应的按钮更糟：用户无从判断哪段内容是自己正在看的那个会话的。
+///
+/// ⇒ 显示清空（[`Scratch::parked_on_other`]），**状态留着**
+/// （`s.messages` 不动）。2026-10-23 改：原来两件事一起做（清消息 +
+/// 退水位线），代价是切回来必须**整段重读**，于是旧消息被当成新消息
+/// 再推理一次——那正是「切回会话慢 7 秒」的主因。
 ///
 /// ## 为什么「认不出头部」不清
 ///
@@ -1634,33 +1694,61 @@ fn apply_relock(s: &mut Scratch) {
 /// 标题栏被裁掉、动画没画完都会短暂认不到，此时清空面板会让消息列表**闪一下**。
 /// 所以只有**指纹确实不同**这一支才清。
 ///
-/// 闸关着的时候，**面板这边**实际做了什么。
+/// ## 显示清空由谁做
 ///
-/// ## `switched` 为什么必须单独报出来
+/// 见 [`blank_messages`]：停泊期间推给界面的消息列表恒为空。
 ///
-/// 它对应的是「水位线要不要一起退」这一个决定，而水位线**不住在
-/// [`Scratch`] 里**——它住在 [`PaneWatcher`] 里。所以「把这个会话的状态
-/// 清干净」这件事天然漏掉它，调用方必须拿到这个信号才退得回去。
+/// ## 「确认换了会话」这件事记在哪
 ///
-/// 漏掉的后果不是「多读一次」，是**永久少读**：面板被清空了，可引擎还
-/// 停在旧会话的底部，切回来时增量范围只剩贴着底部的一条缝，
-/// 8 条消息只回来 1 条，而且水位线从此不再动，**不会自愈**。
+/// 记在 [`Scratch::parked_on_other`]（**状态**），不另设一个
+/// 「本轮刚换了会话」的标志——两处真相迟早分叉：
+/// 一个是「现在是停泊态」，另一个是「这一轮刚好检测到切换」。
+/// 真正需要的「刚关闸」信号由 `just_closed` 表达。
+///
+/// 漏掉的后果不是「多读一次」，是**重复推理**：面板被清空了，
+/// 引擎也只能整段重读才能把历史找回来，于是**早已看过的旧消息**
+/// 被当成新消息再推一次推理（2026-10-23 实测：切回会话要 7 秒，
+/// 其中 6~9 秒是那次重复推理）。
+///
+/// 现在历史留在状态里，切回来不用重读 ⇒ 零 OCR、零推理。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GateOutcome {
     /// 闸的状态刚变成「关」——要推一次 readout，否则界面停在旧状态。
     just_closed: bool,
-    /// **确认换了会话**（指纹确实不同），面板上的消息已清空。
-    switched: bool,
 }
 
-/// 清了面板**就要一起退水位线**——这件事由 [`park_on_other_conversation`]
-/// 兜住，不要在这里只清一半。
+/// 闸关着时，**面板不许显示锁定会话的消息**。
+///
+/// 屏幕上那块是别人的对话，而 `s.messages` 记的是**锁定会话**的历史
+/// （累积只发生在闸开着的时候）。原样推出去 ⇒ 面板顶着别人的会话名
+/// 显示锁定会话的对话 —— 票 32 说的「停泊面板说假话」。
+///
+/// ⇒ 停泊期间推的消息列表恒为空。**历史留在状态里**，
+/// 切回来时原样恢复（`s.messages` 没被清过，见 [`apply_gate_closed`]）。
+fn blank_messages(phase: Phase) -> Phase {
+    match phase {
+        Phase::Read { .. } => Phase::Read {
+            messages: Vec::new(),
+        },
+        Phase::Drafting { .. } => Phase::Drafting {
+            messages: Vec::new(),
+        },
+        Phase::Drafted { candidates, .. } => Phase::Drafted {
+            messages: Vec::new(),
+            candidates,
+        },
+        Phase::Failed { error, .. } => Phase::Failed {
+            messages: Vec::new(),
+            error,
+        },
+    }
+}
+
 fn apply_gate_closed(
     s: &mut Scratch,
     print: Option<&chatservant_perceive::identity::HeaderPrint>,
 ) -> GateOutcome {
     s.candidates.clear();
-    let mut switched = false;
     s.reason = match (&s.locked_print, print) {
         (Some(_), None) => format!(
             "没读出当前会话的头部，无法确认还是不是「{}」——本轮不动手",
@@ -1670,8 +1758,21 @@ fn apply_gate_closed(
         (None, None) => "还没读到任何会话头部，先不动手".into(),
         _ => {
             // 确认换人了：上一个会话的消息**不该继续挂在面板上**。
-            s.messages.clear();
-            switched = true;
+            //
+            // ⚠⚠ **但状态里要留着**（2026-10-23 改）。
+            //
+            // `s.messages` 记的是**锁定会话**的历史——累积只发生在闸开着
+            // 的时候（`step` 里那句 `merge_into_stream` 在身份闸之后），
+            // 所以它**永远**是锁定会话的，不会混进别人的话。
+            //
+            // 原来这里把它清掉了，于是切回来时面板是空的，得靠**整段重读**
+            // 才能重新长出来——而整段重读会把**早已看过的旧消息**当成新消息
+            // 再推一次推理（绕过硬约束第 6 条，还多一次自动发送的风险）。
+            //
+            // ⇒ 现在：**状态留着，显示清空**。
+            // 显示清空由 [`Scratch::parked_on_other`] 负责（见 [`snapshot`]），
+            // 切回来时面板原样恢复，不用重读。
+            s.parked_on_other = true;
             format!(
                 "当前会话已经不是锁定的那一个（锁定的是「{}」）——本轮不动手",
                 if s.locked_name.is_empty() {
@@ -1688,42 +1789,52 @@ fn apply_gate_closed(
     let just_closed = s.prev_gate_open != Some(false);
     s.prev_gate_open = Some(false);
     s.gate_open = false;
-    GateOutcome {
-        just_closed,
-        switched,
-    }
+    GateOutcome { just_closed }
 }
 
 /// 闸关着 = 屏幕上那块**不是我们要读的对话**。面板和引擎必须一起收拾。
 ///
 /// 返回「是不是刚刚才关的」——只有刚关的那一刻才推 readout。
 ///
-/// ## 为什么不能只调 [`apply_gate_closed`]
+/// ## ⚠⚠ 停泊**不许退水位线**（2026-10-23 改，这是「切回会话慢 7 秒」的主因）
 ///
-/// 2026-10-11 实机复现的真实缺陷：用户在微信里切走再切回来，面板上
-/// 8 条消息只剩 6 条，而且**不会自愈**。
+/// ### 水位线属于**锁定会话**，不属于「屏幕上那块」
 ///
-/// 根因不是丢消息，是**两处状态不同步**：闸关着时面板上的累积消息被
-/// 清掉了，可水位线还停在旧会话的底部——它不在 [`Scratch`] 里，
-/// 「把会话状态清干净」这件事天然漏掉它。于是切回来时增量范围只剩
-/// 贴着底部的那条缝，只有一条消息落在里面。
+/// [`PaneWatcher`] 这个实例**整个生命周期只服务锁定会话**：
+/// `observe` 只在闸开着的时候被调用（见 [`step`]），也就是只在锁定会话上。
+/// ⇒ 屏幕上看的是谁，跟水位线**毫无关系**。
 ///
-/// 以前这里还留着一句注释说「清空之后不用补偿，关闸那一支不推进水位线，
-/// 用户切回时整个消息区会重读一遍」——**那句话是错的**。不推进水位线
-/// 恰恰意味着 ROI 保持 `[水位线, 底部)`，也就是那条缝。重读整段需要的是
-/// **退回顶部**，不是「不推进」。
+/// ### 原来退水位线，代价是什么
 ///
-/// 只在 `switched`（确实换了会话）时退：「认不出头部」那一支没有清面板，
-/// 引擎那边的记忆仍然对得上，跟着一块退只会白白多读一次。
+/// 2026-10-11 修的那个缺陷（「切走再切回，面板 8 条消息只剩 6 条」）的
+/// 根因是**两处状态不同步**：面板上的累积消息被清掉了，可水位线还停在
+/// 旧会话的底部。于是切回来时增量范围只剩贴着底部的那条缝。
+///
+/// 当时的修法是「一起退水位线」⇒ 切回来时**整段重读**。
+/// 而整段重读会把**早已看过的旧消息**当成新消息：
+/// `newest` 取的是**本轮 ROI 读到的**对方消息，完全不去重
+/// ⇒ 触发一次**完整模型推理**（6~9 秒）。
+///
+/// 实测（2026-10-23 真机）：切回会话一轮 3.28 秒 + 一次完整推理 6~9 秒
+/// ⇒ 「切换会话 7s+」。而且这一下还**绕过了硬约束第 6 条**
+/// （静默期零调用），并让 `auto_gate.begin_new_round()` 被调用
+/// ⇒ **有为旧消息自动发送的风险**。
+///
+/// ### 现在怎么办
+///
+/// **状态留着，显示清空**：
+/// · 锁定会话的消息流不清（[`Scratch::messages`]）⇒ 切回来面板原样恢复；
+/// · 停泊期间面板显示的消息列表恒为空（[`blank_messages`]）⇒ 不骗人；
+/// · 水位线不动 ⇒ 切回来只读**水位线以下**那段 ⇒ 没有新消息就是零 OCR、
+///   零推理。
+///
+/// ⇒ 2026-10-11 那个缺陷也不会回来：它要的就是「历史能恢复」，
+/// 而现在历史本来就在状态里，不需要靠重读长出来。
 fn park_on_other_conversation(
     s: &mut Scratch,
-    watcher: &mut PaneWatcher,
     print: Option<&chatservant_perceive::identity::HeaderPrint>,
 ) -> bool {
     let g = apply_gate_closed(s, print);
-    if g.switched {
-        watcher.rewind();
-    }
     g.just_closed
 }
 
@@ -1912,8 +2023,8 @@ mod tests {
     use super::{
         AUTO_COOLDOWN, AutoGate, BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message,
         PaneAnchor, Phase, Readout, RecentN, Relock, SESSION, Scratch, Speaker, TierCell,
-        TokenBudget, apply_gate_closed, apply_relock, collect_images, header_print,
-        park_on_other_conversation, phase_to_push, read_round, snapshot,
+        TokenBudget, apply_gate_closed, apply_relock, collect_images, current_phase, gate_opened,
+        header_print, park_on_other_conversation, phase_to_push, read_round, snapshot,
     };
     use chatservant_capture::Frame;
     use chatservant_capture::ocr::{OcrError, OcrLine, OcrText};
@@ -2597,14 +2708,20 @@ mod tests {
         }
     }
 
-    /// **换会话时，面板上的消息必须跟着清掉。**
+    /// **换会话时：状态留着，面板显示清空。**
     ///
-    /// 这条测的是 2026-10-11 定位到的真实缺陷：原来 `merge_into_stream`
-    /// 排在身份闸**前面**，于是切到会话 B 时 B 的消息先被并进 A 的消息流，
-    /// 闸才关——**闸只挡住了推理与投递，没挡住消息累积**。面板于是挂着
-    /// 「B 的会话名」显示「A 的历史夹着 B 的新消息」。
+    /// ## 这条守的是 2026-10-23 那个改动的两侧
+    ///
+    /// 原来关闸时做两件事：**清消息** + **退水位线**。两件事都为了同一个
+    /// 目标——「面板不许显示别的会话的内容」——代价却是切回来必须**整段重读**，
+    /// 于是早已看过的旧消息被当成新消息再推理一次。
+    ///
+    /// 现在拆成两件：**状态留着**（切回来原样恢复）、**显示清空**
+    /// （停泊期间推给界面的消息列表恒为空）。
+    ///
+    /// ⇒ 这条同时钉住两侧：状态侧不许被清，显示侧不许漏。
     #[test]
-    fn closing_the_gate_on_a_different_conversation_drops_the_messages() {
+    fn closing_the_gate_on_a_different_conversation_keeps_the_history_but_blanks_the_panel() {
         let a = print_of(0);
         let b = print_of(1);
         assert!(!a.is_same(&b), "前提：这两块像素要判成不同会话");
@@ -2626,12 +2743,15 @@ mod tests {
             "刚关闸要推一次 readout，否则界面还停在旧状态"
         );
         assert!(
-            g.switched,
-            "指纹确实不同，必须报「换了会话」——水位线要跟着一起退"
+            s.parked_on_other,
+            "指纹确实不同 ⇒ 面板必须进入「停泊在别的会话上」状态"
         );
-        assert!(
-            s.messages.is_empty(),
-            "换了会话还挂着锁定会话的消息：{:?}",
+        // ⚠ **状态里不许清**：锁定会话的历史留在 `s.messages` 里，
+        //   切回来时要原样恢复（不用靠整段重读把历史长出来）。
+        assert_eq!(
+            s.messages.len(),
+            1,
+            "锁定会话的历史被清掉了：{:?}",
             s.messages
         );
         assert!(s.candidates.is_empty(), "候选也必须一起清");
@@ -2640,11 +2760,64 @@ mod tests {
             "面板要说明为什么不动手，实际：{}",
             s.reason
         );
+
+        // ⚠⚠ **但推给界面的那份必须是空的**：屏幕上那块是别人的会话，
+        //   面板却挂着锁定会话的对话 = 停泊面板说假话（票 32）。
+        let out = snapshot(
+            &s,
+            None,
+            current_phase(&s),
+            1,
+            0,
+            chatservant_reason::StageCalls::default(),
+            &s.reason,
+        );
+        assert!(
+            out.phase.messages().is_empty(),
+            "停泊期间推给界面的消息列表必须为空，实际：{:?}",
+            out.phase.messages()
+        );
+
         // **历史不能跟着清**：它是锁定会话的推理上下文，不是面板显示。
         //   清它等于把当前会话攒下的上下文也扔了。
         s.history.push("A 里的历史".into());
         apply_gate_closed(&mut s, Some(&b));
         assert_eq!(s.history.len(), 1, "关闸不是重锁，历史不该被清掉");
+    }
+
+    /// **闸重新打开时必须推一帧**——面板还停在「锁着别的对话，切回来才继续。」
+    ///
+    /// 切回来那一轮**很可能什么都没变**（没有新消息）⇒ `observe` 返回
+    /// `Quiet` ⇒ 本来不会推帧 ⇒ 面板就一直停在停泊态，
+    /// **明明已经切回来了**。
+    #[test]
+    fn returning_to_the_locked_conversation_pushes_a_frame() {
+        let mut s = Scratch::new(RecentN::new(12));
+        s.locked_print = Some(print_of(0));
+        s.messages.push(a_msg("A 里的历史"));
+
+        // 停泊：闸关着，面板处于停泊态。
+        s.prev_gate_open = Some(false);
+        s.parked_on_other = true;
+
+        // 切回来：闸重新开。
+        let just_opened = gate_opened(&mut s);
+
+        assert!(
+            just_opened,
+            "闸从关变成开，必须推一帧把面板恢复出来 —— \
+             否则面板一直停在「切回来才继续」，而人已经切回来了"
+        );
+        assert!(
+            !s.parked_on_other,
+            "切回来之后面板不再是停泊态，锁定会话的消息要能显示"
+        );
+        assert_eq!(
+            s.messages.len(),
+            1,
+            "切回来时锁定会话的历史必须原样恢复：{:?}",
+            s.messages
+        );
     }
 
     /// **连续关闸只推一次 readout。**
@@ -2694,20 +2867,26 @@ mod tests {
         );
     }
 
-    /// **切走再切回锁定会话，消息必须全部回来。**
+    /// **停泊不许退水位线——切回锁定会话时不得重读整段。**
     ///
-    /// 2026-10-11 实机复现的缺陷：微信里切到别的会话再切回来，面板上
-    /// 8 条消息只剩 6 条，而且**不会自愈**。
+    /// ## 为什么这条是承重的
     ///
-    /// 根因不是丢消息，是**两处状态不同步**：闸关着时面板上的累积消息被
-    /// 清掉了，可水位线还停在旧会话的底部——它不在 `Scratch` 里，
-    /// 「把会话状态清干净」这件事天然漏掉它。于是切回来时增量范围只剩
-    /// 贴着底部的那条缝，只有一条消息落在里面。
+    /// 水位线是**锁定会话**的凭证：这个 [`PaneWatcher`] 实例整个生命周期
+    /// 只服务锁定会话（`observe` 只在闸开着时被调用，也就是只在锁定会话上）。
     ///
-    /// 这条按真实路径走：`park_on_other_conversation`（**生产用的那个函数**，
-    /// 不是手工再调一次 `rewind`——那样测的是测试自己）。
+    /// 退了它 ⇒ 切回来时整段重读 ⇒ **早已看过的旧消息被当成新消息**
+    /// ⇒ `newest` 有值 ⇒ 触发一次完整模型推理（6~9 秒）。
+    ///
+    /// 实测形态（2026-10-23 真机）：切回会话一轮 3.28 秒 + 重复推理 6~9 秒
+    /// ⇒ 「切换会话 7s+」。而且它**绕过了硬约束第 6 条**（静默期零调用），
+    /// 还让 `auto_gate.begin_new_round()` 被调用 ⇒ **有为旧消息自动发送的风险**。
+    ///
+    /// ## 这条按真实路径走
+    ///
+    /// `park_on_other_conversation`（**生产用的那个函数**），
+    /// 不是手工再调一次 `rewind`——那样测的是测试自己。
     #[test]
-    fn switching_back_to_the_locked_conversation_restores_every_message() {
+    fn parking_does_not_rewind_the_watermark() {
         // A 会话：8 条消息铺满 700 高的消息区。
         let rows: [(u32, u32); 8] = [
             (60, 80),
@@ -2731,29 +2910,32 @@ mod tests {
         s.messages = (0..8).map(|i| a_msg(&format!("A 的第 {i} 条"))).collect();
         w.commit(660);
 
-        // 切到 B：闸关，面板被清空。**水位线必须同时退掉。**
-        park_on_other_conversation(&mut s, &mut w, Some(&print_of(1)));
-        assert!(s.messages.is_empty(), "前提：面板上的消息确实被清了");
+        // 切到 B：闸关。**水位线不许动**，锁定会话的历史也不许清。
+        park_on_other_conversation(&mut s, Some(&print_of(1)));
+        assert_eq!(
+            s.messages.len(),
+            8,
+            "锁定会话的历史被清了：{:?}",
+            s.messages
+        );
         assert_eq!(
             w.watermark(),
-            0,
-            "闸关着就等于这块画面不是我们的——水位线必须退回顶部，\
-             否则切回来只会读到贴着底部的那条缝"
+            660,
+            "停泊时把水位线退了 —— 切回来会整段重读，\
+             于是旧消息被当成新消息再推理一次（硬约束第 6 条）"
         );
 
-        // 切回 A：闸重新开。整段消息区必须重读。
+        // 切回 A：闸重新开。**画面没变 ⇒ 零 OCR、零推理。**
         assert!(
             print_of(0).is_same(s.locked_print.as_ref().expect("锁还在")),
             "前提：切回来之后指纹要判成同一个会话"
         );
-        let Decision::Read { roi } = w.observe(&a) else {
-            panic!("切回锁定会话必须重新读整段消息区")
-        };
         assert!(
-            roi.y0 <= 1,
-            "增量范围从 y={} 起，8 条消息里只有最下面一条落在里面：{roi:?}",
-            roi.y0
+            matches!(w.observe(&a), Decision::Quiet),
+            "切回锁定会话时画面没变 ⇒ 必须是静默（零 OCR）；\
+             读一遍就意味着旧消息被当成新消息再推理一次"
         );
+        assert_eq!(w.calls(), 1, "整场只该读过一次（A 里的那一次）");
     }
 
     /// **端到端序列：同一窗口 HWND，内容换一批帧。** 票 18 最后一条验收项。
@@ -2852,38 +3034,80 @@ mod tests {
             _ => true,
         };
         assert!(!peer_ok, "前提：B 必须被认成不是锁定的那个会话");
-        let just_closed = park_on_other_conversation(&mut s, &mut w, Some(&pb));
+        let just_closed = park_on_other_conversation(&mut s, Some(&pb));
         assert!(just_closed, "刚换会话：面板要推一次 readout");
+
+        // ⚠⚠ **闸关着 = 这一轮一个像素都没读**（`step` 在闸关着时提前返回），
+        //   所以 B 的内容**从来没进过 OCR**，水位线也不该动。
+        //
+        //   水位线是**锁定会话**的凭证；屏幕上看谁跟它无关。
+        assert_eq!(
+            w.watermark(),
+            roi.y1,
+            "闸关着的时候水位线动了 —— 切回来会读到错的区间，\
+             而旧消息会被当成新消息再推理一次"
+        );
+
+        // ⚠ **面板不许显示锁定会话的内容**（停泊面板说假话，票 32），
+        //   但**状态里留着**（切回来时要原样恢复）。
+        let parked = snapshot(
+            &s,
+            Some(anchor),
+            current_phase(&s),
+            2,
+            0,
+            chatservant_reason::StageCalls::default(),
+            &s.reason,
+        );
         assert!(
-            s.messages.is_empty() && s.candidates.is_empty(),
+            parked.phase.messages().is_empty(),
             "闸关着却还挂着锁定会话的内容：{:?}",
+            parked.phase.messages()
+        );
+        assert!(
+            s.candidates.is_empty(),
+            "闸关着还挂着候选：{:?}",
+            s.candidates
+        );
+        assert_eq!(
+            s.messages.len(),
+            2,
+            "锁定会话的历史被清掉了：{:?}",
             s.messages
         );
 
-        // 在 B 里读一轮并提交——水位线因此被推到 B 的底部。
-        let Decision::Read { roi } = w.observe(&pane(&b)) else {
-            panic!("画面变了必然要读")
-        };
-        w.commit(roi.y1);
-        s.messages = vec![a_msg("B1")];
-
-        // ── 第 3 圈：切回 A ──
+        // ── 第 3 圈：切回 A（闸重新打开）──
         let back = header_print(&a, &anchor).expect("切回来的指纹取得到").0;
         assert!(back.is_same(&pa), "前提：切回来认得是同一个会话");
-        let out = park_on_other_conversation(&mut s, &mut w, Some(&pa));
-        assert!(!out, "闸是重新开的：不该再推一次「刚关」");
-        s.messages = vec![a_msg("A1"), a_msg("A2")];
+        let just_opened = gate_opened(&mut s);
+        assert!(just_opened, "切回来：闸重新打开，要推一帧");
+        assert!(!s.parked_on_other, "切回来之后面板不再是停泊态");
 
-        let Decision::Read { roi } = w.observe(&pane(&a)) else {
-            panic!("切回锁定会话必须重新读")
-        };
+        // A 的画面没变 ⇒ **零 OCR、零推理**（硬约束第 6 条）。
         assert!(
-            roi.y0 <= 1,
-            "增量范围从 y={} 起 —— 水位线没跟着退回顶部，8 条里只有一条能读回来：{roi:?}",
-            roi.y0
+            matches!(w.observe(&pane(&a)), Decision::Quiet),
+            "切回锁定会话时画面没变 ⇒ 必须是静默（零 OCR）；\
+             读一遍就意味着旧消息被当成新消息再推理一次"
+        );
+        assert_eq!(w.calls(), 1, "整场只该读过一次（A 里的那一次）");
+
+        // 面板把锁定会话的历史原样恢复。
+        let restored = snapshot(
+            &s,
+            Some(anchor),
+            current_phase(&s),
+            3,
+            0,
+            chatservant_reason::StageCalls::default(),
+            &s.reason,
+        );
+        assert_eq!(
+            restored.phase.messages().len(),
+            2,
+            "切回来之后面板必须恢复锁定会话的历史：{:?}",
+            restored.phase.messages()
         );
         assert!(s.locked_print.is_some(), "锁还在，闸重新开着");
-        assert!(s.messages.len() == 2, "切回来之后消息必须重新有内容");
     }
 
     /// 锚点：**消息区从 x=[SIDEBAR_W] 起**，标题栏在顶上。
