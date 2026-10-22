@@ -3,7 +3,7 @@ name = "chat-servant-app"
 # ⚠ 与根 `Cargo.toml` 的 `[workspace.package] version` 同值。
 #   它**没有**写 `version.workspace = true`（app 壳子不跟工作区继承那一套），
 #   所以这四处版本号得手动对齐，门禁那一步 `version consistency` 盯着。
-version = "0.1.1"
+version = "0.1.2"
 description = "桌面聊天回复助手的界面外壳"
 # 与工作区其它 crate 一致用 2024 edition，才能用 let-chain（`if let … && let …`）。
 # Tauri 模板默认给 2021 —— 那样写不了 let-chain，所以显式提到 2024。
