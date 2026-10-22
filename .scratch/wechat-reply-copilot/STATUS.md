@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **81** ｜ 验收项全勾 **61** ｜ 已收但留有说明项 **13** ｜ 未收 **7**
+票据总数 **81** ｜ 验收项全勾 **65** ｜ 已收但留有说明项 **13** ｜ 未收 **3**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -23,12 +23,8 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | 票 | 勾/总 | Status | Blocked by |
 |---|---|---|---|
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
-| `21-readout-phase-never-sent.md` | 7/7 | ready-for-human · **P0 · 2026-10-12 实测，不是推断** | None（可以立刻做） |
 | `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 4/7 | needs-triage · **2026-10-17：四个候选全部否完，可测的量已穷尽** | **要人眼**（真 WebView2 上并排四候选过一次） |
-| `44-candidate-action-row-is-button-geometry-on-prose.md` | 18/18 | ready-for-human · **2026-10-18 订正：只剩一条真正未决** | (票面没写 Blocked by) |
-| `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-18 订正：Status 里那个「新撞出的缺陷」已不存在** | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
-| `68-same-draft-shown-twice.md` | 11/11 | ready-for-human · **2026-10-19 已改完并过门禁与实机 DOM 复核； | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
@@ -62,6 +58,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `16-e2e-full-chain.md` | 9/9 |
 | `18-panel-stale-after-session-switch.md` | 6/6 |
 | `19-mojibake-in-source-comments.md` | 5/5 |
+| `21-readout-phase-never-sent.md` | 7/7 |
 | `22-handwritten-body-typeface.md` | 7/7 |
 | `23-button-component-family.md` | 8/8 |
 | `25-main-window-loads-deprecated-panel.md` | 4/4 |
@@ -81,6 +78,8 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 7/7 |
 | `42-settings-page-still-native-controls-and-scrollbar.md` | 8/8 |
 | `43-model-config-two-groups-custom-endpoint-proxy.md` | 9/9 |
+| `44-candidate-action-row-is-button-geometry-on-prose.md` | 18/18 |
+| `45-settings-screen-left-the-paper-family.md` | 27/27 |
 | `46-judge-surface-rescans-the-same-rect-four-times.md` | 5/5 |
 | `47-pp-ocr-plan-cache-has-a-recompile-race.md` | 5/5 |
 | `49-pp-ocr-plan-cache-lifetime-and-det-lock.md` | 7/7 |
@@ -101,6 +100,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `65-tick-offset-was-a-constant-not-a-relation.md` | 8/8 |
 | `66-minimize-button-was-gated-on-a-preference.md` | 9/9 |
 | `67-forensics-guard-covers-files-not-text.md` | 9/9 |
+| `68-same-draft-shown-twice.md` | 11/11 |
 | `69-ci-red-because-an-unreachable-precondition.md` | 11/11 |
 | `70-config-actions-gated-on-the-transport.md` | 12/12 |
 | `71-two-character-name-breaks-the-identity-gate.md` | 3/3 |
