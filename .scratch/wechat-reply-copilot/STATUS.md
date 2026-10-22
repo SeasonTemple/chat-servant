@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **82** ｜ 验收项全勾 **66** ｜ 已收但留有说明项 **13** ｜ 未收 **3**
+票据总数 **82** ｜ 验收项全勾 **67** ｜ 已收但留有说明项 **13** ｜ 未收 **2**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -23,7 +23,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | 票 | 勾/总 | Status | Blocked by |
 |---|---|---|---|
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
-| `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 5/7 | needs-triage · **2026-10-17：四个候选全部否完，可测的量已穷尽** | **要人眼**（真 WebView2 上并排四候选过一次） |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
@@ -70,6 +69,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `31-perceive-has-no-relayout-duty.md` | 8/8 |
 | `32-parked-panel-tells-a-lie.md` | 7/7 |
 | `34-tray-icon-looks-grey-on-dark-taskbar.md` | 6/6 |
+| `35-small-stroke-ratio-is-not-a-legibility-criterion.md` | 7/7 |
 | `36-message-roi-left-edge-collapsed-to-zero.md` | 0/0 |
 | `37-seg-pill-narrower-than-active-item.md` | 0/0 |
 | `38-measured-bubble-color-in-comments-no-longer-occurs.md` | 0/0 |
