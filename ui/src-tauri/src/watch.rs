@@ -1152,6 +1152,32 @@ fn read_round(
     })
 }
 
+/// **把本轮读到的消息并进消息流，并返回「这一轮新到的那些」。**
+///
+/// ## ⚠ 顺序是承重的：**先算新颖度，再并入流**（2026-10-23 修）
+///
+/// 先并后算的话，**本轮的消息已经在流里了** ⇒ 它们被判成「不新」
+/// ⇒ 真正新到的对方消息**不会触发推理**。
+///
+/// 真机夹具实测（那个顺序下）：本轮读到 8 条、面板从 5 涨到 10，
+/// 但「本轮新到」只有 **2** 条 —— 恰好是两条**旧**消息
+/// （对方消息算错 ⇒ 推理被旧消息误触发）。
+///
+/// 合成帧那张夹具不会暴露这个：它每一轮都是**新画面**，
+/// 并进去之后再算，与先算后并的结果一样。
+///
+/// ## 去重口径
+///
+/// `novel_messages` 与 `merge_into_stream` 用**同一套**判据
+/// （说话人 + 正文，只比最近 `DEDUP_TAIL` 条）⇒
+/// 「被判成新的」与「会被并进流」是同一批，不会出现两处口径打架。
+fn absorb_round(stream: &mut Vec<Message>, current: &[Message]) -> Vec<Message> {
+    // ⚠ 必须**先**算：此刻 `stream` 还是「上一轮之后」的那一份。
+    let novel = chatservant_perceive::novel_messages(stream, current);
+    *stream = chatservant_perceive::merge_into_stream(stream, current);
+    novel
+}
+
 /// 当前这一刻的阶段：**有没有候选**决定是 `Read` 还是 `Drafted`。
 ///
 /// 阶段由 Rust 判，不让界面去猜 `candidates` 空不空。
@@ -1388,7 +1414,9 @@ fn step(
     //
     // 现在闸整块提到了 OCR 之前，这个约束是**结构上**成立的：闸关着时
     // 根本走不到这里，也就没什么可漏进来的。
-    s.messages = chatservant_perceive::merge_into_stream(&s.messages, &messages);
+    // ⚠ **顺序承重**：新颖度必须拿「并入本轮之前」的流去比，
+    //   所以并流这件事交给 `absorb_round`（它在函数内部先算后并）。
+    //   见那个函数的文档。
 
     // 存一份给调试画布。**在整帧坐标系**——画布按帧的百分比定位，
     // 用 ROI 坐标会让框整体偏移。
@@ -1427,7 +1455,7 @@ fn step(
     // ⇒ 判据只能是**内容身份**（说话人 + 正文）。
     // 「只是滚动、翻出旧消息」这件事也顺带解决了：旧消息在消息流里已经有了
     // ⇒ 不算新 ⇒ 不会对旧消息重复推理。
-    let novel = chatservant_perceive::novel_messages(&s.messages, &messages);
+    let novel = absorb_round(&mut s.messages, &messages);
 
     // 只有真的有**对方说的话**（且是新到的）才触发推理。
     // 对方说话但都是说过的旧消息（滚出来的）⇒ 不推理、不调外部接口。
@@ -2050,8 +2078,8 @@ mod tests {
     use super::{
         AUTO_COOLDOWN, AutoGate, BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message,
         PaneAnchor, Phase, Readout, RecentN, Relock, SESSION, Scratch, Speaker, TierCell,
-        TokenBudget, apply_gate_closed, apply_relock, collect_images, current_phase, gate_opened,
-        header_print, park_on_other_conversation, phase_to_push, read_round, snapshot,
+        TokenBudget, absorb_round, apply_gate_closed, apply_relock, collect_images, current_phase,
+        gate_opened, header_print, park_on_other_conversation, phase_to_push, read_round, snapshot,
     };
     use chatservant_capture::Frame;
     use chatservant_capture::ocr::{OcrError, OcrLine, OcrText};
@@ -2725,6 +2753,39 @@ mod tests {
             .expect("取得到指纹")
     }
 
+    /// **「新到的」必须拿「并入本轮之前」的消息流去比。**
+    ///
+    /// ## 这条守的是什么（2026-10-23 修的一个真缺陷）
+    ///
+    /// 原来的顺序是：**先并入流，再算新颖度**。于是算新颖度时
+    /// **本轮的消息已经在流里了** ⇒ 它们被判成「不新」
+    /// ⇒ **真正新到的对方消息不会触发推理**。
+    ///
+    /// 真机夹具实测（那个顺序下）：本轮读到 8 条、面板从 5 涨到 10，
+    /// 但「本轮新到」只有 **2** 条 —— 恰好是两条**旧**消息
+    /// （对方消息算错 ⇒ 推理被旧消息误触发）。
+    ///
+    /// ⚠ **合成帧夹具暴露不了这个**：每一轮都是新画面 ⇒ 两种顺序结果一样
+    /// ⇒ 假绿。只有「本轮的消息在上一轮之后已经在流里了」才分岔。
+    #[test]
+    fn novelty_is_computed_against_the_stream_before_this_round() {
+        // 上一轮：两条旧消息进了流。
+        let mut stream: Vec<Message> = Vec::new();
+        let first = absorb_round(&mut stream, &[a_msg("旧的甲"), a_msg("旧的乙")]);
+        assert_eq!(first.len(), 2, "前提：第一轮两条都该算新的");
+        assert_eq!(stream.len(), 2, "前提：第一轮之后流里有两条");
+
+        // 这一轮：一条**旧的**（又读到了）+ 一条**真新的**。
+        let second = absorb_round(&mut stream, &[a_msg("旧的乙"), a_msg("刚到的")]);
+        let texts: Vec<&str> = second.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["刚到的"],
+            "本轮只该报出真正新到的那条；实际 {texts:?} —— \
+             若把「并入流」放在「算新颖度」之前，本轮消息已在流里 ⇒ 全被判成旧的"
+        );
+        assert_eq!(stream.len(), 3, "流里应是两条旧的 + 一条新的");
+    }
     /// **同一会话里对方又发了消息 ⇒ 那几条被算成「新到的」。**
     ///
     /// ## 这条守的是什么（2026-10-23 的真缺陷）
