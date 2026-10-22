@@ -1367,15 +1367,15 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
     //   `header_h` 的过滤是**按 y 做的**，不看位置就只能猜。
     //   坐标是**面板局部**（`r.anchor.chat` 裁出来的那块），不是窗口坐标。
     println!(
-        "{:<3} {:<11} {:<7} {:<9} {:<30} 文字",
-        "#", "y 范围", "说话人", "归类", "依据"
+        "{:<3} {:<19} {:<7} {:<9} {:<30} 文字",
+        "#", "y 范围 (x 范围)", "说话人", "归类", "依据"
     );
-    println!("{}", "-".repeat(122));
+    println!("{}", "-".repeat(130));
     for (i, a) in r.attributions.iter().enumerate() {
         println!(
-            "{:<3} {:<11} {:<7} {:<9} {:<30} {}",
+            "{:<3} {:<19} {:<7} {:<9} {:<30} {}",
             i,
-            format!("{}-{}", a.rect.y0, a.rect.y1),
+            format!("{}-{} ({}..{})", a.rect.y0, a.rect.y1, a.rect.x0, a.rect.x1),
             match a.speaker {
                 Speaker::Me => "我",
                 Speaker::Them => "对方",
