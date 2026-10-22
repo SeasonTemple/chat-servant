@@ -8,7 +8,7 @@
 
 2026-10-22 本轮开工是「同步远程 + 核实进展是否达到交付」。
 同步完跑完整门禁，得到 `GATE: ALL GREEN` —— 但**同一份输出里**
-`>>> ui build FAILED [0.4s] (exit=)` 与 `##GATE##STEP	ui build		0.4`
+`>>> ui build FAILED [0.4s] (exit=)` 与 `##GATE##STEP\tui build\t\t0.4`
 （**退出码字段是空的**）并排出现。
 
 ⇒ 「全绿」与「有一步失败」在屏幕上同形。
