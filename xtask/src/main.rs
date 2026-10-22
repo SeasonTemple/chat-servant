@@ -134,6 +134,12 @@ enum Cmd {
         /// 对已有的 PNG 标定；不给就现场抓一帧
         #[arg(long)]
         file: Option<PathBuf>,
+        /// 给每一行打一张 ASCII 色块图（只画颜色，不画文字）
+        ///
+        /// 用途：回答「气泡到底包不包住文字」这种**形状**问题。
+        /// 众数、对比度这类数字回答不了形状——两种形状能给出同样的数字。
+        #[arg(long)]
+        ascii: bool,
     },
     /// 媒体区域探针：在一张 PNG 上找「这里有一张图」的区域
     ///
@@ -284,7 +290,7 @@ fn main() -> Result<()> {
                 probe_ocr(&file, scale, resample, repeat)
             }
         }
-        Cmd::Measure { file } => probe_measure(file),
+        Cmd::Measure { file, ascii } => probe_measure(file, ascii),
         Cmd::Layout { file } => probe_layout(file),
         Cmd::Media { file } => media_probe::run(file),
         Cmd::SecretScan => secret_probe::run(),
@@ -1669,7 +1675,7 @@ fn gatecmp(a: &Path, b: &Path) -> Result<()> {
 /// - `ink`    框内与 bg 差别最大的像素 = 文字墨色
 /// - `对比`   bg 与 ink 的感知距离，用来切「正文 / 灰字」
 /// - `pos`    相对面板中心的左右位置，用来切「我 / 对方」
-fn probe_measure(file: Option<PathBuf>) -> Result<()> {
+fn probe_measure(file: Option<PathBuf>, ascii: bool) -> Result<()> {
     let frame = match file {
         Some(p) => {
             let img = image::open(&p).context("打开 PNG 失败")?.to_rgb8();
@@ -1702,6 +1708,9 @@ fn probe_measure(file: Option<PathBuf>) -> Result<()> {
     println!();
 
     let pane = frame.crop(anchor.chat).context("裁剪消息区失败")?;
+    if ascii {
+        print_det_boxes(&pane)?;
+    }
     let ocr = chatservant_capture::ocr::recognize(&pane).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let cx = (anchor.chat.x0 + anchor.chat.x1) as f32 / 2.0;
@@ -1711,9 +1720,10 @@ fn probe_measure(file: Option<PathBuf>) -> Result<()> {
     );
     println!("{}", "-".repeat(120));
     for (i, l) in ocr.lines.iter().enumerate() {
-        let Some((bg, ink, contrast)) = measure_line(&pane, l.rect) else {
+        let Some(m) = measure_line(&pane, l.rect) else {
             continue;
         };
+        let (bg, ink, contrast) = (m.bg, m.ink, m.contrast);
         let mid = l.rect.x0 as f32 + l.rect.width() as f32 / 2.0;
         let pos = if mid > cx + anchor.chat.width() as f32 * 0.15 {
             "右"
@@ -1740,15 +1750,226 @@ fn probe_measure(file: Option<PathBuf>) -> Result<()> {
             pos,
             l.text
         );
+        // 邻域色带：只打颜色，不打文字（文字已在上一行打过）。
+        // 「有气泡」= 左/右/上三侧出现**与面板底色不同**的连续段。
+        println!(
+            "      左: {}\n      右: {}\n      上: {}",
+            fmt_runs(&m.left),
+            fmt_runs(&m.right),
+            fmt_runs(&m.above)
+        );
+        if ascii {
+            println!("{}", ascii_band(&pane, l.rect, anchor.panel_bg));
+            // 列剖面：机器数出来的「气泡占哪几列」。
+            let prof = column_profile(&pane, l.rect, anchor.panel_bg);
+            println!(
+                "      列剖面 (x {}..{}, {} 列): {}",
+                l.rect.x0,
+                l.rect.x1,
+                prof.chars().count(),
+                prof
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 一行的测量结果 + **邻域色带**。
+///
+/// ## 为什么要加色带
+///
+/// [`measure_line`] 的 `bg` 是「文字框外一圈的**众数**」。这个口径有个盲区：
+/// **外圈溢出气泡**时，众数仍然是面板底色——于是「有气泡」与「没气泡」
+/// 在这个数上**长得一模一样**。
+///
+/// 色带把外圈那一圈的**真实颜色逐段摊开**：气泡是一块与面板底色不同的矩形，
+/// 它在色带里必然显形。⇒ 这一项只诊断，不参与判据。
+struct LineNeighborhood {
+    /// 外圈众色（现有口径，等价于 [`measure_line`] 的 `bg`）。
+    bg: [u8; 3],
+    /// 框内与 bg 距离最大的像素。
+    ink: [u8; 3],
+    /// ink 与 bg 的感知距离。
+    contrast: f32,
+    /// 文字框**左侧** 40px 的横向色带，从左到右：(颜色, 长度)。
+    left: Vec<([u8; 3], i32)>,
+    /// 文字框**右侧** 40px 的横向色带。
+    right: Vec<([u8; 3], i32)>,
+    /// 文字框**上方** 40px 的纵向色带。
+    above: Vec<([u8; 3], i32)>,
+}
+
+/// 把色带拼成一行人读的文本。
+fn fmt_runs(runs: &[([u8; 3], i32)]) -> String {
+    if runs.is_empty() {
+        return "（越界，没有像素）".into();
+    }
+    runs.iter()
+        .map(|(c, n)| format!("rgb({},{},{})x{}", c[0], c[1], c[2], n))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 往色带里追加一像素；与上一段同色就并段。
+fn push_run(runs: &mut Vec<([u8; 3], i32)>, n: i32, c: [u8; 3]) {
+    if n <= 0 {
+        return;
+    }
+    match runs.last_mut() {
+        Some((last, len)) if *last == c => *len += n,
+        _ => runs.push((c, n)),
+    }
+}
+
+/// 把一小块区域画成 ASCII 色块图。
+///
+/// **只画颜色，不画文字**：每个 cell 取众色，分四类——
+///
+/// | 记号 | 含义 |
+/// |---|---|
+/// | `.` | 面板底色 |
+/// | `#` | 近灰但不是面板底色（气泡底色一类） |
+/// | `G` | 饱和色（我方绿气泡） |
+/// | `@` | 亮像素（文字） |
+///
+/// 用途：回答「气泡到底包不包住文字」这种**形状**问题。
+/// 数字（众数、对比度）回答不了形状问题——两种形状可以给出同样的数字。
+fn ascii_band(
+    frame: &chatservant_capture::Frame,
+    r: chatservant_core::frame::Rect,
+    panel_bg: [u8; 3],
+) -> String {
+    const CELL: i32 = 4;
+    let x0 = (r.x0 - 70).max(0);
+    let x1 = (r.x1 + 70).min(frame.width() as i32);
+    let y0 = (r.y0 - 30).max(0);
+    let y1 = (r.y1 + 30).min(frame.height() as i32);
+    let mut out = String::new();
+    let mut y = y0;
+    while y < y1 {
+        let mut x = x0;
+        while x < x1 {
+            // 这个 cell 里的众色
+            let mut hist: std::collections::HashMap<[u8; 3], usize> =
+                std::collections::HashMap::new();
+            for cy in y..(y + CELL).min(y1) {
+                for cx in x..(x + CELL).min(x1) {
+                    if let Some(p) = frame.pixel(cx as u32, cy as u32) {
+                        *hist.entry(p).or_insert(0) += 1;
+                    }
+                }
+            }
+            let c = hist
+                .into_iter()
+                .max_by_key(|(_, n)| *n)
+                .map(|(c, _)| c)
+                .unwrap_or(panel_bg);
+            let ch = if c == panel_bg {
+                '.'
+            } else if c[0].max(c[1]).max(c[2]) as i32 - c[0].min(c[1]).min(c[2]) as i32 >= 30 {
+                'G'
+            } else if c[0].max(c[1]).max(c[2]) as i32 > 150 {
+                '@'
+            } else {
+                '#'
+            };
+            out.push(ch);
+            x += CELL;
+        }
+        out.push('\n');
+        y += CELL;
+    }
+    out
+}
+
+/// 每列的底色剖面：把一行文字所在的**列**逐列归类。
+///
+/// ## 为什么要有它
+///
+/// 字符画看着像「左边一块彩色、右边一块灰」，但**人眼数列会错**。
+/// 这一项给出机器数出来的答案：一行文字的**框**里，气泡底色到底占哪几列。
+///
+/// 每列取该列在行框内的**众色**，再分四档：
+///
+/// | 记号 | 含义 |
+/// |---|---|
+/// | `.` | 面板底色 |
+/// | `#` | 近灰但不是面板底色（气泡底色一类） |
+/// | `G` | 饱和色（头像、彩色表情） |
+/// | `?` | 该列颜色杂（分不出众色） |
+///
+/// 一行里 `.` 与 `#` 的交界处，就是气泡的左右边缘。
+fn column_profile(
+    frame: &chatservant_capture::Frame,
+    r: chatservant_core::frame::Rect,
+    panel_bg: [u8; 3],
+) -> String {
+    let y0 = r.y0.max(0);
+    let y1 = r.y1.min(frame.height() as i32);
+    let mut out = String::new();
+    for x in r.x0.max(0)..r.x1.min(frame.width() as i32) {
+        let mut hist: std::collections::HashMap<[u8; 3], usize> = std::collections::HashMap::new();
+        for y in y0..y1 {
+            if let Some(p) = frame.pixel(x as u32, y as u32) {
+                *hist.entry(p).or_insert(0) += 1;
+            }
+        }
+        let total: usize = hist.values().sum();
+        let (c, n) = hist
+            .into_iter()
+            .max_by_key(|(_, k)| *k)
+            .unwrap_or((panel_bg, 0));
+        let share = if total == 0 {
+            0.0
+        } else {
+            n as f32 / total as f32
+        };
+        let ch = if share < 0.5 {
+            '?'
+        } else if c == panel_bg {
+            '.'
+        } else if c[0].max(c[1]).max(c[2]) as i32 - c[0].min(c[1]).min(c[2]) as i32 >= 30 {
+            'G'
+        } else {
+            '#'
+        };
+        out.push(ch);
+    }
+    out
+}
+
+/// det 的原始框与合并后的框都打出来。
+///
+/// 定位「行框为什么这么宽」：**框是 det 给的，还是行组装并出来的**，
+/// 这两条的修法完全不同（前者动 det 参数，后者动 [`merge_into_lines`]）。
+fn print_det_boxes(pane: &chatservant_capture::Frame) -> Result<()> {
+    let (vals, pw, ph) = chatservant_capture::ocr_pp_pipeline::det_prob_map(pane)
+        .map_err(|e| anyhow::anyhow!("det 概率图跑不出来：{e}"))?;
+    let (fw, fh) = (pane.width() as usize, pane.height() as usize);
+    let raw = chatservant_capture::ocr_pp_pipeline::det_boxes(&vals, pw, ph, fw, fh);
+    let merged = chatservant_capture::ocr_pp_pipeline::merge_into_lines(&raw);
+    println!("det 原始框 {} 个 → 行组装后 {} 个", raw.len(), merged.len());
+    println!("原始框（x0,y0)-(x1,y1)  w×h：");
+    for b in &raw {
+        println!(
+            "   ({:>5},{:>4})-({:>5},{:>4})  {}×{}",
+            b.x0,
+            b.y0,
+            b.x1,
+            b.y1,
+            b.width(),
+            b.height()
+        );
     }
     Ok(())
 }
 
 /// 测一行：外圈主色（气泡底色）、框内最异样的像素（文字墨色）、两者感知距离。
+/// 额外给出文字框左/右/上三侧的邻域色带。
 fn measure_line(
     frame: &chatservant_capture::Frame,
     r: chatservant_core::frame::Rect,
-) -> Option<([u8; 3], [u8; 3], f32)> {
+) -> Option<LineNeighborhood> {
     use std::collections::HashMap;
 
     // 外圈：文字框向外扩 6px 的一圈，避开字形本身
@@ -1784,7 +2005,40 @@ fn measure_line(
             }
         }
     }
-    Some((bg, ink, best))
+
+    // 邻域色带：横向取文字框中线，纵向取文字框左边界那一列。
+    //
+    // 选「中线」是因为正文行高远大于字形，中线上必有墨；
+    // 选「左边界」是因为那一列几乎贴着气泡内边距，
+    // 上下各扫一段就能看到气泡的**上沿**。
+    let mid_y = (r.y0 + r.y1) / 2;
+    let mut left: Vec<([u8; 3], i32)> = Vec::new();
+    for x in (r.x0 - 40).max(0)..r.x0 {
+        if let Some(p) = frame.pixel(x as u32, mid_y as u32) {
+            push_run(&mut left, 1, p);
+        }
+    }
+    let mut right: Vec<([u8; 3], i32)> = Vec::new();
+    for x in r.x1..(r.x1 + 40).min(frame.width() as i32) {
+        if let Some(p) = frame.pixel(x as u32, mid_y as u32) {
+            push_run(&mut right, 1, p);
+        }
+    }
+    let mut above: Vec<([u8; 3], i32)> = Vec::new();
+    for y in (r.y0 - 40).max(0)..r.y0 {
+        if let Some(p) = frame.pixel(r.x0.max(0) as u32, y as u32) {
+            push_run(&mut above, 1, p);
+        }
+    }
+
+    Some(LineNeighborhood {
+        bg,
+        ink,
+        contrast: best,
+        left,
+        right,
+        above,
+    })
 }
 
 /// 感知距离：亮度项 + 色度项。单纯的欧氏距离会把「深灰 vs 纯黑」判得过近。

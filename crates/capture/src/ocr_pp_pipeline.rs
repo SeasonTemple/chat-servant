@@ -14,6 +14,14 @@
 //! 3. **rec 宽度分桶** — 每个框宽度都不同，而 tract 的形状编译期决定。
 //!    不分桶就得「每个框重编一次图」，几十到几百毫秒一个框。
 //!
+//! ## 分桶这件事**只对 tract 成立**（2026-10-23 实测）
+//!
+//! ONNX Runtime **不按形状编译图**：一个会话吃任意 H/W。
+//! 而 det 与 rec 的输入尺寸都随画面变（生产里 det 有「消息区整块」与
+//! 「会话名窄带」两种形状），于是按形状分桶在 ort 下等于
+//! **每换一次形状就新建一个 ONNX Runtime 会话**——建会话是几十到上百毫秒。
+//! ⇒ ort 下 det 与 rec 的键都与形状无关，见 [`det_key`] 与 [`BucketCache::get`]。
+//!
 //! # 形状顺序：类在**最后一维**（2026-10-10 实测）
 //!
 //! rec 的输出是 `[1, T, C]`（`C = 6625`），**不是** `[1, C, T]`。
@@ -549,6 +557,40 @@ pub fn det_boxes(prob: &[f32], pw: usize, ph: usize, src_w: usize, src_h: usize)
 /// 而 [`OcrLine`] 的语义是「一行」，下游的消息归并靠 `center_y`。
 ///
 /// 合并判据：垂直重叠超过一半，且水平间距小于行高的 60%。
+///
+/// ## 间隙判据里的「行高」取**较矮那个框**（2026-10-23 修）
+///
+/// ⚠ 早先这里用的是 `lh`（**已并成的行**的高度），而那个高度可能来自
+/// **一个图像框**——于是图像框把容忍度撑大，把真正的文字块吸了进来。
+///
+/// **真机实测（2026-10-23，微信 4.0 的会话窗）**：det 对每条对方消息给出
+/// **两个框**——一个 42×42 的头像框（x 14..56）与一个文字框（x 75..193），
+/// 两者水平间隙 **21px**。用旧判据时 `lh = 42` ⇒ 容忍 25px ⇒ 21 < 25
+/// ⇒ **两者被并成一条 179px 宽的「行」**。
+///
+/// 那个宽行把下游**整条链**带歪了（真机实测，生产接缝 `xtask perceive` 复现）：
+///
+/// 1. 气泡从 x=66 起，而行框从 x=14 起 ⇒ [`crate::ocr::OcrLine`] 的
+///    矩形里**裹进了气泡外面的东西**（头像 + 一段面板底色）；
+/// 2. `perceive::attribute` 的**气泡底色探针**是在行框外扩 6px 的一圈上
+///    取众色 ⇒ 那一圈**整圈落在气泡外** ⇒ 众数成了**面板底色**
+///    ⇒ 判据「在不在气泡里」判成「不在」；
+/// 3. 于是走进「对比度 ≥ 140 ⇒ 标题」那一支 ⇒ **整行被丢弃**。
+///
+/// ⇒ 症状是**面板里对方的消息永远不更新**（只有我方那条在）。
+///
+/// 修法：间隙判据里的行高取 `bh.min(lh)`——**较矮的那个框才代表文字行高**。
+/// 这与同一条判据里垂直重叠用的 `bh.min(lh)` 是同一个口径
+/// （两处都用「较矮者」，不是「碰巧一致」）。
+///
+/// ⚠ 为什么不用「较矮者」就没事：**同一行被 det 切开的文字块高度相近**
+/// （实测同一行两块高 20 与 18），`min` 与原值几乎一样 ⇒ 原有合并行为不变；
+/// 而「图像框 + 文字框」是**高矮悬殊**的一对（42 与 17），
+/// `min` 把容忍度从 25px 收到 10px ⇒ 21px 的间隙不再被吞掉。
+///
+/// ⚠ 反过来也要能说清**为什么不是反过来**（取较矮者会不会把该合的拆开）：
+/// 真实同行拆块的间隙是**几像素**（字间空隙），远小于 10px；
+/// 21px 的间隙是「图像与气泡之间那段面板底色」——**两者的量级差一个档**。
 pub fn merge_into_lines(boxes: &[Rect]) -> Vec<Rect> {
     let mut lines: Vec<Rect> = Vec::new();
     let mut sorted: Vec<Rect> = boxes.to_vec();
@@ -568,7 +610,8 @@ pub fn merge_into_lines(boxes: &[Rect]) -> Vec<Rect> {
             } else {
                 l.x0 - b.x1
             };
-            if gap > lh * 3 / 5 {
+            // 行高取**较矮者**：较矮的才代表文字行高（见上面的实测与理由）。
+            if gap > bh.min(lh) * 3 / 5 {
                 continue;
             }
             l.x0 = l.x0.min(b.x0);
@@ -983,7 +1026,41 @@ impl BucketCache {
 
 /// det 的形状键。**两个分量都要**：少一个就会拿错形状的图，
 /// 而 `run` 拿到形状不匹配的输入只会报错，于是整轮回落 WinRT。
+///
+/// ⚠ 2026-10-23：ort 下这个键**不再带形状**（见 [`det_key`]）。
+/// 那个哨兵 `(0, 0)` 不是合法形状（最小是 [`DET_STRIDE`]），
+/// 所以它不会与 tract 的 `(h, w)` 撞上。
 type DetKey = (usize, usize);
+
+/// **det 的缓存键：形状算不算数，由后端决定。**
+///
+/// ## 为什么 ort 下不能按形状分桶（2026-10-23 修）
+///
+/// ONNX Runtime **不像 tract 那样按形状编译图**——一个会话吃任意 H/W
+/// （见 [`ocr_pp::load_det_with`]：ort 那条路直接返回会话，`h`/`w` 根本没被用上）。
+/// 而 det 的键早先是 `(h, w)`，于是**每换一次输入形状就换一个键**：
+/// 单槽（[`DET_SLOT_CAP`]）被挤掉 ⇒ 下一次请求**重建一个 ONNX Runtime 会话**，
+/// 而建会话是几十到上百毫秒级的操作。
+///
+/// 生产里 det 有**两种形状**的输入：
+///
+/// - 消息区整块（`crates/perceive/src/pipeline.rs` 调 [`crate::ocr::recognize`]）；
+/// - 会话名窄带（`crates/perceive/src/peer.rs`，72px 高、3× 放大）。
+///
+/// 两者轮流把单槽挤掉 ⇒ **切会话那一轮必然重建会话**，表现就是卡一下。
+///
+/// rec 侧早做过同样的修正（见 [`BucketCache::get`]），det 侧当时漏了。
+///
+/// ⚠ **tract 保持按 `(h, w)` 分桶**：它确实按形状编译图
+/// （[`ocr_pp::load_det_with`] 里那句 `set_input_fact`），换个形状就是另一张图。
+fn det_key(backend: ocr_pp::Backend, h: usize, w: usize) -> DetKey {
+    if backend == ocr_pp::Backend::Ort {
+        // ort 的会话与形状无关 ⇒ 键也与形状无关。
+        (0, 0)
+    } else {
+        (h, w)
+    }
+}
 
 /// det 槽里的东西：形状 → cell。**存 cell 而不是图**，见 [`get_or_compile`]。
 type DetCells<P> = HashMap<DetKey, Arc<OnceLock<Slot<P>>>>;
@@ -999,6 +1076,10 @@ type DetCells<P> = HashMap<DetKey, Arc<OnceLock<Slot<P>>>>;
 /// 容量 1 走 [`get_or_compile`] 的清桶分支时 `max_buckets / 2 == 0`，
 /// 也就是全清——于是表里永远只有**最后一个被请求**的形状，
 /// 与早先 `*slot = Some(..)` 的语义一致。
+///
+/// ⚠ 2026-10-23：ort 下**键与形状无关**（见 [`det_key`]），
+/// 所以那张表里本来就只有一个键 ⇒ 容量 1 在 ort 下天然够用，
+/// 不需要为「让 det 少重建会话」去动这个数（那是票 49 的设计决定）。
 const DET_SLOT_CAP: usize = 1;
 
 /// det 的槽。容量写死在类型里（[`DET_SLOT_CAP`]），
@@ -1056,6 +1137,39 @@ fn det_plan_slot() -> &'static DetSlots<PlanBody> {
     DET_PLAN.get_or_init(DetSlots::new)
 }
 
+/// **后端取值的唯一出处。** 生产走 [`ocr_pp::backend`]（读 `CHATSERVANT_OCR_BACKEND`）。
+///
+/// 单独立一个函数不是为了好看：守卫测试要钉住「生产确实按**实际取值**走」，
+/// 而这件事只有源码说了算（见 `the_production_det_entry_point_does_not_hardcode_the_backend`）。
+fn det_backend() -> ocr_pp::Backend {
+    ocr_pp::backend()
+}
+
+/// 取 det 图的**唯一实现**：**后端与编译器都由调用方给。**
+///
+/// 拆出来的理由有两条，都不是「为了好测」这么轻：
+///
+/// 1. **后端进参数**：「ort 与 tract 分别是什么行为」若只能靠改环境变量去试，
+///    就没法在一条测试里同时验两边。edition 2024 里 `set_var` 是 `unsafe`，
+///    而本 crate 的测试是多线程跑的，另一个线程同时读环境变量是真会出事的
+///    （同 `a_missing_det_file_means_none_not_an_error` 里记的同一条理由）。
+///    ⇒ 注入点是**后端这个值本身**（`ocr_pp::backend()` 返回的那个枚举），
+///    不是一份「说明书」常量——常量改了不影响行为，注入了也不红。
+/// 2. **编译器进参数**：真 `load_det` 要 31 MB 权重，而没有权重的机器上
+///    也必须有守卫测试（票 47 的教训：那些测试会直接跳过，等于没守）。
+fn det_plan_with<P, E, F>(
+    slots: &DetSlots<P>,
+    backend: ocr_pp::Backend,
+    h: usize,
+    w: usize,
+    compile: F,
+) -> Result<Arc<P>, E>
+where
+    F: Fn() -> Result<Arc<P>, E>,
+{
+    slots.get(det_key(backend, h, w), compile)
+}
+
 /// det 图的缓存。**只缓存一份**——det 的输入尺寸随帧变，一帧只跑一次，
 /// 缓存收益不大；缓存多份反而占内存。编译本身是**秒级**的
 /// （十几秒量级，见 [`BucketCache::plan_path`] 里记的现场实测），
@@ -1070,16 +1184,29 @@ fn det_plan_slot() -> &'static DetSlots<PlanBody> {
 /// ⚠ **容量没变**，仍然只留一份（[`DET_SLOT_CAP`]）。
 /// 并发请求**不同**形状时，在编的图会短暂地超过一份——那是「不互相堵」
 /// 的直接代价，编完之后驻留的仍然只有最后被请求的那一份。
+/// ⚠ 2026-10-23 起，ort 下**根本不会有不同的键**（见 [`det_key`]），
+/// 所以「不同形状各编各的」只对 tract 成立。
 ///
-/// ## 缓存必须按形状校验（2026-10-15 修）
+/// ## 缓存键：**形状算不算数由后端决定**（2026-10-23 修）
+///
+/// 早先这里只按 `(h, w)` 分键，于是**每换一次输入形状就换一张图**。
+/// 那对 tract 是对的（它按形状编译图），对 ort 是错的：ONNX Runtime 的会话
+/// 与输入形状无关，而每次重建会话是几十到上百毫秒。
+/// ⇒ 键的策略挪进 [`det_key`]：ort 下与形状无关，tract 下不变。
+///
+/// ## 缓存必须按形状校验（2026-10-15 修，2026-10-23 限定范围）
 ///
 /// 早先这里只存 `Plan`，**不看 `h`/`w`**。而 det 的图是按具体形状编译的，
 /// 聊天窗口一被拖动尺寸，det 输入就从 `[1,3,960,1280]` 变成别的，
 /// 缓存里那份旧的会被直接返回，接着 `run` 拿到一个形状不匹配的输入而报错，
 /// 于是又走「回落 WinRT」那条静默路径。
+/// ⇒ **这条只对 tract 成立**：ort 的会话吃任意形状，不需要按形状校验。
 pub fn det_plan(h: usize, w: usize) -> Result<Plan, PpError> {
-    det_plan_slot().get((h, w), || {
-        ocr_pp::load_det(&ocr_pp::models_dir().join(DET_MODEL), h, w)
+    // 后端**只读一次**：键与编译器必须用同一个值——
+    // 两次读之间环境变了，键与图就会对不上（而那正是回落 WinRT 的形状）。
+    let backend = det_backend();
+    det_plan_with(det_plan_slot(), backend, h, w, || {
+        ocr_pp::load_det_with(backend, &ocr_pp::models_dir().join(DET_MODEL), h, w)
     })
 }
 
@@ -1302,7 +1429,7 @@ mod tests {
     /// `DET_PLAN` 是**容量 1 的单槽**（[`DET_SLOT_CAP`]），而本 crate 的
     /// 测试默认多线程跑。今天有两条测试会走到那个全局：
     ///
-    /// · `a_different_det_shape_gets_its_own_plan` —— 断言「同形状第二次
+    /// · `the_det_cache_follows_the_runtime_backend` —— 断言「同形状第二次
     ///   调用命中缓存」（`Arc::ptr_eq`）；
     /// · `an_existing_det_file_is_detected` —— 内部 `recognize_in` 会按它
     ///   自己那一帧的形状调一次 `det_plan`。
@@ -1743,25 +1870,26 @@ mod tests {
         );
     }
 
-    /// **det 图的形状变了必须重编，不能拿旧的缓存凑。**
+    /// **生产入口（[`det_plan`]）必须按 `ocr_pp::backend()` 的实际取值走。**
     ///
-    /// 缓存早先不记 `h`/`w`：聊天窗口一被拖动尺寸，
-    /// 拿到的就是按旧形状编的图，`run` 随即因输入形状不符而失败，
-    /// 于是又走「回落 WinRT」那条静默路径。
+    /// 下面那两条守的是「键的策略」，这条守的是「生产用的是那个策略」——
+    /// 它走**产品路径**：全局单槽 + 真权重。
     ///
-    /// 只缓存一份，所以顺序有意义：先验同形状命中缓存，
-    /// 再验换形状会重编。反过来测会误判——缓存被换形状的那次挤掉了。
+    /// 判据随实际后端翻转：ort 下换形状**不该**重建会话（重建是几十到上百毫秒），
+    /// tract 下换形状**必须**换图（拿到旧形状的图 ⇒ `run` 报错 ⇒ 整轮回落 WinRT）。
     ///
-    /// ⚠ 而「同形状命中缓存」这个断言**只能整条跑**：`det_plan` 是全局单槽，
+    /// ⚠ 要权重才跑得动真 det ⇒ 没装权重的机器上跳过（本机装了）。
+    /// ⚠ 「同形状命中缓存」这个断言**只能整条跑**：`det_plan` 是全局单槽，
     /// 别的测试碰一下就没了。所以这里拿 [`DET_GLOBAL`]——见它的说明。
     #[test]
-    fn a_different_det_shape_gets_its_own_plan() {
+    fn the_det_cache_follows_the_runtime_backend() {
         let dir = ocr_pp::models_dir();
         if !dir.join(DET_MODEL).is_file() {
             eprintln!("跳过：{} 下没有 det 权重", dir.display());
             return;
         }
         let _serialized = det_global_guard();
+        let ambient = ocr_pp::backend();
         let a = det_plan(32, 64).expect("32x64 编不出来");
         let a2 = det_plan(32, 64).expect("32x64 重编失败");
         assert!(
@@ -1769,10 +1897,172 @@ mod tests {
             "同形状重复调用没有命中缓存，每次都要重编一遍"
         );
         let b = det_plan(64, 64).expect("64x64 编不出来");
-        // 形状不同 → 必须是另一张图。拿到同一张就说明缓存没看形状。
+        if ambient == ocr_pp::Backend::Ort {
+            assert!(
+                Arc::ptr_eq(&a, &b),
+                "ort 下换了 det 输入形状就重建会话 —— 建会话是几十到上百毫秒，\
+                 而生产里消息区与会话名窄带正是两种形状"
+            );
+        } else {
+            assert!(
+                !Arc::ptr_eq(&a, &b),
+                "tract 下换了 det 输入形状却拿到同一张图 —— 那是按旧形状编的图，\
+                 `run` 会因输入形状不符而失败，整轮回落 WinRT"
+            );
+        }
+    }
+
+    /// **ort：换一个 det 输入形状，不许重建会话。**
+    ///
+    /// 2026-10-23 修。det 的键早先是 `(h, w)`，而 ONNX Runtime 的会话
+    /// **与输入形状无关** ⇒ 每换一次形状就把单槽挤掉，下一次请求**重建会话**
+    /// （几十到上百毫秒）。生产里 det 有两种形状：消息区整块与会话名窄带，
+    /// 切会话那一轮必然重建一次。
+    ///
+    /// 撤掉修复（把 [`det_key`] 改回恒返回 `(h, w)`）时这条会红。
+    #[test]
+    fn under_ort_a_new_det_shape_reuses_the_same_session() {
+        let slots = DetSlots::<u32>::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        // 两种生产形状：消息区整块（736×1184）与会话名窄带（224×288）。
+        let area = (736usize, 1184usize);
+        let band = (224usize, 288usize);
+        let a = det_plan_with(
+            &slots,
+            ocr_pp::Backend::Ort,
+            area.0,
+            area.1,
+            det_stub_compiler(
+                area,
+                Arc::clone(&calls),
+                Arc::clone(&live),
+                Arc::clone(&peak),
+                0,
+            ),
+        )
+        .expect("编译器桩不会失败");
+        let b = det_plan_with(
+            &slots,
+            ocr_pp::Backend::Ort,
+            band.0,
+            band.1,
+            det_stub_compiler(
+                band,
+                Arc::clone(&calls),
+                Arc::clone(&live),
+                Arc::clone(&peak),
+                0,
+            ),
+        )
+        .expect("编译器桩不会失败");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "ort 下换了输入形状就重建了会话 —— 建会话是几十到上百毫秒，\
+             而生产里消息区与会话名窄带正是两种形状"
+        );
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "ort 下两种形状拿到了两份会话 —— 那正是「每换一次形状就重建」"
+        );
+        // 拿到的是**第一次**那份：会话与形状无关，不是按形状另编的。
+        assert_eq!(*b, det_tag(area), "ort 下应当复用同一个会话");
+        assert_eq!(
+            slots.cell_count(),
+            1,
+            "ort 下键与形状无关，槽里本来就该只有一份"
+        );
+    }
+
+    /// **tract：换一个 det 输入形状，仍然要换一张图。**
+    ///
+    /// 与上一条互为反向：tract 是**按形状编译图**的
+    /// （[`ocr_pp::load_det_with`] 里那句 `set_input_fact`），所以键必须带形状。
+    /// 把它也统一掉的话，换形状就拿到形状不匹配的图，`run` 报错 ⇒ 整轮回落 WinRT。
+    ///
+    /// 撤掉修复（[`det_key`] 恒返回 `(0, 0)`）时这条会红。
+    #[test]
+    fn under_tract_a_new_det_shape_still_gets_its_own_plan() {
+        let slots = DetSlots::<u32>::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let area = (736usize, 1184usize);
+        let band = (224usize, 288usize);
+        let a = det_plan_with(
+            &slots,
+            ocr_pp::Backend::Tract,
+            area.0,
+            area.1,
+            det_stub_compiler(
+                area,
+                Arc::clone(&calls),
+                Arc::clone(&live),
+                Arc::clone(&peak),
+                0,
+            ),
+        )
+        .expect("编译器桩不会失败");
+        let b = det_plan_with(
+            &slots,
+            ocr_pp::Backend::Tract,
+            band.0,
+            band.1,
+            det_stub_compiler(
+                band,
+                Arc::clone(&calls),
+                Arc::clone(&live),
+                Arc::clone(&peak),
+                0,
+            ),
+        )
+        .expect("编译器桩不会失败");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "tract 下换形状必须重编 —— 它是按形状编译图的"
+        );
         assert!(
             !Arc::ptr_eq(&a, &b),
-            "换了 det 输入形状却拿到同一张缓存的图 —— 窗口改尺寸后必然失败回落"
+            "tract 下两种形状拿到了同一张图 —— 那是按旧形状编的图，\
+             `run` 会因输入形状不符而失败，整轮回落 WinRT"
+        );
+        assert_eq!(*a, det_tag(area), "形状 {:?} 拿到了别的形状的图", area);
+        assert_eq!(*b, det_tag(band), "形状 {:?} 拿到了别的形状的图", band);
+    }
+
+    /// **生产入口不许写死后端。**
+    ///
+    /// 这条是**源码级**断言（与 `crates/perceive/src/peer.rs` 里那条同款）：
+    /// 上面几条守的是「键的策略」，而**策略有没有被用上**只有源码说了算——
+    /// 注入一个后端值就能让策略跑起来，可生产若不读 `ocr_pp::backend()`，
+    /// 注入的那个值与产品行为之间就没有关系了。
+    ///
+    /// 判据不是「源码里有没有出现 `Backend::`」——策略函数 [`det_key`] 里必然有；
+    /// 判据是 **`det_plan` 的函数体里不许写死后端**。
+    #[test]
+    fn the_production_det_entry_point_does_not_hardcode_the_backend() {
+        let source = include_str!("ocr_pp_pipeline.rs");
+        // 切在**测试模块**前，而不是 `#[cfg(test)]` 前：
+        // `DetSlots::cell_count` 上头也有一个 `#[cfg(test)]`，
+        // 按那个切会把 `det_plan` 一起切掉。
+        let prod = source.split("mod tests {").next().unwrap_or(source);
+        let tail = prod
+            .split("pub fn det_plan(")
+            .nth(1)
+            .expect("det_plan 不见了");
+        let body = tail.split("\n}").next().unwrap_or("");
+        assert!(
+            body.contains("det_backend()"),
+            "det_plan 没有走 det_backend() —— 键的后端必须来自 \
+             ocr_pp::backend() 的实际取值"
+        );
+        assert!(
+            !body.contains("Backend::"),
+            "det_plan 里写死了后端 —— ort/tract 的差别要由 \
+             ocr_pp::backend() 的实际取值决定"
         );
     }
 
@@ -2227,6 +2517,9 @@ mod tests {
     ///
     /// PP-OCR 的 det 吐的是**文本块**，一行中文常常被切成两三块。
     /// 而 [`OcrLine`] 的语义是「一行」——下游按 `center_y` 归并消息。
+    ///
+    /// ⚠ 高度取**真机实测值**（2026-10-23，微信 4.0 会话窗）：同一行被切开的两块
+    /// 高 20 与 18。间隙 4px 远小于 10px 的容忍度 ⇒ 必须合并。
     #[test]
     fn two_boxes_on_one_line_merge() {
         let a = Rect {
@@ -2244,6 +2537,96 @@ mod tests {
         let merged = merge_into_lines(&[a, b]);
         assert_eq!(merged.len(), 1, "同一行没合并：{merged:?}");
         assert_eq!((merged[0].x0, merged[0].x1), (10, 90));
+    }
+
+    /// **图像框不能被并进文字行**（2026-10-23 修，实测真机几何）。
+    ///
+    /// ## 这条守的是哪个缺陷
+    ///
+    /// 症状是**面板里对方的消息永远不更新**（只有我方那条在）。
+    /// 生产接缝（`xtask perceive`）实测复现：8 条对方消息**全部**被判成
+    /// 「标题」丢弃，归并后的消息流里只有 1 条我方消息。
+    ///
+    /// 链条（每一环都实测过）：
+    ///
+    /// 1. det 对每条对方消息给出**两个框**——一个 42×42 的图像框
+    ///    （x 14..56）与一个文字框（x 75..193），水平间隙 **21px**；
+    /// 2. 旧判据的间隙容忍度取 `lh`（已并成的行的高 = **42**）⇒ 25px
+    ///    ⇒ 21 < 25 ⇒ **两者被并成一条 179px 宽的「行」**；
+    /// 3. 气泡从 x=66 起，而行框从 x=14 起 ⇒ 框里**裹进了气泡外的东西**；
+    /// 4. `perceive::attribute` 的气泡底色探针在行框外扩 6px 的一圈上取众色
+    ///    ⇒ 那一圈**整圈落在气泡外** ⇒ 众数成了**面板底色**
+    ///    ⇒ 「在不在气泡里」判成「不在」⇒ 走进「对比度 ≥ 140 ⇒ 标题」那一支
+    ///    ⇒ **整行被丢弃**。
+    ///
+    /// ## 为什么这条能守住
+    ///
+    /// 它量的是 [`merge_into_lines`] **这个事实来源**的行为，
+    /// 不是某个常量的值。⇒ 把判据退回 `lh * 3 / 5`，这条立刻红。
+    ///
+    /// ⚠ 几何取自真机实测（不是编的）：图像框 42×42、文字框高 17、间隙 21。
+    #[test]
+    fn an_image_box_next_to_a_text_box_is_not_merged_into_the_text_line() {
+        // 真机实测：微信 4.0 会话窗里一条对方消息的两个 det 框。
+        // 图像框 x 14..56（42×42），文字框 x 77..193（高 17），间隙 **21px**。
+        let image = Rect {
+            x0: 14,
+            y0: 77,
+            x1: 56,
+            y1: 119,
+        };
+        let text = Rect {
+            x0: 77,
+            y0: 90,
+            x1: 193,
+            y1: 107,
+        };
+        let merged = merge_into_lines(&[image, text]);
+        assert_eq!(
+            merged.len(),
+            2,
+            "图像框被并进文字行了 —— 这会让气泡底色探针采到气泡外面，\
+             对方的消息被判成标题而丢弃（面板永远不更新）：{merged:?}"
+        );
+        // 文字行必须保持文字自己的范围（气泡在 x=66 起，行框不能从 x=14 起）。
+        let text_line = merged.iter().find(|r| r.x0 == 77).expect("文字框不见了");
+        assert_eq!(
+            (text_line.x0, text_line.x1),
+            (77, 193),
+            "文字行的范围被图像框撑开了：{merged:?}"
+        );
+    }
+
+    /// **对照：高度相近的两块仍然合并**（上一条的配套）。
+    ///
+    /// 上一条说「图像框 42×42 + 文字框高 17、间隙 21px」不合并。
+    /// 那不能靠「间隙大」一个字概括——**真实同行拆块的间隙只有几像素**。
+    ///
+    /// ⚠ 所以判据必须是**间隙相对于较矮那个框的高**：
+    /// 同行拆块（高 20 与 18）⇒ 容忍度 10px，间隙 4px ⇒ 合并；
+    /// 图像框（高 42 与 17）⇒ 容忍度 10px，间隙 21px ⇒ 不合并。
+    #[test]
+    fn the_same_line_split_into_blocks_still_merges_with_the_real_gap() {
+        // 同一行被 det 切成两块：高度相近（20 与 18），间隙只有 4px。
+        let a = Rect {
+            x0: 75,
+            y0: 90,
+            x1: 120,
+            y1: 110,
+        };
+        let b = Rect {
+            x0: 124,
+            y0: 90,
+            x1: 193,
+            y1: 108,
+        };
+        let merged = merge_into_lines(&[a, b]);
+        assert_eq!(
+            merged.len(),
+            1,
+            "同一行的两块没合并 —— 那会把一行中文切成两条消息：{merged:?}"
+        );
+        assert_eq!((merged[0].x0, merged[0].x1), (75, 193));
     }
 
     /// **不同行不合并。**
@@ -2655,7 +3038,7 @@ mod tests {
     ///
     /// ⚠ 它内部的 `recognize_in` 会按这一帧的形状调一次 `det_plan`，
     /// 那是要动全局单槽的 ⇒ 必须拿 [`DET_GLOBAL`]，否则会把
-    /// `a_different_det_shape_gets_its_own_plan` 的「同形状命中缓存」挤掉。
+    /// `the_det_cache_follows_the_runtime_backend` 的「同形状命中缓存」挤掉。
     #[test]
     fn an_existing_det_file_is_detected() {
         let dir = ocr_pp::models_dir();
