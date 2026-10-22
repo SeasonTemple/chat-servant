@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **81** ｜ 验收项全勾 **60** ｜ 已收但留有说明项 **14** ｜ 未收 **7**
+票据总数 **81** ｜ 验收项全勾 **61** ｜ 已收但留有说明项 **13** ｜ 未收 **7**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -45,7 +45,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `17-settings-window-parked-offscreen.md` | 3/4 | 已定位 —— 触发对象已在 `6b2acbf` 随「设置搬进面板」删除 |
 | `24-small-type-floor-remeasure.md` | 6/7 | done · **2026-10-14 量具重建 + 三档数据 + 字重对照，结论如下** |
 | `33-attribution-thresholds-are-dark-theme-only.md` | 3/5 | done · 2026-10-14 真机浅色主题实测发现并已修 · 根因定位到具体数值 |
-| `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 9/10 | done · **2026-10-18 决策已下并上线**：默认引擎 = **PP-OCRv6 small**， |
 | `53-dev-ps1-run-returns-output-and-exit-code.md` | 7/8 | done · 2026-10-18。根因与实测证据见下；四个动词已改，绿红两档都自证过。 |
 | `81-dependency-vulnerabilities-go-node.md` | 8/11 | 部分完成 · **2026-10-22 仓库侧已修完并验过；剩 4 条要仓库主人拍板或动手** |
 
@@ -77,6 +76,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `36-message-roi-left-edge-collapsed-to-zero.md` | 0/0 |
 | `37-seg-pill-narrower-than-active-item.md` | 0/0 |
 | `38-measured-bubble-color-in-comments-no-longer-occurs.md` | 0/0 |
+| `39-ppocr-silently-fell-back-to-winrt-all-along.md` | 10/10 |
 | `40-key-input-unreachable-when-unset.md` | 9/9 |
 | `41-winrt-misdetections-are-bugs-not-a-product-decision.md` | 7/7 |
 | `42-settings-page-still-native-controls-and-scrollbar.md` | 8/8 |
