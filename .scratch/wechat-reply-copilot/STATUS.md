@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **81** ｜ 验收项全勾 **59** ｜ 已收但留有说明项 **14** ｜ 未收 **8**
+票据总数 **81** ｜ 验收项全勾 **60** ｜ 已收但留有说明项 **14** ｜ 未收 **7**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -29,7 +29,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `45-settings-screen-left-the-paper-family.md` | 27/27 | ready-for-human · **2026-10-18 订正：Status 里那个「新撞出的缺陷」已不存在** | (票面没写 Blocked by) |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `68-same-draft-shown-twice.md` | 11/11 | ready-for-human · **2026-10-19 已改完并过门禁与实机 DOM 复核； | (票面没写 Blocked by) |
-| `79-release-create-is-not-idempotent.md` | 3/4 | 修完 · **2026-10-22 本机验过逻辑；真机验证 = 下一个 tag 推送** | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
@@ -112,4 +111,5 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `76-gate-skip-only-never-worked.md` | 8/8 |
 | `77-name-band-needs-three-times-not-a-taller-band.md` | 11/11 |
 | `78-gate-false-green-when-a-command-is-missing.md` | 4/4 |
+| `79-release-create-is-not-idempotent.md` | 4/4 |
 | `80-release-v0-1-2.md` | 7/7 |
