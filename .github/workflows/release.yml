@@ -378,9 +378,38 @@ jobs:
           else {
             Write-Warning "沿用 gh 自动生成的 release notes"
           }
-          foreach ($a in $assets) { $ghArgs += @($a.FullName) }
-          & gh @ghArgs
-          if ($LASTEXITCODE -ne 0) { throw "gh release create 失败 (exit=$LASTEXITCODE)" }
+          # ⚠⚠ **tag 被重推时这一跳会红，而且前面的构建全白费**（2026-10-22 实测）：
+          #   重写历史后重推 tag ⇒ release 已存在 ⇒ `gh release create` 报
+          #   「a release with the same tag name already exists」⇒ exit 1。
+          #   实测两次：run `39621252744`（v0.1.1）、`39621252547`（v0.1.0），
+          #   各自烧掉 24~25 分钟构建才在**最后一步**炸掉。
+          #   ⇒ 改成**幂等**：先问「这个 tag 的 release 在不在」，
+          #     在 ⇒ **覆盖**资产与说明（不重建）；不在 ⇒ 建。
+          #   ⚠ 覆盖用的是 `gh release upload --clobber`（按资产名替换），
+          #     不是删了重建——删重建会**短暂把资产摘掉**，那是给用户看的窗口。
+          #   ⚠ 判「这个 tag 在不在」用 `gh release list`（**列表为空时它照样 exit 0**），
+          #     **不用** `gh release view`（不存在时它 exit 1）——
+          #     这一步跑在 `$ErrorActionPreference = 'Stop'` 下，
+          #     而有些 pwsh 版本会把「原生命令非零退出」升级成终止性错误
+          #     ⇒ **判存在性不该用一条注定会失败的命令**。
+          $existing = @(& gh release list --limit 200 --json tagName 2>$null | ConvertFrom-Json | ForEach-Object { $_.tagName })
+          $releaseExists = ($existing -contains $env:TAG)
+          if ($releaseExists) {
+            Write-Output "⚠ tag $($env:TAG) 的 release **已存在** ⇒ 改为覆盖资产与说明（不重建）。"
+            if ($body) {
+              & gh release edit $env:TAG --notes $body
+              if ($LASTEXITCODE -ne 0) { throw "gh release edit 失败 (exit=$LASTEXITCODE)" }
+            }
+            foreach ($a in $assets) {
+              & gh release upload $env:TAG $a.FullName --clobber
+              if ($LASTEXITCODE -ne 0) { throw "gh release upload 失败 (exit=$LASTEXITCODE)" }
+            }
+          }
+          else {
+            foreach ($a in $assets) { $ghArgs += @($a.FullName) }
+            & gh @ghArgs
+            if ($LASTEXITCODE -ne 0) { throw "gh release create 失败 (exit=$LASTEXITCODE)" }
+          }
 
           if ($isDraft) {
             Write-Output "已为 $($env:TAG) 建立**草稿 release**，资产 $($assets.Count) 个。"
