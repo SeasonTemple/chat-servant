@@ -1438,7 +1438,14 @@ fn probe_perceive(file: Option<PathBuf>) -> Result<()> {
     // 2026-10-21 之前这里只有上一行（整帧归类），而产品走的是窄带 ⇒
     // 「探针读到名字」与「产品读不到名字」可以**同时为真**，
     // 而没有任何报错（票 77）。⇒ 两行都打，且**标明来源**。
-    match head.and_then(|rect| chatservant_perceive::read_peer_name(&frame, rect, r.anchor.chat)) {
+    match head.and_then(|rect| {
+        discovered
+            .as_ref()
+            .map(|(print, _)| print)
+            .and_then(|print| {
+                chatservant_perceive::read_peer_name(&frame, print, rect, r.anchor.chat)
+            })
+    }) {
         Some(name) => println!("  生产路径读到的会话名：{name}"),
         None => println!("  生产路径读到的会话名：（这条路上没读出来）"),
     }

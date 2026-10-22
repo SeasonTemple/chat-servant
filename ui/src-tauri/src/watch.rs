@@ -1845,8 +1845,8 @@ fn refresh_peer(
     s.last_print = print.cloned();
     // 指纹变了但**没推出头部矩形**（`discover` 认不出）⇒ 不动已认出的名字。
     //   「认不出」不是「名字变了」，也不是「没有名字」。
-    if let Some(rect) = head {
-        if let Some(name) = chatservant_perceive::read_peer_name(frame, rect, anchor.chat) {
+    if let (Some(rect), Some(print)) = (head, print) {
+        if let Some(name) = chatservant_perceive::read_peer_name(frame, print, rect, anchor.chat) {
             s.peer = name;
         }
     }

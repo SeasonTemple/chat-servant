@@ -86,6 +86,24 @@ pub struct HeaderPrint {
     ink: u32,
     /// 区域面积（宽 × 高）。**不是**墨迹数。
     total: u32,
+    /// 标题墨迹的**右边界**（帧坐标，闭区间）。
+    ///
+    /// ⚠ 它指的是**推导出的标题那一行**里的墨迹右端，
+    /// 不是整条头带的右端 —— 头带下半截会混进消息区的气泡边缘。
+    ///
+    /// ## 它是干什么用的（2026-10-23）
+    ///
+    /// 读会话名那条路要裁一条**窄带**送进 OCR。头带宽 400 px，
+    /// 而会话名只占左端几十 px（真机实测「小号」= 偏移 20..47）。
+    /// 剩下的 350+ px 是空面板，可它的**长宽比**会把 det 的输入
+    /// 撑到 4928×736（3.63 Mpx）—— 见 [`crate::peer`]。
+    ///
+    /// ⇒ 按这个右边界裁，det 输入降到 1376×736（1.01 Mpx），
+    /// **读数逐字不变**（真机对照实测），耗时降到 1/3.3。
+    ///
+    /// ⚠ 宽度**不许写死**：「文件传输助手」6 个字比「小号」宽得多，
+    /// 写死会把长名字切掉 ⇒ 面板显示的名字被截断。
+    title_right: i32,
 }
 
 impl HeaderPrint {
@@ -124,10 +142,16 @@ impl HeaderPrint {
 
         let mut raw = vec![0u8; w * h];
         let mut ink = 0u32;
-        for (i, &l) in lum.iter().enumerate() {
-            if (l as f64 - bg as f64).abs() > INK_DELTA {
-                raw[i] = 1;
-                ink += 1;
+        // 最靠右的墨迹列（**块内**偏移）。算出来是为了裁读名字那条窄带。
+        let mut right_ink = -1i32;
+        for y in 0..h {
+            for x in 0..w {
+                let l = lum[y * w + x];
+                if (l as f64 - bg as f64).abs() > INK_DELTA {
+                    raw[y * w + x] = 1;
+                    ink += 1;
+                    right_ink = right_ink.max(x as i32);
+                }
             }
         }
         // 一块没有字的区域**不能**当身份：它的掩码全 0，
@@ -143,7 +167,17 @@ impl HeaderPrint {
             h,
             ink,
             total: (w * h) as u32,
+            // 一块没有墨的区域的右边界是 -1；上面已经挡掉了那种情况，
+            // 所以这里一定 ≥ 0。转成**帧坐标**（加 x0）。
+            title_right: x0 as i32 + right_ink,
         })
+    }
+
+    /// 标题墨迹的右边界（帧坐标，闭区间）。
+    ///
+    /// 读会话名那条路用它裁窄带 —— 见 [`crate::peer`] 里那张对照表。
+    pub fn title_right(&self) -> i32 {
+        self.title_right
     }
 
     /// 指纹覆盖的区域像素数。**探针用它说明取样范围**，
@@ -1137,6 +1171,111 @@ mod tests {
             !a.is_same(&b),
             "两个字形不同的会话被判成同一个——推导对了但判别力丢了，相似度 {}",
             a.similarity(&b)
+        );
+    }
+
+    // ─────────────── 标题墨迹右边界（2026-10-23：裁窄带子省 det）───────────────
+
+    /// 一帧：会话名在 `CHAT_Y0 + row_off` 那一行，宽度由 `glyphs` 个字块决定。
+    ///
+    /// 每个字块**宽 7 px、间隔 7 px**（步距 14），照 `real_frame` 的比例
+    /// ——真机上「小号」两个字共 28 px。
+    /// `first_x` 是第一个字块的左沿 —— 真机实测距消息区左沿 20 px。
+    fn frame_with_name(row_off: i32, glyphs: u32, first_x: u32) -> Frame {
+        frame_of(
+            |x, y| {
+                let y = y as i32;
+                let top = CHAT_Y0 + row_off;
+                if y >= top && y < top + 11 {
+                    for g in 0..glyphs {
+                        let sx = first_x + g * 14;
+                        let Some(cx) = x.checked_sub(sx).filter(|v| *v < 11) else {
+                            continue;
+                        };
+                        if cx < 7 {
+                            return [225, 225, 225];
+                        }
+                    }
+                }
+                [30, 30, 31]
+            },
+            W,
+            H,
+        )
+    }
+
+    /// **右边界必须跟着名字的实际宽度走**——它不是常数。
+    ///
+    /// ## 为什么这条是承重的
+    ///
+    /// 读会话名那条路按这个右边界裁窄带（`crate::peer`）。
+    /// 写死一个宽度的话：**长名字会被切掉**，面板显示的名字被截断，
+    /// 而且**没有任何报错**——名字短了照样是个「看起来像名字」的串。
+    ///
+    /// ⇒ 这条守卫的作用是：**宽度写死 ⇒ 立刻红**。
+    #[test]
+    fn the_title_right_edge_follows_the_actual_name_width() {
+        let short = HeaderPrint::discover(&frame_with_name(18, 2, 20), chat_rect(), 300)
+            .expect("短名字认得出来")
+            .0;
+        let long = HeaderPrint::discover(&frame_with_name(18, 6, 20), chat_rect(), 300)
+            .expect("长名字认得出来")
+            .0;
+
+        let (s, l) = (short.title_right(), long.title_right());
+        assert!(
+            l > s,
+            "6 个字的名字（{l}）右边界竟不比 2 个字的（{s}）靠右——\
+             右边界没跟着实际墨迹走，裁窄带子会把长名字切掉"
+        );
+        // 6 个字：字块步距 14、宽 7 ⇒ 最后一个字块占 90..96 ⇒ 右沿 96。
+        assert_eq!(l, 96, "长名字的右边界算错了（应为最后一个字块的右沿）");
+        // 2 个字：字块占 20..26 与 34..40 ⇒ 右沿 40。
+        assert_eq!(s, 40, "短名字的右边界算错了");
+        // ⚠ **写死宽度 ⇒ 立刻红**（反向自证，2026-10-23 实测）。
+        //   把右边界换成常数 96，长名字那条仍过，**短名字那条立刻红**
+        //   （40 ≠ 96）⇒ 守卫真的在盯「跟着名字走」，不是盯一个常量。
+        assert_ne!(l, s, "长短名字的右边界相同——右边界没跟着实际墨迹走");
+    }
+
+    /// **右边界不许跑到帧外或退到左沿之前。**
+    ///
+    /// 这两个方向都会把裁剪做坏：越界 ⇒ 裁出空白带子（读不出名字）；
+    /// 太靠左 ⇒ 切掉第一个字。
+    #[test]
+    fn the_title_right_edge_is_inside_the_region() {
+        let f = frame_with_name(18, 2, 20);
+        let print = HeaderPrint::discover(&f, chat_rect(), 300)
+            .expect("认得出来")
+            .0;
+        let right = print.title_right();
+        assert!(
+            right >= 20,
+            "右边界 {right} 落到了第一个字块（x=20）左边——名字会被切掉"
+        );
+        assert!(
+            right < f.width() as i32,
+            "右边界 {right} 超出了帧宽 {}——裁剪会越界",
+            f.width()
+        );
+    }
+
+    /// **同一会话里，右边界不许逐帧乱跳。**
+    ///
+    /// 它决定裁出来的带子有多宽 ⇒ 逐帧跳会让 OCR 的输入尺寸逐帧变，
+    /// 而 det 的会话缓存键是**按形状**算的（ort 除外）⇒ 缓存命中率崩掉。
+    #[test]
+    fn the_title_right_edge_is_stable_across_frames() {
+        let a = HeaderPrint::discover(&real_frame(18, 0), chat_rect(), 300)
+            .unwrap()
+            .0;
+        let b = HeaderPrint::discover(&real_frame(21, 0), chat_rect(), 300)
+            .unwrap()
+            .0;
+        assert_eq!(
+            a.title_right(),
+            b.title_right(),
+            "同一会话、只挪了 3px，右边界却变了——裁出来的带子宽度会逐帧抖"
         );
     }
 }
