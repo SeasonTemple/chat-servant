@@ -101,14 +101,20 @@ Deno 安装器（我们是 Node）、esbuild 自己的 dev server（我们用 Vi
 - [x] Go 侧核实：仓库无 Go 代码、CI 无 Go 系 action、Go 的面只有 esbuild
 - [x] CI 的 Node 运行时核实：`node-version: 22` → setup-node 取最新 22.x
       ⇒ 自动拿到 22.23.4（含昨天那批修复）⇒ **不用改**
-- [ ] **本机 Node**：**2026-10-22 实测 v24.11.0** < 修复版 **24.22.1** ⇒ 要仓库主人自己升
+- [x] **本机 Node**：**2026-10-22 已升到 v24.22.1**（仓库主人点头后本机实做）
       ⚠⚠ **订正（2026-10-22 实测）**：原票面写「v24.20.0 …… 自己升（fnm）」——
       **版本号与工具两处都写错了**：
-      · 本机 node 是 **v24.11.0**（不是 24.20.0）⇒ 差距比原票面写的更大；
+      · 本机 node 原为 **v24.11.0**（不是 24.20.0）⇒ 差距比原票面写的更大；
       · 本机 node **不由 fnm 管**（`fnm list` 只有 `* system`）⇒ 实际是 **nvm-windows**
-        （`C:\nvm4w\nodejs\node.exe` 是符号链接 → `G:\nvm`；已装 24.11.0 / 20.11.1）
-        ⇒ 升级命令是 **`nvm install 24.22.1` + `nvm use 24.22.1`**
-        （建符号链接要管理员权限），**不是 fnm**。
+        （`C:\nvm4w\nodejs\node.exe` 是符号链接 → `G:\nvm`；原已装 24.11.0 / 20.11.1）
+        ⇒ 升级命令是 **`nvm install 24.22.1` + `nvm use 24.22.1`**，**不是 fnm**。
+      ✅ **实做记录（2026-10-22）**：`nvm install 24.22.1` → 下载解压到 `G:\nvm\v24.22.1`；
+      `nvm use 24.22.1` → 符号链接改指 `G:\nvm\v24.22.1`，`node --version` = **v24.22.1**。
+      ⚠ **pnpm 不用重装**：`pnpm.ps1` 落在 `G:\node-v19.0.0-win-x64\node_global\`，
+      但那个目录**没有 node.exe** ⇒ 它走 PATH 上的 `node` ⇒ 自动跟着换版本。
+      实测 `pnpm exec node --version` = **v24.22.1**（升完复核过）。
+      ✅ **换完没坏**：完整门禁重跑一遍 → **ALL GREEN / exit=0**（墙钟 ~50s）；
+      `pnpm audit --registry=https://registry.npmjs.org` → **No known vulnerabilities found**。
       ⚠ 影响面：本机 node 只跑 **本地 dev server**（vite）与门禁的 ui 步，
       **CI 不受影响**（CI 用 `node-version: 22` → 自动拿 22.23.4）。
 - [ ] **本机 Go**：**2026-10-22 实测 go1.24.12**（`D:\Go\bin\go.exe`）< 修复版 **1.27.3**
