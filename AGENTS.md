@@ -167,6 +167,21 @@ pwsh -NoProfile -File scripts\winscan.ps1    # 只报可见窗口
 pwsh -NoProfile -File scripts\shotwin.ps1 <hwnd> <out.png>   # 截窗口
 ```
 
+⚠ **`pnpm dev` 会被运行时掐在 1 小时**（2026-10-23 踩了两次）：
+后台任务跑满 1 小时就死 ⇒ **1420 端口空** ⇒ 已在跑的应用**面板白屏**，
+而观察循环还在跑（日志一切正常）——**最像「应用坏了」的一种假象**。
+
+⇒ ① 起 dev server 用**脱离式**（进程独立于会话存活）：
+
+```powershell
+Start-Process pnpm.cmd -ArgumentList 'dev' -WorkingDirectory "$repo\ui" `
+    -RedirectStandardOutput "$repo\target\probe\vite-dev.log" `
+    -RedirectStandardError  "$repo\target\probe\vite-dev.err.log" -WindowStyle Hidden
+```
+
+⇒ ② dev server 死过一轮之后，**已跑的应用要重启**才有面板
+（webview 连的是死连接，不会自己重连）。
+
 ### 「切会话」这类路径怎么在真机上验（2026-10-23 实测）
 
 **这台机器禁止输入注入**：`SetCursorPos` 直接返回 `False`（光标纹丝不动），
