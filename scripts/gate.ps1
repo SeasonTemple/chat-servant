@@ -257,6 +257,14 @@ function Invoke-StepNow($step) {
   #   报错并把退出码带成 1 ⇒ 明明通过却判红。
   #   同理也让并行组的子脚本不必再自己处理位置。
   if ($step.Dir) { Push-Location -LiteralPath $step.Dir }
+  # ⚠⚠ 清空 `$Error` 再跑动作体（2026-10-22 实测加的）。
+  #   动作体里的 **PowerShell 级错误**（命令不存在、脚本抛异常）**不改
+  #   `$LASTEXITCODE`**：实测 pnpm 不在 PATH 时，`$LASTEXITCODE` 仍是 0，
+  #   而 `$Error` 里多了一条 CommandNotFoundException。
+  #   ⇒ 不看 `$Error`，就只剩「工具没装 ⇒ 这一步报 OK」这条假绿。
+  #   ⚠ 原生命令写 stderr（2>&1 合并的那种）**不进 `$Error`**（实测
+  #   ErrorCount=0）⇒ 这条判据不会把正常输出误判成失败。
+  $Error.Clear()
   & $step.Action
   $code = $LASTEXITCODE
   if ($step.Dir) { Pop-Location }
@@ -264,6 +272,23 @@ function Invoke-StepNow($step) {
   # $LASTEXITCODE 仍是对的，但一旦以后有人在这里插一条会改 $LASTEXITCODE
   # 的命令，红绿就会读到别人的退出码。判据取自 2026-10-11 那次「假绿」。
   $code = $LASTEXITCODE
+  # ⚠⚠ 三条判据，缺一条就假绿（2026-10-22 实测）：
+  #   ① 有 PowerShell 级错误（命令不存在 / 脚本抛异常）⇒ 退出码取不到真值 ⇒ 判红；
+  #   ② 退出码是 $null（这一步压根没回传退出码）⇒ 判红；
+  #   ③ 退出码非 0 ⇒ 判红。
+  # ⚠⚠ **判红必须同时置 `$script:fail`**：这一步以前只打印、不置标志，
+  #   而 Invoke-Lane 判本轨红绿靠的是「`$script:fail` 有没有变」
+  #   ⇒ 串行步红了，轨子照样 `exit 0`，父进程照样报 ALL GREEN。
+  #   （2026-10-22 实测：`ui build` 打了 FAILED，整轮门禁却是 ALL GREEN。）
+  if ($Error.Count -gt 0) {
+    $notFound = @($Error | Where-Object {
+      $_.Exception -is [System.Management.Automation.CommandNotFoundException] -or
+      $_.FullyQualifiedErrorId -like 'CommandNotFoundException*'
+    })
+    $code = if ($notFound.Count -gt 0) { 127 } else { 1 }
+    Write-Output ("GATE_STEP_ERROR: {0} —— {1}" -f $name, ($Error | Select-Object -First 1))
+  } elseif ($null -eq $code) { $code = 1 }
+  if ($code -ne 0) { $script:fail = 1 }
   $sw.Stop()
   $script:stepTime[$name] = [math]::Round($sw.Elapsed.TotalSeconds, 1)
   Write-Output ("{0}STEP`t{1}`t{2}`t{3}" -f $script:mark, $name, $code, $script:stepTime[$name])
@@ -334,9 +359,26 @@ function Invoke-StepParallel([string]$SetKey) {
     [IO.File]::WriteAllText($runPs1, @"
 `$ErrorActionPreference = 'Continue'
 `$global:LASTEXITCODE = 0
+`$Error.Clear()
 Set-Location -LiteralPath '$($uiDir -replace "'", "''")'
 $body
-exit `$LASTEXITCODE
+`$code = `$LASTEXITCODE
+# ⚠⚠ **命令不存在时 `$LASTEXITCODE` 不会变**（PowerShell 级错误不碰它），
+#   它还是上面显式置的 0 ⇒ 子进程 exit 0 ⇒ 父进程把这一步记成 OK。
+#   ⇒ 用 `$Error` 兜底：原生命令的 stderr（2>&1 合并的那种）**不进** `$Error`
+#     （实测 ErrorCount=0），而「命令找不到」会进（实测 ErrorCount=1）。
+#   ⚠ 这已是同一族问题的第三次：Start-ThreadJob 那次（连 Select-Object 都没有）、
+#     这次（工具不在 PATH）。所以判据不能只盯退出码。
+if (`$Error.Count -gt 0) {
+  `$notFound = @(`$Error | Where-Object {
+    `$_.Exception -is [System.Management.Automation.CommandNotFoundException] -or
+    `$_.FullyQualifiedErrorId -like 'CommandNotFoundException*'
+  })
+  `$code = if (`$notFound.Count -gt 0) { 127 } else { 1 }
+  Write-Output ("GATE_STEP_ERROR: " + (`$Error | Select-Object -First 1))
+}
+if (`$null -eq `$code) { `$code = 1 }
+exit `$code
 "@, (New-Object Text.UTF8Encoding $false))
 
     $psi = [Diagnostics.ProcessStartInfo]::new()
@@ -672,8 +714,17 @@ function Invoke-Lanes {
           Write-Output $line
           if ($line -like "$($script:mark)STEP*") {
             $f = $line -split "`t"
-            $script:stepTime[$f[1]] = [double]$f[3]
-            if ([int]$f[2] -ne 0) { $script:fail = 1 }
+            # ⚠⚠ 退出码字段必须能解析成整数（2026-10-22 实测踩到）：
+            #   字段是**空串**时 `[int]""` 抛转换异常，那句 if 根本不执行
+            #   ⇒ 这一步明明打了 FAILED，整轮门禁却照样 ALL GREEN。
+            #   ⇒ 解析不出来就**判红**：拿不到退出码 ≠ 通过。
+            $stepCode = 0
+            if (-not [int]::TryParse($f[2], [ref]$stepCode)) {
+              Write-Output ("GATE_FATAL: 步 `"{0}`" 的退出码不是整数（`"{1}`"）—— 拿不到退出码不等于通过，判红。" -f $f[1], $f[2])
+              $script:fail = 1
+            } elseif ($stepCode -ne 0) { $script:fail = 1 }
+            $secs = 0.0
+            if ([double]::TryParse($f[3], [ref]$secs)) { $script:stepTime[$f[1]] = $secs }
           } elseif ($line -like "$($script:mark)SKIP`t*") {
             $script:skippedNames += ($line -split "`t")[1]
           } elseif ($line -like "$($script:mark)SKIPPED`t*") {
