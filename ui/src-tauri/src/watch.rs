@@ -1119,6 +1119,11 @@ fn read_round(
 
     // ROI 过滤：只留本轮该管的那些行。**ROI 与行框都是消息区坐标**
     // （`read_lines` 已经把行换算回消息区了），两边可以直接比。
+    //
+    // ⚠ 2026-10-23：ROI 现在覆盖**整块消息区**。
+    // 原来它只取「水位线以下」那条带子，而**底部对齐**的聊天窗（微信）
+    // 里新消息落在**旧水位线之上** ⇒ 那条带子结构性读不到它（票 83）。
+    // 「哪几条是新的」改由**内容身份**判（`novel_messages`）。
     let lines: Vec<chatservant_capture::ocr::OcrLine> = ocr
         .lines
         .into_iter()
@@ -1292,7 +1297,8 @@ fn step(
         (Some(a), Some((b, _))) => a.is_same(b),
     };
     if !peer_ok {
-        // 连水位线一起退，否则切回锁定会话时只读得到底部那条缝。
+        // 连引擎的上一帧参照系一起退，否则切回锁定会话时
+        // 「画面跟上一帧一模一样」会继续成立。
         //   见 `park_on_other_conversation`——面板清空和引擎退位必须同一次做。
         let just_closed = park_on_other_conversation(s, discovered.as_ref().map(|(p, _)| p));
         // 闸关着 = 这一帧没读任何像素。**照样记账**，
@@ -1368,17 +1374,9 @@ fn step(
     )?;
     s.ocr_calls += 1;
 
-    tracing::debug!(
-        target: "chat_servant::watch",
-        "roi={roi:?} ocr总行={} 本轮行={} 归类={} 消息={}",
-        total_lines,
-        lines.len(),
-        attrs.len(),
-        messages.len()
-    );
     // **累积**给界面。直接发本轮 ROI 的那几条，面板上的聊天记录会在
-    // 「本轮那几条」和「空」之间来回跳——因为 ROI 被水位线从下往上裁，
-    // 静默时它压根不含任何消息。累积后面板显示的是这个会话最近的一段对话。
+    // 「本轮那几条」和「空」之间来回跳——因为一轮只覆盖**新增**的那些。
+    // 累积后面板显示的是这个会话最近的一段对话。
     //
     //**这一行必须在身份闸之后**，这是 2026-10-11 修的真实缺陷。
     //
@@ -1418,13 +1416,39 @@ fn step(
         1,
     );
 
-    // 只有真的有**对方说的话**才推进水位线。
-    // 推进了却没东西可读 = 那段永远不会被再读一遍 = 漏消息。
-    let newest = messages
+    // **本轮新出现的那些消息。**
+    //
+    // ⚠ 为什么不能按位置判「新的」（2026-10-23 实测逼出来的）：
+    // 微信的消息列表是**底部对齐**的 —— 对话变长时**视口整体上移**，
+    // 最新的那条始终贴在输入框上方。⇒ 对方又发了消息之后，
+    // **新消息落在旧水位线之上**（实测：新增的 5 条在 y 130..567，
+    // 旧水位线是 569 ⇒ 全在其上），按像素行划出来的增量带里**一条都没有**。
+    //
+    // ⇒ 判据只能是**内容身份**（说话人 + 正文）。
+    // 「只是滚动、翻出旧消息」这件事也顺带解决了：旧消息在消息流里已经有了
+    // ⇒ 不算新 ⇒ 不会对旧消息重复推理。
+    let novel = chatservant_perceive::novel_messages(&s.messages, &messages);
+
+    // 只有真的有**对方说的话**（且是新到的）才触发推理。
+    // 对方说话但都是说过的旧消息（滚出来的）⇒ 不推理、不调外部接口。
+    let newest = novel
         .iter()
         .filter(|m| m.speaker == Speaker::Them)
         .map(|m| m.rect.y1)
         .max();
+
+    tracing::debug!(
+        target: "chat_servant::watch",
+        "roi={roi:?} ocr总行={} 本轮行={} 归类={} 消息={} 本轮新到={} 本轮记到y={:?}",
+        total_lines,
+        lines.len(),
+        attrs.len(),
+        messages.len(),
+        novel.len(),
+        // ⚠ 这里打的是**本轮将要记的位置**（还没 commit）。
+        //   打 `committed_bottom()` 会滞后一轮 —— 看起来像「位置没记上」。
+        newest,
+    );
 
     // ⑤ 有对方说话才推理。**没读到就不推理**——省的不只是钱，
     // 还有一次可能失败的外部调用。
@@ -1460,7 +1484,10 @@ fn step(
         // 历史**只增不减**——摘要靠它判断「更早的部分」有多长。
         // 只在这条路径上追加：没读到对方说话时不追加，避免把
         // 时间戳、系统提示当成对话塞进上下文。
-        s.history.extend(messages.iter().map(|m| m.text.clone()));
+        // ⚠ **只追加新到的**（`novel`）。ROI 现在覆盖整块消息区，
+        // `messages` 里含全部可见消息；全量追加会让每轮都把整段历史
+        // 再塞一遍给模型（上下文被重复灌水）。
+        s.history.extend(novel.iter().map(|m| m.text.clone()));
 
         // 口吻样本走**另一路**（`FEATURE.md` 的「单独一路」）。
         //
@@ -1468,7 +1495,8 @@ fn step(
         // `history` 要全部消息（对方说的也在里面），这里**只要我说过的**。
         // 早先这里只推 `.text`，`speaker` 整个被丢掉——于是上层根本没有
         // 任何办法知道哪句是我说的，这条路在实现层面就不存在。
-        s.mine.extend(chatservant_reason::voice::my_side(&messages));
+        // 同上：只收**新到的**我方消息。
+        s.mine.extend(chatservant_reason::voice::my_side(&novel));
 
         // 裁剪。**摘要只在这里发生，且按块**（见 RESUMMARIZE_CHUNK）——
         // 这就是「惰性」的落点：不是每次都算，是攒够一块才算。
@@ -1611,19 +1639,18 @@ fn step(
         s.reason = "这一段里没有对方说的话".into();
     }
 
-    // ⚠⚠ 这里原来是 `if let Some(y) = newest { watcher.commit(y) }`，
-    // 而「读成功了但带子里只有我方消息」（`newest == None`）这条路
-    // **既不 commit 也不清 pending** ⇒ `observe` 里 `pending` 命中就
-    // 先于像素比对返回 `Read`（`stream.rs:130`）⇒ **之后每帧都重读同一段**。
-    // 与硬约束第 6 条「静默期零调用」直接矛盾（对方不说话时每秒一次全量 OCR）。
+    // ⚠⚠ 这里**必须**清 `pending`。
     //
-    // ⇒ 「读到没有」和「读到但没有对方说话」要分开表达：
-    //     有对方消息 → `commit(y)`：推进水位线（处理完了）+ 清 pending；
-    //     没有       → `acknowledge()`：只清 pending（水位线不动，那段还没被消费）。
-    // 两条缺一不可，合成一条就是这次的漏洞。
+    // 读成功了却没走任何一条 ⇒ `observe` 里 `pending` 命中就**先于像素比对**
+    // 直接返回 `Read` ⇒ **之后每帧都重读同一段，永不停止**，
+    // 与硬约束第 6 条「静默期零调用」直接矛盾。
+    //
+    // ⚠ **`commit(y)` 的 `y` 现在只是「记下来给人看」**（2026-10-23 改）：
+    // 它不再划下一轮的 ROI —— 那个判据在底部对齐的聊天窗上结构性失效
+    // （见 `perceive::stream` 模块头的真机实测）。
     match newest {
         Some(y) => watcher.commit(y),
-        None => watcher.acknowledge(),
+        None => watcher.complete(),
     }
     Ok(Some(anchor))
 }
@@ -2698,6 +2725,83 @@ mod tests {
             .expect("取得到指纹")
     }
 
+    /// **同一会话里对方又发了消息 ⇒ 那几条被算成「新到的」。**
+    ///
+    /// ## 这条守的是什么（2026-10-23 的真缺陷）
+    ///
+    /// 微信的消息列表是**底部对齐**的：对话变长时**视口整体上移**，
+    /// 最新的那条始终贴在输入框上方。⇒ 对方又发了消息之后，
+    /// **新消息落在旧水位线之上**。
+    ///
+    /// 真机实测（同一会话的两张真机帧，夹具换文件模拟「新消息到达」）：
+    ///
+    /// ```text
+    /// 第 1 圈  roi y0=60   本轮行=14  消息=5   ← 首读，水位线推到 569
+    /// 换帧后  roi y0=569  本轮行=0   消息=0   ← 新增带是空的：一条都没进来
+    /// ```
+    ///
+    /// 而换帧后**新增的那 5 条**在 y = 130..567 ⇒ **全在 569 之上**。
+    ///
+    /// ⇒ 判据不能是「在第几行」，只能是「**这条消息之前有没有出现过**」。
+    /// 这条钉的就是那个新判据：**内容身份**。
+    #[test]
+    fn a_new_peer_message_is_counted_as_new() {
+        // 已知：A 会话里已经有 3 条对方消息。
+        let known: Vec<Message> = (0..3).map(|i| a_msg(&format!("旧消息 {i}"))).collect();
+
+        // 本轮画面里：两条旧的 + 一条新的（正文从没出现过）。
+        let current: Vec<Message> = vec![a_msg("旧消息 0"), a_msg("旧消息 1"), a_msg("刚到的")];
+
+        let novel = chatservant_perceive::novel_messages(&known, &current);
+        let texts: Vec<&str> = novel.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["刚到的"],
+            "只有没出现过的那条才算新到的；实际 {texts:?}"
+        );
+    }
+
+    /// **旧消息重新出现在画面里（滚动翻出）⇒ 不算新的。**
+    ///
+    /// 这是新判据的另一半：底部对齐的窗里，视口一动整段内容就换位置，
+    /// 于是**读到的行里绝大多数是早就看过的旧消息**。
+    /// 若按位置判，它们会被当成新消息 ⇒ 每次滚动都触发一次完整推理
+    /// ⇒ 既烧钱又可能**对旧消息自动发送**。
+    #[test]
+    fn an_old_message_re_read_is_not_counted_as_new() {
+        let known: Vec<Message> = (0..3).map(|i| a_msg(&format!("旧消息 {i}"))).collect();
+
+        // 视口上移：读到的全是旧消息（顺序还变了）。
+        let current: Vec<Message> = vec![a_msg("旧消息 2"), a_msg("旧消息 0"), a_msg("旧消息 1")];
+
+        let novel = chatservant_perceive::novel_messages(&known, &current);
+        assert!(
+            novel.is_empty(),
+            "旧消息被当成新消息了：{:?}",
+            novel.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+    }
+
+    /// **正文相同但说话人不同 ⇒ 是两条不同的消息。**
+    ///
+    /// 身份是「说话人 + 正文」。只看正文的话，「我也说了一句『好的』」
+    /// 会被当成对方说的 ⇒ 面板左右不分 ⇒ 推理上下文里我方的话被当对方的话。
+    #[test]
+    fn the_same_text_from_the_other_side_is_a_different_message() {
+        let mut mine = a_msg("好的");
+        mine.speaker = Speaker::Me;
+        let known: Vec<Message> = vec![mine];
+
+        let current: Vec<Message> = vec![a_msg("好的")]; // 对方说的同一句
+
+        let novel = chatservant_perceive::novel_messages(&known, &current);
+        assert_eq!(
+            novel.len(),
+            1,
+            "对方说的同一句话被我方那条吃掉了：{:?}",
+            novel.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+    }
     fn a_msg(text: &str) -> Message {
         Message {
             id: format!("Them:{text}"),
@@ -2867,15 +2971,13 @@ mod tests {
         );
     }
 
-    /// **停泊不许退水位线——切回锁定会话时不得重读整段。**
+    /// **停泊不许丢锁定会话的状态——切回时不得重复推理。**
     ///
     /// ## 为什么这条是承重的
     ///
-    /// 水位线是**锁定会话**的凭证：这个 [`PaneWatcher`] 实例整个生命周期
-    /// 只服务锁定会话（`observe` 只在闸开着时被调用，也就是只在锁定会话上）。
-    ///
-    /// 退了它 ⇒ 切回来时整段重读 ⇒ **早已看过的旧消息被当成新消息**
-    /// ⇒ `newest` 有值 ⇒ 触发一次完整模型推理（6~9 秒）。
+    /// 停泊（闸关着）时锁定会话的**消息流必须留着**：
+    /// 丢了它 ⇒ 切回来时整段重读 ⇒ **早已看过的旧消息被当成新消息**
+    /// ⇒ 触发一次完整模型推理（6~9 秒）。
     ///
     /// 实测形态（2026-10-23 真机）：切回会话一轮 3.28 秒 + 重复推理 6~9 秒
     /// ⇒ 「切换会话 7s+」。而且它**绕过了硬约束第 6 条**（静默期零调用），
@@ -2886,7 +2988,7 @@ mod tests {
     /// `park_on_other_conversation`（**生产用的那个函数**），
     /// 不是手工再调一次 `rewind`——那样测的是测试自己。
     #[test]
-    fn parking_does_not_rewind_the_watermark() {
+    fn parking_keeps_the_locked_conversation_state() {
         // A 会话：8 条消息铺满 700 高的消息区。
         let rows: [(u32, u32); 8] = [
             (60, 80),
@@ -2903,26 +3005,20 @@ mod tests {
         let mut s = Scratch::new(RecentN::new(12));
         s.locked_print = Some(print_of(0));
 
-        // 在 A 里读到全部 8 条，水位线推到最下面一条的下沿。
+        // 在 A 里读到全部 8 条。
         let Decision::Read { .. } = w.observe(&a) else {
             panic!("首次观察必须读整段消息区")
         };
         s.messages = (0..8).map(|i| a_msg(&format!("A 的第 {i} 条"))).collect();
-        w.commit(660);
+        w.complete();
 
-        // 切到 B：闸关。**水位线不许动**，锁定会话的历史也不许清。
+        // 切到 B：闸关。**锁定会话的历史不许清**（那是切回来时要恢复的东西）。
         park_on_other_conversation(&mut s, Some(&print_of(1)));
         assert_eq!(
             s.messages.len(),
             8,
             "锁定会话的历史被清了：{:?}",
             s.messages
-        );
-        assert_eq!(
-            w.watermark(),
-            660,
-            "停泊时把水位线退了 —— 切回来会整段重读，\
-             于是旧消息被当成新消息再推理一次（硬约束第 6 条）"
         );
 
         // 切回 A：闸重新开。**画面没变 ⇒ 零 OCR、零推理。**
@@ -3023,10 +3119,10 @@ mod tests {
         s.locked_print = Some(pa.clone());
         s.locked_name = "A".into();
         s.messages = vec![a_msg("A1"), a_msg("A2")];
-        let Decision::Read { roi } = w.observe(&pane(&a)) else {
+        let Decision::Read { .. } = w.observe(&pane(&a)) else {
             panic!("第一帧必然要读")
         };
-        w.commit(roi.y1);
+        w.complete();
 
         // ── 第 2 圈：切到 B。同一个 watcher，只是内容换了 ──
         let peer_ok = match (&s.locked_print, Some(&pb)) {
@@ -3038,13 +3134,13 @@ mod tests {
         assert!(just_closed, "刚换会话：面板要推一次 readout");
 
         // ⚠⚠ **闸关着 = 这一轮一个像素都没读**（`step` 在闸关着时提前返回），
-        //   所以 B 的内容**从来没进过 OCR**，水位线也不该动。
+        //   所以 B 的内容**从来没进过 OCR**，锁定会话的消息流也不该动。
         //
-        //   水位线是**锁定会话**的凭证；屏幕上看谁跟它无关。
+        //   消息流是**锁定会话**的凭证；屏幕上看谁跟它无关。
         assert_eq!(
-            w.watermark(),
-            roi.y1,
-            "闸关着的时候水位线动了 —— 切回来会读到错的区间，\
+            s.messages.len(),
+            2,
+            "闸关着的时候锁定会话的消息流变了 —— 切回来会读到错的区间，\
              而旧消息会被当成新消息再推理一次"
         );
 
@@ -3672,6 +3768,53 @@ mod tests {
         (f, anchor)
     }
 
+    /// **底部对齐的第二帧**：视口整体上移 ⇒ 旧气泡上移，**新气泡落在旧水位线之上**。
+    ///
+    /// 与 [`wechat_frame_with_ink`] 同几何（侧栏条纹、标题栏、输入框上沿），
+    /// 差别只在消息区里的气泡：旧的挪到 126..154，**新的那条在 96..124**
+    /// —— 即新消息的下沿 124 **小于**第一轮那条的下沿 156（消息区相对 129）。
+    ///
+    /// ⚠ 这就是微信的真相：最新的那条始终贴在输入框上方，
+    /// 视口一变，**整段内容的位置都变了**。
+    fn wechat_frame_bottom_anchored() -> (Frame, PaneAnchor) {
+        const W: u32 = 800;
+        const H: u32 = 600;
+        const SIDEBAR_W: u32 = 192;
+        const HEADER_H: u32 = 27;
+        const INPUT_TOP: u32 = 426;
+        const PANEL: [u8; 3] = [30, 30, 31];
+        const CHROME: [u8; 3] = [51, 51, 51];
+        const THEIR_BUBBLE: [u8; 3] = [47, 47, 48];
+        const THEIR_INK: [u8; 3] = [225, 225, 229];
+        const SIDEBAR_STRIPES: [[u8; 3]; 4] =
+            [[34, 34, 51], [62, 48, 96], [40, 74, 58], [96, 52, 64]];
+
+        let mut px = vec![0u8; (W * H * 3) as usize];
+        for y in 0..H {
+            for x in 0..W {
+                let c = if x < SIDEBAR_W {
+                    SIDEBAR_STRIPES[((y / 4) as usize) % SIDEBAR_STRIPES.len()]
+                } else if y < HEADER_H || y == INPUT_TOP {
+                    CHROME
+                } else {
+                    PANEL
+                };
+                let i = ((y * W + x) * 3) as usize;
+                px[i..i + 3].copy_from_slice(&c);
+            }
+        }
+        // 视口上移 30px：旧气泡 156..184 → 126..154。
+        fill_rect(&mut px, W, Rect::new(224, 126, 416, 154), THEIR_BUBBLE);
+        stroke_rect(&mut px, W, Rect::new(240, 134, 400, 146), THEIR_INK);
+        // **新到的那条**：在 96..124 ⇒ 它的下沿 124 在旧那条的下沿 156 **之上**。
+        fill_rect(&mut px, W, Rect::new(224, 96, 416, 124), THEIR_BUBBLE);
+        stroke_rect(&mut px, W, Rect::new(240, 104, 400, 116), THEIR_INK);
+
+        let f = Frame::from_rgb(W, H, px).expect("合成帧");
+        let anchor = chatservant_capture::anchor::derive(&f).expect("锚点推得出来");
+        (f, anchor)
+    }
+
     fn fill_rect(px: &mut [u8], w: u32, r: Rect, c: [u8; 3]) {
         for y in r.y0.max(0) as u32..r.y1.max(0) as u32 {
             for x in r.x0.max(0) as u32..r.x1.max(0) as u32 {
@@ -3828,6 +3971,107 @@ mod tests {
         }
     }
 
+    /// **底部对齐的窗里，对方来了新消息 ⇒ 产品路径必须读到它。**
+    ///
+    /// ## 这条守的是什么（2026-10-23 的真缺陷，端到端形态）
+    ///
+    /// 微信的消息列表是**底部对齐**的：对话变长时**视口整体上移**，
+    /// 最新的那条始终贴在输入框上方。⇒ 对方又发了消息之后，
+    /// **新消息落在旧水位线之上**。
+    ///
+    /// 真机实测（同一会话的两张真机帧，夹具换文件模拟「新消息到达」）：
+    ///
+    /// ```text
+    /// 第 1 圈  roi y0=60   本轮行=14  消息=5   ← 首读，水位线推到 569
+    /// 换帧后  roi y0=569  本轮行=0   消息=0   ← 新增带是空的：一条都没进来
+    /// ```
+    ///
+    /// 而换帧后**新增的那 5 条**在 y = 130..567 ⇒ **全在 569 之上**。
+    ///
+    /// ## 为什么这条要落在**产品路径**上（而不是引擎层）
+    ///
+    /// 旧形态横跨两个 crate：
+    /// 引擎按**像素水位线**给出 ROI（`perceive::stream`）
+    /// → `read_round` 按 ROI 过滤行（这里）
+    /// → 新消息被滤掉。
+    ///
+    /// 只在引擎层测**抓不住它**（实测：把引擎改回旧判据，引擎层的守卫不红）——
+    /// 因为拆掉水位线之后，引擎那一层压根不知道「水位线以上」是什么。
+    /// ⇒ 守卫必须走**产品路径**：`read_round` 拿到的 roi 覆盖不到新消息时，
+    /// 那条消息就丢了。
+    ///
+    /// ## 判据分两半
+    ///
+    /// ① **旧形态的 ROI 确实读不到它**（前提）——证明这条测的不是假闸；
+    /// ② **产品路径的 ROI 读得到它**（结论）。
+    #[test]
+    fn a_bottom_anchored_new_message_survives_the_product_read_path() {
+        let (frame_a, anchor) = wechat_frame_with_ink();
+        let (frame_b, _) = wechat_frame_bottom_anchored();
+        let pane_a = frame_a.crop(anchor.chat).expect("裁得出消息区");
+        let pane_b = frame_b.crop(anchor.chat).expect("裁得出消息区");
+
+        // 行框写在**帧坐标**里。
+        let old_line = Rect::new(240, 164, 400, 176);
+        let moved_line = Rect::new(240, 134, 400, 146);
+        let fresh_line = Rect::new(240, 104, 400, 116);
+
+        // ── 第一轮：读到旧消息，水位线 = 它的下沿 ──
+        let mut src_a = PickyEngine::new(ViewPlan::PPOCR, anchor.chat, &frame_a);
+        src_a.lines = vec![("旧的那条".to_string(), old_line)];
+        let roi_a = Rect::new(0, 0, anchor.chat.width(), anchor.chat.height());
+        let round_a =
+            read_round(&frame_a, &pane_a, &anchor, roi_a, &src_a).expect("第一轮读帧成功");
+        assert_eq!(
+            round_a.messages.len(),
+            1,
+            "前提：第一轮必须读到旧的那条 —— 否则这条测的是个假闸"
+        );
+        let watermark = round_a.messages[0].rect.y1;
+        assert!(
+            watermark > 0,
+            "前提：第一轮那条的下沿必须为正 —— 否则水位线无从谈起"
+        );
+
+        // ── 第二轮：视口上移，新消息落在旧水位线之上 ──
+        let mut src_b = PickyEngine::new(ViewPlan::PPOCR, anchor.chat, &frame_b);
+        src_b.lines = vec![
+            ("旧的那条".to_string(), moved_line),
+            ("刚到的".to_string(), fresh_line),
+        ];
+
+        // **旧形态的 ROI**：像素水位线以下。
+        let old_roi = Rect::new(0, watermark, anchor.chat.width(), anchor.chat.height());
+        let round_old =
+            read_round(&frame_b, &pane_b, &anchor, old_roi, &src_b).expect("第二轮读帧成功");
+        assert!(
+            !round_old.messages.iter().any(|m| m.text.contains("刚到的")),
+            "前提不成立：旧 ROI 竟然读到了新消息 —— 这条守卫会假绿"
+        );
+
+        // ── 产品路径的 ROI：它必须覆盖到新消息 ──
+        let mut w = chatservant_perceive::PaneWatcher::new(0);
+        assert!(matches!(
+            w.observe(&pane_a),
+            chatservant_perceive::Decision::Read { .. }
+        ));
+        // ⚠ **必须推进水位线**（`step()` 的真实行为：读到对方消息就 `commit(最大 y1)`）。
+        // 不推进的话，旧机制下 `top.max(watermark=0)` = top ⇒ 整块
+        // ⇒ **这条守卫会假绿**（实测：那样写，反向自证抓不住它）。
+        w.commit(watermark);
+        let chatservant_perceive::Decision::Read { roi } = w.observe(&pane_b) else {
+            panic!("画面变了必须读 —— 底部对齐的窗里视口一上移，整段像素都变了")
+        };
+
+        let round_new =
+            read_round(&frame_b, &pane_b, &anchor, roi, &src_b).expect("第二轮读帧成功");
+        let texts: Vec<&str> = round_new.messages.iter().map(|m| m.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("刚到的")),
+            "产品路径没读到新到的那条：{texts:?} —— \
+             底部对齐的窗里新消息落在旧水位线之上，ROI 覆盖不到它"
+        );
+    }
     /// **产品路径与探针路径必须给出同一个答案。**
     ///
     /// 探针那条路是 `chatservant_perceive::read`（`xtask perceive` 走它）。

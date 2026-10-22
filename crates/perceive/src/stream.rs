@@ -8,14 +8,14 @@
 //!
 //! ## 做法
 //!
-//! 维护一条**已提交水位线**。新消息永远从底部出现，所以识别范围永远是
-//! 「水位线以下、忽略区以下」的那一条新增带。
+//! 每来一帧问一个问题：
 //!
-//! 每来一帧问两个问题：
+//! **消息区（`ignore_top` 以下那一段）跟上一帧一模一样吗？**
+//! → 一样 ⇒ [`Decision::Quiet`]，一个像素都不读；
+//! → 不一样 ⇒ [`Decision::Read`]，**读整块消息区**。
 //!
-//! 1. 整块消息区跟上一帧一模一样吗？→ [`Decision::Quiet`]，一个像素都不读。
-//! 2. 不一样的话，**水位线以下**那一段也一样吗？→ 一样就说明变的全在
-//!    水位线以上（滚出旧消息、顶部公告），仍然是 [`Decision::Quiet`]。
+//! ⚠ **「读哪一段」不再由像素划出来**——见下面「底部对齐」那一节。
+//! 「哪几条是新的」由**内容身份**判（[`crate::merge::novel_messages`]）。
 //!
 //! ## 为什么必须排除顶部
 //!
@@ -23,17 +23,44 @@
 //! 零调用这条约束当场作废。跳过多高的区域由 [`ChatSurface`] 给——
 //! 那是「接一个新软件」要提供的东西之一，不该写死在引擎里。
 //!
-//! ## 水位线什么时候动
+//! ## ⚠⚠ 底部对齐的聊天窗：水位线**不能**锚在像素行上（2026-10-23 实测）
+//!
+//! 上面那条「新消息永远从底部出现 ⇒ 新增带在水位线以下」的推理，
+//! **对微信是错的**，而微信就是本产品要接的那个软件。
+//!
+//! 微信的消息列表是**底部对齐**的：对话变长时**视口整体上移**，
+//! 最新的那条始终贴在输入框上方。⇒ 对方又发了消息之后，
+//! **新消息落在旧水位线之上**（旧水位线是「上一条消息的下沿」，
+//! 而新消息是「上一条消息被顶上去之后腾出来的那一格」）。
+//!
+//! 真机实测（2026-10-23，同一会话的两张真机帧，夹具换文件模拟「新消息到达」）：
+//!
+//! ```text
+//! 第 1 圈  roi y0=60   本轮行=14  消息=5      ← 首读，水位线推到 569
+//! 换帧后  roi y0=569  本轮行=0   消息=0      ← 新增带是空的：一条新消息都没进来
+//! ```
+//!
+//! 那一圈**什么都没读到**，而对方确实发了 4 条。⇒ 增量带这个模型
+//! 在底部对齐的窗上**结构性地读不到新消息**。
+//!
+//! ⇒ 所以水位线**必须锚在内容上，不能锚在像素行上**：
+//! 「读到了什么」由**内容身份**（说话人 + 正文）判定，
+//! 「这段像素读过了没有」由**消息流**判定，与它在第几行无关。
+//!
+//! ## 「读到哪了」什么时候记
 //!
 //! **识别成功之后**，由调用方显式 [`PaneWatcher::commit`]。
-//! 失败就不推进——下一帧会重试，而不是永久丢掉一条消息。
+//! 失败就不记——下一帧会重试，而不是永久丢掉一条消息。
+//!
+//! ⚠ 这个位置**只作诊断**（打进日志），**不再用来划 ROI**。
 //!
 //! ## 这层管不了的事
 //!
-//! **滚动翻出旧消息不算新消息**——像素上它和「来了新消息」一样都是内容上移，
-//! 靠对比分不开。真正的判据是「这条消息是不是已经上报过」，
-//! 那是会话层的 `Novelty`。这一层保证的是它的**必要前提**：
-//! 识别范围永远在水位线以下，已经读过的那一段不会被重读。
+//! **「哪几条是新的」不归这层管。** 像素上「来了新消息」和「滚动翻出旧消息」
+//! 分不开（都是内容整体上移）。
+//!
+//! ⇒ 判据在**内容身份**（说话人 + 正文）：见 [`crate::merge::novel_messages`]。
+//! 这一层只保证它的**必要前提**：画面没变就一个像素都不读。
 //!
 //! [`ChatSurface`]: ../../../../CONTEXT.md
 
@@ -44,12 +71,14 @@ use chatservant_core::frame::{Frame, Rect};
 pub enum Decision {
     /// 没变：一行都不读。这次观察的 OCR 调用数必须是 0。
     Quiet,
-    /// 变了：只读这一个矩形。**它永远在水位线以下。**
+    /// 变了：读这一个矩形。
     Read {
-        /// 要读的增量带（上沿即已提交水位线，下沿到消息区底部）。
+        /// 要读的那一块。
         ///
-        /// 给整条矩形而不是「从 y 到 y」的偏移，是为了让调用方不必
-        /// 再知道水位线是多少——那条常量只由 [`PaneWatcher`] 管。
+        /// ⚠ 2026-10-23：它现在覆盖**整块消息区**（`ignore_top` 以下）。
+        /// 原来只取「已提交水位线以下」那条带子，而**底部对齐**的聊天窗
+        /// （微信）里新消息落在**旧水位线之上** ⇒ 那条带子结构性读不到它。
+        /// 见模块头「底部对齐」那一节的真机实测。
         ///
         /// ## 坐标系是**消息区局部坐标**，不是整帧坐标
         ///
@@ -69,14 +98,19 @@ pub enum Decision {
 /// 消息区的增量观察器。
 ///
 /// **一个会话一个实例。** 切走再切回同一个会话要用**同一个**实例——
-/// 水位线是「这个会话读到哪了」的凭证，重建实例等于把读过的消息全忘掉，
+/// 「这个会话读到哪了」是它的凭证，重建实例等于把读过的消息全忘掉，
 /// 用户会看到重复上报。
 #[derive(Debug)]
 pub struct PaneWatcher {
     /// 顶部跳过多高。置顶公告条会自己滚，算进 diff 会让画面永远判定为变化。
     ignore_top: i32,
-    /// 已提交水位线（含）。以上的内容都读过了。
-    watermark: i32,
+    /// 本会话**消费到过的最深位置**（对方消息的下沿）。
+    ///
+    /// ⚠ **它不再用来划 ROI**（2026-10-23 改）——在底部对齐的聊天窗上
+    /// 那个判据结构性失效（模块头有真机实测：新增的消息落在旧水位线**之上**）。
+    ///
+    /// 现在它是**诊断信息**：本轮消费到哪儿了，打进日志给人看。
+    committed: i32,
     /// 上一次要读、但**还没读到结果**的矩形。
     ///
     /// 有它是为了失败重试：没有它的话，「画面跟上一帧一模一样」会把重试
@@ -93,27 +127,23 @@ impl PaneWatcher {
     pub fn new(ignore_top: i32) -> Self {
         Self {
             ignore_top,
-            watermark: 0,
+            committed: 0,
             pending: None,
             last: None,
             calls: 0,
         }
     }
 
-    /// 已提交水位线，即「这个会话读到哪了」。
-    ///
-    /// 增量 ROI 从**它本身那一行**开始（`top.max(watermark)`），不是从下一行，
-    /// 所以边界那一行会被重扫一次——宁可重扫，不可漏掉贴着水位线长出来的消息。
-    ///
-    /// 只认 [`PaneWatcher::commit`] 显式推进过的值：识别失败不推进，
-    /// 下一帧才有机会重试——漏一条消息比多跑一次 OCR 严重得多。
-    pub fn watermark(&self) -> i32 {
-        self.watermark
-    }
-
     /// 观察以来返回过几次「要读了」。静默期必须是 0。
     pub fn calls(&self) -> u32 {
         self.calls
+    }
+
+    /// 本会话**消费到过的最深位置**。**诊断用**（打进日志）。
+    ///
+    /// ⚠ 它**不是**下一轮的 ROI 上界——见 [`PaneWatcher`] 的字段说明。
+    pub fn committed_bottom(&self) -> i32 {
+        self.committed
     }
 
     /// 看一帧，决定这次要不要读。
@@ -123,6 +153,26 @@ impl PaneWatcher {
     ///
     /// 有未完成的读取时**无视画面变化直接重试**——这是「失败不丢消息」
     /// 的代价：反复失败时会一直重试，退避由调用方负责。
+    ///
+    /// ## 底部对齐的窗：ROI 覆盖**整块**消息区（2026-10-23 改）
+    ///
+    /// 原来这里给的是 `[水位线, 消息区底部)`。在**底部对齐**的聊天窗
+    /// （微信就是）上这个判据**结构性地读不到新消息**——实测见模块头：
+    /// 新消息落在旧水位线**之上**，那条带子里一条都没有。
+    ///
+    /// ⇒ 现在整块消息区都给，**「哪几条是新的」由内容身份判定**
+    /// （见 [`crate::merge::novel_messages`]）。
+    ///
+    /// ## 为什么这不违反「静默期零调用」
+    ///
+    /// 静默期走的是**整块逐字节比对**：一模一样 ⇒ [`Decision::Quiet`]，
+    /// 一行都不读、一像素都不送。ROI 大小只影响「变了之后读哪几行」，
+    /// **不影响「变没变」**。
+    ///
+    /// ⚠ 而 OCR 送进去的画面**本来就不是 ROI**——
+    /// `read_lines` 给的是整帧或整块消息区（见 `ocr_input_pixels` 的注释：
+    /// 「ROI 只决定读哪几行，送进 OCR 的画面根本没变小」）。
+    /// ⇒ ROI 变大**不增加 OCR 成本**，只增加「本轮行数」。
     pub fn observe(&mut self, pane: &Frame) -> Decision {
         let bottom = pane.height() as i32;
         let top = self.ignore_top.clamp(0, bottom);
@@ -134,13 +184,15 @@ impl PaneWatcher {
                 None => Decision::Read {
                     roi: Rect::new(0, top, pane.width() as i32, bottom),
                 },
-                Some(prev) if same_pixels(prev, pane, 0, bottom) => Decision::Quiet,
-                // 变的全在水位线以上：滚出旧消息、顶部公告条在滚。一样不读。
-                Some(prev) if same_pixels(prev, pane, top.max(self.watermark), bottom) => {
-                    Decision::Quiet
-                }
+                // ⚠ **只比 `ignore_top` 以下那一段。**
+                //   置顶公告条会自己滚，把它算进 diff，画面就永远判定为变化
+                //   ⇒ 「静默期零调用」当场作废。
+                //   （`ignore_top` 是**唯一**的顶部豁免机制——
+                //   原来还有一条「变的全在水位线以上 ⇒ Quiet」的捷径，
+                //   它在底部对齐的窗上判反，已删。）
+                Some(prev) if same_pixels(prev, pane, top, bottom) => Decision::Quiet,
                 Some(_) => Decision::Read {
-                    roi: Rect::new(0, top.max(self.watermark), pane.width() as i32, bottom),
+                    roi: Rect::new(0, top, pane.width() as i32, bottom),
                 },
             },
         };
@@ -154,58 +206,44 @@ impl PaneWatcher {
         decision
     }
 
-    /// 识别成功后推进水位线，并清掉待重试的那一段。
+    /// **这一轮读完了，而且消费到了位置 `y`**：记下位置、清掉待重试的那一段。
     ///
-    /// **只在真的读完之后才调。** 失败不推进，下一帧会重试同一段。
+    /// **只在真的读完之后才调。** 失败不调，下一帧会重试同一段。
+    ///
+    /// ## `y` 只是**记下来给人看**，不再划下一轮的 ROI
+    ///
+    /// 原来这里推进**像素行**的水位线，用来划下一轮的增量 ROI。
+    /// 那个判据在**底部对齐**的聊天窗上结构性失效（见模块头）⇒
+    /// 「读过没有」改由**上层的消息流**按内容身份承担
+    /// （[`crate::merge::novel_messages`]）。
     pub fn commit(&mut self, y: i32) {
-        self.watermark = self.watermark.max(y);
+        self.committed = self.committed.max(y);
         self.pending = None;
     }
 
-    /// **读完但没有对方说话**时确认这段已经看过，只清 `pending`、**不推进水位线**。
+    /// **这一轮读完了，但没有可记的位置**（没读到对方说话）：清掉待重试的那一段。
     ///
-    /// ## 为什么必须单独有这个方法（2026-10-19 补，硬约束第 6 条）
-    ///
-    /// ⚠⚠ 原来调用方只有一条通路：`if let Some(y) = newest { watcher.commit(y) }`
-    ///   （`ui/src-tauri/src/watch.rs:1386`）。于是有一条**成功路径**两者都不做：
-    ///
-    ///   **读成功了，但带子里只有我方消息**（`newest == None`）。
-    ///
-    ///   而 `observe` 里 `pending` 命中时**先于像素比对直接返回 `Decision::Read`**
-    ///   （`:130-132`）⇒ 下一帧还是 `Read` ⇒ 再下一帧还是 ……
-    ///   **之后每一帧都重读同一段，永不停止**。
-    ///
-    ///   这与本文件开头写的「没有新的对方消息时，一次 OCR 都不跑」
-    ///   **直接矛盾**。实测形态：对方不说话的一段时间里，
-    ///   程序每秒做一次全消息区 OCR —— 静默期不是零调用，是**持续满速**。
-    ///
-    /// ## 为什么水位线不能动
-    ///
-    /// 这段**确实读过了**，但**没有被消费**（没有对方消息可归类）。
-    /// 水位线的语义是「这里以下的我已经处理完」——
-    /// 没处理就不该推进，否则新消息落在同一段里会被水位线跳过。
-    /// 而 `pending` 的语义是「这段我发起了读取但没结束」，那个是真的结束了。
-    ///
-    /// ⇒ 两个语义必须由两个方法表达。合成一个就是这次的漏洞。
-    pub fn acknowledge(&mut self) {
+    /// 与 [`PaneWatcher::commit`] 的差别只有「记不记位置」——
+    /// 失败不调，下一帧会重试同一段。
+    pub fn complete(&mut self) {
         self.pending = None;
     }
 
-    /// **把水位线退回顶部**，下一帧会重读整段消息区。
+    /// **忘掉上一帧**，下一帧必然重读整段消息区。
     ///
     /// ## 什么时候必须调
     ///
-    /// 换会话。换完之后消息区里全是**从没读过的内容**，而水位线还停在
-    /// 上一段对话的底部——于是增量 ROI 永远只剩贴着输入框的那一条缝，
-    /// **一条消息都不会再进来**，候选也就永远出不来。
+    /// 换会话。换完之后消息区里全是**从没读过的内容**，而 `last` 还指着
+    /// 上一段对话的画面——留着它，「画面跟上一帧一模一样」的判断会继续成立
+    /// ⇒ 新会话的内容**一条都进不来**，候选也就永远出不来。
     ///
     /// 实测：点「锁」换到另一个会话后，会话名和闸都对，但候选一直是 0，
-    /// 而且不会自愈。清历史、清摘要、清候选都做了，唯独漏了水位线——
+    /// 而且不会自愈。清历史、清摘要、清候选都做了，唯独漏了这个——
     /// 它不在 `Scratch` 里，所以「把会话状态清干净」这件事天然漏掉它。
     ///
-    /// `last` 也要丢掉：留着旧会话的画面会让「没变化」的判断继续成立。
+    /// （原来这里还要退**水位线**。水位线已于 2026-10-23 拆掉 ——
+    /// 它在底部对齐的聊天窗上结构性失效，见模块头。）
     pub fn rewind(&mut self) {
-        self.watermark = 0;
         self.pending = None;
         self.last = None;
     }
@@ -273,7 +311,7 @@ mod tests {
         Frame::from_rgb(W, H, px).expect("pane")
     }
 
-    /// **读完但没有对方说话 ⇒ 下一帧必须是 `Quiet`，不是再读一次。**
+    /// **读完（哪怕没有对方说话）⇒ 下一帧必须是 `Quiet`，不是再读一次。**
     ///
     /// 这是硬约束第 6 条「静默期零调用」的守卫。
     ///
@@ -289,7 +327,7 @@ mod tests {
     /// 静默期不是零调用，是持续满速。⚠ 而所有既有测试都**不会红**：
     /// 它们的调用方要么 commit、要么 rewind，**从没走过这条路径**。
     #[test]
-    fn acknowledging_a_read_with_no_message_from_them_goes_quiet() {
+    fn completing_a_read_with_no_message_from_them_goes_quiet() {
         // 一帧画面稳定不变（只有我方的行，对方没说话）。
         let pane = pane(&[(100, 112)], None);
         let mut w = PaneWatcher::new(0);
@@ -300,49 +338,25 @@ mod tests {
             "第一帧没有参照物，必然要读"
         );
 
-        // 读成功了，但带子里只有我方消息 ⇒ 调用方走 acknowledge()。
-        w.acknowledge();
+        // 读成功了，但带子里只有我方消息 ⇒ 调用方走 complete()。
+        w.complete();
 
         // ⚠ 这一帧画面**逐字节没变** —— 本该走 Quiet。
-        //   修复前 pending 还在，于是无视像素变化直接返回 Read，
+        //   若 pending 还在，于是无视像素变化直接返回 Read，
         //   于是再下一帧还是 Read……永不停止。
         assert!(
             matches!(w.observe(&pane), Decision::Quiet),
             "静默期必须 Quiet —— 重新 Read 意味着对方不说话时每秒重读一次 \
-             （硬约束第 6 条）。检查调用方是不是漏了 acknowledge()。"
-        );
-    }
-
-    /// **`acknowledge()` 只清 `pending`，**不**推进水位线。**
-    ///
-    /// 两者语义不同，合成一个就是 2026-10-19 那个漏洞的根源：
-    /// · `pending` = 「这段我发起了读取但没结束」
-    /// · `watermark` = 「这里以下的我已经处理完」
-    ///
-    /// 「读到了但没有对方消息」这段**看过但没被消费**（没东西可归类），
-    /// 所以 `pending` 该清、水位线不该动 —— 水位线动了，
-    /// 之后落在同一段里的新消息会被**跳过**。
-    #[test]
-    fn acknowledging_does_not_move_the_watermark() {
-        let pane = pane(&[(100, 112)], None);
-        let mut w = PaneWatcher::new(0);
-        assert!(matches!(w.observe(&pane), Decision::Read { .. }));
-
-        w.acknowledge();
-
-        assert_eq!(
-            w.watermark(),
-            0,
-            "acknowledge 不得推进水位线 —— 那段还没被消费，推进会跳过之后的新消息"
+             （硬约束第 6 条）。检查调用方是不是漏了 complete()。"
         );
     }
 
     /// **重锁之后必须能重读整段消息区。**
     ///
-    /// 2026-10-08 实机事故：换会话后水位线还停在上一段对话的底部，
-    /// 增量 ROI 永远只剩贴着输入框的那条缝，于是**一条消息都进不来**、
+    /// 2026-10-08 实机事故：换会话后引擎还指着上一段对话的画面，
+    /// 「画面跟上一帧一模一样」继续成立 ⇒ **一条消息都进不来**、
     /// 候选永远是 0，而且不会自愈。清历史、清摘要、清候选都做了，
-    /// 唯独漏了水位线——它不在会话状态里。
+    /// 唯独漏了这个——它不在会话状态里。
     ///
     /// 这条测试按那条真实路径走：A 读到顶 → 切到 B（画面全变）→ 重锁。
     #[test]
@@ -350,22 +364,14 @@ mod tests {
         let a = pane(&[(100, 112), (140, 152)], None);
         let mut w = PaneWatcher::new(0);
         assert!(matches!(w.observe(&a), Decision::Read { .. }));
-        w.commit(200);
-        assert_eq!(w.watermark(), 200);
+        w.complete();
 
-        // 换成会话 B：整块画面都不同，但水位线还在底部。
-        //
-        // 注意这里**可能返回 Quiet**：水位线以下那段（A、B 都空）在字节上
-        // 完全一样，`same_pixels` 会判「没变化」。真实系统里换会话是靠
-        // **头部指纹**发现的（见 watch.rs 的会话闸），不是靠这里的 diff——
-        // 闸关着的时候不会推进水位线，于是 B 的内容一条也进不来。
+        // 换成会话 B：整块画面都不同。
         let b = pane(&[(40, 52), (80, 92), (120, 132)], None);
         let _ = w.observe(&b);
-        assert_eq!(w.watermark(), 200, "闸关着的时候水位线不动");
 
-        // 重锁：水位线必须退回去，否则 B 的内容永远读不到。
+        // 重锁：必须丢掉上一帧的参照系，否则 B 的内容永远读不到。
         w.rewind();
-        assert_eq!(w.watermark(), 0, "重锁没有把水位线退回顶部");
         let roi = match w.observe(&b) {
             Decision::Read { roi } => roi,
             Decision::Quiet => panic!("重锁后必须重读整段消息区"),
@@ -384,7 +390,7 @@ mod tests {
 
         // 第一次没有参照系，必须读一次——否则第一条消息永远读不到。
         assert!(matches!(w.observe(&f), Decision::Read { .. }));
-        w.commit(200);
+        w.complete();
 
         for _ in 0..5 {
             assert_eq!(w.observe(&f), Decision::Quiet, "静止时不该再读");
@@ -392,54 +398,105 @@ mod tests {
         assert_eq!(w.calls(), 1, "静止五分钟就是五次观察零次调用");
     }
 
-    /// 新消息只触发一次增量识别。
+    /// **底部对齐：新消息到了 ⇒ 必须触发一次识别。**
+    ///
+    /// ## 这条守的是什么（2026-10-23 的真缺陷）
+    ///
+    /// 微信的消息列表是**底部对齐**的：对话变长时**视口整体上移**，
+    /// 最新的那条始终贴在输入框上方。⇒ 对方又发了消息之后，
+    /// **新消息落在旧水位线之上**。
+    ///
+    /// 真机实测（同一会话的两张真机帧，夹具换文件模拟「新消息到达」）：
+    ///
+    /// ```text
+    /// 第 1 圈  roi y0=60   本轮行=14  消息=5   ← 首读，水位线推到 569
+    /// 换帧后  roi y0=569  本轮行=0   消息=0   ← 新增带是空的：一条都没进来
+    /// ```
+    ///
+    /// 而换帧后**新增的那 5 条**在 y = 130..567 ⇒ **全在 569 之上**。
+    ///
+    /// ⇒ 原来那条「变的全在水位线以上 ⇒ Quiet」的捷径，
+    /// 在这个软件上**恰好是最坏情况**：新消息到达时变动的正是
+    /// 水位线以上的那一段 ⇒ 永远判 Quiet ⇒ 连读都不读。
+    ///
+    /// ## 这条测试把那个形态**原样复现**
+    ///
+    /// 新帧 = 旧内容**整体上移** + 底部多出一条 ⇒ 新消息落在旧消息**之上**。
+    ///
+    /// ⚠ **必须先读完一轮**（2026-10-23 补）：旧判据的「水位线以上 ⇒ Quiet」
+    /// 只有在**水位线已经推进过**时才成立；单轮里水位线还是 0 ⇒
+    /// 旧判据压根不触发 ⇒ 守卫会**假绿**（实测：那样写反证②不红）。
     #[test]
-    fn a_new_message_triggers_exactly_one_incremental_read() {
-        let before = pane(&[(100, 112)], None);
+    fn a_bottom_anchored_new_message_triggers_a_read() {
+        // 旧帧：三条消息（100..112 / 140..152 / 180..192）。
+        let before = pane(&[(100, 112), (140, 152), (180, 192)], None);
         let mut w = PaneWatcher::new(0);
-        w.observe(&before);
-        w.commit(200);
+        assert!(matches!(w.observe(&before), Decision::Read { .. }));
+        w.complete();
         assert_eq!(w.calls(), 1);
 
-        // 底部多来一条消息
-        let after = pane(&[(100, 112), (200, 212)], None);
-        let Decision::Read { roi } = w.observe(&after) else {
-            panic!("底部新增消息必须触发识别")
-        };
-        assert!(roi.y0 >= 200, "新增带的顶边应在水位线之下");
-        w.commit(260);
+        // 新帧：**内容整体上移 20px**（底部对齐的视口滚动），
+        // 底部**多出一条**。⇒ 新消息落在旧消息**之上**。
+        let after = pane(&[(80, 92), (120, 132), (160, 172), (200, 212)], None);
 
-        // 再看同一帧：不该再读
-        assert_eq!(w.observe(&after), Decision::Quiet);
+        let Decision::Read { roi } = w.observe(&after) else {
+            panic!(
+                "底部对齐的窗里来了新消息，必须触发识别 —— \
+                    旧判据（变的全在水位线以上 ⇒ Quiet）在这里恰好判反了"
+            )
+        };
+        assert_eq!(roi.y0, 0, "ROI 顶边必须从消息区顶部开始（整块读）");
+        assert_eq!(roi.y1, H as i32, "ROI 底边应到消息区下沿");
         assert_eq!(w.calls(), 2, "一条新消息只该触发一次");
     }
 
-    /// 识别范围永远在水位线以下——已经读过的那一段不会被重读。
+    /// **只比 `ignore_top` 以下那一段。**
+    ///
+    /// 置顶公告条会自己滚。把它算进 diff，画面就永远判定为变化——
+    /// 「静默期零调用」当场作废。
+    ///
+    /// 这条与上面那条成对：上面守「底部新消息 ⇒ 要读」，
+    /// 这条守「顶部滚动 ⇒ 不读」。**两条一起才完整**：
+    /// 只放宽顶部而不放宽底部，会漏新消息；只放宽底部而不放宽顶部，
+    /// 会一直读。
     #[test]
-    fn the_roi_never_reaches_into_already_read_pixels() {
-        let mut w = PaneWatcher::new(0);
-        w.observe(&pane(&[(100, 112)], None));
-        w.commit(200);
+    fn only_the_ignored_top_band_is_excluded_from_the_diff() {
+        let ignore_top = 60;
+        let base = pane(&[(100, 112)], None);
+        let mut w = PaneWatcher::new(ignore_top);
+        w.observe(&base);
+        w.complete();
+        assert_eq!(w.calls(), 1);
 
-        let cases: [&[(u32, u32)]; 2] = [
-            &[(100, 112), (250, 262)],
-            &[(100, 112), (250, 262), (280, 292)],
-        ];
-        for extra in cases {
-            let Decision::Read { roi } = w.observe(&pane(extra, None)) else {
-                panic!("水位线以下有新内容，应触发识别")
-            };
-            assert!(
-                roi.y0 >= 200,
-                "ROI 顶边 {} 越过了水位线 200——会重读已识别的内容",
-                roi.y0
+        // 顶部那一带在动（模拟公告条滚动），消息区其余部分逐字节没变。
+        for top in [20u32, 24, 28, 32] {
+            let f = pane(&[(100, 112)], Some((top, top + 12)));
+            assert_eq!(
+                w.observe(&f),
+                Decision::Quiet,
+                "顶部 {top} 处的公告条在滚，不该触发识别"
             );
-            assert_eq!(roi.y1, H as i32, "ROI 底边应到消息区下沿");
-            // 推进到新内容的**下沿**，不是 ROI 底边：真实聊天里新消息会把旧
-            // 内容顶上去，但合成帧不会，线一旦推到 300 就再没有可读区域了。
-            w.commit(extra.last().expect("非空").1 as i32);
         }
-        assert_eq!(w.calls(), 3, "每次新增都只触发一次识别");
+        assert_eq!(w.calls(), 1, "滚动公告条期间必须是零调用");
+    }
+
+    /// **「只是滚动、不是新消息」不重复触发。**
+    ///
+    /// 旧判据靠「变的全在水位线以上」来挡滚动；在底部对齐的窗上那个判据
+    /// 挡不住新消息，于是改成**内容身份**判（见 `merge::novel_messages`）。
+    ///
+    /// 这条钉住引擎这一侧仍然成立的部分：**像素逐字节没变 ⇒ 一定不读**。
+    /// 「内容重复 ⇒ 不算新」是上层的事。
+    #[test]
+    fn an_unchanged_pane_never_triggers_a_read() {
+        let f = pane(&[(100, 112)], None);
+        let mut w = PaneWatcher::new(0);
+        assert!(matches!(w.observe(&f), Decision::Read { .. }));
+        w.complete();
+        for _ in 0..3 {
+            assert_eq!(w.observe(&f), Decision::Quiet);
+        }
+        assert_eq!(w.calls(), 1);
     }
 
     /// 票 36 的守卫：ROI 的**横轴**是消息区局部坐标。
@@ -467,7 +524,7 @@ mod tests {
                 "ROI 右边界应等于**消息区**宽度。真塌成 0 边界的形态是 \
                  x1 宽到接近帧宽——真机实测消息区 940px、帧 1253px"
             );
-            w.commit(200);
+            w.complete();
         }
     }
 
@@ -481,7 +538,7 @@ mod tests {
         let base = pane(&[(100, 112)], None);
         let mut w = PaneWatcher::new(ignore_top);
         w.observe(&base);
-        w.commit(200);
+        w.complete();
         assert_eq!(w.calls(), 1);
 
         // 只有顶部那一带在动，位置每帧都不一样（模拟滚动）
@@ -507,25 +564,25 @@ mod tests {
             panic!("首次必须读一次")
         };
         assert_eq!(roi.y0, ignore_top, "ROI 顶边必须从忽略区下沿开始");
-        w.commit(200);
+        w.complete();
 
-        // 水位线在忽略区之下时，取两者更大的那个
+        // 底部新增 ⇒ 整块读，ROI 顶边仍从忽略区下沿开始。
         let Decision::Read { roi } = w.observe(&pane(&[(100, 112), (250, 262)], None)) else {
             panic!("底部新增应触发识别")
         };
-        assert!(roi.y0 >= 200, "ROI 顶边 {} 应在忽略区与水位线之下", roi.y0);
+        assert_eq!(roi.y0, ignore_top, "ROI 顶边必须从忽略区下沿开始");
     }
 
-    /// 识别失败**不推进水位线**，下一帧重试——不能永久丢消息。
+    /// 识别失败**不推进状态**，下一帧重试——不能永久丢消息。
     #[test]
-    fn a_failed_read_does_not_advance_the_watermark() {
+    fn a_failed_read_is_retried_on_the_next_frame() {
         let before = pane(&[(100, 112)], None);
         let mut w = PaneWatcher::new(0);
         w.observe(&before);
-        w.commit(200);
+        w.complete();
 
         let after = pane(&[(100, 112), (250, 262)], None);
-        // 识别失败：拿到 Read 之后没有 commit
+        // 识别失败：拿到 Read 之后没有 complete()
         let Decision::Read { roi: first } = w.observe(&after) else {
             panic!("应触发识别")
         };
@@ -539,32 +596,21 @@ mod tests {
         assert_eq!(w.calls(), 3, "失败要重试，不能靠「已经看过了」糊弄过去");
     }
 
-    /// 一个会话一个观察器。切走再切回，用的还是同一个水位线。
+    /// 一个会话一个观察器。切走再切回，**各自的参照系互不干扰**。
     #[test]
-    fn each_session_keeps_its_own_watermark() {
+    fn each_session_keeps_its_own_reference_frame() {
         let f = pane(&[(100, 112)], None);
         let mut a = PaneWatcher::new(0);
         let mut b = PaneWatcher::new(0);
 
         a.observe(&f);
-        a.commit(200);
+        a.complete();
         b.observe(&f);
-        b.commit(120);
+        b.complete();
 
-        assert_ne!(a.watermark(), b.watermark(), "两个会话的水位线必须独立");
-
-        // 切走再切回 A：它已经读到 200，同一帧不该再读
+        // 切走再切回 A：它已经读过这一帧，同一帧不该再读
         let before = a.calls();
         assert_eq!(a.observe(&f), Decision::Quiet);
         assert_eq!(a.calls(), before, "切回已读的会话不该重复上报");
-    }
-
-    /// 水位线只进不退。重复 commit 旧的 y 不能把线拉回去。
-    #[test]
-    fn the_watermark_never_moves_backwards() {
-        let mut w = PaneWatcher::new(0);
-        w.commit(200);
-        w.commit(120);
-        assert_eq!(w.watermark(), 200);
     }
 }

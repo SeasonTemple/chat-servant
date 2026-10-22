@@ -198,6 +198,38 @@ Move-Item target\probe\_t.png target\probe\fixture-swap.png -Force
 ⚠ 夹具帧是**别人的真实对话**（`target/probe/` 已被 gitignore）：
 **不许**把它们的内容写进提交信息、注释或测试夹具。
 
+### 「同一会话里对方来了新消息」怎么在真机上验（2026-10-23 实测）
+
+上一节那套（换夹具帧 = 屏幕内容变了）**同样适用**，而且这是主线 P0 的
+最后一环：**对方在**同一会话**里又发了一条 ⇒ 面板要不要更新**。
+
+⚠ **先看这个几何**，否则验的东西是假的：**微信的消息列表是「底部对齐」的** ——
+对话变长时**视口整体上移**，最新的那条始终贴在输入框上方。
+
+⇒ **新消息落在旧水位线之上**（实测：A 帧最后一条下沿 569，
+B 帧新增的那几条在 y 130..567）⇒ 任何按**像素行**划出来的增量带
+`[水位线, 底部)` **结构性地读不到它**。
+
+```powershell
+# 两张**同会话**的真机帧：B 比 A 晚（对方又发了几条，视口上移）
+Copy-Item target\probe\wechat-now.png target\probe\fixture-swap.png -Force
+$env:CHATSERVANT_FIXTURE = (Resolve-Path target\probe\fixture-swap.png).Path
+# …起应用、等它读完第一张…
+# 换成第二张（先写临时文件再 Move-Force）
+Copy-Item target\probe\wx-before.png target\probe\_t.png -Force
+Move-Item target\probe\_t.png target\probe\fixture-swap.png -Force
+```
+
+判读日志里的 `roi=… 本轮行=N 消息=M` 这一行：
+**`本轮行=0` = 一条新消息都没读进来**（这正是 2026-10-23 修掉的那个形态）；
+`emit readout ... messages=N` 的 N 增长 ⇒ 面板更新了。
+
+⚠ **守卫要能抓住回归，就得能复现旧机制**（本轮踩了两轮）：
+① 守卫必须**走产品路径**（旧形态横跨两个 crate，只在引擎层测抓不住）；
+② 守卫必须**推进水位线**（复现 `step()` 的真实行为），
+否则旧机制下 ROI 不收窄 ⇒ **守卫假绿**。
+——「守卫量的是谁」：量**事实来源**，不是量常量。
+
 ### 内循环：不要每次都跑全门禁（2026-10-16 加）
 
 上面那条是**完整门禁**，代价是热缓存下也要 94.4s（2026-10-19 并行化后实测；

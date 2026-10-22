@@ -23,7 +23,9 @@ pub use attribute::{Attribution, Evidence, NoiseClass, Palette, Speaker, classif
 pub use fixture::{keep_colors, redact_with};
 pub use mask::{Masked, Rejection, SurfaceVerdict, judge_surface, mask, reject_image_text};
 pub use media::{Found, MediaKind, MediaRegion, find};
-pub use merge::{MESSAGE_WINDOW, Message, conversation_name, group, merge_into_stream};
+pub use merge::{
+    MESSAGE_WINDOW, Message, conversation_name, group, merge_into_stream, novel_messages,
+};
 pub use peer::{PEER_NAME_BAND_H, PEER_NAME_UPSCALE, read_peer_name};
 pub use pipeline::{
     LineSource, OCR_UPSCALE, Read, ReadError, SystemOcr, ViewPlan, ViewPolicy, ocr_input_pixels,
