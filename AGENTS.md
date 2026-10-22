@@ -578,6 +578,16 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
   而外层 `$LASTEXITCODE` 是 0。后果是**一个带红门禁的 commit 被提交了**。
   现在补了 `exit $fail`，两者一致；但判断时仍以打印的那两行为准。
   **每次给 `gate.ps1` 加新步骤，都顺手确认它红了之后 `exit` 确实非 0。**
+- ⚠⚠ **退出码 0 也可能等于「什么都没跑」——「全绿」要有见证**（2026-10-22 实测）。
+  本轮跑门禁拿到 `GATE: ALL GREEN`，而 `ui build` 只花 **0.8s**、一行输出都没有。
+  根因是本机 pnpm 的原生二进制没装上（`node_modules/pnpm/pnpm` 仍是占位注释），
+  `pnpm.ps1` 执行那个占位文本文件 ⇒ **静默空转：exit 0、零输出**。
+  ⇒ 退出码只能证明「命令没报错」，**证明不了「检查真的跑了」**。
+  ⇒ 判一条门禁步可信，要看**它留下了什么证据**（产物、或明确的通过语），
+  不是看它 exit 0。⚠ 本机 pnpm 这条尤其要注意：CI 上 pnpm 由
+  `pnpm/action-setup` 装、最近 8 次 run 全绿，**CI 的才是可信那份**。
+  ⇒ 门禁那三处「工具缺失/退出码取不到 ⇒ 假绿」已修（票 78），
+  但「工具在、却静默空转」这一形态**堵不住**，要靠见证。
 - **Tauri 2 ≠ Tauri 1。** `PredefinedMenuItem::separator`（小写，2.x）；
   `MenuItemBuilder::build(&manager)` 要传 manager。凭 Tauri 1 记忆写的代码编译不过。
 - **`tauri.conf.json` 里定义的窗口在 `.setup()` 之前就创建并开始加载**（实测 2026-10-10）。
