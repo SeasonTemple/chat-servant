@@ -11,3 +11,31 @@ allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:
   - '@lucide/svelte@1.53.0'
+
+# ── 越出声明范围的版本，只能靠 override 提上来（2026-10-22）────────────
+#
+# ⚠ 为什么 cookie 是 override 而不是直接升级依赖：
+#   上游的版本要求**不覆盖**修复版——`@sveltejs/kit` 2.x 要求 `cookie: ^0.6.0`
+#   （0.x 的 caret 锁死在 0.6.x），而 GHSA-pxg6-pf52-xh8x 的修复版是 **0.7.x**
+#   ⇒ 不 override，锁文件里就永远是那个有洞的版本。
+#   · cookie 0.7.2：GHSA-pxg6-pf52-xh8x（low）——
+#     cookie 接受带越界字符的 name/path/domain。0.7.0 起对非法输入**抛错**，
+#     而 kit 用它解析 dev server 的 cookie ⇒ 需要实跑验证（见票 81）。
+#
+# ⚠⚠ esbuild 的 override **试过、退回了**（实测，别再试）：
+#   esbuild 是**用 Go 写的**，它那个二进制里带着 Go 运行时；2026-10-21 那批
+#   Go 公告（GO-2026-4864/4869/4871，中���证书拦截）落在旧版 esbuild 身上。
+#   看着该升到 0.28.x，但 **vite 6 + esbuild 0.28.2 实测构建失败**：
+#     「Transforming destructuring to the configured target environment
+#      ("chrome87", "edge88", "es2020", "firefox78", "safari14") is not supported yet」
+#   ⇒ esbuild 0.28 **提高了最低支持 target**，而本仓没设 `build.target`
+#     ⇒ 用的是 vite 6 的默认老 target ⇒ 降级转换做不了。
+#   ⚠ 要升 esbuild，就得同时抬 `build.target`（es2022/chrome100 一类），
+#     而那是**产品决定**：抬 target = 放弃很老的 WebView2（chromium 87 是 2021 年）。
+#     ⇒ 不在这里悄悄做。
+#   ⚠ 而那批 Go 漏洞的**四条路径我们一条都不走**
+#     （crypto/tls、crypto/x509、Deno 安装器、esbuild 自己的 dev server）
+#     ⇒ 实际暴露面接近零。真正的长期解是 vite 8（用 Rolldown/Rust 替掉 esbuild，
+#     那个 Go 二进制直接消失），那是另一件事，见票 81。
+overrides:
+  cookie: 0.7.2
