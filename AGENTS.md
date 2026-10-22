@@ -275,6 +275,15 @@ pwsh -NoProfile -File scripts\gate.ps1 -Only 'cargo,ui'
 ⚠ 这张表会过期。`gate.ps1` 现在每轮都打印自己的分步耗时，**以它为准**，
 不要照抄这张表进任何文档或结论里。
 
+⚠⚠ **GitHub CI 上跑同一套门禁要 20~26 分钟**（2026-10-22 实测五次：
+17m22s / 19m8s / 20m21s / 21m10s / 23m46s）⇒ **别把「慢」当成「卡死」**。
+瓶颈是 **Gate 10 `cargo deny check`**：它要冷 clone `advisory-db`
+（本机只要 4.9s 是因为**有缓存**，runner 上没有）。
+⇒ 判活的方法不是干等，是 `gh api …/actions/runs/<id>/jobs` 看**卡在哪一步**：
+前 23 步（fmt / clippy / test / OCR accuracy / secret scan）都过了、
+只剩 `Gate 10` 在跑 ⇒ 就是正常的网络慢。
+⚠ `actions/cache` 现在只缓存 cargo 产物，**没缓存 advisory-db** ⇒ 想提速先看这里。
+
 ⚠ **手写 Rust 之后必须先 `cargo fmt --all`**——门禁第一步就是 `fmt --check`，超长行必红。
 
 ## 前端约定
