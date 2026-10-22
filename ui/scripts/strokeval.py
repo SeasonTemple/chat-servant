@@ -399,6 +399,18 @@ def report(tag: str, m: dict[str, float], font_px: float, lines: int) -> None:
         f" / {m.get('frag_p99', float('nan')) * 100:6.2f}%   <- worst glyphs, not the average"
     )
     print(f"    elongation NEW    {m['elong_mean']:6.2f}")
+    # 谷底亮度（票 35 的第四个候选）：**越大 ⇒ 越糊**
+    print(
+        f"    valley band      {m.get('valley_band_px', float('nan')):8.0f}px"
+        f"   dark ratio {m.get('valley_dark_ratio', float('nan')) * 100:6.2f}%"
+        f"   p05 {m.get('valley_p05', float('nan')):5.3f}"
+    )
+    print(
+        f"    gap (in-glyph)   {m.get('gap_count', float('nan')):8.0f} gaps"
+        f"   median {m.get('gap_median', float('nan')):5.3f}"
+        f"   med-p10 {m.get('gap_median_p10', float('nan')):5.3f}"
+        f"   bright {m.get('gap_bright_ratio', float('nan')) * 100:6.2f}%"
+    )
 
 
 def synth_break(mask: np.ndarray) -> np.ndarray:
@@ -510,6 +522,120 @@ def selfproof(mask: np.ndarray, font_px: float, lines: list[tuple[int, int]]) ->
     return 2
 
 
+def dilate8(mask: np.ndarray) -> np.ndarray:
+    """8 邻域膨胀。**不绕回**——用 padding 切片，不用 `np.roll`
+    （roll 会把右边缘的像素卷到左边缘 ⇒ 凭空多出邻居）。"""
+    h, w = mask.shape
+    pad = np.zeros((h + 2, w + 2), dtype=bool)
+    pad[1:-1, 1:-1] = mask
+    out = np.zeros_like(mask)
+    for dy in (0, 1, 2):
+        for dx in (0, 1, 2):
+            out |= pad[dy : dy + h, dx : dx + w]
+    return out
+
+
+# 「明显暗于纸」的相对阈值。0.92 ⇒ 比纸暗 8% 以上就算「暗」。
+# ⚠ 这个数是**拍的**，但它只决定「算不算暗」，不决定方向：
+#   改它只会让三个指标同向平移，不会把「越大越糊」翻成相反。
+VALLEY_DARK = 0.92
+
+
+def valley_metrics(
+    lum: np.ndarray, mask: np.ndarray, paper_lum: float, font_px: float
+) -> dict[str, float]:
+    """**谷底亮度**——票 35 连否三个候选之后的第四个（2026-10-23）。
+
+    ## 为什么必须是灰度的量（它与前三个候选的根本差别）
+
+    前三个候选——`≤1px` 占比（宽度）、碎片率（连通性）、墨块实心度（疏密）——
+    **全都只量几何与拓扑**：它们看的是「墨被切成什么形状」，
+    看不见「笔画之间还留不留得下亮缝」。
+    票 35 的观察是：**墨本身各档都是全黑，变的是笔画之间还留不留得下亮缝。**
+    ⇒ 这一族量必须看**灰度**，这是前三个够不到的维度。
+
+    ## 两种取缝法，各量一遍（数据说话，不先押一种）
+
+    A) **紧邻墨的一圈**：8 邻域膨胀带里去掉墨本身 ⇒ 贴着笔画的缝。
+       ⚠ 字的**外轮廓**也在带里（那里永远是亮纸）⇒ 稀释。
+    B) **列方向的字内窄缝**：一列里相邻两段墨之间的空白，
+       只留**窄于 0.25em** 的（宽的是行距，不是字内缝）⇒ 更精准，
+       但只覆盖上下方向的缝。
+
+    ## 方向：越大 ⇒ 越糊（与碎片率同向，便于并排看）
+
+    ⚠⚠ **必须用纯色纸底**：纸纹的暗折痕比墨阈值还暗（票 24 的坑），
+    在谷底带里会被当成「暗的缝」⇒ 量到的是折痕，不是缝。
+    这是「量字的量要在干净底上量」那条纪律（票 24）的延伸。
+    """
+    if mask.size == 0:
+        return {}
+    thr = paper_lum * VALLEY_DARK
+
+    # ── A) 紧邻墨的一圈 ────────────────────────────────────────────
+    band = dilate8(mask) & ~mask
+    band_px = int(band.sum())
+    if band_px:
+        band_lum = lum[band]
+        valley_dark = float((band_lum < thr).mean())
+        valley_p05 = float(np.percentile(band_lum, 5)) / paper_lum
+    else:
+        valley_dark = float("nan")
+        valley_p05 = float("nan")
+
+    # ── B) 列方向的字内窄缝 ───────────────────────────────────────
+    w = mask.shape[1]
+    max_gap = max(2.0, font_px * 0.25) if font_px else 3.0
+    mins: list[float] = []
+    meds: list[float] = []
+    brights: list[float] = []
+    for x in range(w):
+        runs = runs_in_col(mask[:, x])
+        for (ya, _), (yb, _) in zip(runs, runs[1:]):
+            gap_w = yb - ya - 1
+            if gap_w <= 0 or gap_w > max_gap:
+                continue
+            seg = lum[ya + 1 : yb, x]
+            mins.append(float(seg.min()))
+            meds.append(float(np.median(seg)))
+            brights.append(float((seg >= thr).mean()))
+    if mins:
+        arr = np.array(mins)
+        med_arr = np.array(meds)
+        br_arr = np.array(brights)
+        gap_dark = float((arr < thr).mean())
+        gap_p10 = float(np.percentile(arr, 10)) / paper_lum
+        gap_min = float(arr.min()) / paper_lum
+        # ⚠⚠ **中位亮度才是「缝通不通」**（2026-10-23 实测踩到）：
+        # 取**最暗**像素测到的是**抗锯齿陡峭度**，不是可读性——
+        #   21px 的笔画间隙窄，AA 灰占比高 ⇒ min 更暗，
+        #   于是「读得出」那档反而显得更糊（方向反了）。
+        # 缝**中位**接近纸色 ⇒ 缝是通的；被填满 ⇒ 中位掉下来。
+        gap_median = float(np.median(med_arr)) / paper_lum
+        gap_median_p10 = float(np.percentile(med_arr, 10)) / paper_lum
+        gap_bright = float(br_arr.mean())
+    else:
+        gap_dark = float("nan")
+        gap_p10 = float("nan")
+        gap_min = float("nan")
+        gap_median = float("nan")
+        gap_median_p10 = float("nan")
+        gap_bright = float("nan")
+
+    return {
+        "valley_band_px": float(band_px),
+        "valley_dark_ratio": valley_dark,
+        "valley_p05": valley_p05,
+        "gap_count": float(len(mins)),
+        "gap_dark_ratio": gap_dark,
+        "gap_p10": gap_p10,
+        "gap_min": gap_min,
+        "gap_median": gap_median,
+        "gap_median_p10": gap_median_p10,
+        "gap_bright_ratio": gap_bright,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("png")
@@ -543,6 +669,9 @@ def main() -> int:
     heights = [y1 - y0 + 1 for y0, y1 in lines]
     font_px = args.font_px or float(np.median(heights))
     m = full_measure(body, font_px, heights)
+    # 谷底亮度要**灰度**——前三个候选拿不到这个维度（票 35，2026-10-23）。
+    # body 是 mask 的行子集 ⇒ 对应的 lum 是 crop 的同一段行。
+    m.update(valley_metrics(crop[lines[0][0] : lines[-1][1] + 1, :], body, paper_lum, font_px))
 
     print(f"== {args.png} ==")
     print(

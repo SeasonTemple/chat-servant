@@ -150,6 +150,55 @@
     return [300, 400, 500, 600, 700].includes(n) ? n : 600;
   });
 
+  /* ── E 段（票 35）的字号阶梯 ──
+   *
+   *  票 35 要的是**同一条正文在多个字号下的并排**（默认 21/17/14/12/11），
+   *  用来给「小字到底糊不糊」补一个**阳性对照**——
+   *  量具能给出数，但「读得出 / 明显糊」是人的判断，两边缺一不可。
+   *
+   *  ⚠ **每档单独一张 sheet**（票 24 的教训）：一个 sheet 混排多种字号，
+   *  行切分会把两种字号的墨并进同一个掩码 ⇒ 量出来的不是那个字号的东西。
+   *
+   *  ⚠ **字体可配，但「静默回落」是已知陷阱**（`app.css` 里记着）：
+   *  `?draft=lxgw` 在没装字体的机器上会静默回落成楷体，
+   *  图看着「只是字体没生效」，不比对就会误判成「这个字体效果不行」。
+   *  ⇒ 本段只负责把**想要的**字体写进去；
+   *  出图脚本必须**同时报出实际生效的字体**（`document.fonts.check`）。
+   */
+  const LADDER_SIZES = [21, 17, 14, 12, 11];
+
+  const LADDER_FONTS = {
+    fangsong: { name: '仿宋', stack: "FangSong, STFangsong, '仿宋', serif" },
+    song: { name: '宋体', stack: "SimSun, '宋体', serif" },
+    kai: { name: '楷体', stack: "KaiTi, STKaiti, '楷体', serif" },
+  };
+
+  const LADDER_VISIBLE = $derived.by(() => {
+    const v = page.url.searchParams.get('sizes');
+    if (v === null) return LADDER_SIZES;
+    const list = v
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n) && n >= 8 && n <= 48);
+    return list.length ? list : LADDER_SIZES;
+  });
+
+  const LADDER_FONT = $derived.by(() => {
+    const v = page.url.searchParams.get('font');
+    // ⚠ `searchParams.get` 的类型是 `string | null` ⇒ **null 不能当索引**
+    // （svelte-check 会报 `Type 'null' cannot be used as an index type`）。
+    if (v !== null && v in LADDER_FONTS) {
+      return LADDER_FONTS[v as keyof typeof LADDER_FONTS];
+    }
+    return LADDER_FONTS.fangsong;
+  });
+
+  const LADDER_WEIGHT = $derived.by(() => {
+    const v = page.url.searchParams.get('weight');
+    const n = v === null ? 400 : Number(v);
+    return [300, 400, 500, 600, 700].includes(n) ? n : 400;
+  });
+
   const TOUCH = [
     {
       id: 'P1',
@@ -272,7 +321,7 @@
     而那张表**看起来完全正常**。
     ⇒ 渲染时只有一个纸块，量具就不必猜。
   -->
-  {#if only !== 'small'}
+  {#if only !== 'small' && only !== 'ladder'}
     <figure class="slot">
       <figcaption>纸 · 1:1 · 380 × 560</figcaption>
       <div class="sheet" style="width:{SHEET_W}px;height:{SHEET_H}px"></div>
@@ -280,7 +329,7 @@
   {/if}
 
   <div class="rack">
-    {#if only !== 'b' && only !== 'type' && only !== 'small' && MARK_MODE === 'above'}
+    {#if only !== 'b' && only !== 'type' && only !== 'small' && only !== 'ladder' && MARK_MODE === 'above'}
       <h1>A · 轮廓对了，表面还不对</h1>
       <p class="lede">
         笔迹的<b>收放方向和横纵比</b>都已照照片校准（1.48 : 1），但看着仍不像铅笔。 差的是<b>表面</b
@@ -317,7 +366,7 @@
       {/each}
     {/if}
 
-    {#if only !== 'type' && only !== 'small'}
+    {#if only !== 'type' && only !== 'small' && only !== 'ladder'}
       <h1 class="gap">B · 圈还是勾</h1>
       <p class="lede">
         {#if MARK_MODE === 'overlay'}
@@ -440,6 +489,58 @@
                    background-position:0 0"
             >
               <div class="bodytype" style="font-size:{t.px}px">{BODY_SAMPLE}</div>
+            </div>
+          </div>
+          <div class="ruler" aria-hidden="true">
+            {#each RULER as i (i)}<i class:long={i % 5 === 0}></i>{/each}
+          </div>
+        </section>
+      {/each}
+    {/if}
+
+    {#if only === 'ladder'}
+      <!--
+      E 段 · 字号阶梯（票 35）。
+
+      问的是「同一条正文缩到多小还读得出」。票 35 连否三个判据
+      （≤1px 占比 / 碎片率 / 墨块实心度）——它们只量几何与拓扑，
+      而 17px 这个尺度上的可读性不由它们决定。
+
+      **每档单独一张 sheet**：混排会让行切分把两种字号的墨并进同一个掩码
+      （票 24 首轮就是这么作废的）。
+
+      样本是中性起草回复，**不含任何真实聊天内容**（演示页可能部署到公开 URL）。
+      -->
+      <h1 class="gap">E · 字号阶梯</h1>
+      <p class="lede">
+        同一条正文，按 <b>{LADDER_VISIBLE.join(' / ')}px</b> 排开，字体与字重锁死（
+        {LADDER_FONT.name} · {LADDER_WEIGHT}）。 看的不是「哪个好看」，是<b>哪一档还读得出</b>——
+        量具给数，<b>读不读得出要人看</b>。
+      </p>
+
+      {#each LADDER_VISIBLE as px (px)}
+        <section class="cand">
+          <header>
+            <b>{px}px</b>
+            <span class="cname"
+              >{LADDER_FONT.name} · 316px 栏 · 行高 1.5 · 字重 {LADDER_WEIGHT}</span
+            >
+            <span class="claim">量具：谷底亮度 / 碎片率 / 细笔画墨块</span>
+          </header>
+          <div class="crop" data-ladder style="width:{SHEET_W}px">
+            <div
+              class="band grow"
+              style="background:{PAPER_CSS};
+                   background-size:{SHEET_W}px {SHEET_H}px;
+                   background-position:0 0"
+            >
+              <div
+                class="bodytype"
+                style="font-size:{px}px;font-weight:{LADDER_WEIGHT}"
+                style:font-family={LADDER_FONT.stack}
+              >
+                {BODY_SAMPLE}
+              </div>
             </div>
           </div>
           <div class="ruler" aria-hidden="true">
