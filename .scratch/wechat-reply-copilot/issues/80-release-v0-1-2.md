@@ -3,7 +3,7 @@
 **What to build:** 把 v0.1.1 之后累计的修复发成 v0.1.2——版本号四处对齐、
 双语发布说明、tag 推送、Release 产出 msi + nsis。
 
-**Status:** 进行中 · **2026-10-22 开始**
+**Status:** done · **2026-10-22 真发 v0.1.2：run `39737470359` success，msi + nsis 两个资产落地**
 
 ## 为什么要发这一版
 
@@ -29,13 +29,28 @@ v0.1.1 是 2026-10-20 发的。之后主线累计 20 个提交，其中**两处�
 
 ## 发出去之后要验的
 
-- [ ] tag `v0.1.2` 推送 ⇒ Release workflow 绿
-- [ ] **Releases 页上出现 v0.1.2**，资产是**两个**：msi + nsis
-- [ ] 资产名里的版本是 **0.1.2**（`chat-servant_0.1.2_x64-setup.exe` /
-      `chat-servant_0.1.2_x64_en-US.msi`）
-      ⇒ ⚠ 这条不是形式主义：tag 与 `tauri.conf.json` 对不上时，
+- [x] tag `v0.1.2` 推送 ⇒ Release workflow 绿
+      → run `39737470359` conclusion=success
+- [x] **Releases 页上出现 v0.1.2**，资产是**两个**：msi + nsis
+      → `chat-servant_0.1.2_x64-setup.exe`（38.4 MB）+
+      `chat-servant_0.1.2_x64_en-US.msi`（45.2 MB）
+- [x] 资产名里的版本是 **0.1.2**
+      → ⚠ 这条不是形式主义：tag 与 `tauri.conf.json` 对不上时，
       发出去的是「标题 v0.1.2、附件叫 0.1.1」的错标 release，
       而**没有任何一步会报错**（release.yml 的「Report publish gate」就是拦这个的）
+      → 实测该步 **completed success**（tag v0.1.2 ↔ version 0.1.2）
+
+### 发版链路这一步真跑通了（值得记一笔）
+
+- `verify` job（mojibake → 取权重 → 造语料 → fmt+clippy+test）**绿**
+- `Build installers` job：取权重 → 打包 → **核对装包内有权重** → 发布
+  - `Report publish gate` success
+  - `Verify weights before bundling` success
+  - `Build msi + nsis` success
+  - `Verify weights landed in the bundle` success
+  - `Publish | GitHub Release` success
+    ⇒ **这一步正是票 79 改幂等的那一步**（之前 tag 重推会在这里撞名失败）
+- ⇒ 发布页：https://github.com/SeasonTemple/chat-servant/releases/tag/v0.1.2
 
 ## ⚠ 连带决定：v0.1.0 **不补发**
 
