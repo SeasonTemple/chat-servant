@@ -342,3 +342,38 @@ commit `9cf53f9`），**「闸门是否存在」这一层仍然没人守**。
   → `git reflog expire --expire=now --all` → `git gc --prune=now`。
   ⚠ **只 fetch+reset 是不够的**：旧对象会变成不可达但**仍在 `.git` 里**；
   ⚠ **只 gc 不 expire 也等于没做**：reflog 仍把旧提交算作可达。
+
+  → ✅ **2026-10-22 复核：这条已经落地，不存在了**。
+  实测 `E:\devSpace` **整个目录都不在盘上**（不只是那个子目录），
+  ⇒ 不存在「还持有旧历史的本机拷贝」⇒ **本机侧只剩本仓这一份**，
+  而本仓已按上面四步清过（旧 sha `b58dd1e` 已 `not a valid object name`，
+  `git fsck --unreachable` **0 行**）。
+  ⇒ **本票现在只剩一条尾巴：GitHub Support 工单。**
+
+  ⚠⚠ **本轮自己踩了一次「刚做完就把它弄回来」**（2026-10-22）：
+  为防丢东西，本机同步远程时建了个备份分支指向**重写前**的提交
+  ⇒ 那条分支让旧历史**重新可达**了
+  ⇒ 与本票记的「标签也是 ref」是同一个道理：**ref 不止分支**，
+  备份分支、stash、worktree 一样会把旧历史挂回来。
+  ⇒ 已删该分支 + `reflog expire --expire=now --all` + `gc --prune=now`，
+  复查旧 sha 不再是对象、`fsck --unreachable` 0 行。
+  ⚠ **教训**：做历史清理时，**任何新 ref 都要当成泄漏面**看待。
+
+## ⚠ 剩下那一条尾巴：给 GitHub Support 的工单要点（可直接粘贴）
+
+GitHub 官方流程是「重写历史 + force push + 联系 Support 清缓存」。
+前两步已做完，**第三步只能由仓库主人本人提交**（Support 工单不是 issue，
+本仓 `gh issue list` 为空 ⇒ 说明还没提）。
+
+要点（提交时照抄即可）：
+
+- 仓库：`SeasonTemple/chat-servant`
+- 事项：**移除敏感数据 / 清除旧提交缓存视图**
+- 已自行完成：全部历史已用 `git filter-repo` 重写并 force-push
+  （`main` 与 `v0.1.0` / `v0.1.1` 两个标签都已重指到重写后的提交）
+- 请协助清除的残留：
+  ① 旧 commit 页 / 分享链接（示例旧 sha：`9113d2a8`）
+  ② 代码搜索索引里的旧版本
+  ③ 服务器侧仍可取到的不可达旧对象
+    （示例：`gh api repos/SeasonTemple/chat-servant/contents/crates/capture/src/ocr.rs?ref=9113d2a8`
+    目前仍返回 200，且内容与 HEAD 不同）
