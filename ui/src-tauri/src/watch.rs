@@ -1622,9 +1622,13 @@ fn step(
                 // 顺序很重要：`blind` 只存在于 `DraftSet` 上，
                 //   存进 `s.candidates` 之后就拿不到了（面板契约里没有这个字段）。
                 let draft_is_blind = t.draft.blind;
+                // ⚠ 走**展示顺序**（2026-10-23）：第一行 = 模型明确挑的那条
+                //   = `recommended()` = **Auto 档会发出去的那条**。
+                //   原来这里走 `sorted()`（按 probability 重排）⇒ 把第三段
+                //   挑好的顺序又冲掉了 ⇒ 那一整段模型调用等于白花。
                 s.candidates = t
                     .draft
-                    .sorted()
+                    .display_order()
                     .into_iter()
                     .enumerate()
                     .map(|(i, c)| DraftCandidate {

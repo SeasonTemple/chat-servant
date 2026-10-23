@@ -834,9 +834,21 @@ const SYS_DRAFT: &str = "\
 不要解释。像真人发消息那样短。输出 JSON：{\"candidates\":[{\"text\":\"...\",\"probability\":0到1}]}
 给 1 到 3 条，语气各不相同，probability 是你认为用户会选哪条。";
 
+/// 排序那步的 system prompt。
+///
+/// ## ⚠ 2026-10-23 改：**按编号排，不按原文排**
+///
+/// 原来让它回**候选原文**，再逐字回查。⇒ 真机 22:26 实战：
+/// 模型给三条都**改了字**（加引号/句号）⇒ 逐字回查三条全对不上
+/// ⇒ 排序**整个失效**（退化成起草的顺序）⇒ 那 4.3 秒**白花**
+/// （一轮推理 12.2 秒里的最大一块）。
+///
+/// ⇒ 现在让它回**编号**（1 起），编号就是下面 user 提示里列给它的那些。
+/// ⇒ 不依赖模型「听话地照抄」——**这是判据，不是请求**。
 const SYS_RANK: &str = "\
-你在给候选排序。只输出 JSON：{\"order\":[\"候选原文\",\"...\"]}
-按「用户最可能选它」从高到低排。原样复制候选文本，不要改写。";
+你在给候选**挑一条**。只输出 JSON：{\"best\":2}
+指出**用户最可能选哪一条**——只给**一个编号**（从 1 开始），不要给完整排列。
+编号见下面列出的候选。";
 
 /// 「走不走代理」的共享句柄。**网络层的属性，不是任何一家供应商的属性。**
 ///
@@ -1367,64 +1379,73 @@ impl Reasoner for HttpReasoner {
         _ctx: &TurnContext,
         draft: &DraftSet,
     ) -> Result<Vec<Candidate>, ReasonError> {
+        // 候选**带编号**列出（1 起）——模型回的就是这些编号。
         let mut lines = String::new();
-        for c in &draft.candidates {
-            lines.push_str(&c.text);
-            lines.push('\n');
+        for (i, c) in draft.candidates.iter().enumerate() {
+            lines.push_str(&format!("{}. {}\n", i + 1, c.text));
         }
         let v = self
             .ask_json(SYS_RANK, &lines, Stage::Rank, &[])
             .map_err(|e| ReasonError::Rank(redact(&e)))?;
-        let Some(order) = v.get("order").and_then(|o| o.as_array()) else {
-            return Err(ReasonError::Rank("响应里没有 order 数组".into()));
-        };
-        // 按 order 里的原文回查候选。
+        // ⚠ **只认一个编号**（2026-10-23 改）。
         //
-        // ⚠ 2026-10-23 改（真机 14:26 实测）：**回查失败的候选不许消失**。
+        // ## 为什么从「完整排列」改成「一条」
+        //
+        // 我们真正需要的只有**第一条是谁**（面板第一行 = 推荐 = Auto 档发的
+        // 那条）⇒ 完整排列里的其余信息**没人用**，而它更容易错：
+        // 真机 22:26 实测：模型把三条原文**都改了字** ⇒ 逐字回查三条全对不上
+        // ⇒ 整段作废 ⇒ 那 4.3 秒白花（一轮推理 12.2 秒里的最大一块）。
+        //
+        // ⇒ 现在只要**一个编号**：模型答错的可能性小得多，输出也更短。
+        //
+        // ⚠ 编号认不出（不是数字 / 越界 / 压根没这个键）⇒ 判第三段失败
+        // ⇒ 由上层降级成「按概率排」⇒ **候选一条都不少**（票 86 的不变量）。
+        let best = v.get("best").and_then(|b| {
+            b.as_u64()
+                .or_else(|| b.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        });
+        let Some(best) = best else {
+            return Err(ReasonError::Rank("响应里没有可用的编号".into()));
+        };
+        let Some(pick) = usize::try_from(best)
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .filter(|i| *i < draft.candidates.len())
+        else {
+            tracing::warn!("第三段给的编号 {best} 超出候选范围");
+            return Err(ReasonError::Rank("第三段给的编号超出候选范围".into()));
+        };
+        // 组装**展示顺序**：挑中的那条第一，其余按 probability 降序。
+        //
+        // ⚠ 2026-10-23 改（真机 22:26 实测）：**第三段不许让候选变少**。
         //
         // ## 旧写法错在哪
         //
-        // 旧写法把「order 里逐字对不上的项」直接丢掉，而
-        // [`crate::seam::turn`] 又用这份 ranked **整个替换** `draft.candidates`
-        // ⇒ 起草 3 条、模型回的三条里**没有一条与原文逐字相同**
-        // （它给引文加了引号/句号）⇒ ranked 只剩 1 条 ⇒
-        // **面板上只剩 1 个回复选项**（日志里三条
-        // 「排序里出现了不在候选中的文本，已丢弃」）。
+        // 旧写法把「对不上的项」直接丢掉，而 [`crate::seam::turn`] 又用这份
+        // ranked **整个替换** `draft.candidates`
+        // ⇒ 起草 3 条、模型回的三条里**没有一条对得上**
+        // ⇒ ranked 只剩 1 条 ⇒ **面板上只剩 1 个回复选项**。
         //
-        // ⇒ 「模型改写了原文」这件事，**代价不该由用户付**：
+        // ⇒ 「模型没按要求回」这件事，**代价不该由用户付**：
         // 起草是白花的，用户的可选回复也少了。
         //
         // ## 现在的口径
         //
-        // · order 里**逐字对得上**的 → 按 order 排；
-        // · order 里**对不上**的（模型改写了原文）→ 记一条 warn，
-        //   **不造新候选**（这条规矩不变：不能凭空造一条出来）；
-        // · **order 根本没提到的候选** → 原样补在后面（顺序按起草时的）。
+        // · 挑中的那条 → **第一**；
+        // · 其余 → 按 probability 降序（稳定：概率相同保持原顺序）。
         //
-        // ⇒ 候选数**恒等于**起草给的数；排序最多只能改顺序，不能改条数。
-        let mut used = vec![false; draft.candidates.len()];
-        let mut out: Vec<Candidate> = Vec::new();
-        for want in order.iter().filter_map(|x| x.as_str()) {
-            let hit = draft
-                .candidates
-                .iter()
-                .enumerate()
-                .find(|(i, c)| !used[*i] && c.text.trim() == want.trim());
-            match hit {
-                Some((i, c)) => {
-                    used[i] = true;
-                    out.push(c.clone());
-                }
-                None => tracing::warn!(
-                    "排序里的文本与候选逐字不同（模型改写了原文）——这一项已丢弃，原候选仍保留在后面"
-                ),
-            }
-        }
-        // order 没提到的候选**不许消失**：原样补在后面。
-        for (i, c) in draft.candidates.iter().enumerate() {
-            if !used[i] {
-                out.push(c.clone());
-            }
+        // ⇒ 候选数**恒等于**起草给的数；第三段最多只能改顺序，不能改条数。
+        let mut rest: Vec<usize> = (0..draft.candidates.len()).filter(|i| *i != pick).collect();
+        rest.sort_by(|a, b| {
+            draft.candidates[*b]
+                .probability
+                .partial_cmp(&draft.candidates[*a].probability)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut out: Vec<Candidate> = Vec::with_capacity(draft.candidates.len());
+        out.push(draft.candidates[pick].clone());
+        for i in rest {
+            out.push(draft.candidates[i].clone());
         }
         Ok(out)
     }
@@ -2116,27 +2137,25 @@ mod tests {
         );
     }
 
-    /// **排序那步把原文改写了，候选一条都不能少**（2026-10-23 真机 14:26）。
+    /// **第三段挑的那条，要真的排到第一**（2026-10-23）。
     ///
-    /// ## 真机形态
+    /// ## 为什么这条守卫存在
     ///
-    /// 起草给了 2 条，模型回的 order 里**一条逐字相同、一条被加了引号**
-    /// ⇒ 旧写法把 ranked 变成 1 条，而 `turn()` 又用它**整个替换**
-    /// `draft.candidates` ⇒ **面板上只剩 1 个回复选项**。
+    /// 第三段（挑一条）的结果**以前到不了面板**：
+    /// 面板走 `DraftSet::sorted()`——**按 probability 重排**⇒ 把第三段
+    /// 挑好的顺序又冲掉了 ⇒ 那 4.3 秒等于白花。
     ///
-    /// ⇒ 现在：逐字对不上的**项**丢弃，但**候选本身必须留下**（排在后面）。
-    /// 守卫断言两件事：条数不变、且**逐字对得上的那条仍排在第一**
-    /// （否则「保住条数」会退化成「顺序也不要了」）。
+    /// ⇒ 现在展示顺序即向量顺序，守卫断言：
+    /// **挑第 2 条 ⇒ 面板第一行就是第 2 条**（`draft_json` 的第 2 条是
+    /// 「我看看时间」，概率 0.3——**比第 1 条低** ⇒ 这才证明第一行来自
+    /// 第三段、不是概率）。
     #[test]
-    fn a_rank_that_rewrites_the_text_keeps_every_candidate() {
+    fn the_picked_candidate_becomes_the_first_one_on_the_panel() {
         let up = upstream(vec![
             Reply(200, openai_reply(judge_json())),
             Reply(200, openai_reply(draft_json())),
-            // order 里第一条**逐字相同**、第二条**被改了字**
-            Reply(
-                200,
-                openai_reply(r#"{"order":["今晚八点可以","「我看看时间」"]}"#),
-            ),
+            // 挑**第 2 条**（概率更低的那条）⇒ 第一行必须换人
+            Reply(200, openai_reply(r#"{"best":2}"#)),
         ]);
         let route = Route::custom(Protocol::OpenAiCompatible, up.base_url()).expect("合法");
         let cell = ModelCell::new(route);
@@ -2148,18 +2167,40 @@ mod tests {
         let ctx = TurnContext::text(vec!["今晚有空吗".into()], "小号".into());
         let t = crate::turn(&mut r, &ctx).expect("推理成功");
         assert_eq!(
-            t.draft.candidates.len(),
-            2,
-            "排序改了字也不能让候选变少：{:?}",
+            t.recommended().map(|c| c.text.as_str()),
+            Some("我看看时间"),
+            "第三段挑的那条必须排第一：{:?}",
             t.draft.candidates
         );
+        assert_eq!(t.draft.candidates.len(), 2, "候选一条都不能少");
+    }
+
+    /// **第三段答非所问（回原文而不是编号）时，候选一条都不能少**。
+    ///
+    /// 真机 22:26 的形态：模型回了**改写过的原文**⇒ 认不出编号
+    /// ⇒ 第三段判失败 ⇒ 上层降级成「按概率排」⇒ 候选照常、条数不变。
+    #[test]
+    fn a_third_stage_that_answers_with_text_keeps_every_candidate() {
+        let up = upstream(vec![
+            Reply(200, openai_reply(judge_json())),
+            Reply(200, openai_reply(draft_json())),
+            // 回的是**原文**（不是编号）⇒ 认不出 ⇒ 降级
+            Reply(200, openai_reply(r#"{"best":"今晚八点可以"}"#)),
+        ]);
+        let route = Route::custom(Protocol::OpenAiCompatible, up.base_url()).expect("合法");
+        let cell = ModelCell::new(route);
+        cell.set("MiniMax-M3.1-Flash")
+            .expect("自定义端点不挑模型名");
+        let mut r =
+            HttpReasoner::with_config(cell, KEY.into(), ProxyCell::new()).expect("起运行时");
+
+        let ctx = TurnContext::text(vec!["今晚有空吗".into()], "小号".into());
+        let t = crate::turn(&mut r, &ctx).expect("推理成功");
+        assert_eq!(t.draft.candidates.len(), 2, "候选一条都不能少");
         assert_eq!(
-            t.draft.candidates[0].text, "今晚八点可以",
-            "逐字对得上的那条仍应排在第一"
-        );
-        assert_eq!(
-            t.draft.candidates[1].text, "我看看时间",
-            "对不上的那条**原文**要留下（不能用模型改写后的字）"
+            t.recommended().map(|c| c.text.as_str()),
+            Some("今晚八点可以"),
+            "降级时第一行 = 概率最高的那条（今天的行为）"
         );
     }
 

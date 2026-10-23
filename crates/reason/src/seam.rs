@@ -44,7 +44,7 @@ impl Turn {
                 self.intent.summary(),
                 self.draft.candidates.len(),
                 self.draft
-                    .sorted()
+                    .display_order()
                     .first()
                     .map(|c| c.probability)
                     .unwrap_or(0.0)
@@ -58,13 +58,13 @@ impl Turn {
         }
     }
 
-    /// 推荐条：排序后第一条，也就是用户最可能选的那一条。
+    /// 推荐条：**展示顺序的第一条**，也就是用户最可能选的那一条。
     ///
-    /// 走 [`DraftSet::recommended`]——排序失败降级成按概率排时，
-    /// 「第一条」的含义不变：它仍然是概率最高的那条，不是生成顺序的第一条。
+    /// 走 [`DraftSet::recommended`]——第三段成功时它是**模型明确挑的那条**，
+    /// 第三段失败降级成按概率排时它是概率最高的那条。
     /// `None` 只在一条候选都没有时出现，而 [`turn`] 保证不会这样返回。
     pub fn recommended(&self) -> Option<&Candidate> {
-        self.draft.sorted().first().copied()
+        self.draft.display_order().first().copied()
     }
 
     /// 候选条数。

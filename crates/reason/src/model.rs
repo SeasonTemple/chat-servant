@@ -75,27 +75,41 @@ pub struct DraftSet {
 }
 
 impl DraftSet {
-    /// 按胜出概率降序，**推荐条在第一条**。
+    /// 按**展示顺序**返回候选。**不再按 probability 重排。**
     ///
-    /// 稳定排序：概率相同时保持原顺序——不然每次渲染推荐条都可能换人，
-    /// 用户按下去才发现不是刚才看的那条。
-    pub fn sorted(&self) -> Vec<&Candidate> {
-        let mut v: Vec<&Candidate> = self.candidates.iter().collect();
-        v.sort_by(|a, b| {
-            b.probability
-                .partial_cmp(&a.probability)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        v
+    /// ## ⚠ 2026-10-23 改：这里原来按 probability 降序排
+    ///
+    /// 那样排有个致命后果：**第三段（挑选/旧称「排序」）的结果被丢掉了**——
+    /// 它把候选重排好塞回 `candidates`，而这里又按 probability 重排一遍
+    /// ⇒ 模型明确挑的那条**未必排第一** ⇒ 那一整段模型调用（约 4 秒）
+    /// **等于白花**（真机 22:26 实测：面板的第一条并不是模型挑的那条）。
+    ///
+    /// ## 现在的顺序由谁定
+    ///
+    /// · 第三段成功 ⇒ **它挑的那条排第一**，其余按 probability 降序
+    ///   （由 [`crate::seam::turn`] 排好）；
+    /// · 第三段失败/降级 ⇒ 全部按 probability 降序（同上）。
+    ///
+    /// ⇒ 「展示的第一条」= **用户最可能选的那条** = `recommended()`
+    /// = **Auto 档会发出去的那条** ⇒ 三者终于一致。
+    ///
+    /// ⚠ 顺序**不会在两次渲染之间变**：候选向量在一轮推理内不变，
+    /// 而「每次渲染都按 probability 重排」原本是为了稳定——现在稳定性
+    /// 由「一轮只排一次」保证。
+    pub fn display_order(&self) -> Vec<&Candidate> {
+        self.candidates.iter().collect()
     }
 
-    /// 推荐条：概率最高的那一条。
+    /// 推荐条：**展示顺序的第一条**。
+    ///
+    /// ⚠ 2026-10-23：原来它是「概率最高的那条」——而展示顺序由第三段决定
+    /// ⇒ 现在它就是**模型明确挑的那条**（第三段失败时 = 概率最高的那条）。
     ///
     /// 返回 `None` 只意味着**一条候选都没有**——正常推理路径上
     /// [`crate::seam::turn`] 已经把空集拦成 [`ReasonError::EmptyDraft`]，
     /// 所以拿到 `None` 说明这个 `DraftSet` 是调用方自己拼的，它得自己兜住。
     pub fn recommended(&self) -> Option<&Candidate> {
-        self.sorted().first().copied()
+        self.display_order().first().copied()
     }
 }
 
