@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **84** ｜ 验收项全勾 **69** ｜ 已收但留有说明项 **13** ｜ 未收 **2**
+票据总数 **85** ｜ 验收项全勾 **69** ｜ 已收但留有说明项 **13** ｜ 未收 **3**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -24,6 +24,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 |---|---|---|---|
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
+| `85-one-turn-is-three-serial-model-calls.md` | 4/5 | open（2026-10-23 量化完毕 + 把耗时变成可见的；**取舍待仓库主人拍板**） | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 

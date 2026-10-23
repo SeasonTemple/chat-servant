@@ -1191,10 +1191,25 @@ impl HttpReasoner {
         }
         let opts = route.protocol().chat_options();
         // **这里就是 async → sync 那道桥。** 对外（`Reasoner`）仍然是同步的。
-        let resp = self
-            .rt
-            .block_on(client.exec_chat(model, req, Some(&opts)))
-            .map_err(|e| brief(&e))?;
+        let t0 = std::time::Instant::now();
+        let res = self.rt.block_on(client.exec_chat(model, req, Some(&opts)));
+        let ms = t0.elapsed().as_millis();
+        // ⚠ **每次调用都记耗时**（2026-10-23 加）。
+        //
+        // 一轮推理是**三次串行调用**（判断 → 起草 → 排序），
+        // 而面板上「正在起草」那二十几秒是**一个数** ⇒ 不分段就永远
+        // 说不清「时间花在哪」。
+        //
+        // ⚠ 只打**阶段名 + 毫秒数**，不带任何请求/响应正文
+        // （请求体里有用户的聊天内容）。
+        tracing::info!(
+            target: "chatservant_reason::transport",
+            stage = ?stage,
+            ms,
+            ok = res.is_ok(),
+            "模型调用完成"
+        );
+        let resp = res.map_err(|e| brief(&e))?;
         let text = resp.first_text().map(str::to_string).ok_or_else(|| {
             // 上游契约变了。**只说结构不认识**，不带任何请求/响应正文——
             // 请求体里有用户的聊天内容，而 genai 的错误里**带着整个请求体**。
