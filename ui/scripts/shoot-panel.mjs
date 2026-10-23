@@ -86,6 +86,23 @@ const facts = await page.evaluate(() => {
   const name = box('.cs-pick-name');
   const quote = box('.cs-where-quote');
   const draft = box('.cs-draft-text');
+  // ⚠ **溢出量**：静默裁掉的东西只能在这里看见——
+  //   `clientHeight` 是看得见的高度，`scrollHeight` 是内容真正要的高度。
+  //   两者不等 ⇒ **有内容被裁掉了**（`.cs-sheet` 的 overflow: hidden 会让它无声消失）。
+  const over = (sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return null;
+    const cs = getComputedStyle(el);
+    const lh = parseFloat(cs.lineHeight) || 0;
+    return {
+      client: el.clientHeight,
+      scroll: el.scrollHeight,
+      overflow: el.scrollHeight - el.clientHeight,
+      lineHeight: lh,
+      lines: lh > 0 ? Math.round((el.scrollHeight / lh) * 10) / 10 : null,
+      visibleLines: lh > 0 ? Math.round((el.clientHeight / lh) * 10) / 10 : null,
+    };
+  };
   return {
     sheet: sr ? { w: Math.round(sr.width), h: Math.round(sr.height) } : null,
     where,
@@ -94,6 +111,8 @@ const facts = await page.evaluate(() => {
     draft,
     actions,
     pick,
+    draftOverflow: over('.cs-draft-text'),
+    actionsOverflow: over('.cs-actions'),
     // 档位行到纸底的余白（撕口那一侧的净空）
     pickToSheetBottom: pick && sr ? Math.round((sr.bottom - pick.bottom) * 10) / 10 : null,
     // 候选区离档位行顶的净空
@@ -134,6 +153,15 @@ console.log(`候选行高 ${JSON.stringify(facts.actRows)}`);
 console.log(
   `草稿正文 .cs-draft-text  h=${facts.draft?.h}  font=${facts.draft?.fontSize}  ` +
     `底=${facts.draft?.bottom}`,
+);
+console.log(
+  `  溢出 client=${facts.draftOverflow?.client} scroll=${facts.draftOverflow?.scroll} ` +
+    `⇒ 裁掉 ${facts.draftOverflow?.overflow}px（可见 ${facts.draftOverflow?.visibleLines} 行 / ` +
+    `共 ${facts.draftOverflow?.lines} 行）`,
+);
+console.log(
+  `  候选区溢出 client=${facts.actionsOverflow?.client} scroll=${facts.actionsOverflow?.scroll} ` +
+    `⇒ 折叠 ${facts.actionsOverflow?.overflow}px`,
 );
 
 await browser.close();

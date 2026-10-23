@@ -80,7 +80,7 @@ Rust 核心 + Tauri 2 外壳 + Svelte 5 前端，先打通微信单聊。
 - `xtask` — 开发者探针（thread-probe、e2e）
 - `ui/` — SvelteKit 5 前端
 - `ui/src-tauri/` — Tauri 2 外壳：命令层、托盘、观察循环
-- `ui/static/demo/*.json` — 八态演示夹具，`?demo=1&state=<名字>`
+- `ui/static/demo/*.json` — 演示夹具，`?demo=1&state=<名字>`（⚠ 不止「八态」：还有 `many`（候选太多）与 `longdraft`（草稿太长）两个**排版复核夹具**）
 - `.agents/skills/` — 技能库，68 个，**实际只有 6 个可用**（见「Skill 库」一节）
 - `.github/` — CI（与 `gate.ps1` 的**步的集合**对齐；⚠ 别数「几步」，见下）、release（tag 驱动，出 msi+nsis）
 - `.githooks/` — commit-msg 校验 Conventional Commits、pre-commit 凭据闸

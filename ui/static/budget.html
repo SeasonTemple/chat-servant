@@ -78,6 +78,14 @@
         //     而目测只敢信「东西不见了」，不敢信「差多少」。
         //   ⇒ 必须进量具，`tier.bottom` vs `sheet.bottom` 才有数。
         { key: 'many', url: '/panel/?demo=1&state=many' },
+        // 2026-10-23 加（票 88）：**长草稿**那一态。
+        //   ⚠ `many` 是「候选太多」，这一态是「**草稿太长**」——两者挤掉的是不同的东西：
+        //   `many` 挤掉的是**备选**（档位行没事），这一态挤掉的是**档位行**
+        //   （草稿是 flex 项且默认 `min-height: auto` ⇒ 它不肯比自己内容更矮
+        //     ⇒ 顶出纸外 ⇒ `.cs-sheet` 的 overflow hidden 把它**静默裁掉**）。
+        //   ⇒ 档位行是「我现在在哪一档」的唯一显示，而 Auto 档不可逆
+        //   ⇒ 那是最不能被裁掉的一行。
+        { key: 'longdraft', url: '/panel/?demo=1&state=longdraft' },
       ];
 
       // ⚠ `measure()` 是同步的，而纸的栅格化是异步的 ⇒ 先量一次、全状态共用。

@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **87** ｜ 验收项全勾 **71** ｜ 已收但留有说明项 **13** ｜ 未收 **3**
+票据总数 **88** ｜ 验收项全勾 **71** ｜ 已收但留有说明项 **14** ｜ 未收 **3**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -43,6 +43,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `53-dev-ps1-run-returns-output-and-exit-code.md` | 7/8 | done · 2026-10-18。根因与实测证据见下；四个动词已改，绿红两档都自证过。 |
 | `81-dependency-vulnerabilities-go-node.md` | 9/11 | 部分完成 · **2026-10-22 仓库侧已修完并验过；剩 4 条要仓库主人拍板或动手** |
 | `85-one-turn-is-three-serial-model-calls.md` | 4/5 | done（2026-10-23 量化 → **取舍已定并落地**：第三段改成「**挑一条**」， |
+| `88-long-draft-pushed-the-tier-row-off-the-paper.md` | 6/7 | done（2026-10-23 用户报出 → 定位 → 修法 → 量具加一档 → 反向自证通过） |
 
 ## 三、已收（验收项全勾）
 
