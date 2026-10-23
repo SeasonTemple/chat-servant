@@ -179,13 +179,25 @@ pub fn merge_into_stream(prev: &[Message], new: &[Message]) -> Vec<Message> {
 ///
 /// ⇒ 判据不能是「在第几行」，只能是「**这条消息之前有没有出现过**」。
 ///
-/// ## 判据
+/// ## 判据：**身份计数**（多重集），不是集合，也不是窗口
 ///
 /// 消息身份 = **说话人 + 正文**（与 `message_id` 同一口径）。
-/// 已在 `known` 里出现过的 ⇒ 不是新的。
+/// `seen` 里有几条这个身份，本轮就抵掉几条；抵不动的那几条 ⇒ 新的。
 ///
-/// ⚠ **只比最近 [`DEDUP_TAIL`] 条**：同样的内容隔很久再说一次是合法对话，
-/// 全量比对会把真消息吃掉（与 [`merge_into_stream`] 同一取舍）。
+/// ### 为什么用**计数**而不是「在不在集合里」
+///
+/// 对方把同一句又说一遍（「在吗」…「在吗」）是合法对话。
+/// 用集合判 ⇒ 第二句被当成「已经见过」⇒ **不回复**。
+/// 用计数判 ⇒ 第一句抵掉、第二句抵不动 ⇒ **第二句算新的** ✔
+///
+/// ### 为什么**不用窗口**（`DEDUP_TAIL` 那套）
+///
+/// 窗口比的是「最近几条」，可**用户往上翻历史**时，画面里全是**更早**的消息
+/// ——它们落在窗口之外 ⇒ 被当成新的 ⇒ **对旧内容触发一次推理**
+/// （Auto 档下还可能误发）。
+///
+/// ⚠ 计数法也有边界：`seen` 只留最近若干条 ⇒ **比那更早**的旧消息滚出来时
+/// 身份已不在账本里 ⇒ 仍可能被当成新的。这是已知残留（票 06 的 `Novelty`）。
 ///
 /// ## 为什么不用「位置」判
 ///
@@ -197,16 +209,20 @@ pub fn merge_into_stream(prev: &[Message], new: &[Message]) -> Vec<Message> {
 /// `merge_into_stream` 管的是**面板显示哪一份**（累积 + 去重）；
 /// 本函数管的是「**哪几条是刚到的**」（驱动推理）。
 /// 两者都要：前者防重复显示，后者防**对旧消息重复推理**。
-pub fn novel_messages(known: &[Message], current: &[Message]) -> Vec<Message> {
+pub fn novel_messages(seen: &[Message], current: &[Message]) -> Vec<Message> {
+    // 「已经处理过」的身份**计数**（不是集合）。
+    let mut left: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for m in seen {
+        *left.entry(message_id(m.speaker, &m.text)).or_insert(0) += 1;
+    }
     let mut out = Vec::new();
     for m in current {
-        let dup = known
-            .iter()
-            .rev()
-            .take(DEDUP_TAIL)
-            .any(|p| p.speaker == m.speaker && p.text == m.text);
-        if !dup {
-            out.push(m.clone());
+        let key = message_id(m.speaker, &m.text);
+        match left.get_mut(&key) {
+            // 抵掉一个 ⇒ 这条是**处理过的**旧消息。
+            Some(c) if *c > 0 => *c -= 1,
+            // 抵不动 ⇒ 没处理过 ⇒ 新的。
+            _ => out.push(m.clone()),
         }
     }
     out

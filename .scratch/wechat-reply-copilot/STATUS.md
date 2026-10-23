@@ -114,4 +114,4 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `79-release-create-is-not-idempotent.md` | 4/4 |
 | `80-release-v0-1-2.md` | 7/7 |
 | `82-switch-back-triggers-a-duplicate-inference.md` | 8/8 |
-| `83-bottom-anchored-new-message-never-read.md` | 10/10 |
+| `83-bottom-anchored-new-message-never-read.md` | 12/12 |

@@ -245,6 +245,21 @@ Move-Item target\probe\_t.png target\probe\fixture-swap.png -Force
 否则旧机制下 ROI 不收窄 ⇒ **守卫假绿**。
 ——「守卫量的是谁」：量**事实来源**，不是量常量。
 
+⚠ **改文件时行尾不能变**（2026-10-23 踩到，一口气咬了三次）：
+仓库 `.gitattributes` 是 `eol=lf`。⚠ **PowerShell 的 `WriteAllLines` 按 Windows 默认
+写 CRLF** ⇒ 整个文件被转成 CRLF ⇒
+① `git diff` 冒出一堆无关改动；
+② **按 `"\n}\n"` 切窗的源码守卫切不准**（CRLF 下没有这个子串）
+⇒ 窗口吞掉整个生产段 ⇒ 把**注释里**的字也算进去 ⇒ **假红**
+（本轮就看到 `the_watch_layer_does_not_hand_roll_the_ocr_recipe` 变红，
+而它守的东西根本没被改）。
+⇒ 用 `WriteAllText`（保留原内容）或写完**显式转回 LF**；
+改完用 `git ls-files --eol <file>` 核一遍。
+
+⚠ **失败原因要进日志**：原来只有界面上的 `Phase::Failed` 带原因，
+日志里只有一句 `phase=failed` ⇒ **线上看不到「为什么失败」** ⇒ 只能靠猜。
+⇒ 失败分支补一行 `warn!("这一轮失败：{e}")`。
+
 ⚠ **顺序类的缺陷，合成夹具测不出来**（同轮又踩了一次）：
 夹具每轮都是**新画面** ⇒ 「先算后并」与「先并后算」结果**一样** ⇒ 守卫假绿。
 ⇒ ① 守卫要能分岔，就得让**状态在两轮之间真的变过** ⇒ **连着走两轮**；

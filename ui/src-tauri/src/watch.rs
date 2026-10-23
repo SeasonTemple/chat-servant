@@ -449,6 +449,23 @@ struct Scratch {
     /// readout 里写死 `messages: Vec::new()`。于是界面上的消息流永远是空的
     /// ——即使识别完全正常、候选都出来了，聊天记录那一片永远是「还没有消息」。
     messages: Vec<Message>,
+    /// **已处理过的消息账本**（保留重复正文）。
+    ///
+    /// ## 为什么不能直接用 [`Scratch::messages`]
+    ///
+    /// `messages` 走 `merge_into_stream`——那是**面板显示**语义，
+    /// 它会把**重复正文**去掉 ⇒ 它的计数不反映「这句话处理过几次」。
+    /// 而新颖度要的是**真实计数**（对方把同一句又说一遍 ⇒ 第二句是新的）。
+    ///
+    /// ## 它管什么
+    ///
+    /// 「哪几条是刚到的」的判据基准（见 [`absorb_round`]）。
+    /// 用户**往上翻历史**时，画面里全是更早的消息 ——
+    /// 若拿「最近几条」当基准，它们落在窗口外 ⇒ 被当成新的
+    /// ⇒ **对旧内容触发推理**（Auto 档下还可能误发）。
+    ///
+    /// 换会话（重锁）时必须清空：那是另一段对话了。
+    seen: Vec<Message>,
     /// **只对这个会话动手。** 见 [`LoopConfig::locked_peer`]。
     locked_peer: String,
     /// 当前窗口里认出的会话名。**空串 = 没认出来**。
@@ -600,6 +617,7 @@ impl Scratch {
             history: Vec::new(),
             mine: Vec::new(),
             messages: Vec::new(),
+            seen: Vec::new(),
             recent,
             vision: chatservant_reason::VisionBridge::off(),
             locked_peer: String::new(),
@@ -945,6 +963,11 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         last_failed = false;
                     }
                     Err(e) => {
+                        // ⚠ **失败原因必须进日志**（2026-10-23 补）。
+                        //   原来只有界面上的 `Phase::Failed` 带原因，
+                        //   而日志里只有一句「phase=failed」⇒
+                        //   **线上看不到「为什么失败」**，排查只能靠猜。
+                        tracing::warn!(target: "chat_servant::watch", "这一轮失败：{e}");
                         // 失败这一轮也要报分段计数——**出错的段就在数字里**。
                         let st = reasoner.stage_calls();
                         // 出错时**保留已读到的消息**：一个 OCR 抖动不该把
@@ -1171,10 +1194,30 @@ fn read_round(
 /// `novel_messages` 与 `merge_into_stream` 用**同一套**判据
 /// （说话人 + 正文，只比最近 `DEDUP_TAIL` 条）⇒
 /// 「被判成新的」与「会被并进流」是同一批，不会出现两处口径打架。
-fn absorb_round(stream: &mut Vec<Message>, current: &[Message]) -> Vec<Message> {
-    // ⚠ 必须**先**算：此刻 `stream` 还是「上一轮之后」的那一份。
-    let novel = chatservant_perceive::novel_messages(stream, current);
-    *stream = chatservant_perceive::merge_into_stream(stream, current);
+fn absorb_round(
+    seen: &mut Vec<Message>,
+    display: &mut Vec<Message>,
+    current: &[Message],
+) -> Vec<Message> {
+    // ⚠ 必须**先**算：此刻 `seen` 还是「上一轮之后」的那一份。
+    //
+    // `seen` 是**账本**（保留重复），`display` 是**面板显示**（去重）。
+    // 两个都要，因为它们回答的是不同的问题：
+    //   · 账本答「这句话处理过几次」⇒ 新颖度（驱动推理）
+    //   · 面板答「界面上该显示哪一份」
+    let novel = chatservant_perceive::novel_messages(seen, current);
+
+    // 新的记进账本（**保留重复** —— 对方把同一句又说一遍，那也是新的一条）。
+    seen.extend(novel.iter().cloned());
+    // 账本有上限：太早的旧消息滚出来时身份已不在账本里
+    // ⇒ 仍可能被当成新的（已知残留，票 06 的 `Novelty`）。
+    const SEEN_WINDOW: usize = 64;
+    if seen.len() > SEEN_WINDOW {
+        seen.drain(..seen.len() - SEEN_WINDOW);
+    }
+
+    // 面板只并**新的**：重读到的旧消息不该在面板上重复出现。
+    *display = chatservant_perceive::merge_into_stream(display, &novel);
     novel
 }
 
@@ -1455,7 +1498,7 @@ fn step(
     // ⇒ 判据只能是**内容身份**（说话人 + 正文）。
     // 「只是滚动、翻出旧消息」这件事也顺带解决了：旧消息在消息流里已经有了
     // ⇒ 不算新 ⇒ 不会对旧消息重复推理。
-    let novel = absorb_round(&mut s.messages, &messages);
+    let novel = absorb_round(&mut s.seen, &mut s.messages, &messages);
 
     // 只有真的有**对方说的话**（且是新到的）才触发推理。
     // 对方说话但都是说过的旧消息（滚出来的）⇒ 不推理、不调外部接口。
@@ -1723,6 +1766,9 @@ fn apply_relock(s: &mut Scratch) {
     // 下面却还挂着上一个会话的对话——那正是「界面上出现不是这个会话的内容」，
     // 和上面那条历史串味是同一类事故，只是它出在给人看的那一层。
     s.messages.clear();
+    // 账本同样要清：那是**上一个会话**处理过的消息。
+    // 留着它 ⇒ 新会话里说的同一句话会被当成「已经见过」⇒ 不回复。
+    s.seen.clear();
 }
 
 /// **闸关着的时候，把面板收拾干净。** 返回「是不是刚刚才关的」。
@@ -2768,23 +2814,74 @@ mod tests {
     /// ⚠ **合成帧夹具暴露不了这个**：每一轮都是新画面 ⇒ 两种顺序结果一样
     /// ⇒ 假绿。只有「本轮的消息在上一轮之后已经在流里了」才分岔。
     #[test]
-    fn novelty_is_computed_against_the_stream_before_this_round() {
-        // 上一轮：两条旧消息进了流。
-        let mut stream: Vec<Message> = Vec::new();
-        let first = absorb_round(&mut stream, &[a_msg("旧的甲"), a_msg("旧的乙")]);
+    fn novelty_is_computed_against_the_ledger_before_this_round() {
+        // 上一轮：两条旧消息进了账本与面板。
+        let mut seen: Vec<Message> = Vec::new();
+        let mut display: Vec<Message> = Vec::new();
+        let first = absorb_round(&mut seen, &mut display, &[a_msg("旧的甲"), a_msg("旧的乙")]);
         assert_eq!(first.len(), 2, "前提：第一轮两条都该算新的");
-        assert_eq!(stream.len(), 2, "前提：第一轮之后流里有两条");
+        assert_eq!(seen.len(), 2, "前提：第一轮之后账本里有两条");
+        assert_eq!(display.len(), 2, "前提：第一轮之后面板里有两条");
 
         // 这一轮：一条**旧的**（又读到了）+ 一条**真新的**。
-        let second = absorb_round(&mut stream, &[a_msg("旧的乙"), a_msg("刚到的")]);
+        let second = absorb_round(&mut seen, &mut display, &[a_msg("旧的乙"), a_msg("刚到的")]);
         let texts: Vec<&str> = second.iter().map(|m| m.text.as_str()).collect();
         assert_eq!(
             texts,
             vec!["刚到的"],
             "本轮只该报出真正新到的那条；实际 {texts:?} —— \
-             若把「并入流」放在「算新颖度」之前，本轮消息已在流里 ⇒ 全被判成旧的"
+             若把「并入」放在「算新颖度」之前，本轮消息已在账本里 ⇒ 全被判成旧的"
         );
-        assert_eq!(stream.len(), 3, "流里应是两条旧的 + 一条新的");
+        assert_eq!(seen.len(), 3, "账本里应是两条旧的 + 一条新的");
+        assert_eq!(display.len(), 3, "面板里应是两条旧的 + 一条新的");
+    }
+
+    /// **用户往上翻历史 ⇒ 画面里的旧消息不算新的。**
+    ///
+    /// ## 这条守的是什么（2026-10-23 修的最后一个洞）
+    ///
+    /// 新颖度原来拿「**最近几条**」当基准（`DEDUP_TAIL = 6`）。
+    /// 可**用户往上翻历史**时，画面里全是**更早**的消息 ——
+    /// 它们落在那个窗口之外 ⇒ 被当成新的 ⇒ **对旧内容触发一次推理**
+    /// （Auto 档下还可能误发）。
+    ///
+    /// ## 为什么用**计数**（多重集）而不是集合
+    ///
+    /// 对方把同一句又说一遍（「在吗」…「在吗」）是合法对话。
+    /// 集合判 ⇒ 第二句被当成「已经见过」⇒ **不回复**。
+    /// 计数判 ⇒ 第一句抵掉、第二句抵不动 ⇒ 第二句算新的 ✔
+    ///
+    /// 这两条一起才完整：**旧消息不误报**，**新消息不漏报**。
+    #[test]
+    fn scrolled_up_history_is_not_counted_as_new_but_a_repeat_is() {
+        // 账本里已有 8 条（模拟读过一段历史）。
+        let mut seen: Vec<Message> = Vec::new();
+        let mut display: Vec<Message> = Vec::new();
+        let history: Vec<Message> = (0..8).map(|i| a_msg(&format!("旧消息 {i}"))).collect();
+        absorb_round(&mut seen, &mut display, &history);
+        assert_eq!(seen.len(), 8, "前提：八条都进了账本");
+
+        // ── 情景一：用户往上翻，画面里是**更早**的几条（窗口之外）──
+        let scrolled: Vec<Message> = (0..4).map(|i| a_msg(&format!("旧消息 {i}"))).collect();
+        let novel = absorb_round(&mut seen, &mut display, &scrolled);
+        assert!(
+            novel.is_empty(),
+            "往上翻历史被当成了新消息：{:?}",
+            novel.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+
+        // ── 情景二：对方把**同一句**又说了一遍（旧的那条还在画面里）──
+        let mut seen2: Vec<Message> = Vec::new();
+        let mut display2: Vec<Message> = Vec::new();
+        absorb_round(&mut seen2, &mut display2, &[a_msg("在吗")]);
+        let repeated = absorb_round(&mut seen2, &mut display2, &[a_msg("在吗"), a_msg("在吗")]);
+        let texts: Vec<&str> = repeated.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["在吗"],
+            "对方把同一句又说一遍 ⇒ 第二句是新的；实际 {texts:?} —— \
+             用集合判会把第二句吃掉 ⇒ 不回复"
+        );
     }
     /// **同一会话里对方又发了消息 ⇒ 那几条被算成「新到的」。**
     ///
