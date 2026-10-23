@@ -49,9 +49,10 @@
 - [x] 现象定位到**滚动容器的按行裁切**（不是素材、不是折叠线）
 - [x] 手工档不撞、Auto 档撞 ⇒ 判据是「**多了那行警告**」
 - [x] 证据图：`target/probe/panel-type/sheet-auto.png`（gitignored）
-- [ ] **修法定下来**（①~④ 或新方案）
-- [ ] 量具补一档：`ui/static/budget.html` 的 STATES 里加 `auto-longdraft`（长草稿 + Auto 档）
-- [ ] 改完复跑量具 + 真机复验
+- [x] **修法定下来**：用**候选区同一套**的底部渐隐（②）⇒ 与 `.cs-actions[data-more='true']` 同一套机制，不另发明
+- [x] 量具补一档：`ui/static/budget.html` 的 STATES 里加 `auto-longdraft`（长草稿 + Auto 档）⇒ 新夹具 `ui/static/demo/auto-longdraft.json` ⇒ **49 条判据 ALL GREEN**
+- [x] 改完复跑量具（49 条全绿）+ **反向自证**（改废那条规则 ⇒ 量具红 **6 条**，含新档）
+- [ ] **真机复验**（人眼：长草稿时正文下缘是化掉的，不是齐腰切断）
 
 ## 七、为什么**现在不动**
 
