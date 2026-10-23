@@ -1378,18 +1378,52 @@ impl Reasoner for HttpReasoner {
         let Some(order) = v.get("order").and_then(|o| o.as_array()) else {
             return Err(ReasonError::Rank("响应里没有 order 数组".into()));
         };
-        // 按 order 里的原文回查候选。**回查失败就丢掉那一项**，
-        // 不允许凭空造一条候选出来。
+        // 按 order 里的原文回查候选。
+        //
+        // ⚠ 2026-10-23 改（真机 14:26 实测）：**回查失败的候选不许消失**。
+        //
+        // ## 旧写法错在哪
+        //
+        // 旧写法把「order 里逐字对不上的项」直接丢掉，而
+        // [`crate::seam::turn`] 又用这份 ranked **整个替换** `draft.candidates`
+        // ⇒ 起草 3 条、模型回的三条里**没有一条与原文逐字相同**
+        // （它给引文加了引号/句号）⇒ ranked 只剩 1 条 ⇒
+        // **面板上只剩 1 个回复选项**（日志里三条
+        // 「排序里出现了不在候选中的文本，已丢弃」）。
+        //
+        // ⇒ 「模型改写了原文」这件事，**代价不该由用户付**：
+        // 起草是白花的，用户的可选回复也少了。
+        //
+        // ## 现在的口径
+        //
+        // · order 里**逐字对得上**的 → 按 order 排；
+        // · order 里**对不上**的（模型改写了原文）→ 记一条 warn，
+        //   **不造新候选**（这条规矩不变：不能凭空造一条出来）；
+        // · **order 根本没提到的候选** → 原样补在后面（顺序按起草时的）。
+        //
+        // ⇒ 候选数**恒等于**起草给的数；排序最多只能改顺序，不能改条数。
+        let mut used = vec![false; draft.candidates.len()];
         let mut out: Vec<Candidate> = Vec::new();
         for want in order.iter().filter_map(|x| x.as_str()) {
-            if let Some(c) = draft
+            let hit = draft
                 .candidates
                 .iter()
-                .find(|c| c.text.trim() == want.trim())
-            {
+                .enumerate()
+                .find(|(i, c)| !used[*i] && c.text.trim() == want.trim());
+            match hit {
+                Some((i, c)) => {
+                    used[i] = true;
+                    out.push(c.clone());
+                }
+                None => tracing::warn!(
+                    "排序里的文本与候选逐字不同（模型改写了原文）——这一项已丢弃，原候选仍保留在后面"
+                ),
+            }
+        }
+        // order 没提到的候选**不许消失**：原样补在后面。
+        for (i, c) in draft.candidates.iter().enumerate() {
+            if !used[i] {
                 out.push(c.clone());
-            } else {
-                tracing::warn!("排序里出现了不在候选中的文本，已丢弃");
             }
         }
         Ok(out)
@@ -2079,6 +2113,53 @@ mod tests {
             2,
             "候选不该被思考块吃掉：{:?}",
             t.draft.candidates
+        );
+    }
+
+    /// **排序那步把原文改写了，候选一条都不能少**（2026-10-23 真机 14:26）。
+    ///
+    /// ## 真机形态
+    ///
+    /// 起草给了 2 条，模型回的 order 里**一条逐字相同、一条被加了引号**
+    /// ⇒ 旧写法把 ranked 变成 1 条，而 `turn()` 又用它**整个替换**
+    /// `draft.candidates` ⇒ **面板上只剩 1 个回复选项**。
+    ///
+    /// ⇒ 现在：逐字对不上的**项**丢弃，但**候选本身必须留下**（排在后面）。
+    /// 守卫断言两件事：条数不变、且**逐字对得上的那条仍排在第一**
+    /// （否则「保住条数」会退化成「顺序也不要了」）。
+    #[test]
+    fn a_rank_that_rewrites_the_text_keeps_every_candidate() {
+        let up = upstream(vec![
+            Reply(200, openai_reply(judge_json())),
+            Reply(200, openai_reply(draft_json())),
+            // order 里第一条**逐字相同**、第二条**被改了字**
+            Reply(
+                200,
+                openai_reply(r#"{"order":["今晚八点可以","「我看看时间」"]}"#),
+            ),
+        ]);
+        let route = Route::custom(Protocol::OpenAiCompatible, up.base_url()).expect("合法");
+        let cell = ModelCell::new(route);
+        cell.set("MiniMax-M3.1-Flash")
+            .expect("自定义端点不挑模型名");
+        let mut r =
+            HttpReasoner::with_config(cell, KEY.into(), ProxyCell::new()).expect("起运行时");
+
+        let ctx = TurnContext::text(vec!["今晚有空吗".into()], "小号".into());
+        let t = crate::turn(&mut r, &ctx).expect("推理成功");
+        assert_eq!(
+            t.draft.candidates.len(),
+            2,
+            "排序改了字也不能让候选变少：{:?}",
+            t.draft.candidates
+        );
+        assert_eq!(
+            t.draft.candidates[0].text, "今晚八点可以",
+            "逐字对得上的那条仍应排在第一"
+        );
+        assert_eq!(
+            t.draft.candidates[1].text, "我看看时间",
+            "对不上的那条**原文**要留下（不能用模型改写后的字）"
         );
     }
 
