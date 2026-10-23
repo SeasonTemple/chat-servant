@@ -205,10 +205,21 @@ Move-Item target\probe\_t.png target\probe\fixture-swap.png -Force
 ```
 
 判读日志（`RUST_LOG=info,chat_servant::watch=debug,chat_servant::pump=debug`）：
-`emit readout ... peer="X" messages=N` 那一行是证据行——
+`emit readout ... peer="X" messages=N` 那一行是**证据行**——
 `messages=0` = 停泊时面板没显示锁定会话的内容；
 `phase=read`（**不是** `drafting`）= 切回来**没有**重复推理；
-`一轮 Nms` = 该轮耗时（静默期约 1.06s）。
+`一轮 Nms` = 该轮耗时（**含那 1 秒的 tick**，所以它比「这一轮真正花的
+CPU 时间」大 1 秒；静默期约 1.17s）。
+
+⚠ **用户感知的是端到端延迟**，不是「一轮 Nms」：
+**端到端 = 换帧时刻 → `emit readout` 的时间戳**（日志自带毫秒时间戳，
+两边都是 UTC，直接相减）。2026-10-23 08:51 实测（当前代码）：
+**切走 1389 ms / 切回 890 ms**；那一整场 `roi=` 行**只有启动那一次**
+⇒ 切走切回**一条消息都没读**；`phase=drafting` **只有启动那次**
+⇒ **零模型调用**。
+
+⇒ 「切换会话 7s+」那个数是**修之前**的（3.28 s 一轮 **+ 一次多出来的
+推理 6~9 s**）。票见 `.scratch/wechat-reply-copilot/issues/82-*.md`。
 
 ⚠ 夹具帧是**别人的真实对话**（`target/probe/` 已被 gitignore）：
 **不许**把它们的内容写进提交信息、注释或测试夹具。
