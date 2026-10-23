@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **85** ｜ 验收项全勾 **69** ｜ 已收但留有说明项 **13** ｜ 未收 **3**
+票据总数 **85** ｜ 验收项全勾 **69** ｜ 已收但留有说明项 **12** ｜ 未收 **4**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -23,6 +23,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | 票 | 勾/总 | Status | Blocked by |
 |---|---|---|---|
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
+| `24-small-type-floor-remeasure.md` | 6/7 | 部分完成 · **2026-10-14 量具重建 + 三档数据 + 字重对照，结论已定**（小字 ≥11px、10.5 不能放、杠杆是字重 600）· **⚠ 剩真机复验那半**（2026-10-23 加了 13px 候选并出了对照图，**待人眼**） | None（可以立刻做） |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `85-one-turn-is-three-serial-model-calls.md` | 4/5 | open（2026-10-23 量化完毕 + 把耗时变成可见的；**取舍待仓库主人拍板**） | (票面没写 Blocked by) |
 
@@ -39,7 +40,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `12-tauri-svelte-skeleton.md` | 7/9 | done（`emit_readout` 已在 ticket 16 接上真实数据；面板现在还会显示 |
 | `15-vision-bridge.md` | 8/9 | done，但默认路径**不启用** |
 | `17-settings-window-parked-offscreen.md` | 3/4 | 已定位 —— 触发对象已在 `6b2acbf` 随「设置搬进面板」删除 |
-| `24-small-type-floor-remeasure.md` | 6/7 | done · **2026-10-14 量具重建 + 三档数据 + 字重对照，结论如下** |
 | `33-attribution-thresholds-are-dark-theme-only.md` | 3/5 | done · 2026-10-14 真机浅色主题实测发现并已修 · 根因定位到具体数值 |
 | `53-dev-ps1-run-returns-output-and-exit-code.md` | 7/8 | done · 2026-10-18。根因与实测证据见下；四个动词已改，绿红两档都自证过。 |
 | `81-dependency-vulnerabilities-go-node.md` | 8/11 | 部分完成 · **2026-10-22 仓库侧已修完并验过；剩 4 条要仓库主人拍板或动手** |
