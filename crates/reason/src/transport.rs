@@ -176,9 +176,17 @@ impl Protocol {
     /// genai 适配器。**必须显式给，不许把模型名字符串直接丢给 genai。**
     ///
     /// **这是个真会咬人的默认值**：genai 靠模型名前缀猜适配器
-    /// （`gpt*` → OpenAI、`claude*` → Anthropic、**其余一律 → Ollama**）。
-    /// 我们的模型叫 `abab6.5s-chat`，不带前缀，于是它会**静默落到 Ollama**，
-    /// 打到 `http://localhost:11434` 去——症状是「配置成功、一调用就 404」。
+    /// （`gpt*` → OpenAI、`claude*` → Anthropic、
+    /// **`MiniMax-*` → 它自带的 MiniMax 适配器**、其余一律 → Ollama）。
+    /// 我们的模型叫 `MiniMax-M3.1-Flash` ⇒ genai 会猜成**它自带的 MiniMax
+    /// 适配器**，而那是 **Anthropic 兼容**协议（见 [`Provider::MiniMax`]），
+    /// 我们的端点说的是 **OpenAI 兼容**协议
+    /// ⇒ 症状是「配置成功、一调用就失败」，而错在哪只有读 genai 的源码才看得出来。
+    ///
+    /// ⚠ 2026-10-23 订正：这一段的**例子也变了**。老模型名
+    /// `abab6.5s-chat` 不带任何前缀，genai 会猜成 **Ollama**
+    /// （打到 `localhost:11434`）；换成现在这些 `MiniMax-*` 名字之后，
+    /// genai 猜的是**它自己的 MiniMax 适配器**——**同样错，错法不同**。
     ///
     /// 所以每次调用都用 `ModelIden::new(adapter, name)` 显式钉死。
     pub fn adapter(self) -> AdapterKind {
@@ -243,8 +251,12 @@ pub enum Provider {
     /// 鉴权头（`x-api-key` 而非 `Bearer`）、请求体里的 `system`、
     /// 响应里取文字的指针，三处都不一样。
     Anthropic,
-    /// MiniMax，走 **OpenAI 兼容**接口（实测 `abab6.5s-chat` 在
-    /// `https://api.minimaxi.com/v1/chat/completions` 返回 HTTP 200 并正常回话）。
+    /// MiniMax，走 **OpenAI 兼容**接口（2026-10-23 实测
+    /// `MiniMax-M3.1-Flash` 在 `https://api.minimaxi.com/v1/chat/completions`
+    /// 返回 HTTP 200 并正常回话；清单里其余名字当天也逐个真调过）。
+    ///
+    /// ⚠ **上游会下线模型名**：老的 `abab6.5s-chat` 在 2026-10-23 已经
+    /// 404（"is no longer available"）⇒ 清单是**快照**，不是永久有效的。
     ///
     /// ## 这里**不用** genai 的 `AdapterKind::MiniMax`
     ///
@@ -388,7 +400,7 @@ impl Provider {
         match self {
             Self::OpenAi => &["OPENAI_API_KEY"],
             Self::Anthropic => &["ANTHROPIC_API_KEY"],
-            // `abab6.5s-chat` / `api.minimaxi.com` 走的是中国区端点，
+            // `api.minimaxi.com` 走的是中国区端点，
             // 官方文档与各家接入指南给的就是 `_CN_`那个变量名。
             Self::MiniMax => &["MINIMAX_API_KEY", "MINIMAX_CN_API_KEY"],
             Self::DeepSeek => &["DEEPSEEK_API_KEY"],
@@ -469,7 +481,33 @@ impl Provider {
         match self {
             Self::OpenAi => &["gpt-4o-mini"],
             Self::Anthropic => &["claude-sonnet-5"],
-            Self::MiniMax => &["abab6.5s-chat"],
+            // ⚠ 2026-10-23：MiniMax 这一栏**整条换过**。
+            //
+            // 原来只有 `abab6.5s-chat` 一个名字，而上游已经把它下线了：
+            // 真机日志写着「上游返回 404：The model "abab6.5s-chat" is no
+            // longer available.」⇒ **判断与起草两次调用全废**
+            // ⇒ 面板上永远是 0 候选。
+            //
+            // 下面这 6 个名字**当天逐个真调过**
+            // （`https://api.minimaxi.com/v1/chat/completions` 返回 HTTP 200
+            // 且正常回话）。
+            //
+            // ⚠⚠ **上游的 `/v1/models` 清单会说谎**：它列出来的
+            // `MiniMax-M2` / `M2.1` / `M2.1-highspeed` 三个，
+            // 真调**全是 404** ⇒ **只有真调才算数**，清单只是候选。
+            //
+            // ⚠ 默认取 `MiniMax-M3.1-Flash`：它与 `M2.7-highspeed` 一样，
+            // 把思考放进**独立字段**（`reasoning_content`）⇒ `content` 里
+            // 就是干净的 JSON。旗舰那几个（M3 / M2.7 / M2.5）把
+            // `<think>…</think>` 塞在 `content` 开头 ⇒ 靠 [`strip_think`] 剥。
+            Self::MiniMax => &[
+                "MiniMax-M3.1-Flash",
+                "MiniMax-M3",
+                "MiniMax-M2.7",
+                "MiniMax-M2.7-highspeed",
+                "MiniMax-M2.5",
+                "MiniMax-M2.5-highspeed",
+            ],
             // ↓↓ 抄自文档，未实测；清单只是给界面一个候选，不构成「验过」。
             Self::DeepSeek => &["deepseek-chat"],
             Self::Qwen => &["qwen-plus"],
@@ -1157,11 +1195,15 @@ impl HttpReasoner {
             .rt
             .block_on(client.exec_chat(model, req, Some(&opts)))
             .map_err(|e| brief(&e))?;
-        resp.first_text().map(str::to_string).ok_or_else(|| {
+        let text = resp.first_text().map(str::to_string).ok_or_else(|| {
             // 上游契约变了。**只说结构不认识**，不带任何请求/响应正文——
             // 请求体里有用户的聊天内容，而 genai 的错误里**带着整个请求体**。
             format!("响应里没有文字（provider={}）", route.provider().key())
-        })
+        })?;
+        // ⚠ 剥掉思考块（见 [`strip_think`]）：旗舰模型把 `<think>…</think>`
+        //   塞在 `content` 开头，而本 crate 三步都要**从 `content` 解析 JSON**
+        //   ⇒ 不剥就是「有回话、但解析失败 ⇒ 面板 0 候选」。
+        Ok(strip_think(&text))
     }
 
     /// 拿一段 JSON 文本。**剥掉模型爱加的代码块围栏。**
@@ -1536,6 +1578,52 @@ pub fn strip_code_fence(raw: &str) -> String {
     body.trim_end_matches("```").trim().to_string()
 }
 
+/// 剥掉模型爱加的 `<think>…</think>` 思考块。
+///
+/// ## 为什么必须剥（2026-10-23 真机实测）
+///
+/// MiniMax 的旗舰模型（`MiniMax-M3` / `M2.7` / `M2.5`）把思考**塞在
+/// `content` 开头**——真调一次，拿到的是这样：
+///
+/// ```text
+/// <think>We need output JSON only candidates 1-3 …</think>
+///
+/// {"candidates":[{"text":"有呀，大概几点？","probability":0.5}, …]}
+/// ```
+///
+/// 而本 crate 的判断/起草/排序三步都要**从 `content` 里解析 JSON**
+/// （[`HttpReasoner::ask_json`]）⇒ 前面多一段 `<think>` 就**解析失败**
+/// ⇒ 起草空候选 ⇒ 面板上什么也没有，而且日志里只有一句「响应解析失败」。
+///
+/// ## 有一个模型不一样
+///
+/// `MiniMax-M3.1-Flash` 与 `M2.7-highspeed` 把思考放进**独立字段**
+/// `reasoning_content`，`content` 里就是干净的 JSON ⇒ 不必剥。
+/// 剥了也不影响它们（没有 `<think>` 就不动）。
+///
+/// ## 没闭合怎么办
+///
+/// 开头有 `<think>` 而没有 `</think>`（输出被截断）⇒ **后面没有答案**，
+/// 留个空串比留半截思考好——半截思考会被当成回复正文发出去。
+pub fn strip_think(raw: &str) -> String {
+    let mut out = String::new();
+    let mut s = raw.trim();
+    while let Some(start) = s.find("<think>") {
+        // 思考块**之前**的文字要留下——只删块本身，不是删「块及其以后」。
+        out.push_str(&s[..start]);
+        let rest = &s[start + "<think>".len()..];
+        match rest.find("</think>") {
+            Some(i) => s = rest[i + "</think>".len()..].trim_start(),
+            None => {
+                s = "";
+                break;
+            }
+        }
+    }
+    out.push_str(s);
+    out.trim().to_string()
+}
+
 /// 抹掉 key。**任何对外文本都要过这里。**
 ///
 /// **2026-10-15 不再自己实现了**。这里原来有一份只认 `sk-` / `sk-ant-`
@@ -1856,21 +1944,126 @@ mod tests {
 
     /// **适配器必须显式钉死。**
     ///
-    /// `abab6.5s-chat` 不带任何前缀——直接把它当字符串丢给 genai，
-    /// genai 会按「其余 → Ollama」处理，打到 `localhost:11434` 去。
-    /// 症状是「配置成功、一调用就 404」，所以这里钉死成断言。
+    /// `MiniMax-M3.1-Flash` 带 `MiniMax-` 前缀——直接把它当字符串丢给
+    /// genai，genai 会猜成**它自带的 MiniMax 适配器**
+    /// （`genai-0.6.5` 的 `from_model`：`starts_with("MiniMax-")` → MiniMax），
+    /// 而那是 **Anthropic 兼容**协议、打的也不是我们的端点。
+    /// 症状是「配置成功、一调用就失败」，所以这里钉死成断言。
     #[test]
     fn the_adapter_is_pinned_not_guessed_from_the_model_name() {
         use genai::adapter::AdapterKind as K;
         assert_eq!(Provider::MiniMax.adapter(), K::OpenAI);
         assert_eq!(Provider::OpenAi.adapter(), K::OpenAI);
         assert_eq!(Provider::Anthropic.adapter(), K::Anthropic);
-        // 反证：裸传模型名**真的会**落到 Ollama。
-        assert_eq!(K::from_model("abab6.5s-chat").expect("认得"), K::Ollama);
+        // 反证：裸传模型名**真的会**猜错——猜成 MiniMax，不是我们用的 OpenAI。
+        assert_eq!(
+            K::from_model("MiniMax-M3.1-Flash").expect("认得"),
+            K::MiniMax
+        );
         // 所以我们走的每一条路都必须是显式 ModelIden。
         assert_eq!(
-            Provider::MiniMax.model_iden("abab6.5s-chat").adapter_kind,
+            Provider::MiniMax
+                .model_iden("MiniMax-M3.1-Flash")
+                .adapter_kind,
             K::OpenAI
+        );
+    }
+
+    /// **死掉的模型名不许回到清单里**（2026-10-23）。
+    ///
+    /// 上游把 `abab6.5s-chat` 下线了（404 "is no longer available"）。
+    /// 清单是**白名单**（[`Provider::accepts_model`]），名字在里面就等于
+    /// 「我们保证它能用」⇒ 放一个死名字进去 = 保证一个 404。
+    #[test]
+    fn the_dead_minimax_model_name_is_not_offered() {
+        assert!(
+            !Provider::MiniMax.models().contains(&"abab6.5s-chat"),
+            "上游在 2026-10-23 下线了 abab6.5s-chat（404 is no longer available）——别把它放回清单"
+        );
+    }
+
+    /// **清单里每个名字都得是今天真调得通的**（2026-10-23 实测）。
+    ///
+    /// ⚠ 上游的 `/v1/models` **会说谎**：它列出的 `MiniMax-M2` / `M2.1` /
+    /// `M2.1-highspeed` 真调全是 404 ⇒ 「清单里有」不等于「能用」。
+    /// ⇒ 这一条钉的是**清单本身**：只放实测通过的那几个。
+    #[test]
+    fn the_minimax_list_only_holds_models_that_answered() {
+        let expected = [
+            "MiniMax-M3.1-Flash",
+            "MiniMax-M3",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7-highspeed",
+            "MiniMax-M2.5",
+            "MiniMax-M2.5-highspeed",
+        ];
+        assert_eq!(
+            Provider::MiniMax.models(),
+            expected.as_slice(),
+            "MiniMax 清单变了——新增/删除的名字都要先真调一次（上游的 /v1/models 会说谎）"
+        );
+        // 默认取第一个，且默认名必须在清单里。
+        let d = Provider::MiniMax.default_model();
+        assert!(!d.is_empty(), "默认模型名不能是空串");
+        assert!(
+            Provider::MiniMax.models().contains(&d),
+            "默认模型名 {d} 不在清单里"
+        );
+    }
+
+    /// **思考块必须剥掉**（2026-10-23 实测的形态）。
+    #[test]
+    fn think_blocks_are_stripped() {
+        // 旗舰模型的真实形态。
+        let raw = "<think>We need output JSON only …</think>\n\n{\"candidates\":[]}";
+        assert_eq!(strip_think(raw), "{\"candidates\":[]}");
+        // 没有思考块 ⇒ 原样（只去空白）。
+        assert_eq!(strip_think("{\"a\":1}"), "{\"a\":1}");
+        // 没闭合 ⇒ 后面没有答案 ⇒ 空串（留半截思考更糟）。
+        assert_eq!(strip_think("<think>思考到一半"), "");
+        // 没闭合时，**块之前**的文字仍然要留下。
+        assert_eq!(strip_think("答案<think>思考到一半"), "答案");
+        // 多个块。
+        assert_eq!(strip_think("<think>a</think>x<think>b</think>y"), "xy");
+    }
+
+    /// **带 `<think>` 的 JSON 也必须解析得出来**——走**产品路径**。
+    ///
+    /// MiniMax 旗舰模型（M3 / M2.7 / M2.5）把思考**塞在 `content` 开头**，
+    /// 而本 crate 三步都要**从 `content` 里解析 JSON**
+    /// ⇒ 前面多一段思考就是「有回话、但解析失败」⇒ 起草空候选。
+    ///
+    /// ⚠ 这条**走产品路径**（假上游 + `crate::turn`）：
+    /// 只测 `strip_think` 那个函数量的是「它自己」，不是「产品那条路」。
+    #[test]
+    fn a_thinking_model_still_yields_candidates() {
+        let up = upstream(vec![
+            Reply(200, openai_reply(judge_json())),
+            Reply(
+                200,
+                openai_reply(&format!(
+                    "<think>We need output JSON only candidates 1-3 …</think>\n\n{}",
+                    draft_json()
+                )),
+            ),
+            Reply(
+                200,
+                openai_reply(r#"{"order":["今晚八点可以","我看看时间"]}"#),
+            ),
+        ]);
+        let route = Route::custom(Protocol::OpenAiCompatible, up.base_url()).expect("合法");
+        let cell = ModelCell::new(route);
+        cell.set("MiniMax-M3").expect("自定义端点不挑模型名");
+        let mut r =
+            HttpReasoner::with_config(cell, KEY.into(), ProxyCell::new()).expect("起运行时");
+
+        let ctx = TurnContext::text(vec!["今晚有空吗".into()], "小号".into());
+        let t = crate::turn(&mut r, &ctx).expect("带思考块的回复也必须解析得出来");
+        assert_eq!(
+            t.draft.candidates.len(),
+            2,
+            "候选不该被思考块吃掉：{:?}",
+            t.draft.candidates
         );
     }
 

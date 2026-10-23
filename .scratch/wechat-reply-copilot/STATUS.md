@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **83** ｜ 验收项全勾 **68** ｜ 已收但留有说明项 **13** ｜ 未收 **2**
+票据总数 **84** ｜ 验收项全勾 **69** ｜ 已收但留有说明项 **13** ｜ 未收 **2**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -115,3 +115,4 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `80-release-v0-1-2.md` | 7/7 |
 | `82-switch-back-triggers-a-duplicate-inference.md` | 8/8 |
 | `83-bottom-anchored-new-message-never-read.md` | 12/12 |
+| `84-minimax-model-name-retired-upstream.md` | 7/7 |
