@@ -1442,6 +1442,20 @@ impl Reasoner for HttpReasoner {
                 .partial_cmp(&draft.candidates[*a].probability)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        // ⚠ 记下**挑中了第几条**（2026-10-24 加）。
+        //
+        // 理由：第三段的结果是**面板第一行**（`recommended()` = Auto 档发的那条），
+        // 而面板上**看不出**哪一条是被挑中的 ⇒ 这条判据以前只能靠眼睛。
+        // ⇒ 日志里有一行 ⇒ 「第一行 = 模型挑的那条」可核。
+        //
+        // ⚠ 只打**序号**，不打候选原文（那是对话内容，不进日志）。
+        tracing::info!(
+            target: "chatservant_reason::transport",
+            pick = pick + 1,
+            total = draft.candidates.len(),
+            "第三段挑中了第 {n} 条（面板第一行就是它）",
+            n = pick + 1
+        );
         let mut out: Vec<Candidate> = Vec::with_capacity(draft.candidates.len());
         out.push(draft.candidates[pick].clone());
         for i in rest {
