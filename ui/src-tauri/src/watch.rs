@@ -1184,6 +1184,44 @@ fn read_round(
 /// 计数判据本来就有「抵掉一个」的语义 ⇒ 账本越大越保守（越少误报）。
 pub(crate) const SEEN_WINDOW: usize = 512;
 
+/// **把我们自己说过的话，从「对方说的」改判回「我说的」。**
+///
+/// ## 为什么需要它（2026-10-24，用户真机报出）
+///
+/// 用户在 `Auto` 档点了一条候选 ⇒ 面板回执说「可能已经发出去了」
+/// ⇒ 紧接着**又起草了一轮**。他怀疑「自己发出去的消息被当成了对方的新消息」。
+///
+/// 归类器靠**气泡底色的彩度**判说话人（饱和 = 我 / 近灰 = 对方）。
+/// 真机帧实测它判对了（绿色气泡 `彩度=91` ⇒ 「我」✔），
+/// 但那是**运气**：探针只要有一次采到气泡缝，彩度就掉到 0 ⇒ 判成「对方」。
+/// ⇒ 一旦判错，那句话就是「对方的新消息」⇒ 触发一次完整推理
+/// ⇒ `Auto` 档下还可能**再发一条** ⇒ **自问自答**。
+///
+/// ## 判据：**正文**，不是颜色、不是位置、不是时间
+///
+/// 「我们自己说过这句话」是**事实**，颜色只是**猜测**。
+/// ⇒ 事实优先于猜测：正文对得上，就按我方算。
+///
+/// ## 改的是**说话人**，不是丢弃
+///
+/// 丢弃的话，面板上就看不到自己刚发的那条了；
+/// 改判的话，它以「我」的身份进消息流 —— 这本来就是它应有的身份。
+///
+/// ## 残留
+///
+/// 对方在 10 分钟内说了**一模一样**的正文 ⇒ 那句会被算成我方
+/// ⇒ 代价是**少起草一轮**（不是多发），方向是安全的。
+fn relabel_our_own(messages: &mut [Message]) {
+    for m in messages.iter_mut() {
+        if m.speaker == Speaker::Them && crate::commands::sent_by_us(&m.text) {
+            m.speaker = Speaker::Me;
+            // `id` 是「说话人 + 正文」的口径（见 `perceive::message_id`），
+            // ⇒ 改判之后必须同步，否则前端 keyed 渲染会认成另一条。
+            m.id = format!("{speaker:?}:{text}", speaker = Speaker::Me, text = m.text);
+        }
+    }
+}
+
 /// **把本轮读到的消息并进消息流，并返回「这一轮新到的那些」。**
 ///
 /// ## ⚠ 顺序是承重的：**先算新颖度，再并入流**（2026-10-23 修）
@@ -1510,6 +1548,24 @@ fn step(
     // ⇒ 判据只能是**内容身份**（说话人 + 正文）。
     // 「只是滚动、翻出旧消息」这件事也顺带解决了：旧消息在消息流里已经有了
     // ⇒ 不算新 ⇒ 不会对旧消息重复推理。
+    //
+    // ⚠⚠ **先把我们自己说过的话认回来**（2026-10-24，用户真机报出）。
+    //
+    // 现象：`Auto` 档点了一条候选之后，面板**又起草了一轮**——
+    // 用户怀疑「自己发出去的消息被当成了对方的新消息」。
+    //
+    // 气泡颜色判据本该把它判成「我」（真机帧实测：绿色气泡 `彩度=91` ⇒ 「我」✔），
+    // 但**判据失手一次**，那句话就成了「对方的新消息」
+    // ⇒ 触发一次完整推理 ⇒ `Auto` 档下还可能**再发一条** ⇒ 自问自答。
+    //
+    // ⇒ 这里不靠颜色，靠**「我们自己说过这句话」这个事实**
+    // （`commands::note_sent` 在装填/发送的那一刻记下正文）：
+    // 读到同一条正文 ⇒ 一律算「我」。
+    //
+    // ⚠ **顺序承重**：必须在 `absorb_round` **之前**改判——
+    // 否则账本里先存成「对方说的」，新颖度会拿「我方那句话」去比对方 ⇒ 对不上。
+    let mut messages = messages;
+    relabel_our_own(&mut messages);
     let novel = absorb_round(&mut s.seen, &mut s.messages, &messages);
 
     // 只有真的有**对方说的话**（且是新到的）才触发推理。
@@ -1522,12 +1578,23 @@ fn step(
 
     tracing::debug!(
         target: "chat_servant::watch",
-        "roi={roi:?} ocr总行={} 本轮行={} 归类={} 消息={} 本轮新到={} 本轮记到y={:?}",
+        // ⚠⚠ **「本轮新到」必须按说话人拆开打**（2026-10-24）。
+        //
+        // 用户报「发出去的消息被当成了新接收消息，又起草了一轮」——
+        // 而这一行**只打总数**，于是分不清「对方来了新消息」
+        // 与「我们自己发的那条被算成了新的」。
+        //
+        // ⇒ 拆成「对方 N / 我方 M」：只要「对方=0」却起草了，
+        // 就是**判据坏了**（而不是「对方真的说话了」）。
+        // ⇒ **只打个数，不打正文**：聊天内容不进日志。
+        "roi={roi:?} ocr总行={} 本轮行={} 归类={} 消息={} 本轮新到={}（对方={} 我方={}） 本轮记到y={:?}",
         total_lines,
         lines.len(),
         attrs.len(),
         messages.len(),
         novel.len(),
+        novel.iter().filter(|m| m.speaker == Speaker::Them).count(),
+        novel.iter().filter(|m| m.speaker == Speaker::Me).count(),
         // ⚠ 这里打的是**本轮将要记的位置**（还没 commit）。
         //   打 `committed_bottom()` 会滞后一轮 —— 看起来像「位置没记上」。
         newest,
@@ -2182,7 +2249,7 @@ mod tests {
         PaneAnchor, Phase, Readout, RecentN, Relock, SEEN_WINDOW, SESSION, Scratch, Speaker,
         TierCell, TokenBudget, absorb_round, apply_gate_closed, apply_relock, collect_images,
         current_phase, gate_opened, header_print, park_on_other_conversation, phase_to_push,
-        read_round, snapshot,
+        read_round, relabel_our_own, snapshot,
     };
     use chatservant_capture::Frame;
     use chatservant_capture::ocr::{OcrError, OcrLine, OcrText};
@@ -3054,6 +3121,90 @@ mod tests {
             novel.iter().map(|m| &m.text).collect::<Vec<_>>()
         );
     }
+    /// **我们自己发出去的那句话，不能被当成对方的新消息。**
+    ///
+    /// ## 这条守的是什么（2026-10-24，用户真机报出）
+    ///
+    /// 用户在 `Auto` 档点了一条候选 ⇒ 面板回执说「可能已经发出去了」
+    /// ⇒ 紧接着**又起草了一轮**。他怀疑「自己发出去的消息被当成了对方的新消息」。
+    ///
+    /// ## 为什么这条不能靠「气泡颜色判据」保证
+    ///
+    /// 归类器靠**气泡底色的彩度**判说话人（饱和 = 我 / 近灰 = 对方）。
+    /// 真机帧实测它判对了（绿色气泡 `彩度=91` ⇒ 「我」✔），
+    /// 但探针只要有一次采到气泡缝，彩度就掉到 0 ⇒ 判成「对方」
+    /// ⇒ 一句话成了「对方的新消息」⇒ 触发一次完整推理
+    /// ⇒ `Auto` 档下还可能**再发一条** ⇒ **自问自答**。
+    ///
+    /// ⇒ 判据必须是**事实**（「我们自己说过这句话」），不是**猜测**（颜色）。
+    ///
+    /// ## 这条走的是**生产路径**
+    ///
+    /// 断言的是 `relabel_our_own`（`step()` 里改判的那个函数），
+    /// 而它读的 `commands::sent_by_us` 也走生产路径（`note_sent` 在
+    /// 装填/发送那一刻记下正文）⇒ 把 `note_sent` 拆掉，这条测试**也该红**。
+    #[test]
+    fn our_own_sent_line_is_not_counted_as_a_new_peer_message() {
+        // ⚠ 正文必须**唯一**：那份账本是进程级的全局，
+        // 而测试是并发的 ⇒ 用一句别的测试不会用到的话。
+        let text = "我们自己发出去的那一句（守卫测试专用，别与真会话重样）";
+        crate::commands::note_sent(text);
+
+        // 模拟「下一轮读回来，探针这次采歪了 ⇒ 判成了对方」。
+        let mut msgs = vec![Message {
+            id: format!("Them:{text}"),
+            speaker: Speaker::Them,
+            text: text.into(),
+            rect: chatservant_core::frame::Rect::new(0, 0, 10, 10),
+            evidence: "测试".into(),
+        }];
+
+        relabel_our_own(&mut msgs);
+
+        assert_eq!(
+            msgs[0].speaker,
+            Speaker::Me,
+            "我们自己发出去的话被算成了对方说的"
+        );
+        assert_eq!(
+            msgs[0].id,
+            format!("Me:{text}"),
+            "改判之后 `id` 必须跟着说话人走（前端按 `id` 做 keyed 渲染）"
+        );
+        // 判据链的第二段：改判之后，「本轮新到里有没有**对方**的话」必须为空。
+        // 这一段才是**真正**的守——推理只由对方的新消息触发（见 `step()`）。
+        let peer_news = msgs.iter().filter(|m| m.speaker == Speaker::Them).count();
+        assert_eq!(
+            peer_news, 0,
+            "改判之后仍被算成对方的新消息 ⇒ 会白起草一轮（还可能再发一条）"
+        );
+    }
+
+    /// **没发过的话不许被改判。**
+    ///
+    /// 这条守的是护栏的**另一半**：改判判据是「我们自己说过这句话」，
+    /// 而不是「这句看起来像从右边来的」⇒
+    /// 对方说的、我们没说过的话，必须原样保持「对方」。
+    #[test]
+    fn a_peer_line_we_never_sent_is_left_alone() {
+        let text = "对方说的一句我们从没发过的话（守卫测试专用）";
+        let mut msgs = vec![Message {
+            id: format!("Them:{text}"),
+            speaker: Speaker::Them,
+            text: text.into(),
+            rect: chatservant_core::frame::Rect::new(0, 0, 10, 10),
+            evidence: "测试".into(),
+        }];
+
+        relabel_our_own(&mut msgs);
+
+        assert_eq!(
+            msgs[0].speaker,
+            Speaker::Them,
+            "对方的话被误改判成我方 ⇒ 对方的消息不再触发推理"
+        );
+    }
+
     fn a_msg(text: &str) -> Message {
         Message {
             id: format!("Them:{text}"),

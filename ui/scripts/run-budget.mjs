@@ -18,7 +18,8 @@ for (const [k, s] of Object.entries(data.states)) {
   const t = s.pick_clipped;
   console.log(
     `${k.padEnd(11)} 档位格 slotBottom=${t?.slotBottom} 纸底=${t?.paperBottom} ` +
-      `⇒ clipped=${t?.clipped} over=${t?.over} 草稿scrollH=${s.draft?.scrollH} ` +
+      `⇒ clipped=${t?.clipped} over=${t?.over} ` +
+      `正文below=${s.draft_roll?.below ?? '-'} mask=${String(s.draft_roll?.mask ?? '-').slice(0, 14)} ` +
       `候选scrollH=${s.actsScroll?.scrollH ?? s.actions?.scrollH ?? '-'}`,
   );
 }

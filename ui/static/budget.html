@@ -323,6 +323,27 @@
           })(),
           topbar: one('.cs-topbar'),
           draft: one('.cs-draft'),
+          // ⚠ 正文区自己的滚动状态（票 91，2026-10-24）。
+          //   `.cs-draft` 是**滚动容器**（票 88）⇒ 长草稿会被**横切**：
+          //   切一半读成「这张纸坏了」，不是「下面还有」⇒ 必须有底部渐隐。
+          //   候选区早就有了这条判据（`actions_roll`），正文区不能没有。
+          draft_roll: (() => {
+            // ⚠ **必须用 doc**（iframe 的文档），不是顶层 document——
+            //   面板是渲染在 iframe 里的（见 measure(doc)）。
+            const dr = doc.querySelector('.cs-draft');
+            if (!dr) return null;
+            const dcs = doc.defaultView.getComputedStyle(dr);
+            return {
+              scrollH: dr.scrollHeight,
+              clientH: dr.clientHeight,
+              scrollTop: +dr.scrollTop.toFixed(1),
+              below: +(dr.scrollHeight - dr.scrollTop - dr.clientHeight).toFixed(1),
+              more: dr.dataset.more ?? null,
+              // ⚠ `mask` 也要量：光有 `data-more` 属性不算数，
+              //   得证明那条 CSS 真的落到计算样式上了（属性 → 规则的链路会断）。
+              mask: (dcs.maskImage || dcs.webkitMaskImage || 'none').slice(0, 44),
+            };
+          })(),
           actions: one('.cs-actions'),
           // ⚠ 候选区自己的滚动状态（票 44，2026-10-16 加）。
           //   之前这里只量了 `set_overflow`（设置屏），候选区溢出**没有任何判据** ——
@@ -545,7 +566,16 @@
               `below=${s.actions_roll.below} mask=${s.actions_roll.mask.slice(0, 18)}`,
             );
           }
-          // ⑥ 红铅笔滤镜在（主面板档位行的勾跨组件引用它，断了不会报错）。
+          // ⑥ 正文区溢出时底部渐隐必须真的落到计算样式上（票 91，2026-10-24）。
+          //   与 ⑤ **同一套形状**：候选区有，正文区也必须有。
+          if (s.draft_roll) {
+            add(
+              s.draft_roll.below <= 1 || String(s.draft_roll.mask).startsWith('linear-gradient'),
+              `${k}: 正文溢出渐隐`,
+              `below=${s.draft_roll.below} mask=${s.draft_roll.mask.slice(0, 18)}`,
+            );
+          }
+          // ⑦ 红铅笔滤镜在（主面板档位行的勾跨组件引用它，断了不会报错）。
           add(s.pencil_defs === 'ok', `${k}: #pencil 滤镜`, s.pencil_defs);
         }
         const failed = lines.filter((l) => l.startsWith('FAIL')).length;

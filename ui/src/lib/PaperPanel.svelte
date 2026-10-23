@@ -311,6 +311,20 @@
    */
   let moreBelow = $state(false);
 
+  /**
+   * 正文区（`.cs-draft`）**下面还有没有**。
+   *
+   * ⚠ 与 `moreBelow` 是**两处**、两个 state、两个 attachment —— 不合并。
+   *
+   * 合并过一次（把两个容器塞进同一个 attachment），代价是：
+   * Svelte 的 attachment 只有一个返回的清理函数 ⇒ 两个 `ResizeObserver`
+   * 与两个 `scroll` 监听要自己手写拆卸 ⇒ 少写一行就泄漏一个监听器，
+   * 而监听器泄漏在这台机器上表现为**进程线程数缓慢上涨**（2026-10-23 实测）。
+   *
+   * ⇒ 两个容器、两个 state、两个 attachment，各自管各自的清理。
+   */
+  let moreBelowDraft = $state(false);
+
   const markOverflow: Attachment<HTMLDivElement> = (node) => {
     // 读一次候选条数，让「候选换了」也重新量一次：
     // 增删候选会改 `scrollHeight`，而那不是 Svelte 的响应式来源。
@@ -322,6 +336,24 @@
     update();
     node.addEventListener('scroll', update, { passive: true });
     // 窗口尺寸变了、字号探针改了，容器高度跟着变。
+    const ro = new ResizeObserver(update);
+    ro.observe(node);
+    return () => {
+      node.removeEventListener('scroll', update);
+      ro.disconnect();
+    };
+  };
+
+  /** 正文区的溢出标记。与 [`markOverflow`] **同一套判据**，只是另一个容器。 */
+  const markOverflowDraft: Attachment<HTMLDivElement> = (node) => {
+    // 读一次候选条数：候选换了 ⇒ 正文（第一条候选）也换了 ⇒ 高度跟着变。
+    void allCandidates.length;
+
+    const update = () => {
+      moreBelowDraft = node.scrollHeight - node.scrollTop - node.clientHeight > 1;
+    };
+    update();
+    node.addEventListener('scroll', update, { passive: true });
     const ro = new ResizeObserver(update);
     ro.observe(node);
     return () => {
@@ -1009,7 +1041,7 @@
       正文行。**只有墨色**：`--cs-mark` 在真实纸底上只有 3.00 : 1，掉出 AA，
       正文小字用它就是不合规（app.css 的注释记着这条是怎么翻的）。
     -->
-      <div class="cs-draft">
+      <div class="cs-draft" {@attach markOverflowDraft} data-more={moreBelowDraft}>
         {#if drafted}
           <!--
             ⚠⚠ **这一行就是第一条候选**（票 68，2026-10-19）。
@@ -1520,6 +1552,13 @@
       -webkit-mask-image: none;
       mask-image: none;
     }
+
+    /* 正文区同理（2026-10-24）：`mask-image` 不属于 forced-colors 的接管范围，
+       UA 不会替我们关掉 ⇒ 高对比度用户会拿到**被压暗的正文**。 */
+    .cs-draft[data-more='true'] {
+      -webkit-mask-image: none;
+      mask-image: none;
+    }
   }
 
   /* ── 拖拽带 + 窗口控制 ─────────────────────────────────────── */
@@ -1842,6 +1881,30 @@
    *   大了会吃掉上一条的纸芯。
    */
   .cs-actions[data-more='true'] {
+    -webkit-mask-image: linear-gradient(
+      to bottom,
+      #000 0,
+      #000 calc(100% - 32px),
+      transparent 100%
+    );
+    mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 32px), transparent 100%);
+  }
+
+  /* 正文区的底部渐隐 —— 与上面 **同一套做法**（2026-10-24，票 91）。
+   *
+   * ## 为什么正文区也需要它
+   *
+   * `.cs-draft` 在票 88 之后成了**滚动容器**（长草稿不再把档位行顶出纸外）。
+   * 于是长草稿会被**横切**：切一半读成「这张纸坏了」，不是「下面还有」。
+   * 而 Auto 档还多一行红字警告 ⇒ 正文可用高度再少一行 ⇒ 撞得更狠。
+   *
+   * ⚠ 与候选区不同的是：这里的被切对象是**一条撕边纸条**
+   * （第一条候选，2026-10-24 改成纸条）⇒ 撕口被齐腰切断，
+   * 正是撕边语言里最刺眼的那种坏法。
+   *
+   * ⇒ 同一套渐隐：把下缘化掉 ⇒ 读成「纸往下延伸」。
+   */
+  .cs-draft[data-more='true'] {
     -webkit-mask-image: linear-gradient(
       to bottom,
       #000 0,
@@ -2815,30 +2878,79 @@
     flex: 0 1 auto;
     min-height: 0;
     overflow-y: auto;
+    /* ⚠ **`padding: 8px 0`**（2026-10-24）：`.cs-draft-lead` 成了撕边纸片，
+     * 而撕边位图最外侧有一圈**透明**（纸没到那儿，实测 alpha 0）。
+     * 本元素是**滚动容器** ⇒ `overflow` 沿 padding box 裁
+     * ⇒ 不留这 8px，撕口的透明外沿会被裁掉，纸边看着像被啃过一口。
+     * ⇒ 与 `.cs-actions` 用**同一套**做法（那里也是 8px，见那条规则的注释）。
+     */
+    padding: 8px 0;
   }
 
+  /* ⚠⚠⚠ **第一条候选也是一张撕边纸条**（2026-10-24）。
+   *
+   * ## 为什么改
+   *
+   * 用户原话：「我说了多少次候选都要是纸条，你非得留下一个显示纯文字是吧？」
+   * ⇒ 面板上**每一个候选**都必须是纸片，第一条也不例外。
+   *
+   * 原来它是 `.cs-draft-lead`：`all: unset` + 21px 仿宋墨色
+   * ⇒ **一行纯文字浮在纸上**，与下面那组撕边纸条**两种材质**。
+   * 而「两者材质不同是有意的」那句理由是**我们自己写下的**，不是用户要的
+   * ⇒ 这条「有意」是**我们自己开的口子**，今天收掉。
+   *
+   * ## 「读」与「挑」的分工仍然在，只是不再靠材质区分
+   *
+   * 第一条仍然是**大字**（21px 仿宋）+ **墨色**（备选是铅笔灰）
+   * ⇒ 面板上一眼能认出「这条是推荐」。
+   *
+   * ## 撕边参数为什么与 `.cs-act` **逐字一致**
+   *
+   * `strip.png` 是**从面板位图裁出来的真边**（`ui/scripts/stripgen.py`），
+   * 一致性不靠调参数维持，靠**同源** ⇒ 两处必须逐字相同。
+   */
   .cs-draft-lead {
-    all: unset;
+    appearance: none;
     display: block;
     text-align: inherit;
     cursor: pointer;
-    border-radius: 3px;
-    transition: background var(--cs-dur-fast) var(--cs-ease);
+    font: inherit;
+    color: inherit;
+    background: transparent;
+    border-style: solid;
+    border-color: transparent;
+    border-width: 16px;
+    border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
+    padding: 3px 10px;
+    /* ⚠ **`margin: -8px 0`**：撕边最外侧那圈是**透明**的，
+     * 不拉回来就会在纸片上方留一道假的缝（与 `.cs-act` 同一理由）。
+     */
+    margin: -8px 0;
+    /* ⚠ 影必须用 `filter: drop-shadow()`，不能用 `box-shadow`：
+     *   `box-shadow` 画的是**边框盒**的矩形，而撕边位图最外侧本来就是透明的
+     *   ⇒ 矩形投影的直边会从那些透明处露出来，那里本该什么都没有。
+     */
+    filter: drop-shadow(0 3px 6px rgb(24 18 10 / 0.2));
+    transition:
+      transform var(--cs-dur-fast) var(--cs-ease),
+      filter var(--cs-dur-fast) var(--cs-ease);
   }
 
-  /* ⚠⚠ **hover 底色必须 `color-mix` 混纸，不能混 `transparent`**（2026-10-19 被
-   * `check-opaque-bg.ps1` 拦下，票 59）。第一版写的是
-   * `background: rgb(24 18 10 / 4%)` —— 半透明底色在 **Tauri 透明窗口 +
-   * WebView2 分层合成**下**整层不绘制**，而浏览器 dev server 里画得好好的。
-   * ⇒ 这一处 hover 反馈在真机上会**完全消失**，且只靠真机才看得见。
-   * 混背后那张纸就绕开了分层合成这条路径。
+  /* ⚠ **票 59 的那条规矩仍然有效**（2026-10-24 记）：
+   * 半透明底色在 **Tauri 透明窗口 + WebView2 分层合成**下**整层不绘制**，
+   * 而浏览器 dev server 里画得好好的 ⇒ 只靠真机才看得见。
+   * ⇒ 哪天这里要加底色，**必须 `color-mix` 混纸**，不能混 `transparent`。
+   * （本条现在没有底色：悬停走的是「拿起来」。） */
+  /* 悬停 = **拿起来**（与 `.cs-act` 同一套：上抬 2px、转 0.5°、影加深）。
    *
-   * 幅度只 4%：正文是「读」的地方，下面那组撕边纸条才是「挑」的地方，
-   * 两者材质不同是有意的。可点提示只给一层几乎察觉不到的墨，
-   * 不做成「一张纸」—— 做了就又变成 `.cs-act` 那一族，
-   * 票 44 绕了三轮的那场打架会回来。 */
-  .cs-draft-lead:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--cs-ink) 4%, var(--cs-paper));
+   * ⚠ 原来这里是「4% 墨色底」（`color-mix` 混纸，票 59 的那条规矩）。
+   * 现在**不用底色**了：纸条族的一致反馈是「拿起来」，
+   * 底色只属于「没有纸条的那一族」（面板上还有别的控件用底色）。
+   */
+  .cs-draft-lead:hover:not(:disabled),
+  .cs-draft-lead:focus-visible:not(:disabled) {
+    transform: translateY(-2px) rotate(-0.5deg);
+    filter: drop-shadow(0 8px 16px rgb(24 18 10 / 0.26));
   }
 
   .cs-draft-lead:focus-visible {
@@ -2848,8 +2960,11 @@
     outline-offset: 2px;
   }
 
+  /* 禁用：**收掉投影** ⇒「一片没有落在纸上的纸」（与 `.cs-act:disabled` 同一口径）。 */
   .cs-draft-lead:disabled {
     cursor: default;
+    transform: none;
+    filter: none;
   }
 
   .cs-draft-text {

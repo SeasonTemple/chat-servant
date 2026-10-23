@@ -10,6 +10,7 @@ use chatservant_core::dispatch::{DeliveryReceipt, Dispatch, Dispatcher, Next};
 // 而它的 blanket impl 建立在 `Deserialize` 上。
 // 只 derive `Serialize` 的话编译报 E0277（2026-10-10 本机实测）。
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
@@ -632,10 +633,95 @@ fn deliver(candidate_id: &str, send: bool) -> DeliveryReceipt {
     };
 
     if send {
-        chatservant_capture::inject::fill_and_send(&text, hwnd)
+        let r = chatservant_capture::inject::fill_and_send(&text, hwnd);
+        // ⚠ **记下「这是我们发出去的」**（2026-10-24）。
+        // 只有**确实发出去了**才记：`NotSent` / `Failed` 时那句话没进聊天窗口，
+        // 记了就是一条假账 ⇒ 后面对方说同一句会被误判成「我方的话」。
+        if !matches!(r, DeliveryReceipt::NotSent | DeliveryReceipt::Failed(_)) {
+            note_sent(&text);
+        }
+        r
     } else {
-        chatservant_capture::inject::fill_input_box(&text, hwnd)
+        let r = chatservant_capture::inject::fill_input_box(&text, hwnd);
+        // ⚠ **只填入也记**（2026-10-24）：`Manual` 档填完，人多半会自己按回车，
+        // 而那句字**会变成聊天窗口里的一条** ⇒ 它同样会被读回来。
+        // ⇒ 「我们说过的话」这个事实，**在填入的那一刻就成立了**。
+        if matches!(r, DeliveryReceipt::Filled) {
+            note_sent(&text);
+        }
+        r
     }
+}
+
+/// **我们自己发出去 / 填进去过的正文**（最近若干条，带时效）。
+///
+/// ## 为什么要有它（2026-10-24，用户真机报出）
+///
+/// 用户在 `Auto` 档点了一条候选，面板回执说「可能已经发出去了」，
+/// 紧接着**又起草了一轮**——他怀疑「自己发出去的消息被当成了对方的新消息」。
+///
+/// 气泡颜色判据（饱和 = 我 / 近灰 = 对方）本该把它判成「我」
+/// （真机帧实测：绿色气泡 `彩度=91` ⇒ 判成「我」✔）。
+/// 但**判据一旦失手一次**，那句话就成了「对方的新消息」
+/// ⇒ 触发一次完整推理 ⇒ `Auto` 档下还可能**再发一条** ⇒ 自问自答。
+///
+/// ⇒ 所以不靠颜色，靠**「我们自己说过这句话」这个事实**：
+/// 装填 / 发送的那一刻把正文记下来，之后读到的**同一句正文**
+/// 一律按「我」算（见 `watch::relabel_our_own`）。
+///
+/// ## 判据是**正文**，不是位置、不是颜色、不是时间
+///
+/// - 位置：底部对齐的窗里位置会整体平移（票 83）；
+/// - 颜色：探针可能采到气泡缝（这正是本条要兜住的那种失手）；
+/// - 时间：「刚才发过」不能区分「对方说了同一句」。
+///
+/// ## 残留（写清楚，不藏）
+///
+/// 对方在 **10 分钟内说了与我们**一模一样**的正文** ⇒ 那一句会被算成「我方」。
+/// 代价是**少起草一轮**（不是多发），方向是安全的。
+static SENT_BY_US: Mutex<VecDeque<(String, std::time::Instant)>> = Mutex::new(VecDeque::new());
+
+/// 记多少条。
+const SENT_MEMORY: usize = 32;
+/// 记多久。
+const SENT_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// 记一句「我们发出去 / 填进去过的话」。
+pub fn note_sent(text: &str) {
+    let t = text.trim();
+    if t.is_empty() {
+        return;
+    }
+    let Ok(mut g) = SENT_BY_US.lock() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    g.retain(|(_, at)| {
+        now.checked_duration_since(*at)
+            .is_some_and(|d| d < SENT_TTL)
+    });
+    g.push_back((t.to_string(), now));
+    while g.len() > SENT_MEMORY {
+        g.pop_front();
+    }
+}
+
+/// 这句话是不是我们自己说过（且还在时效内）？
+pub fn sent_by_us(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let Ok(g) = SENT_BY_US.lock() else {
+        return false;
+    };
+    let now = std::time::Instant::now();
+    g.iter().any(|(s, at)| {
+        s == t
+            && now
+                .checked_duration_since(*at)
+                .is_some_and(|d| d < SENT_TTL)
+    })
 }
 
 /// **`Auto` 档专用：填入 + 发送，一步做完。**（2026-10-15 新增）
@@ -665,7 +751,14 @@ fn deliver_send(hwnd: windows::Win32::Foundation::HWND, candidate_id: &str) -> D
     };
     // 拿不到正文就**不注入**——见 [`deliver`] 里同一段的理由：
     // 往别人的聊天框里送一句占位假话，比不送严重得多。
-    chatservant_capture::inject::fill_and_send(&text, hwnd)
+    let r = chatservant_capture::inject::fill_and_send(&text, hwnd);
+    // ⚠ **记下「这是我们发出去的」**（2026-10-24）。
+    // 这里是 `Auto` 档**唯一**真正按下回车的地方 ⇒ 它说的话
+    // 下一轮就会被读回来 ⇒ 必须认成「我方」，不能当成对方的新消息。
+    if !matches!(r, DeliveryReceipt::NotSent | DeliveryReceipt::Failed(_)) {
+        note_sent(&text);
+    }
+    r
 }
 
 /// **`Auto` 档的自动发送入口。给观察循环调用**（2026-10-15 新增）。
@@ -3346,6 +3439,49 @@ mod mark_shape_tests {
 /// 因为回车是**唯一**不可撤销的动作（填进去的字可以删，发出去的消息不能）。
 /// 数它比数函数调用更接近要守的不变量：任何将来新增的发送路径，
 /// 只要最后要按回车，就一定落进这几条断言里。
+#[cfg(test)]
+mod sent_registry_tests {
+    use super::*;
+
+    /// **记过的句子认得出，没记过的不许认。**
+    ///
+    /// 这份账本是「我们自己说过什么」的**唯一**事实来源
+    /// ⇒ 观察层靠它把「我们发的话」从「对方的话」里摘出来
+    /// （见 `watch::relabel_our_own`）。
+    ///
+    /// ⚠ 判据的**方向**很重要：认错成「我方」⇒ 对方的消息不再触发推理
+    /// （少回一句）；认错成「对方」⇒ 对**自己**说的话又起草一轮
+    /// （`Auto` 档下还可能再发一条 ⇒ 自问自答）。⇒ 宁可少认，不可多认。
+    #[test]
+    fn only_what_we_actually_sent_is_recognised_as_ours() {
+        let text = "我们自己发出去的那一句（命令层守卫测试专用）";
+        assert!(
+            !sent_by_us(text),
+            "还没发过的话不许被认成我方（那是凭空多出来的身份）"
+        );
+        note_sent(text);
+        assert!(
+            sent_by_us(text),
+            "发过的话必须认得出——否则观察层会把我们自己的话当成对方的新消息"
+        );
+        assert!(
+            !sent_by_us("另一句我们从没发过的话（命令层守卫测试专用）"),
+            "不该把没发过的句子认成我方"
+        );
+    }
+
+    /// **空句不认。**
+    ///
+    /// 空正文会匹配上任何一条空消息 ⇒ 判据必须先把它挡掉。
+    #[test]
+    fn an_empty_line_is_never_recognised_as_ours() {
+        assert!(!sent_by_us(""), "空句不认");
+        assert!(!sent_by_us("   "), "只有空白的句也不认");
+        note_sent("   ");
+        assert!(!sent_by_us(""), "记了空白句也不该让空句被认出来");
+    }
+}
+
 #[cfg(test)]
 mod send_path_guard_tests {
     use super::*;

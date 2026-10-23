@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **91** ｜ 验收项全勾 **71** ｜ 已收但留有说明项 **16** ｜ 未收 **4**
+票据总数 **92** ｜ 验收项全勾 **72** ｜ 已收但留有说明项 **16** ｜ 未收 **4**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -22,10 +22,10 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 
 | 票 | 勾/总 | Status | Blocked by |
 |---|---|---|---|
-| `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
+| `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** · **2026-10-24 `Auto` 那半条已验**（用户截图：小号会话里确实多了一条绿色气泡） | None（可以立刻做） |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
-| `90-hover-rotation-blurs-the-strip.md` | 4/7 | open（2026-10-24 用户截图放大后问「为什么有一个候选不是纸片样式」⇒ 顺带量出来的 ⇒ 待用户拍板） | (票面没写 Blocked by) |
-| `91-auto-tier-clips-the-draft-in-half.md` | 3/6 | open（2026-10-24 出对照板时从整张纸截图上看见 ⇒ 已量 ⇒ 修法待定） | (票面没写 Blocked by) |
+| `90-hover-rotation-blurs-the-strip.md` | 4/7 | open · **降级**（2026-10-24 用户判定：「旋转是重点吗？目前如图那么明显的差异？**不才是问题？**」⇒ 材质才是重点，旋转本轮**不动**）· 结论与实测都留着，等用户哪天问起再动 | (票面没写 Blocked by) |
+| `92-all-candidates-are-strips.md` | 7/9 | open（2026-10-24 用户真机报出四条 ⇒ 材质与护栏已落地 ⇒ 待真机复验） | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
@@ -46,7 +46,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `81-dependency-vulnerabilities-go-node.md` | 9/11 | 部分完成 · **2026-10-22 仓库侧已修完并验过；剩 4 条要仓库主人拍板或动手** |
 | `85-one-turn-is-three-serial-model-calls.md` | 4/5 | done（2026-10-23 量化 → **取舍已定并落地**：第三段改成「**挑一条**」， |
 | `88-long-draft-pushed-the-tier-row-off-the-paper.md` | 6/7 | done（2026-10-23 用户报出 → 定位 → 修法 → 量具加一档 → 反向自证通过） |
-| `89-drag-shows-the-whole-window-rectangle.md` | 6/7 | done（2026-10-24 用户报出 + 截图 ⇒ 定位 ⇒ 改法 ⇒ 待真机复验） |
+| `91-auto-tier-clips-the-draft-in-half.md` | 3/6 | done（2026-10-24 已修：正文区补上与候选区**同一套**的底部渐隐 + 量具新增判据「正文溢出渐隐」⇒ 反向自证：改废那条规则 ⇒ 量具红 5 条） |
 
 ## 三、已收（验收项全勾）
 
@@ -123,3 +123,4 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `84-minimax-model-name-retired-upstream.md` | 7/7 |
 | `86-rank-dropped-candidates-when-text-was-rewritten.md` | 6/6 |
 | `87-tokio-asyncfd-unsound-advisory.md` | 5/5 |
+| `89-drag-shows-the-whole-window-rectangle.md` | 7/7 |
