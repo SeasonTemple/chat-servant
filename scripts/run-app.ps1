@@ -29,7 +29,7 @@ Remove-Item $log -ErrorAction SilentlyContinue
 # 一致（都下划线），但历史上 `watch.rs` 里**有一条**曾写成 `chat-servant::watch`
 # （连字符），2026-10-18 已统一。target 字符串对 `EnvFilter` 不透明，
 # **一条拼错就等于那一路的日志永远收不到**，而且它不报错，只是安静。
-$env:RUST_LOG = 'info,chat_servant::watch=debug,chat_servant::pump=debug,chat_servant_app=debug,chatservant_capture=debug,chatservant_perceive=debug'
+$env:RUST_LOG = 'info,chat_servant::watch=debug,chat_servant::pump=debug,chat_servant_app=debug,chat_servant_app::commands=debug,chatservant_capture=debug,chatservant_perceive=debug'
 
 # ⚠ 起法用 `Start-Process`，**不是**因为「这样能脱离作业对象」——
 # 2026-10-18 实测（`target/probe/detach-test.ps1`，无头、判据是存活）：

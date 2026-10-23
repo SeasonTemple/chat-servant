@@ -1674,6 +1674,15 @@ fn step(
                     //   见 `.scratch/…/20-two-dispatch-tiers.md` 的 Update。
                     match crate::commands::auto_send(&top.id) {
                         Ok(receipt) => {
+                            // ⚠ **自动发送必须留日志**（2026-10-24 补）：
+                            //   这是程序**自己**按下回车的那条路 ⇒ 不可逆 ⇒
+                            //   日志是事后唯一的证据。
+                            //   ⚠ 只打回执文案，不含候选正文。
+                            tracing::info!(
+                                target: "chat_servant::watch",
+                                "自动发送回执：{}",
+                                receipt.explain()
+                            );
                             s.auto_gate.record_sent(now);
                             s.reason = format!(
                                 "{}。已按最高置信度自动发送：{}",

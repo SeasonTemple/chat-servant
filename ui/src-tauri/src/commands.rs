@@ -372,6 +372,24 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
         // 「上一步已经装填过了」，而 `Auto` 档**没有上一步**。
         // 用错会得到「回执说发成功了，输入框里其实什么都没有」。
         let receipt = deliver_send(hwnd, &candidate_id);
+        // ⚠⚠ **这里必须留日志**（2026-10-24 补）。
+        //
+        // 这是**整个代码库里唯一会把消息真的按回车发出去**的地方，
+        // 而发出去的东西**撤不回来** ⇒ 事后若有人问「刚才那条发出去了吗」，
+        // **日志是唯一的证据**。
+        //
+        // 2026-10-24 真机实测的缺口：用户在 Auto 档点了一条候选，
+        // 面板上出现了回执「可能已经发出去了——不再自动重放，请自己看一眼
+        // 聊天窗口」⇒ 那**确实**走到了这里（按了回车），
+        // 而**日志里一个字都没有** ⇒ 只能靠人回忆。
+        //
+        // ⚠ 只打**回执文案**：`DeliveryReceipt::explain()` 里没有候选正文、
+        //   也没有聊天内容 ⇒ 不违反「截图不落盘 / 聊天内容不进日志」。
+        tracing::info!(
+            target: "chat_servant_app::commands",
+            "Auto 档投递回执：{}",
+            receipt.explain()
+        );
         //**这里原来紧跟着一句 `armed.disarm()`，2026-10-18 删掉了。**
         //
         // `arm` 在**发送被尝试之前**就把 `candidate_id` 记进了本轮
@@ -424,6 +442,13 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
     // 这一步只补一个回车」，而 `Auto` 档没有上一步。它只剩注释不改，
     // 下一个读的人会以为它是当前路径。
     let receipt = deliver(&candidate_id, false);
+    // 同上：**投递动作必须留痕**（Manual 档是「只填入、没发」，
+    // 但用户按过一次候选就是按过 ⇒ 事后要能查）。
+    tracing::info!(
+        target: "chat_servant_app::commands",
+        "Manual 档投递回执：{}",
+        receipt.explain()
+    );
 
     // 让档位守则跑一遍，把下一步该做什么告诉前端。
     let next = d.next(receipt.clone(), 0);
