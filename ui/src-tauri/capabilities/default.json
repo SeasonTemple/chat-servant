@@ -1,12 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "副驾面板需要的 Tauri 能力。**这里曾经一个文件都没有**，于是前端调 listen 被静默拒绝，界面永远停在启动时那一次 probe_anchor 的结果——Rust 循环推过去的消息、候选、意图，一条都到不了界面。`core:window:allow-start-dragging` 是实测补上的：头部挂着 `data-tauri-drag-region`，但 ACL 里没有这条权限，拖拽的 IPC 会被**静默拒掉**，面板于是推不动——界面看着有抓手，实际是个死控件。",
+  "description": "副驾面板需要的 Tauri 能力。**这里曾经一个文件都没有**，于是前端调 listen 被静默拒绝，界面永远停在启动时那一次 probe_anchor 的结果——Rust 循环推过去的消息、候选、意图，一条都到不了界面。⚠ `core:window:allow-start-dragging` **2026-10-24 已删**：拖动带不再用 `data-tauri-drag-region`（那走 Windows 原生标题栏拖动 ⇒ 系统会画一个矩形拖拽轮廓 ⇒ 透明窗口拖动时看到的是整个窗口矩形，票 89）⇒ 改成前端算屏幕位移、发给我们自己搬窗口（`commands::drag_window_by`）⇒ 这条权限没有调用方了。留着它 = 留一个「以后谁又挂上 data-tauri-drag-region 也不会被发现」的口子。",
   "windows": ["main", "debug"],
-  "permissions": [
-    "core:event:allow-listen",
-    "core:event:allow-unlisten",
-    "core:window:allow-close",
-    "core:window:allow-start-dragging"
-  ]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "core:window:allow-close"]
 }

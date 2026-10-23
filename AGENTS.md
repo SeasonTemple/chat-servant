@@ -730,6 +730,11 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
 - **ACL 少一条权限，界面上只会表现为「控件点不动 / 拖不动」**，控制台不冒泡、
   clippy / svelte-check / 测试一样都不报。已踩过：`capabilities/default.json` 缺
   `core:window:allow-start-dragging`，面板 `data-tauri-drag-region` 被静默拒绝。
+  ⚠ **2026-10-24 订正**：拖动**不再用** `data-tauri-drag-region`（那走 Windows
+  原生标题栏拖动 ⇒ 系统会画一个**矩形**拖拽轮廓 ⇒ 透明窗口拖动时看到的是
+  整个窗口矩形，票 89）⇒ 改成前端算**屏幕位移**、发 `commands::drag_window_by`
+  自己搬窗口 ⇒ **那条权限已删**（留着 = 留一个「以后谁又挂上
+  `data-tauri-drag-region` 也不会被发现」的口子）。
 - **主面板不许挪位置。** 托盘菜单「打开设置」走 `show_panel`（show+聚焦），
   **不是** `show_window`（那个会 `set_position(120,120)`）。
 - **`cargo build --release` 改了 `ui/build` 不会重链**。改完前端要

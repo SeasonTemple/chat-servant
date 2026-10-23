@@ -1031,6 +1031,39 @@ pub fn hide_panel(app: AppHandle) -> Result<(), String> {
     w.hide().map_err(|e| format!("隐藏失败：{e}"))
 }
 
+/// **自己拖窗口**（2026-10-24，票 89）。
+///
+/// ## 为什么不用 `data-tauri-drag-region`
+///
+/// 那个属性走的是 **Windows 原生标题栏拖动**（`WM_NCLBUTTONDOWN` + `HTCAPTION`）
+/// ⇒ **Windows 会自己画一个矩形拖拽轮廓** ⇒ 透明窗口的轮廓就是
+/// **整个窗口矩形** ⇒ 拖动时看到的是「一个矩形」，而不是那张撕边纸
+/// （用户 2026-10-24 原话：「窗口拖动时看到的窗体还是原本的矩形」，
+/// 截图上那个细白框就是它）。
+///
+/// ⇒ 改成：前端把**指针在屏幕上的位移**算出来发过来，我们**直接搬窗口**
+/// ⇒ 系统的拖动机制**压根没启动** ⇒ 没有轮廓。
+///
+/// ## 坐标：逻辑 px → 物理 px
+///
+/// 指针位移是 **CSS px**（逻辑像素），窗口位置是**物理像素**
+/// ⇒ 差一个 `scale_factor`（本机 125%）⇒ 不乘的话窗口会「跟不上」指针。
+#[tauri::command]
+pub fn drag_window_by(app: AppHandle, dx: f64, dy: f64) -> Result<(), String> {
+    let Some(w) = app.get_webview_window("main") else {
+        return Err("主窗口不存在".into());
+    };
+    // ⚠ Tauri 2 的 `WebviewWindow` **没有** `position()`，窗口的位置叫
+    // `outer_position()`（`position()` 是 `Window` 上的旧名/别的含义）。
+    let pos = w.outer_position().map_err(|e| e.to_string())?;
+    let k = w.scale_factor().map_err(|e| e.to_string())?;
+    w.set_position(PhysicalPosition::new(
+        pos.x as f64 + dx * k,
+        pos.y as f64 + dy * k,
+    ))
+    .map_err(|e| e.to_string())
+}
+
 /// 显示主面板（托盘菜单 →「显示面板」）。
 #[tauri::command]
 pub fn show_panel(app: AppHandle) -> Result<(), String> {

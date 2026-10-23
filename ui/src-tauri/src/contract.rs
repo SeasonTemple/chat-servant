@@ -105,7 +105,7 @@ pub mod commands {
     /// 别为了消掉这条 allow 去生产代码里硬凑一次引用——那是让门禁
     ///   反过来决定代码形状。
     #[allow(dead_code)]
-    pub const ALL: [&str; 31] = [
+    pub const ALL: [&str; 32] = [
         "probe_anchor",
         "latest_readout",
         "debug_pane",
@@ -137,6 +137,8 @@ pub mod commands {
         "hide_panel",
         "show_panel",
         "quit_app",
+        // 2026-10-24（票 89）：自己搬窗口，避开 Windows 原生拖动的矩形轮廓。
+        "drag_window_by",
     ];
 
     /// **明知道「注册了、前端却不调」的命令。**

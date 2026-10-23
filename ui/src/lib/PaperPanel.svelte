@@ -67,6 +67,63 @@
   import PencilDefs from '$lib/PencilDefs.svelte';
 
   /**
+   * **自己拖窗口**（2026-10-24，票 89）。
+   *
+   * ## ⚠ 位移必须取 `screenX/screenY`，**不能取 `clientX`**
+   *
+   * 窗口一动，**指针下方的内容也跟着动** ⇒ `clientX`（相对窗口的坐标）
+   * **几乎不变** ⇒ 用它算位移 ⇒ **窗口原地不动**。
+   * `screenX`（屏幕坐标）才是鼠标真的走了多远 ⇒ 窗口 1:1 跟着走，
+   * 而且指针下的内容点保持不变（与原生拖动的手感一致）。
+   *
+   * ## 落点
+   *
+   * 拖动带仍是**撕口那条上沿**（40px）：正文要能选中复制，
+   * 整张纸都当拖拽区会吃掉正文上的每一次按下。
+   * 控件（齿轮/×）在 `.cs-cpanel` 里（`data-no-drag`）⇒ 落在它们上**不拖**。
+   *
+   * ## 演示态
+   *
+   * `IS_DEMO` 下没有 Tauri ⇒ `invoke` 会失败 ⇒ 被 `.catch` 吃掉
+   * ⇒ 演示页拖不动（那里也不需要拖）。
+   */
+  let draggingWindow = false;
+  let dragScreenX = 0;
+  let dragScreenY = 0;
+
+  function startWindowDrag(e: PointerEvent) {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement | null)?.closest?.('[data-no-drag]')) return;
+    draggingWindow = true;
+    dragScreenX = e.screenX;
+    dragScreenY = e.screenY;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    e.preventDefault();
+  }
+
+  function moveWindowDrag(e: PointerEvent) {
+    if (!draggingWindow) return;
+    const dx = e.screenX - dragScreenX;
+    const dy = e.screenY - dragScreenY;
+    if (dx === 0 && dy === 0) return;
+    dragScreenX = e.screenX;
+    dragScreenY = e.screenY;
+    void invoke('drag_window_by', { dx, dy }).catch(() => {
+      // 拖不动也不能把界面弄坏（演示态没有这条命令）。
+    });
+  }
+
+  function endWindowDrag(e: PointerEvent) {
+    if (!draggingWindow) return;
+    draggingWindow = false;
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      // 指针已经没了（窗口被关掉等）——忽略。
+    }
+  }
+
+  /**
    * 标记的**幅面档**。跟「勾还是圈」正交：勾也有大小，圈也有大小。
    * `?shape=tick|ring` 选笔，`?size=base|mid|big` 选幅面，都是探针不落盘。
    *
@@ -726,7 +783,22 @@
     ⚠ 控件一律 `data-no-drag`（现在挂在 `.cs-cpanel` 上，`WinCtl` 已删）——否则点 × 会变成
     「拖动窗口」，而且**界面上什么都不会报错**。
   -->
-  <div class="cs-topbar" data-tauri-drag-region>
+  <!--
+    ⚠⚠ **拖动是自己实现的**（2026-10-24，票 89），**不用 `data-tauri-drag-region`**。
+
+    那个属性走的是 **Windows 原生标题栏拖动** ⇒ **Windows 会自己画一个矩形
+    拖拽轮廓** ⇒ 透明窗口的轮廓就是**整个窗口矩形** ⇒ 拖动时看到的是
+    「一个矩形」而不是那张撕边纸（用户原话 + 截图：那个细白框）。
+    ⇒ 现在由前端算**指针的屏幕位移**、发给 Rust 直接搬窗口 ⇒ 系统那套没启动。
+  -->
+  <div
+    class="cs-topbar"
+    role="presentation"
+    onpointerdown={startWindowDrag}
+    onpointermove={moveWindowDrag}
+    onpointerup={endWindowDrag}
+    onpointercancel={endWindowDrag}
+  >
     <div class="cs-cpanel" data-no-drag>
       <!--
         ⚠ **记号是自己画的，不是图标库里的。**

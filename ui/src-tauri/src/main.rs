@@ -108,6 +108,7 @@ fn main() {
             commands::tray_ready,
             commands::hide_panel,
             commands::show_panel,
+            commands::drag_window_by,
             commands::quit_app,
         ])
         .run(tauri::generate_context!())
