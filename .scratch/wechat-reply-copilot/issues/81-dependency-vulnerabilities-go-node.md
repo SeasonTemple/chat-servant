@@ -175,3 +175,25 @@ exit=0
 
 ⚠ 「没跑到」的分支**本机这次没被触发**（端点可达）⇒ 那条分支**只在网络不通时**才会出现
 ⇒ 要验它，得把 registry 指到一个没有 audit 端点的源（= 默认的 npmmirror）。
+## 2026-10-23 23:40 补记：这道步在 CI 上**第一次跑就挂了**（已修）
+
+CI run #214（提交 `1987346`）红在 `Gate 10b | npm audit`：
+
+```text
+ParserError: D:\a\_temp\…ps1:6
+Line |
+   6 |  if [ "$code" -eq 0 ]; then
+     |  ~   Missing '(' after 'if' in if statement.
+```
+
+⇒ **本仓的 CI runner 是 Windows**（日志里 `shell: C:\Program Files\PowerShell\7\pwsh.EXE`
+与 `D:\a\_temp\…ps1` 两处都写着），而我第一版把逻辑写成 **bash 段**
+⇒ 等于**给 PowerShell 喂 bash** ⇒ 解析阶段就挂，**一步都没跑到**。
+
+⇒ 改法：**CI 调与本地门禁同一份脚本**（`./scripts/npmaudit.ps1`，`shell: pwsh`）
+⇒ 形状（红/跳过+横幅）**不可能两边漂**；
+⇒ parity 见证子串也改成**命令**（`npmaudit.ps1`）而不是步名。
+
+⚠ 教训（同族：「本地绿 ≠ CI 绿」的老坑，这里是**新形态**）：
+**先看 runner 是什么系统、默认 shell 是什么**，再决定这段脚本写成什么语言。
+本仓的 runner 是 Windows ⇒ 多行脚本一律用 `shell: pwsh`（票 13 的 autofixer 步早就是这么写的）。

@@ -54,7 +54,9 @@ $witness = [ordered]@{
   'cargo test --workspace' = 'cargo test --workspace'
   'secret scan'           = 'secret-scan'
   'cargo deny check'      = 'cargo deny check'
-  'npm audit'             = 'pnpm audit'
+  # ⚠ 见证取**命令**（脚本名）：CI 调的就是这个脚本 ⇒
+  #   本地与 CI 跑的是**同一份实现**，形状不可能两边漂。
+  'npm audit'             = 'npmaudit.ps1'
   'ui svelte-check'       = 'pnpm check'
   'ui lint'               = 'pnpm lint'
   'ui svelte-autofixer'   = 'scripts/autofixer.ps1'
