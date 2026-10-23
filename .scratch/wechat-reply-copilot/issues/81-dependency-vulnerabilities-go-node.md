@@ -173,8 +173,29 @@ No known vulnerabilities found
 exit=0
 ```
 
-⚠ 「没跑到」的分支**本机这次没被触发**（端点可达）⇒ 那条分支**只在网络不通时**才会出现
-⇒ 要验它，得把 registry 指到一个没有 audit 端点的源（= 默认的 npmmirror）。
+### ✅ 两条分支都实跑过了（2026-10-24 00:45）
+
+| 场景 | 实测输出 | exit |
+|---|---|---|
+| 扫得到（默认 npmjs） | `No known vulnerabilities found` | **0**（绿） |
+| **扫不到**（指到没有 audit 端点的源） | 横幅「**没跑到**（取不到 audit 端点 / 网络不通）」+「**本次没有扫 npm 侧**」+ pnpm 原文 | **0**（跳过，**不是红**） |
+
+⇒ 「没跑到」那条分支**不再只是纸面上的**。
+⚠ 为此给 `scripts/npmaudit.ps1` 加了一个覆盖口
+`CHATSERVANT_AUDIT_REGISTRY`（**只为让这条分支可被验证**）：
+
+```powershell
+$env:CHATSERVANT_AUDIT_REGISTRY='https://registry.npmmirror.com'
+pwsh -NoProfile -File scripts\npmaudit.ps1
+```
+
+⚠ 默认值**不许**改：npmjs 才是有端点、真正扫得到的那一个；
+而 npmmirror 正是本机的默认源 ⇒ 它**没有实现 audit 端点**
+（`ERR_PNPM_AUDIT_ENDPOINT_NOT_EXISTS`）⇒ 这也是为什么必须显式 `--registry`。
+
+⚠ 「**有洞 → 红**」那条分支**逻辑上成立**（pnpm 退出码非零、输出里没有
+网络错误特征 ⇒ 直接透传非零）⇒ 但它**没法在这台机器上实跑**
+（要有一份**带洞的锁文件**才能触发）⇒ 记在这里，别声称验过。
 ## 2026-10-23 23:40 补记：这道步在 CI 上**第一次跑就挂了**（已修）
 
 CI run #214（提交 `1987346`）红在 `Gate 10b | npm audit`：

@@ -27,8 +27,17 @@
 # ⇒ 折中：**跳过但必须显眼**（横幅 + 原文），不静默。
 $ErrorActionPreference = 'Continue'
 
-# ⚠ 必须显式指到 npmjs（默认源没有 audit 端点）。
-$registry = 'https://registry.npmjs.org'
+# ⚠ 必须显式指到 npmjs（默认源 npmmirror **没有实现 audit 端点**）。
+#
+# ⚠ `CHATSERVANT_AUDIT_REGISTRY` 这个覆盖口**只为让「扫不到」那条分支
+#   **可被验证**：默认源可达 ⇒ 那条分支在本机永远走不到 ⇒ 它就只是纸面上的。
+#   ⇒ 用它指到一个没有 audit 端点的源，就能真跑一次：
+#     $env:CHATSERVANT_AUDIT_REGISTRY='https://registry.npmmirror.com'
+#     pwsh -NoProfile -File scripts\npmaudit.ps1
+#   ⇒ 期望：打横幅「本次没有扫 npm 侧」且 exit=0（不是红）。
+#   ⚠ 默认值**不许**改：npmjs 才是有端点、真正扫得到的那一个。
+$registry = if ($env:CHATSERVANT_AUDIT_REGISTRY) { $env:CHATSERVANT_AUDIT_REGISTRY }
+else { 'https://registry.npmjs.org' }
 
 Push-Location (Join-Path $PSScriptRoot '..' 'ui')
 try {
