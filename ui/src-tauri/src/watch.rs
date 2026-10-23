@@ -1175,6 +1175,15 @@ fn read_round(
     })
 }
 
+/// **已处理账本**留多少条。
+///
+/// ⚠ 这是残留的边界：**账本之外**的旧消息（用户往前翻出来的）
+/// 身份不在账本里 ⇒ 仍可能被当成新的 ⇒ 触发一次对旧内容的推理。
+///
+/// 给 512 条（≈ 25 KB）：「往前翻 512 条消息」才可能出界 —— 真实使用里翻不到。
+/// 计数判据本来就有「抵掉一个」的语义 ⇒ 账本越大越保守（越少误报）。
+pub(crate) const SEEN_WINDOW: usize = 512;
+
 /// **把本轮读到的消息并进消息流，并返回「这一轮新到的那些」。**
 ///
 /// ## ⚠ 顺序是承重的：**先算新颖度，再并入流**（2026-10-23 修）
@@ -1209,9 +1218,12 @@ fn absorb_round(
 
     // 新的记进账本（**保留重复** —— 对方把同一句又说一遍，那也是新的一条）。
     seen.extend(novel.iter().cloned());
-    // 账本有上限：太早的旧消息滚出来时身份已不在账本里
-    // ⇒ 仍可能被当成新的（已知残留，票 06 的 `Novelty`）。
-    const SEEN_WINDOW: usize = 64;
+    // 账本有上限，但**给得很大**（512 条 ≈ 25 KB）。
+    //
+    // ⚠ 上限是残留的边界：**账本之外**的旧消息（用户往前翻出来的）
+    // 身份不在账本里 ⇒ 仍可能被当成新的。
+    //   512 条意味着「往前翻 512 条消息」才可能出界 —— 真实使用里翻不到。
+    //   真正的残留只剩「翻到**应用启动之前**的历史」（那一段应用压根没读过）。
     if seen.len() > SEEN_WINDOW {
         seen.drain(..seen.len() - SEEN_WINDOW);
     }
@@ -2123,9 +2135,10 @@ impl chatservant_reason::Summarizer for NoSummary {
 mod tests {
     use super::{
         AUTO_COOLDOWN, AutoGate, BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message,
-        PaneAnchor, Phase, Readout, RecentN, Relock, SESSION, Scratch, Speaker, TierCell,
-        TokenBudget, absorb_round, apply_gate_closed, apply_relock, collect_images, current_phase,
-        gate_opened, header_print, park_on_other_conversation, phase_to_push, read_round, snapshot,
+        PaneAnchor, Phase, Readout, RecentN, Relock, SEEN_WINDOW, SESSION, Scratch, Speaker,
+        TierCell, TokenBudget, absorb_round, apply_gate_closed, apply_relock, collect_images,
+        current_phase, gate_opened, header_print, park_on_other_conversation, phase_to_push,
+        read_round, snapshot,
     };
     use chatservant_capture::Frame;
     use chatservant_capture::ocr::{OcrError, OcrLine, OcrText};
@@ -2834,6 +2847,43 @@ mod tests {
         );
         assert_eq!(seen.len(), 3, "账本里应是两条旧的 + 一条新的");
         assert_eq!(display.len(), 3, "面板里应是两条旧的 + 一条新的");
+    }
+
+    /// **账本要留得住很多条**——「往前翻」不至于出界。
+    ///
+    /// 账本容量是残留的边界：账本之外的旧消息身份不在账本里
+    /// ⇒ 仍可能被当成新的 ⇒ 对旧内容触发推理。
+    /// 512 条意味着真实使用里翻不到那个边界。
+    #[test]
+    fn the_ledger_keeps_enough_for_a_long_scroll_back() {
+        let mut seen: Vec<Message> = Vec::new();
+        let mut display: Vec<Message> = Vec::new();
+
+        // 读过 600 条（超过账本容量）。
+        for i in 0..600 {
+            let batch = vec![a_msg(&format!("第 {i} 条"))];
+            absorb_round(&mut seen, &mut display, &batch);
+        }
+        assert!(
+            seen.len() <= SEEN_WINDOW,
+            "账本不该超过容量：{} > {}",
+            seen.len(),
+            SEEN_WINDOW
+        );
+        assert!(
+            seen.len() >= 256,
+            "账本留得太少（{} 条）——往前翻几屏就出界 ⇒ 旧消息被当成新的",
+            seen.len()
+        );
+
+        // 往前翻：画面里是**更早**的消息（它们在账本里）⇒ 不该算新。
+        let scrolled: Vec<Message> = (400..410).map(|i| a_msg(&format!("第 {i} 条"))).collect();
+        let novel = absorb_round(&mut seen, &mut display, &scrolled);
+        assert!(
+            novel.is_empty(),
+            "往前翻出来的旧消息被当成了新的：{:?}",
+            novel.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
     }
 
     /// **用户往上翻历史 ⇒ 画面里的旧消息不算新的。**
