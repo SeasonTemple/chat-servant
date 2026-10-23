@@ -100,7 +100,7 @@ abab6.5s-chat (adapter: OpenAI) 请求失败：上游返回 404：
 - [x] 死名字不许回清单（有守卫）
 - [x] 推理失败的原因进日志
 - [x] genai 猜适配器那条注释按**现在的** genai 源码订正
-- [x] 真机夹具跑一轮完整推理，面板**出候选**（见第八节）
+- [x] 真机复验两遍都出候选：夹具帧一遍、**实时抓帧**一遍（见第八节）
 
 ## 八、真机复验（夹具帧源，真实 OCR + 真实模型调用）
 
@@ -121,6 +121,24 @@ abab6.5s-chat (adapter: OpenAI) 请求失败：上游返回 404：
 minimax 的（`chat-servant/llm/minimax`），而**模型名不持久化**
 （`ModelCell::new` 每次取 `default_model()`）⇒ 改清单即刻生效，
 不需要用户去设置页改任何东西。
+
+### 实时模式（**真窗口 + 真模型**）也复验过
+
+同一套二进制改成实时抓帧（不夹具）再起一次：
+
+```text
+01:11:35.586  INFO  chat_servant::watch: tick=1 peer="" candidates=0
+01:11:37.557  DEBUG roi=Rect { x0: 0, y0: 60, x1: 840, y1: 587 } ocr总行=20 本轮行=17 归类=17 消息=7 本轮新到=7
+01:11:37.692  INFO  chat_servant::pump: emit readout tick=1 phase=drafting peer="小号" messages=7 candidates=0
+01:11:58.715  INFO  chat_servant::pump: emit readout tick=1 phase=drafted  peer="小号" messages=7 candidates=3
+```
+
+⇒ 实时抓帧读到 7 条消息 ⇒ 推理三步跑通 ⇒ **3 条候选**，全程**零告警**。
+
+⚠ 这一轮模型耗时 **≈21 s**（夹具那轮是 6.6 s）⇒ 上下文更长、模型更慢。
+⇒ 面板在这 21 秒里显示的是「正在起草」那一帧（轮中推出去的那一帧），
+**不是一个不动的面板**——这正是票 21 当初要的效果。
+⇒ 但 21 秒对用户来说仍然偏长，**这一条留着观察**（不是本票的范围）。
 
 ## 九、仍然没做的
 
