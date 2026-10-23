@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **89** ｜ 验收项全勾 **71** ｜ 已收但留有说明项 **16** ｜ 未收 **2**
+票据总数 **91** ｜ 验收项全勾 **71** ｜ 已收但留有说明项 **16** ｜ 未收 **4**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -24,6 +24,8 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 |---|---|---|---|
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** | None（可以立刻做） |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
+| `90-hover-rotation-blurs-the-strip.md` | 4/7 | open（2026-10-24 用户截图放大后问「为什么有一个候选不是纸片样式」⇒ 顺带量出来的 ⇒ 待用户拍板） | (票面没写 Blocked by) |
+| `91-auto-tier-clips-the-draft-in-half.md` | 3/6 | open（2026-10-24 出对照板时从整张纸截图上看见 ⇒ 已量 ⇒ 修法待定） | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
