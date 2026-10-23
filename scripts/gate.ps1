@@ -172,8 +172,9 @@ $script:laneOf = @{
   'cargo test --workspace'   = 'rust'
   'secret scan'              = 'rust'
   'license consistency'    = 'rust'
-  # ── 网络轨：拉 advisory-db，与本机编译零共享 ──
+  # ── 网络轨：拉 advisory-db / 查 npm 漏洞，与本机编译零共享 ──
   'cargo deny check'       = 'net'
+  'npm audit'              = 'net'
   # ── ui 轨 ──
   'ui svelte-check'        = 'ui'
   'ui lint'                = 'ui'
@@ -564,6 +565,17 @@ Step "cargo deny check" `
   -If { [bool](Get-Command cargo-deny -ErrorAction SilentlyContinue) } `
   -Unless 'cargo-deny 未安装：cargo install cargo-deny' `
   -Action { & pwsh -NoProfile -File "$PSScriptRoot\deny.ps1" 2>&1 | Select-Object -Last 60 }
+
+# npm 侧漏洞（2026-10-23 加，票 81）。Rust 侧有 cargo deny advisories，
+# **npm 侧原先一步都没有** ⇒ 2026-10-21 那批公告能一直躺在锁文件里。
+#
+# ⚠ 形状：**取不到就跳过，但必须显眼**（仓库主人拍板）。
+# 走 scripts/npmaudit.ps1：默认源 npmmirror **没有 audit 端点**，
+# 而「跳过要打横幅」这件事也在那一层。
+Step "npm audit" `
+  -If { Test-Path "ui\pnpm-lock.yaml" } `
+  -Unless 'ui/pnpm-lock.yaml 不存在（先 cd ui && pnpm install）' `
+  -Action { & pwsh -NoProfile -File "$PSScriptRoot\npmaudit.ps1" 2>&1 | Select-Object -Last 40 }
 
 # ---- 前端 ----
 # node_modules 不在就跳过，不算红：那只是还没装依赖。

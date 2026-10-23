@@ -67,6 +67,7 @@ fix(感知): 切回会话后消息变少 —— 水位线住在引擎里
 | 4 | `cargo test --workspace` |
 | 5 | `cargo xtask secret-scan`（仓库里不许残留 key；**没设 `CHATSERVANT_PROBE_KEY` 时会跳过**，见下方陷阱 3） |
 | 6 | `cargo deny check`（许可证 / advisory / 来源，见 ADR-0003） |
+| 6b | `npm audit`（npm 侧漏洞；**扫不到就跳过但会打横幅**——不是静默跳过，见 `scripts/npmaudit.ps1`） |
 | 7 | `pnpm check`（svelte-check） |
 | 8 | `pnpm lint` + `svelte-autofixer` |
 | 9 | `pnpm build` |

@@ -127,7 +127,7 @@ Deno 安装器（我们是 Node）、esbuild 自己的 dev server（我们用 Vi
       而它**不做 TLS、不做证书校验**（上面「四条路径本仓一条都不走」那段）
       ⇒ Go 那批中间证书拦截公告在本仓**没有可达路径**。
       ⇒ 升 Go 是**机器卫生**，不是本仓的欠账；**不必为它卡住本仓的活**。
-- [ ] **加门禁步「npm audit」**：现在 npm 侧零覆盖 ⇒ 要加
+- [x] **加门禁步「npm audit」**：✅ **2026-10-23 23:00 已加**（形状按仓库主人拍板）
       ⚠ 但按本仓规矩，**新增门禁步要四处一起改**
       （`gate.ps1` + `ci.yml` + `release.yml` + `AGENTS.md` + `CONTRIBUTING.md`
       + parity 见证表）⇒ 不是顺手能加的，本票不自己动
@@ -138,3 +138,40 @@ Deno 安装器（我们是 Node）、esbuild 自己的 dev server（我们用 Vi
       vite 8 用 **Rolldown（Rust）替掉 esbuild** ⇒ **那个 Go 二进制直接消失**，
       这才是 Go 那条线的长期解。⚠ 但 kit 3 是大版本（有 breaking changes），
       且会牵动 `@sveltejs/vite-plugin-svelte` 7.x ⇒ 是一次真正的升级项目
+
+## 2026-10-23 23:00：「npm audit」门禁步已加（形状按仓库主人拍板）
+
+### 形状：**取不到就跳过，但必须显眼**
+
+- 扫得到、**0 条洞** → 绿；
+- 扫得到、**有洞** → **红**；
+- **扫不到**（端点不存在 / 网络不通）→ **跳过 + 打横幅**
+  「本次**没有**扫 npm 侧」。
+
+⚠ **为什么不是「取不到就红」**（票 67 的先例是判红）：
+票 67 禁的是「**静默**变成跳过」。而这道步的「取不到」是**环境问题**
+（国内网络 / 镜像源），**不是漏洞** ⇒ 判红会让门禁在本机**天天红**
+⇒ 门禁一红就没人看 ⇒ **覆盖率归零，比不扫还糟**。
+⇒ 折中：**跳过但必须显眼**（横幅 + 原文），不静默。
+
+### 落点（按本仓规矩：新增门禁步四处一起改）
+
+| 文件 | 改了什么 |
+|---|---|
+| `scripts/npmaudit.ps1`（新） | 形状本体（显式 `--registry=https://registry.npmjs.org`——默认源 npmmirror **没有 audit 端点**） |
+| `scripts/gate.ps1` | 步 `npm audit` + **lane 登记**（net 轨；漏登记 `Assert-Lanes` 会直接红） |
+| `.github/workflows/ci.yml` | `Gate 10b | npm audit`（同一形状：`set +e` 是必需的，否则 `set -e` 会把 step 打死） |
+| `scripts/check-gate-parity.ps1` | 见证表加一行（`npm audit` → `pnpm audit`） |
+| `AGENTS.md` / `CONTRIBUTING.md` | 门禁步清单（两份都写） |
+
+### 实测
+
+```text
+$ pwsh -NoProfile -File scripts\npmaudit.ps1
+No known vulnerabilities found
+>>> npm audit: no known vulnerabilities found
+exit=0
+```
+
+⚠ 「没跑到」的分支**本机这次没被触发**（端点可达）⇒ 那条分支**只在网络不通时**才会出现
+⇒ 要验它，得把 registry 指到一个没有 audit 端点的源（= 默认的 npmmirror）。

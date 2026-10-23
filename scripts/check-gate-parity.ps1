@@ -54,6 +54,7 @@ $witness = [ordered]@{
   'cargo test --workspace' = 'cargo test --workspace'
   'secret scan'           = 'secret-scan'
   'cargo deny check'      = 'cargo deny check'
+  'npm audit'             = 'pnpm audit'
   'ui svelte-check'       = 'pnpm check'
   'ui lint'               = 'pnpm lint'
   'ui svelte-autofixer'   = 'scripts/autofixer.ps1'

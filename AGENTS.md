@@ -136,6 +136,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo deny check                 # 许可证/advisory/来源合规，见 ADR-0003
+pwsh -NoProfile -File scripts\npmaudit.ps1   # npm 侧漏洞（扫不到就跳过，但会打横幅）
 cd ui && pnpm check && pnpm lint
 
 # ⚠ `cargo deny` 要联网拉 advisory-db。**直连 github.com 实测可用**
@@ -156,6 +157,13 @@ cd ui && pnpm check && pnpm lint
 #   症状是「git 命令挂住不返回」+ 一串 `error: daemon terminated`。
 # ⚠ **教训（与「票面里的存在性断言」同族）**：「本机有没有 X」是**状态**，不是常量——
 #   写进文档时必须带日期且可复验；今天实测到的结论，明天可能是假的。
+# ⚠ **另有一道步会因网络抖而红，但它不是代码的错**（2026-10-23 23:20 实测）：
+#   `ui svelte-autofixer` 靠 `npx -y @sveltejs/mcp` **现拉工具** ⇒ 拉不到时它报
+#   `AUTOFIXER_TOOL_UNAVAILABLE (2 / 12 个文件没被检查到)` 并 **exit=2**
+#   ⇒ 门禁红，而它**自己写着「这一步没有结论，不是『有问题』」**。
+#   ⇒ **重跑那一步即可**（实测重跑：12/12 OK ⇒ `AUTOFIXER_ALL_CLEAN`）。
+#   ⇒ 同理，`cargo deny` 也会因 advisory-db 刚更新而**当场报出新公告**——
+#   那是它**该做的**事，不是它坏了（那次是 tokio 的 RUSTSEC-2026-0386，票 87）。
 pwsh -NoProfile -File scripts\gate.ps1
 
 # 启动与探针

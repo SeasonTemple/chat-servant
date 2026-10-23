@@ -315,6 +315,34 @@ jobs:
       - name: "Gate 10 | cargo deny check"
         run: cargo install cargo-deny --locked && cargo deny check
 
+      # ⑦ npm 侧漏洞（2026-10-23 加，票 81）。
+      # ⚠ 形状与本地门禁**逐字同一套**：扫得到有洞 → 红；
+      #   **扫不到 → 跳过 + 打横幅**（仓库主人拍板；理由见 scripts/npmaudit.ps1 头注）。
+      # ⚠ `set +e` 是必需的：`out=$(pnpm audit ...)` 在 `set -e` 下会因非零退出
+      #   直接把整个 step 打死 ⇒ 后面的「取不到就跳过」分支永远走不到。
+      - name: "Gate 10b | npm audit"
+        working-directory: ui
+        run: |
+          set +e
+          out=$(pnpm audit --registry=https://registry.npmjs.org 2>&1)
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "$out"
+            echo '>>> npm audit: no known vulnerabilities found'
+            exit 0
+          fi
+          if echo "$out" | grep -Eq 'ERR_PNPM_AUDIT_ENDPOINT_NOT_EXISTS|ERR_PNPM_FETCH|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ECONNRESET|certificate'; then
+            echo '============================================================'
+            echo '!! npm audit **没跑到**（取不到 audit 端点 / 网络不通）'
+            echo '!! ⇒ 本次**没有**扫 npm 侧（这不是「扫过了没洞」）'
+            echo '============================================================'
+            echo "$out"
+            exit 0
+          fi
+          echo "$out"
+          exit 1
+
       - name: "Gate 11 | svelte-check"
         working-directory: ui
         run: pnpm check
