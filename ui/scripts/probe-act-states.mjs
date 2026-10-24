@@ -8,8 +8,14 @@
  *
  * | 谁 | 元素 | 材质 |
  * |---|---|---|
- * | **第一条候选（推荐）** | `.cs-draft-lead`（在 `.cs-draft` 正文位里） | **正文**：21px 仿宋墨色，无撕边、无影 |
- * | **第 2 条起（备选）** | `.cs-act`（在 `.cs-actions` 动作区里） | **撕边纸片**：`border-image: url('/strip.png')` + 两层影 |
+ * | **第一条候选（推荐）** | `.cs-act`（动作区第 1 条） | **撕边纸片** + 一枚手绘勾（`.cs-act-mark`） |
+ * | **第 2 条起（备选）** | `.cs-act`（同一个动作区） | **撕边纸片**：`border-image: url('/strip.png')` + 两层影 |
+ *
+ * ⇒ **2026-10-24 票 92 续**：正文位**不再住候选**。原来住在那儿的
+ * `.cs-draft-lead` 是 21px 仿宋 + 撕边 + 右上角一枚勾 + **没有概率列**
+ * ⇒ 面板上两种形制 ⇒ 用户原话：「为什么和下面的两个候选样式不同？
+ * 百分比置信度没有、勾选的位置奇怪，长度不一致」。
+ * ⇒ 现在**全部候选都是 `.cs-act`** ⇒ 形制统一，只靠那枚勾分出推荐那条。
  *
  * ⚠ **量具量的是谁**（本脚本第一版栽在这里）：
  * 上一轮我按 `.cs-act` 取样 ⇒ **只量到备选** ⇒ 得出「两条都是纸片」。
@@ -138,13 +144,16 @@ for (const tier of ['noprep', 'drafted', 'auto']) {
     .first()
     .screenshot({ path: join(OUT, `sheet-${tier}.png`) });
 
-  // ── 两条材质：正文行（首选） vs 纸片行（备选）────────────────────
-  await shot('.cs-draft-lead', 0, `lead-${tier}.png`);
+  // ── 形制：推荐那条（动作区第 1 条） vs 备选（第 2 条）────────────────
+  // ⚠ 2026-10-24 票 92 续：正文位不再住候选 ⇒「推荐那条」就是 `.cs-act` 的
+  //   **第 1 条** ⇒ 这里比的是**第 1 条 vs 第 2 条**，形制必须**逐项相同**
+  //   （字号 / 字体 / 宽 / 材质），只允许**墨色与那枚勾**不同。
+  await shot('.cs-act', 0, `lead-${tier}.png`);
   await shot('.cs-act', 0, `act-${tier}-0-rest.png`);
   await shot('.cs-act', 1, `act-${tier}-1-rest.png`);
 
-  report[`${tier}/lead`] = await styleOf('.cs-draft-lead', 0);
-  report[`${tier}/alt`] = await styleOf('.cs-act', 0);
+  report[`${tier}/lead`] = await styleOf('.cs-act', 0);
+  report[`${tier}/alt`] = await styleOf('.cs-act', 1);
 
   // ⚠ `noprep`（候选给出前）根本没有候选 ⇒ 下面几拍跳过。
   if ((await page.locator('.cs-act').count()) === 0) {
@@ -198,7 +207,7 @@ for (const tier of ['noprep', 'drafted', 'auto']) {
 
   report[`${tier}/measure`] = {};
   for (const [k, p] of Object.entries(shots)) {
-    if (k.startsWith('lead-')) continue;
+    // ⚠ 2026-10-24 票 92 续：推荐那条**也是纸条**了 ⇒ 它不再被排除。
     report[`${tier}/measure`][k] = await measure(p);
   }
   report[`${tier}/shots`] = shots;
@@ -239,25 +248,29 @@ const board = `<!doctype html>
   code { background:#e6dcc8; padding:0 4px; border-radius:3px; font-size:12px; }
   .big { width:430px; }
 </style></head><body>
-<h1>候选分两种材质 —— 第一条是「正文」，第 2 条起才是「撕边纸片」</h1>
+<h1>候选**全是纸条** —— 推荐那条只多一枚勾</h1>
 <p class="lead">
-<b>用户看得没错。</b>面板上的候选不是一个列表渲染的：<b>第一条候选占住正文位</b>（<code>.cs-draft-lead</code>，
-21px 仿宋墨色、<b>无撕边无影</b>，可点、也可选中复制），<b>第 2 条起</b>才是动作区里的
-<code>.cs-act</code> 撕边纸片（14px，带 <code>border-image: url('/strip.png')</code> + 两层影）。
-代码注释原话：「正文是『读』的地方，下面那组撕边纸条才是『挑』的地方，<b>两者材质不同是有意的</b>」。
+<b>用户看得没错。</b>面板上的候选不是一个列表渲染的：原来**第一条候选占住正文位**
+（<code>.cs-draft-lead</code>，21px 仿宋、<b>无概率列</b>、勾浮在右上角、横向还更窄），
+下面第 2 条起才是动作区里的 <code>.cs-act</code> 撕边纸片（14px，带
+<code>border-image: url('/strip.png')</code> + 两层影）。
+⇒ 用户原话：「为什么和下面的两个候选样式不同？百分比置信度没有、勾选的位置奇怪，长度不一致」。
+<br /><b>2026-10-24 票 92 续：正文位不再渲染候选</b> ⇒ 动作区列**全部**候选
+⇒ 每一条都是同一种纸条（14px 雅黑、同宽、概率列在右），推荐那条只多**一枚手绘勾**。
 </p>
 
 <h2>① 同一张纸的三种内容：候选给出前 / 候选出来时 / Auto 档</h2>
 <div class="row">
 ${fig('候选给出前（noprep）', join(OUT, 'sheet-noprep.png'), '正文位是一句<b>占位灰字</b>，下面<b>没有纸片组</b>')}
-${fig('候选出来时（drafted）', join(OUT, 'sheet-drafted.png'), '正文位换成<b>第一条候选的大字</b>，下面多出<b>纸片组</b>')}
-${fig('Auto 档（auto）', join(OUT, 'sheet-auto.png'), '结构相同 + 红字警告 + 红铅笔勾；⚠ 正文最后一行被<b>横切一半</b>')}
+${fig('候选出来时（drafted）', join(OUT, 'sheet-drafted.png'), '正文位是<b>一句状态句</b>，下面<b>三张纸条</b>')}
+${fig('Auto 档（auto）', join(OUT, 'sheet-auto.png'), '结构相同 + 红字警告 + 红铅笔勾')}
 </div>
 
-<h2>② 两条材质并排（同一时刻、同一档）</h2>
+<h2>② 推荐那条 vs 备选（同一时刻、同一档）</h2>
 <div class="row">
-${fig('第一条候选（正文位）', DS['lead-drafted.png'], '<code>.cs-draft-lead</code>：all:unset，无撕边无影 ⇒ <b>它本来就不是纸片</b>')}
-${fig('备选（动作区）', DS['act-drafted-0-rest.png'], '<code>.cs-act</code>：撕边位图 + 影 <code>0 3px 6px/.2</code> ⇒ 纸片')}
+${fig('推荐那条（动作区第 1 条）', DS['act-drafted-0-rest.png'], '<code>.cs-act</code> + <code>cs-act-lead/cs-act-is-lead</code> ⇒ 与其它行<b>同一种纸条</b>，只多一枚勾')}
+${fig('备选（动作区第 2 条）', DS['act-drafted-1-rest.png'], '<code>.cs-act</code>：撕边位图 + 影 <code>0 3px 6px/.2</code> ⇒ 纸片')}
+</div>
 </div>
 
 <h2>③ 悬停的那一条为什么会「糊」——三种写法实测</h2>
