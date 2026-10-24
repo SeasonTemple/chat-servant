@@ -54,21 +54,18 @@ else { 'https://registry.npmjs.org' }
 
 # ── 豁免表：GHSA 编号 → 为什么不适用 ─────────────────────────────────
 # ⚠ **每条都要能指着代码说出「这条路径不存在」**，否则不许进这张表。
+# ⚠ **2026-10-24：表空了。**
+#   之前这里有两条（`@sveltejs/kit < 3.0.0` 的两条 low 级公告），
+#   当时是**权宜之计**（升框架要动整条前端链，先把门禁的噪声压住）。
+#   ⇒ **正解已经落地**：SvelteKit 升到 3.1.0（票 81）⇒ `pnpm audit` 归零
+#   （实测：`No known vulnerabilities found`，exit 0）⇒ 那两条公告**不再存在**。
+#   ⇒ 豁免表清空。
+#
+# ⚠ **机制留着**：下一次公告来了还用得上 ⇒ 门槛是
+#   ① 逐条列 GHSA 编号（不许按包名豁免）；
+#   ② 理由必须是「**这条路径在本产品里不存在**」（「危害小」不算）；
+#   ③ **新公告照样红**（表里没有的就是红的）。
 $exempt = @{
-    'GHSA-pfhg-q3qv-9q6r' = @'
-SvelteKit「增强表单提交」可跳转到不可信站点（low）。
-**本产品没有 form action**：面板是 SPA + Tauri IPC（`invoke`/`emit`），
-`ui/src/` 里没有任何 `<form>`、`use:enhance` 或 `export const actions`
-⇒ 这条代码路径在本产品里**不存在**。
-'@
-    'GHSA-27mw-82g8-phjj' = @'
-SvelteKit「预渲染页读到不可信 cache-control 头 ⇒ XSS」（low）。
-触发前提是**有一个 HTTP 服务器**把不可信头带进预渲染页。
-**本产品没有 HTTP 服务器**：Tauri 走 `file://` 本地协议加载页面
-⇒ 没有响应头、也就没有不可信的 `cache-control` ⇒ 这条路径不存在。
-（`ui/src/routes/+layout.ts` 确实有 `prerender = true`，但预渲染产物是
-本地文件，攻击者**没有任何渠道**往它的响应头里塞东西。）
-'@
 }
 
 Push-Location (Join-Path $PSScriptRoot '..' 'ui')

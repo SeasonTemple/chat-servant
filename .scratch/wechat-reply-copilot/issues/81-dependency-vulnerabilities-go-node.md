@@ -260,3 +260,56 @@ Rust 侧 `cargo deny` 本来就有豁免机制，npm 侧没有 ⇒ 公告一发�
 
 ⇒ 这是一次**框架大版本迁移**（连带 rolldown 换掉 esbuild），不是「顺手升一下依赖」
 ⇒ 留在本票里当**独立条目**做，不塞进一次缺陷修复里。
+
+## 2026-10-24 下午：**SvelteKit 3 / vite 8 迁移落地**（正解，不是豁免）
+
+上午给 `npm audit` 步加的**逐条豁免**是权宜之计（升框架要动整条前端链，
+先把门禁的噪声压住）⇒ 下午把**正解**做掉了 ⇒ **豁免表已清空**。
+
+### 落地的六个文件
+
+| 文件 | 变化 |
+|---|---|
+| `ui/package.json` | kit `^3.1.0`、adapter-static `^4.0.0`、vite-plugin-svelte `^7.3.1`、svelte `^5.57.2`、vite `^8.3.5`、typescript `^6.0.3`；加 `"prepare": "svelte-kit sync"`，`build` 改成 `svelte-kit sync && vite build` |
+| `ui/vite.config.ts` | 配置搬进 `sveltekit({...})`（**扁平**形状）；`$lib` 用 vite 的 `resolve.alias` 映回 `src/lib` |
+| `ui/tsconfig.json` | `extends: "$app/tsconfig"`；`types: ["node", "$app/types"]`；`paths` 补 `$lib` |
+| `ui/pnpm-workspace.yaml` | **删掉** `overrides: { cookie: 0.7.2 }`（kit 3 要 `cookie ^2.0.1`，钉 0.7.2 会装出声明与实际不符的树）；顺手修了文件里 3 个 U+FFFD |
+| `ui/pnpm-lock.yaml` | 重新生成（kit2/vite6/cookie0.7 残留均为 0） |
+| `ui/svelte.config.js` | **删除**（kit 3 会主动检查它是否存在，存在即报错 `config_file_unsupported`） |
+
+### 实测（真仓库，kit 3.1.0 / vite 8.3.5）
+
+- `pnpm audit --registry=https://registry.npmjs.org/` ⇒ **`No known vulnerabilities found`**（exit 0）
+  ⇒ **那两条公告不再存在** ⇒ **豁免表清空**（机制留着给下一次）。
+- `pnpm build` / `pnpm check`（svelte-check 0 error 0 warning）/ `pnpm lint` ⇒ 全绿。
+- **面板在 vite 8（rolldown）下渲染正常**，排版量具 **49 条判据 ALL GREEN** ⇒
+  迁移没有改变排版结果。
+
+### 四个卡点的解法（都已验证）
+
+1. **`svelte.config.js` 不再被读** ⇒ 配置搬进 `sveltekit({...})`，且形状**变扁平**（没有 `kit: { … }` 那层）。
+2. **`$lib` 被删**，而 rolldown 认不出 `#lib` ⇒ 用 vite 的 `resolve.alias` + tsconfig 的 `paths`，
+   **源码里的 `$lib/...` 一行未改**。
+   ⚠ kit 自己的 `alias` 选项**没用**：① 它已标 deprecated；② kit 3.1.0 在 **Windows** 上会**误报**
+   `"paths" was overwritten`（它把别名拼成 `src\lib/*` 再拿 `path.resolve` 归一化后的
+   `src\lib\*` 逐字比对 ⇒ **分隔符不一致就判「被覆盖」**，上游 bug；TypeScript 实际解析正常）。
+3. **构建前必须 `svelte-kit sync`** ⇒ kit 3 不再自动 sync；不 sync 则虚拟 CSS 模块加载不到，
+   postcss 把 `.svelte` 当 CSS 读 ⇒ 报极具误导性的 `Unknown word </style>`。
+   ⇒ 加 `prepare` **且** `build` 前显式 sync（`prepare` 只在装依赖时跑）。
+4. **`tsconfig` 要继承 `$app/tsconfig`**，`types` 必须含 `$app/types`。
+
+### 顺带修掉的两处「量具自己有洞」
+
+- **`scripts/scan-mojibake.ps1` 的 `-Include` 坑**：`Get-ChildItem -Path ui -File -Include *.json`
+  在 PowerShell 里**返回 0 个文件**（`-Include` 配字面路径会过滤掉一切）
+  ⇒ 根目录的 `AGENTS.md` / `Cargo.toml` 与 `ui/` 根下的配置**从来没被扫过**
+  ⇒ 改成扩展名过滤 ⇒ 扫描文件数 311 → **325**，并当场抓到 `ui/pnpm-workspace.yaml` 里 3 个 U+FFFD。
+- **守卫每行只报第一条命中**（`break`）⇒ 同一行上的其它条目被掩盖 ⇒ 改成**报全**。
+
+### 仍然开着
+
+- **`#lib` 官方路线没走**：kit 3 推荐 `#lib`（package.json `imports`），
+  但它要改 `ui/src/**`，且 rolldown 认不出 `#lib/...` ⇒ 等前端那一轮统一做。
+  一旦 `#lib` 通了，vite 与 tsconfig 两处 `paths` 都能删掉。
+- **老 WebView2 的兼容性没有主动验证过**（vite 8 用 rolldown 替掉 esbuild）⇒
+  真机面板已验渲染正常，但更老的 WebView2 未测。

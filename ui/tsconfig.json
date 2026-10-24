@@ -1,5 +1,7 @@
 {
-  "extends": "./.svelte-kit/tsconfig.json",
+  // SvelteKit 3 生成的父配置落在 `node_modules/$app/tsconfig.json`
+  // （由 `svelte-kit sync` 写入），不再有 `.svelte-kit/tsconfig.json`。
+  "extends": "$app/tsconfig",
   "compilerOptions": {
     "allowJs": true,
     "checkJs": true,
@@ -10,11 +12,25 @@
     "sourceMap": true,
     "strict": true,
     "moduleResolution": "bundler",
-    // vite.config.ts / svelte.config.js 在 Node 侧跑，需要 process / node:*
+    // `$lib` 的类型解析 —— 与 `vite.config.ts` 的 `resolve.alias` 是同一件事
+    // 的另一半：那边给打包器与 dev server，这边给 TypeScript。
+    // ⚠ 两处必须同时改，理由见 vite.config.ts 里 `$lib` 那段注释。
+    "paths": {
+      "$lib": ["./src/lib"],
+      "$lib/*": ["./src/lib/*"]
+    },
+    // vite.config.ts 在 Node 侧跑，需要 process / node:*
     // 前端代码不引它们——见 `include`，只放行配置文件。
-    "types": ["node"]
+    //
+    // ⚠ SvelteKit 3 要求 `types` 里**必须含 `$app/types`**
+    //   （父配置写的就是它；这里覆盖掉它，kit 会报
+    //   `"types" was overwritten. It must include "$app/types"`）。
+    "types": ["node", "$app/types"]
   },
   // eslint.config.js 交给 eslint 自己处理类型：它的 `@eslint/js` 与
   // `LegacyConfig` 迭代器在 checkJs 下全是噪声，而 svelte-check 不需要它。
-  "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte", "vite.config.ts", "svelte.config.js"]
+  //
+  // ⚠ `svelte.config.js` 已删除（SvelteKit 3 不再读它，且会主动报错），
+  //   所以不再列进 include。
+  "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte", "vite.config.ts"]
 }

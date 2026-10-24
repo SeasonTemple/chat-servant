@@ -14,7 +14,7 @@ minimumReleaseAgeExclude:
 
 # ── 越出声明范围的版本，只能靠 override 提上来（2026-10-22）────────────
 #
-# ⚠ 为什么 cookie 是 override 而不是直接升级依赖：
+# ⚠ 为什么曾经有 cookie 这条 override：
 #   上游的版本要求**不覆盖**修复版——`@sveltejs/kit` 2.x 要求 `cookie: ^0.6.0`
 #   （0.x 的 caret 锁死在 0.6.x），而 GHSA-pxg6-pf52-xh8x 的修复版是 **0.7.x**
 #   ⇒ 不 override，锁文件里就永远是那个有洞的版本。
@@ -22,9 +22,18 @@ minimumReleaseAgeExclude:
 #     cookie 接受带越界字符的 name/path/domain。0.7.0 起对非法输入**抛错**，
 #     而 kit 用它解析 dev server 的 cookie ⇒ 需要实跑验证（见票 81）。
 #
+# ✅ 2026-10-24：SvelteKit 升到 3.x 之后，这条 override **删掉了**。
+#   理由是它已经**变成障碍**而不是补丁：
+#   · kit 3.1.0 自己声明的依赖是 `cookie: ^2.0.1`——cookie 2.x 是把
+#     0.7.x 那个修复（非法 name/path/domain 抛错）**包含在内**的后继大版本，
+#     ⇒ 上游要修的东西上游自己修好了，不需要我们越界钉版本。
+#   · 继续 override 到 0.7.2 会把 kit 3 的 `cookie: ^2.0.1` 顶掉，
+#     装出一个**声明范围与实际版本不符**的依赖树。
+#   ⇒ 现在让 cookie 跟着 kit 3 走到 2.x。
+#
 # ⚠⚠ esbuild 的 override **试过、退回了**（实测，别再试）：
 #   esbuild 是**用 Go 写的**，它那个二进制里带着 Go 运行时；2026-10-21 那批
-#   Go 公告（GO-2026-4864/4869/4871，中���证书拦截）落在旧版 esbuild 身上。
+#   Go 公告（GO-2026-4864/4869/4871，中间证书拦截）落在旧版 esbuild 身上。
 #   看着该升到 0.28.x，但 **vite 6 + esbuild 0.28.2 实测构建失败**：
 #     「Transforming destructuring to the configured target environment
 #      ("chrome87", "edge88", "es2020", "firefox78", "safari14") is not supported yet」
@@ -36,6 +45,4 @@ minimumReleaseAgeExclude:
 #   ⚠ 而那批 Go 漏洞的**四条路径我们一条都不走**
 #     （crypto/tls、crypto/x509、Deno 安装器、esbuild 自己的 dev server）
 #     ⇒ 实际暴露面接近零。真正的长期解是 vite 8（用 Rolldown/Rust 替掉 esbuild，
-#     那个 Go 二进制直接消失），那是另一件事，见票 81。
-overrides:
-  cookie: 0.7.2
+#     那个 Go 二进制直接消失）——**2026-10-24 已随 SvelteKit 3 升到 vite 8**。

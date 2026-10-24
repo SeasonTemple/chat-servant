@@ -40,8 +40,21 @@ foreach ($r in $roots) {
     $files += Get-ChildItem -Path $r -Recurse -File | Where-Object { $_.FullName -notmatch '\\target\\|node_modules|\.svelte-kit' }
   }
 }
-$files += Get-ChildItem -Path . -File -Include *.md,*.toml -ErrorAction SilentlyContinue
-$files += Get-ChildItem -Path ui -File -Include *.json,*.ts,*.js -ErrorAction SilentlyContinue
+# ⚠⚠ **2026-10-24 修一个静默的洞**：原来这两行用的是
+#   `Get-ChildItem -Path . -File -Include *.md,*.toml` 与
+#   `Get-ChildItem -Path ui -File -Include *.json,*.ts,*.js`。
+# ⇒ **PowerShell 的 `-Include` 配字面路径（路径里没有通配符）会过滤掉一切**
+#   （实测：`Get-ChildItem -Path ui -File -Include *.json` 返回 **0** 个，
+#   而去掉 `-Include` 返回 **10** 个）⇒ 这两行**从来没扫到过任何文件**
+# ⇒ 根目录的 `AGENTS.md` / `README*.md` / `Cargo.toml`、
+#   `ui/` 根下的 `package.json` / `tsconfig.json` / `vite.config.ts` /
+#   `pnpm-lock.yaml` / `pnpm-workspace.yaml`
+#   ——**全都在扫描范围外**，而它们恰恰是中文注释最密的地方。
+#   ⇒ 改用**扩展名过滤**，不靠 `-Include`。
+$files += Get-ChildItem -Path . -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '\.(md|toml)$' }
+$files += Get-ChildItem -Path ui -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '\.(json|ts|js|yaml|yml)$' }
 $files = $files | Where-Object { $_.Name -match $ext } | Sort-Object FullName -Unique
 
 # U+0000–U+0008 / U+000B / U+000C / U+000E–U+001F / U+007F：这些字符在任何一份
