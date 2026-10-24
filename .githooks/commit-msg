@@ -7,6 +7,32 @@
 #   所以 scope 的字符类不能照抄英文字母那一版。下面的 pattern 显式放了
 #   CJK 与全角范围。照抄别人的 ASCII-only 校验器会把本项目几乎所有提交拒掉。
 msg_file="$1"
+
+# ── 真人聊天**原文**闸（硬约束第 3 条「文字」那一半）─────────────────
+# ⚠ 2026-10-24 票 93：真人会话里的一条气泡原文被抄进了票面，
+#   随提交进了**公开仓**。图片那一半 .gitignore 拦得住，文字拦不住
+#   ⇒ 这一道是文字那一半的机器守卫。
+#
+# 判据是**字面黑名单**（本机真帧的 OCR 文本），不是启发式。
+# ⚠ 缺黑名单 ⇒ **没有结论**，不是「没问题」⇒ 打横幅、exit 0，
+#   不许静默跳过（票 67 的教训）。
+# ⚠ 这里用 -SkipStaged：暂存区那一半由 .githooks/pre-commit 扫，
+#   这一道只管**提交信息**（$1 是 git 传进来的消息文件）。
+# ─────────────────────────────────────────────────────────────────────
+blacklist='target/probe/real-chat-blacklist.txt'
+if [ ! -s "$blacklist" ]; then
+  echo '!! 本次没有黑名单 ⇒ 没扫真人原文（缺 target/probe/real-chat-blacklist.txt）' >&2
+  echo '   ⇒ 先跑：pwsh -NoProfile -File scripts/refresh-real-chat-blacklist.ps1' >&2
+  exit 0
+fi
+if ! command -v pwsh >/dev/null 2>&1; then
+  echo '✗ commit-msg: 找不到 pwsh（PowerShell 7），真人原文这道闸跑不了。' >&2
+  exit 1
+fi
+if ! pwsh -NoProfile -File scripts/check-real-chat.ps1 -MessageFile "$1" -SkipStaged; then
+  echo '✗ commit-msg: 提交信息里有真人聊天原文。' >&2
+  exit 1
+fi
 header="$(head -n1 "$msg_file")"
 
 # 放行自动前缀（merge/revert/fixup/squash）

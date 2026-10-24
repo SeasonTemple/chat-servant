@@ -106,6 +106,47 @@ foreach ($l in $listed) {
   }
 }
 
+# ── ④ 真人聊天原文那道闸（硬约束第 3 条「文字」那一半）─────────────────
+# 2026-10-24 票 93：真人会话里的一条气泡原文被抄进了票面，随提交进了
+# **公开仓**（本仓在 GitHub 上）。图片那一半 `.gitignore` 拦得住，
+# 文字那一半当时**一道机器守卫都没有** ⇒ 补上这道。
+#
+# 判据是**字面黑名单**（本机真帧的 OCR 文本），不是启发式。
+#
+# ⚠ 判据取**判据本身**：闸门调用的脚本名 + 那句横幅。
+#   三处必须**逐字一致**：`.githooks/pre-commit`、`.githooks/commit-msg`、
+#   `scripts/check-real-chat.ps1`。
+#   ⇒ 少一处，两份横幅就漂移 ⇒ 打出来的提示与实际行为对不上。
+#
+# ⚠ 为什么提交信息那一半挂在 `commit-msg` 而不是 `pre-commit`：
+#   实测 2026-10-24，pre-commit 阶段 `.git/COMMIT_EDITMSG` **还不存在**
+#   （只有上一次的残留），本次提交信息要到编辑器关掉之后才定下来 ⇒
+#   能看到**最终**提交信息的 hook 只有 `commit-msg`。
+$realChatGuard = 'scripts/check-real-chat.ps1'
+$realChatBanner = '!! 本次没有黑名单 ⇒ 没扫真人原文（缺 target/probe/real-chat-blacklist.txt）'
+
+foreach ($hookFile in @('.githooks/pre-commit', '.githooks/commit-msg')) {
+  if (-not (Test-Path $hookFile)) {
+    $fail.Add("找不到 $hookFile —— 提交前的闸少了一个")
+    continue
+  }
+  $h = [IO.File]::ReadAllText((Resolve-Path $hookFile))
+  if (-not $h.Contains($realChatGuard)) {
+    $fail.Add("$hookFile 里没有 '$realChatGuard' 这一步 —— 真人聊天原文那道闸没了")
+  }
+  if (-not $h.Contains($realChatBanner)) {
+    $fail.Add("$hookFile 里没有那句横幅 —— 缺黑名单时的提示被改掉了")
+  }
+}
+if (-not (Test-Path $realChatGuard)) {
+  $fail.Add("找不到 $realChatGuard —— 闸门调用的那个脚本不见了")
+} else {
+  $g = [IO.File]::ReadAllText((Resolve-Path $realChatGuard))
+  if (-not $g.Contains($realChatBanner)) {
+    $fail.Add("$realChatGuard 里没有同一句横幅 —— 两处横幅不一致了")
+  }
+}
+
 if ($fail.Count) {
   Write-Output '凭据闸这道防线本身出了问题：'
   Write-Output ''
@@ -113,6 +154,10 @@ if ($fail.Count) {
   exit 1
 }
 
-Write-Output ("凭据闸：判据片段齐全、marker 两段式（未自豁免）、" +
-               "图片白名单与仓库实际 {0} 张一致。" -f $tracked.Count)
+# ⚠ `-f` 的优先级**高于** `+` ⇒ 整个串必须包在一对括号里再 `-f`。
+#   写成 `"a" + "b {0}" + "c" -f $x` 会让 `-f` 只作用在最后一段上，
+#   `{0}` 留在原处不替换（2026-10-24 实测：一度打成 `{0}` 字面量）。
+Write-Output (("凭据闸：判据片段齐全、marker 两段式（未自豁免）、" +
+                "图片白名单与仓库实际 {0} 张一致、" +
+                "真人原文闸在位（暂存区 + 提交信息）。") -f $tracked.Count)
 exit 0
