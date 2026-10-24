@@ -218,3 +218,45 @@ Line |
 ⚠ 教训（同族：「本地绿 ≠ CI 绿」的老坑，这里是**新形态**）：
 **先看 runner 是什么系统、默认 shell 是什么**，再决定这段脚本写成什么语言。
 本仓的 runner 是 Windows ⇒ 多行脚本一律用 `shell: pwsh`（票 13 的 autofixer 步早就是这么写的）。
+
+## 2026-10-24 npm 侧又红了：**两条 SvelteKit 公告**（`@sveltejs/kit < 3.0.0`）
+
+`GHSA-pfhg-q3qv-9q6r`（增强表单提交跳转）与 `GHSA-27mw-82g8-phjj`
+（预渲染页读到不可信 cache-control 头）⇒ 都是 **low**，都补在 **kit 3**。
+⇒ `npm audit` 门禁步按设计判红（「扫得到有洞就红」）⇒ **门禁红了**。
+
+### 处置：**给 npm audit 加豁免表**（与 `deny.toml` 的 exceptions 同款）
+
+Rust 侧 `cargo deny` 本来就有豁免机制，npm 侧没有 ⇒ 公告一发布就**只能整包升级**。
+⇒ `scripts/npmaudit.ps1` 加 `$exempt` 表：**逐条 GHSA + 逐条理由**，
+门槛三条：① 逐条列编号（不许按包名豁免）② 理由必须是
+「**这条路径在本产品里不存在**」（「危害小」不算）③ **新公告照样红**。
+
+两条的理由（**都指着代码说了**）：
+- `GHSA-pfhg-q3qv-9q6r` ⇒ 本产品**没有 form action**（SPA + Tauri IPC，
+  `ui/src/` 里没有 `<form>` / `use:enhance` / `export const actions`）；
+- `GHSA-27mw-82g8-phjj` ⇒ 触发前提是**有 HTTP 服务器**把不可信头带进预渲染页，
+  而 Tauri 走 **`file://`** ⇒ 没有响应头 ⇒ 这条路径不存在。
+
+**反向自证**：抽掉其中一条豁免 ⇒ 同一条公告立刻变成「不在豁免表」⇒ **判红**（exit=1）。
+
+### ⚠ 升级到 kit 3 的**迁移步骤**（试过，记下来免得再走一遍）
+
+试装 `kit@3.1.0 + adapter-static@4 + vite-plugin-svelte@7 + vite@8 + ts@6`，
+**卡在四处**，已全部退回（工作树回到已验证可用的状态）：
+
+1. **`svelte.config.js` 不再被读**（kit 3 直接报 `config_file_unsupported`）
+   ⇒ 配置要搬进 `sveltekit(...)` 插件，且**形状变扁平**（不再有 `kit: { … }` 那层）；
+2. **`$lib` 被删**（`module_removed_lib`）⇒ 新写法 `#lib`，
+   **但 rolldown（vite 8 的打包器）认不出 `#lib`**
+   （`Rolldown failed to resolve import "#lib/PaperPanel.svelte"`）
+   ⇒ 只能用 kit 给的**逃生口**：`alias: { '$lib': 'src/lib' }`；
+3. **构建前必须 `svelte-kit sync`** ⇒ kit 3 不再自动 sync，
+   不 sync ⇒ `.svelte-kit/` 没生成 ⇒ **虚拟 CSS 模块加载不到**
+   ⇒ postcss 把 `.svelte` 当 CSS 读 ⇒ 报 `Unknown word </style>`（**极具误导性**）
+   ⇒ 修法：`package.json` 加 `"prepare": "svelte-kit sync"`；
+4. **`tsconfig.json` 要继承 `$app/tsconfig`**（不是 `./.svelte-kit/tsconfig.json`），
+   且 `compilerOptions.types` **必须含 `$app/types`**（覆盖了它 ⇒ `tsconfig_invalid`）。
+
+⇒ 这是一次**框架大版本迁移**（连带 rolldown 换掉 esbuild），不是「顺手升一下依赖」
+⇒ 留在本票里当**独立条目**做，不塞进一次缺陷修复里。

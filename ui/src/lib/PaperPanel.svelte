@@ -1069,11 +1069,47 @@
           <button
             type="button"
             class="cs-draft-lead"
+            class:cs-lead-auto={tier === 'Auto'}
             disabled={sending}
             onclick={() => void dispatchCandidate(drafted.id)}
             aria-label="按这个候选：{drafted.text}"
           >
             <p class="cs-draft-text">{drafted.text}</p>
+            <!--
+              ⚠⚠ **推荐那条的「最优选」记号**（2026-10-24，用户指出来的）。
+
+              ## 为什么这里需要它
+
+              票 68（2026-10-19）把**第一条候选挪进正文位**，动作区从**第 2 条起**列。
+              而勾的渲染条件是动作区那几行里的 `{#if i === 0}`
+              ⇒ 动作区的 `i` 从 1 开始 ⇒ **`i === 0` 永远不成立**
+              ⇒ **面板上任何一条候选都没有勾**
+              ⇒ 用户原话：「凭什么看出其是最优选？而且选中项不应该有勾/圈吗？」
+
+              ## 形制与位置
+
+              · **同一支笔**：`.cs-pencil-mark` + `TICK_NESTED` 五层嵌套 + `#pencil` 滤镜
+                ⇒ 与档位行那枚红铅笔、与备选区曾经那枚勾，**是同一支笔**；
+              · **位置**：正文最后一行的**右端**，**挂在内容盒内**
+                （往下会撞到撕边，往上会压到句子 ⇒ 两边都不行）；
+              · **颜色**：手动档墨色 / 自动档红铅笔 ⇒ 与备选那几行同口径
+                （自动档下这一条也是**点一下就发出去**的那条 ⇒ 不可逆要红铅笔）。
+
+              ⚠ 与备选区那枚勾不同：它**不进文档流**（绝对定位），
+              所以正文高度只多出**下方那 16px 的让位**，不多占横向。
+            -->
+            <span class="cs-lead-mark">
+              <svg
+                class="cs-pencil-mark"
+                viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}"
+                width="20"
+                height="12"
+                aria-hidden="true"
+                filter="url(#pencil)"
+              >
+                {#each TICK_NESTED as l (l.d)}<path d={l.d} fill-opacity={l.o} />{/each}
+              </svg>
+            </span>
           </button>
         {:else if readout?.phase === 'drafting'}
           <!--
@@ -2912,6 +2948,8 @@
   .cs-draft-lead {
     appearance: none;
     display: block;
+    /* ⚠ 记号是**绝对定位**的 ⇒ 定位基准要在这儿（`.cs-act` 同理）。 */
+    position: relative;
     text-align: inherit;
     cursor: pointer;
     font: inherit;
@@ -2921,7 +2959,13 @@
     border-color: transparent;
     border-width: 16px;
     border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
-    padding: 3px 10px;
+    /* ⚠ **上方多让 17px**：记号挂在纸条的**右上角**，
+       贴在正文**上面**一行 ⇒ **长草稿被裁时它也不会消失**。
+       ⚠ 第一版把它挂在正文最后一行的下方（与备选那几行同侧）⇒
+       **长草稿那一档它正好落在被裁掉/渐隐的位置** ⇒ 看不见
+       （2026-10-24 实拍发现）。
+       ⚠ 只多**高度**，不占**横向** ⇒ 正文宽度一点不变。 */
+    padding: 17px 10px 3px;
     /* ⚠ **`margin: -8px 0`**：撕边最外侧那圈是**透明**的，
      * 不拉回来就会在纸片上方留一道假的缝（与 `.cs-act` 同一理由）。
      */
@@ -2965,6 +3009,28 @@
     cursor: default;
     transform: none;
     filter: none;
+  }
+
+  /* 推荐那条的「最优选」记号（2026-10-24，用户指出「选中项应该有勾」）。
+   *
+   * ⚠ **绝对定位**：不进文档流 ⇒ 正文宽度不受它影响
+   * （让位的那 17px 已经写在 `.cs-draft-lead` 的 `padding-top` 里）。
+   * ⚠ **右上角**（不是右下角）：**长草稿被裁时裁的是下边**
+   * ⇒ 记号挂在下边就会跟着消失（第一版就是这么白放的）。
+   * ⚠ 右对齐内容盒 ⇒ 与备选那几行「记号在右」同一侧。
+   */
+  .cs-lead-mark {
+    position: absolute;
+    right: 10px;
+    top: 2px;
+    pointer-events: none;
+    color: var(--cs-ink);
+  }
+
+  /* 自动档：这一条也是**点一下就发出去**的那条 ⇒ 记号用**红铅笔**
+     （与 `.cs-act-red .cs-act-mark` 同一口径：红只落在记号上）。 */
+  .cs-lead-auto .cs-lead-mark {
+    color: var(--cs-pencil-red);
   }
 
   .cs-draft-text {

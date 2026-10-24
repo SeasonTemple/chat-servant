@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **93** ｜ 验收项全勾 **72** ｜ 已收但留有说明项 **16** ｜ 未收 **5**
+票据总数 **94** ｜ 验收项全勾 **72** ｜ 已收但留有说明项 **17** ｜ 未收 **5**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -48,6 +48,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `85-one-turn-is-three-serial-model-calls.md` | 4/5 | done（2026-10-23 量化 → **取舍已定并落地**：第三段改成「**挑一条**」， |
 | `88-long-draft-pushed-the-tier-row-off-the-paper.md` | 6/7 | done（2026-10-23 用户报出 → 定位 → 修法 → 量具加一档 → 反向自证通过） |
 | `91-auto-tier-clips-the-draft-in-half.md` | 6/7 | done（2026-10-24 已修：正文区补上与候选区**同一套**的底部渐隐 + 量具新增判据「正文溢出渐隐」⇒ 反向自证：改废那条规则 ⇒ 量具红 5 条） |
+| `94-the-recommended-candidate-has-no-tick.md` | 6/7 | done（2026-10-24 用户指出 ⇒ 定位 ⇒ 补勾 ⇒ 手动档墨色 / 自动档红铅笔 ⇒ 量具 49 条全绿） |
 
 ## 三、已收（验收项全勾）
 
