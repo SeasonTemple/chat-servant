@@ -39,6 +39,35 @@ fn main() {
                     );
                 }
             }
+            // ⚠⚠ **夹具模式在窗口标题上标出来**（2026-10-25，用户反馈
+            // 「这些无意义的文字不要再摆了」）。
+            //
+            // 夹具模式（`CHATSERVANT_FIXTURE`）下，Rust 会**拒投**
+            // （`outcome = "FixtureSkipped"`，见 `commands::dispatch`），
+            // 而前端**不在面板上摆那句话**（`DISPATCH_SILENT`）。
+            // ⇒ 开发者怎么知道「我点的这一下根本没发出去」？
+            //   ⇒ 标在**窗口标题**上：标题是操作系统那一层，
+            //   不占面板的任何一个像素 ⇒ 面板是产品面，标题是开发态。
+            //
+            // ⚠ 标题从**配置**里取再拼，不硬编码「副驾」——
+            //   硬编码就会在改 `tauri.conf.json` 之后悄悄对不上。
+            let fixture_mode = std::env::var("CHATSERVANT_FIXTURE")
+                .map(|p| !p.trim().is_empty())
+                .unwrap_or(false);
+            if fixture_mode {
+                let base = app
+                    .config()
+                    .app
+                    .windows
+                    .iter()
+                    .find(|w| w.label == "main")
+                    .map(|w| w.title.clone())
+                    .unwrap_or_else(|| "副驾".to_string());
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.set_title(&format!("{base} · 夹具模式"));
+                }
+                tracing::info!("夹具模式：窗口标题已标注「· 夹具模式」；投递一律拒投");
+            }
             // 托盘**先建**，因为「关闭时 = 收进托盘」这一档要验证托盘存在。
             // 顺序反了的话，设置页可能在托盘建好之前就把那一档存进去了，
             // 于是「收起」这个动作没有落点。

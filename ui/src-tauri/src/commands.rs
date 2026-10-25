@@ -253,6 +253,32 @@ pub fn debug_pane() -> Option<crate::debug::DebugPane> {
     crate::watch::debug_pane()
 }
 
+/// **夹具模式下拒投**时的回执（2026-10-25）。
+///
+/// ⚠⚠ **outcome 是 `FixtureSkipped`，不是 `Failed`**（用户反馈：
+/// 「这些无意义的文字不要再摆了」）。
+///
+/// 夹具模式**没有投递**这回事 ⇒ 说「投递失败」是**假报告**。
+/// ⇒ 前端**不把它渲染成回执**（见 `PaperPanel.svelte` 的 `DISPATCH_SILENT`），
+///   而夹具模式本身标在**窗口标题**上（`· 夹具模式`，见 `main.rs`）。
+///
+/// ⚠ 它还有第二层后果：那段回执排在候选组**之后**却比候选组高，
+///   会把候选组压小 ⇒ 候选内容溢出 ⇒ 面板上冒出一条竖滚动条
+///   （真机实测：点过候选后容器 167 / 内容 187 ⇒ 溢出 20px）。
+///   ⇒ 挡路的正是这段「无意义文字」。
+///
+/// ⚠ 抽成独立函数是为了**能测**：夹具判定读环境变量，
+///   而在测试里改环境变量是 `unsafe`（edition 2024）且会串到别的并行测试。
+fn fixture_skipped_reply() -> DispatchReply {
+    DispatchReply {
+        outcome: "FixtureSkipped",
+        detail: "当前跑在冻结的夹具帧上（CHATSERVANT_FIXTURE），不投递。\
+                 要真的发送，去掉该环境变量重启。"
+            .into(),
+        next_hint: None,
+    }
+}
+
 /// `dispatch` 的返回。**回执不是布尔值。**
 #[derive(Serialize)]
 pub struct DispatchReply {
@@ -299,13 +325,8 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
         .map(|p| !p.trim().is_empty())
         .unwrap_or(false);
     if fixture_mode {
-        return DispatchReply {
-            outcome: "Failed",
-            detail: "当前跑在**冻结的夹具帧**上（CHATSERVANT_FIXTURE），不投递。\
-                     要真的发送，去掉该环境变量重启。"
-                .into(),
-            next_hint: None,
-        };
+        tracing::warn!("夹具模式：拒投（不投递到任何真会话）");
+        return fixture_skipped_reply();
     }
 
     // **档位从 Rust 自己的格子读，不看前端传什么。**
@@ -2616,6 +2637,84 @@ impl chatservant_reason::Reasoner for PresetReasoner {
         d: &chatservant_reason::DraftSet,
     ) -> Result<Vec<chatservant_reason::Candidate>, chatservant_reason::ReasonError> {
         Ok(d.candidates.clone())
+    }
+}
+
+/// **夹具拒投这条契约**的守卫（2026-10-25）。
+///
+/// ⚠ 它跨语言（Rust 给 outcome，前端决定怎么显示）⇒ 放在一起测，
+/// 免得两边各改各的、半年后才发现「Rust 说没投递、前端摆一大段红字」。
+#[cfg(test)]
+mod fixture_reply_tests {
+    use super::*;
+
+    /// ⚠⚠ **夹具模式拒投时，outcome 必须是 `FixtureSkipped`，不能是 `Failed`**
+    /// （2026-10-25，用户反馈：「这些无意义的文字不要再摆了」）。
+    ///
+    /// ## 为什么这条要钉死
+    /// `Failed` 会**进回执区**，在面板上摆出一段红字；那段字
+    /// ① 语义上是**假报告**（夹具模式压根没投递），
+    /// ② 还会把候选组压小 ⇒ 候选内容溢出 ⇒ 面板上冒出竖滚动条。
+    /// ⇒ 夹具拒投必须走**单独一路**（前端 `DISPATCH_SILENT` 不渲染它）。
+    #[test]
+    fn the_fixture_refusal_is_not_reported_as_a_failed_dispatch() {
+        let reply = fixture_skipped_reply();
+        assert_eq!(
+            reply.outcome, "FixtureSkipped",
+            "夹具拒投不是投递失败 ⇒ 不能用 `Failed`（那会摆红字 + 挤掉候选组）"
+        );
+        assert_ne!(reply.outcome, "Failed");
+        assert_ne!(reply.outcome, "NotSent");
+        // detail 仍要说清楚「为什么没发」——它进的是**日志**，不是面板。
+        assert!(
+            reply.detail.contains("夹具"),
+            "detail 要说明这是夹具模式（它进日志，不是面板）：{}",
+            reply.detail
+        );
+    }
+
+    /// ⚠⚠ **前端的「不渲染回执」这条链路必须真的在**
+    /// （2026-10-25，用户反馈：「这些无意义的文字不要再摆了」）。
+    ///
+    /// ## 为什么 Rust 要管前端源码
+    /// `FixtureSkipped` 是**跨语言契约**：Rust 给这个 outcome，
+    /// 前端认它 ⇒ **不生成回执**。两边只要有一边改了名字或改了分支，
+    /// 就会出现「Rust 说没投递、前端摆一段红字」——
+    /// 而那块红字正是把候选组压小、逼出滚动条的那一段。
+    /// ⇒ 这里读源码逐字断言，**改名或删分支都会红**。
+    #[test]
+    fn the_fixture_outcome_is_silenced_on_the_panel_side() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("src")
+                .join("lib")
+                .join("PaperPanel.svelte"),
+        )
+        .expect("读得到 PaperPanel.svelte（路径：ui/src-tauri/../src/lib/）");
+
+        // ① 前端得认这个 outcome
+        assert!(
+            src.contains("'FixtureSkipped'"),
+            "前端必须认 `FixtureSkipped`（Rust 给的就是这个名字）"
+        );
+        // ② 且它得在「不生成回执」那一档里
+        assert!(
+            src.contains("DISPATCH_SILENT"),
+            "前端必须有 `DISPATCH_SILENT`（不生成回执的那一档）"
+        );
+        // ③ 命中时回执得被清掉，而不是显示成红字
+        assert!(
+            src.contains("sentNote = null"),
+            "命中 `DISPATCH_SILENT` 时回执必须清空（`sentNote = null`），\
+             否则夹具拒投又会变成面板上的一大段红字"
+        );
+        // ④ 真投递的失败**不许**被一起吞掉
+        assert!(
+            src.contains("'Failed'") && src.contains("'NotSent'"),
+            "真投递的失败（`Failed`/`NotSent`）必须仍然显示——\
+             「没发成」必须让用户看见"
+        );
     }
 }
 
