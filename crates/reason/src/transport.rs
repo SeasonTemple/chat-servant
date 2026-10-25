@@ -834,21 +834,34 @@ const SYS_DRAFT: &str = "\
 不要解释。像真人发消息那样短。输出 JSON：{\"candidates\":[{\"text\":\"...\",\"probability\":0到1}]}
 给 1 到 3 条，语气各不相同，probability 是你认为用户会选哪条。";
 
-/// 排序那步的 system prompt。
-///
-/// ## ⚠ 2026-10-23 改：**按编号排，不按原文排**
-///
-/// 原来让它回**候选原文**，再逐字回查。⇒ 真机 22:26 实战：
-/// 模型给三条都**改了字**（加引号/句号）⇒ 逐字回查三条全对不上
-/// ⇒ 排序**整个失效**（退化成起草的顺序）⇒ 那 4.3 秒**白花**
-/// （一轮推理 12.2 秒里的最大一块）。
-///
-/// ⇒ 现在让它回**编号**（1 起），编号就是下面 user 提示里列给它的那些。
-/// ⇒ 不依赖模型「听话地照抄」——**这是判据，不是请求**。
-const SYS_RANK: &str = "\
-你在给候选**挑一条**。只输出 JSON：{\"best\":2}
-指出**用户最可能选哪一条**——只给**一个编号**（从 1 开始），不要给完整排列。
-编号见下面列出的候选。";
+// ⚠⚠⚠ **第三段的提示词已经退役**（2026-10-25，仓库主人定案）。
+//
+// ## 它曾经做什么
+//
+// 原来叫模型「给候选**挑一条**」，回一个编号；挑中的那条排第一，
+// 其余按 `probability` 降序。2026-10-23 改过一次：让它回**编号**而不是原文
+// （真机 22:26 实测：模型给三条都改了字 ⇒ 逐字回查三条全对不上 ⇒ 排序整个失效
+// ⇒ 那 4.3 秒白花，一轮推理 12.2 秒里的最大一块）。
+//
+// ## 为什么现在**没有第三段**了
+//
+// 概率来自**起草段的自评**，挑选来自**另一次调用** ⇒ 同一道题问了两遍，
+// 答案可以对不上 ⇒ 面板自相矛盾：第一行（带勾、墨色正文）可能只有 11%，
+// 旁边 62% 的那条反而像"备选"。
+//
+// 仓库主人原话：「**为何 11% 的置信度会作为首选？**」
+// ⇒ 定案：**首选 = 概率最高的那条**，排序也按概率降序
+// ⇒ 勾、墨色正文、百分数三者一致，面板不需要解释「为什么这条排第一」。
+//
+// ⇒ **这次调用整个取消**：保留它却不用它的结果 = 每轮白花一次网络请求。
+// ⇒ 现在**一轮两次模型调用**（判断 + 起草）。
+//
+// ⚠ 这段历史留在注释里，是因为「两段自评 + 一次挑选」这种设计的**坑**还在：
+//   将来若有人又想加一次模型判断，得先回答「它的结论与概率冲突时听谁的」。
+//
+// ⚠⚠ **它是普通注释，不是文档注释**：`SYS_RANK` 这个常量**已经删掉了**
+// ⇒ 留着 `///` 会让这段历史**挂到下一个类型头上**
+//   （clippy 会报 `empty_line_after_doc_comments`）。
 
 /// 「走不走代理」的共享句柄。**网络层的属性，不是任何一家供应商的属性。**
 ///
@@ -919,7 +932,7 @@ struct ClientSlot {
 
 /// 一轮推理用的模型配置。
 ///
-/// **对外仍然是同步的**——`Reasoner` trait 是同步的，三段式、降级路径、
+/// **对外仍然是同步的**——`Reasoner` trait 是同步的，三段编排、降级路径、
 /// 界面上的调用计数全都建立在这一点上。同步与 async 之间那道桥在
 /// [`HttpReasoner::ask`] 里的 `block_on`。
 #[derive(Clone)]
@@ -964,7 +977,6 @@ pub struct HttpReasoner {
     /// 而只有一个总数的话，任何一段挂了都分不清是哪段。
     judge_calls: std::cell::Cell<u32>,
     draft_calls: std::cell::Cell<u32>,
-    rank_calls: std::cell::Cell<u32>,
 }
 
 /// 哪一段在发请求。**只为计数用**，不进请求体。
@@ -972,7 +984,6 @@ pub struct HttpReasoner {
 enum Stage {
     Judge,
     Draft,
-    Rank,
 }
 
 impl std::fmt::Debug for HttpReasoner {
@@ -1041,7 +1052,6 @@ impl HttpReasoner {
             calls: std::cell::Cell::new(0),
             judge_calls: std::cell::Cell::new(0),
             draft_calls: std::cell::Cell::new(0),
-            rank_calls: std::cell::Cell::new(0),
         })
     }
 
@@ -1199,7 +1209,6 @@ impl HttpReasoner {
         match stage {
             Stage::Judge => self.judge_calls.set(self.judge_calls.get() + 1),
             Stage::Draft => self.draft_calls.set(self.draft_calls.get() + 1),
-            Stage::Rank => self.rank_calls.set(self.rank_calls.get() + 1),
         }
         let opts = route.protocol().chat_options();
         // **这里就是 async → sync 那道桥。** 对外（`Reasoner`）仍然是同步的。
@@ -1379,88 +1388,46 @@ impl Reasoner for HttpReasoner {
         _ctx: &TurnContext,
         draft: &DraftSet,
     ) -> Result<Vec<Candidate>, ReasonError> {
-        // 候选**带编号**列出（1 起）——模型回的就是这些编号。
-        let mut lines = String::new();
-        for (i, c) in draft.candidates.iter().enumerate() {
-            lines.push_str(&format!("{}. {}\n", i + 1, c.text));
-        }
-        let v = self
-            .ask_json(SYS_RANK, &lines, Stage::Rank, &[])
-            .map_err(|e| ReasonError::Rank(redact(&e)))?;
-        // ⚠ **只认一个编号**（2026-10-23 改）。
+        // ⚠⚠⚠ **排序 = 纯本地按 probability 降序**（2026-10-25，仓库主人定案）。
         //
-        // ## 为什么从「完整排列」改成「一条」
+        // ## 为什么不再问模型「挑哪一条」
         //
-        // 我们真正需要的只有**第一条是谁**（面板第一行 = 推荐 = Auto 档发的
-        // 那条）⇒ 完整排列里的其余信息**没人用**，而它更容易错：
-        // 真机 22:26 实测：模型把三条原文**都改了字** ⇒ 逐字回查三条全对不上
-        // ⇒ 整段作废 ⇒ 那 4.3 秒白花（一轮推理 12.2 秒里的最大一块）。
+        // 原来是第三段（`SYS_RANK`）：把候选列给模型，模型答一个编号，
+        // 那条排第一、其余按概率降序。
         //
-        // ⇒ 现在只要**一个编号**：模型答错的可能性小得多，输出也更短。
+        // ⇒ **模型挑的那条，与起草段自评的概率，是两回事**：
+        //   概率来自起草段（`SYS_DRAFT` 的自评），挑选来自第三次调用。
+        //   同一道题问了两遍，答案可以对不上。
         //
-        // ⚠ 编号认不出（不是数字 / 越界 / 压根没这个键）⇒ 判第三段失败
-        // ⇒ 由上层降级成「按概率排」⇒ **候选一条都不少**（票 86 的不变量）。
-        let best = v.get("best").and_then(|b| {
-            b.as_u64()
-                .or_else(|| b.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-        });
-        let Some(best) = best else {
-            return Err(ReasonError::Rank("响应里没有可用的编号".into()));
-        };
-        let Some(pick) = usize::try_from(best)
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .filter(|i| *i < draft.candidates.len())
-        else {
-            tracing::warn!("第三段给的编号 {best} 超出候选范围");
-            return Err(ReasonError::Rank("第三段给的编号超出候选范围".into()));
-        };
-        // 组装**展示顺序**：挑中的那条第一，其余按 probability 降序。
+        // ⇒ 面板上的读法因此**自相矛盾**：
+        //   第一行 = 模型挑的那条（带着勾、墨色正文），
+        //   而它自己的概率可能只有 11%；
+        //   旁边那条 62% 的反而排在后面、看起来像"备选"。
+        //   仓库主人原话：「**为何 11% 的置信度会作为首选？**」
         //
-        // ⚠ 2026-10-23 改（真机 22:26 实测）：**第三段不许让候选变少**。
+        // ⇒ 定案：**首选 = 概率最高的那条**，排序也按概率降序
+        //   ⇒ 第一行永远是概率最高的 ⇒ 勾、墨色正文、百分数三者一致，
+        //   面板上**不需要**解释「为什么这条排第一」。
         //
-        // ## 旧写法错在哪
+        // ⚠ **这次调用整个取消了**（原先一轮推理里的第三段）。
+        //   保留它却不用它的结果 = 每轮白花一次网络请求 + 几秒。
+        //   ⇒ 现在**一轮两次模型调用**（判断 + 起草）。
         //
-        // 旧写法把「对不上的项」直接丢掉，而 [`crate::seam::turn`] 又用这份
-        // ranked **整个替换** `draft.candidates`
-        // ⇒ 起草 3 条、模型回的三条里**没有一条对得上**
-        // ⇒ ranked 只剩 1 条 ⇒ **面板上只剩 1 个回复选项**。
+        // ⚠ 候选**条数**不变（票 86 的不变量）：这里只排顺序，不增不减。
         //
-        // ⇒ 「模型没按要求回」这件事，**代价不该由用户付**：
-        // 起草是白花的，用户的可选回复也少了。
-        //
-        // ## 现在的口径
-        //
-        // · 挑中的那条 → **第一**；
-        // · 其余 → 按 probability 降序（稳定：概率相同保持原顺序）。
-        //
-        // ⇒ 候选数**恒等于**起草给的数；第三段最多只能改顺序，不能改条数。
-        let mut rest: Vec<usize> = (0..draft.candidates.len()).filter(|i| *i != pick).collect();
-        rest.sort_by(|a, b| {
-            draft.candidates[*b]
-                .probability
-                .partial_cmp(&draft.candidates[*a].probability)
+        // ⚠ `sort_by` 是**稳定**排序 ⇒ 概率相同者保持起草给出的原顺序。
+        let mut out = draft.candidates.clone();
+        out.sort_by(|a, b| {
+            b.probability
+                .partial_cmp(&a.probability)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        // ⚠ 记下**挑中了第几条**（2026-10-24 加）。
-        //
-        // 理由：第三段的结果是**面板第一行**（`recommended()` = Auto 档发的那条），
-        // 而面板上**看不出**哪一条是被挑中的 ⇒ 这条判据以前只能靠眼睛。
-        // ⇒ 日志里有一行 ⇒ 「第一行 = 模型挑的那条」可核。
-        //
-        // ⚠ 只打**序号**，不打候选原文（那是对话内容，不进日志）。
+        // ⚠ 只打**名次与概率**，不打候选原文（那是对话内容，不进日志）。
         tracing::info!(
             target: "chatservant_reason::transport",
-            pick = pick + 1,
-            total = draft.candidates.len(),
-            "第三段挑中了第 {n} 条（面板第一行就是它）",
-            n = pick + 1
+            total = out.len(),
+            "按概率降序排好（第一行 = 概率最高的那条 = 面板的首选）"
         );
-        let mut out: Vec<Candidate> = Vec::with_capacity(draft.candidates.len());
-        out.push(draft.candidates[pick].clone());
-        for i in rest {
-            out.push(draft.candidates[i].clone());
-        }
         Ok(out)
     }
 
@@ -1474,7 +1441,6 @@ impl Reasoner for HttpReasoner {
         StageCalls {
             judge: self.judge_calls.get(),
             draft: self.draft_calls.get(),
-            rank: self.rank_calls.get(),
         }
     }
 }
@@ -1818,12 +1784,10 @@ mod tests {
             SYS_DRAFT.contains("不要代写"),
             "起草提示词丢了「不要代写」那半句：只写禁词等于允许模型换个说法代写"
         );
-        // 三个提示词都非空：防止有人为了过门禁把整个常量删成空串。
-        for (name, p) in [
-            ("SYS_JUDGE", SYS_JUDGE),
-            ("SYS_DRAFT", SYS_DRAFT),
-            ("SYS_RANK", SYS_RANK),
-        ] {
+        // 两个提示词都非空：防止有人为了过门禁把整个常量删成空串。
+        // ⚠⚠ **「排序」那段提示词已经退役**（2026-10-25）：排序改成
+        //   纯本地按 probability 降序 ⇒ 少一次网络请求。
+        for (name, p) in [("SYS_JUDGE", SYS_JUDGE), ("SYS_DRAFT", SYS_DRAFT)] {
             assert!(!p.trim().is_empty(), "{name} 被清空了");
         }
     }
@@ -1847,11 +1811,13 @@ mod tests {
         assert_eq!(t.intent.intent, "约时间");
         assert_eq!(t.candidates_count(), 2);
         assert_eq!(t.recommended().unwrap().text, "今晚八点可以");
-        assert_eq!(r.calls(), 3, "判断+起草+排序 = 3 次");
+        // ⚠⚠ **两次**（2026-10-25）：排序改成纯本地按 probability 降序
+        // ⇒ 第三段那次调用**取消了** ⇒ 一轮两次。
+        assert_eq!(r.calls(), 2, "判断+起草 = 2 次（排序是纯本地的，不发请求）");
 
-        // 请求形状：三次都打到 chat/completions、都带 Bearer 鉴权。
+        // 请求形状：两次都打到 chat/completions、都带 Bearer 鉴权。
         let seen = up.seen();
-        assert_eq!(seen.len(), 3);
+        assert_eq!(seen.len(), 2);
         for s in seen.iter() {
             assert_eq!(s.method, "POST");
             assert_eq!(s.path, "/v1/chat/completions", "端点拼错了：{}", s.path);
@@ -1961,7 +1927,11 @@ mod tests {
         // `seen[0]` 变成起草那一次，于是下面那条断言报「判断请求带了口吻样本」——
         // 读起来像是判断把口吻样本泄给了上游，真凶其实在测试夹具的读失败上
         // （见 `mock_upstream`）。断条数会让它当场报「少了一条」，那才是真的。
-        assert_eq!(seen.len(), 3, "一轮 = 判断 + 起草 + 排序，各一次请求");
+        assert_eq!(
+            seen.len(),
+            2,
+            "一轮 = 判断 + 起草，各一次请求（排序是纯本地的）"
+        );
         assert!(
             seen[0].body.contains("\"system\""),
             "第一条应当是判断请求，它带 system 提示：{}",
@@ -2151,25 +2121,25 @@ mod tests {
         );
     }
 
-    /// **第三段挑的那条，要真的排到第一**（2026-10-23）。
+    /// **面板第一行 = 概率最高的那条**（2026-10-25，仓库主人定案）。
     ///
     /// ## 为什么这条守卫存在
     ///
-    /// 第三段（挑一条）的结果**以前到不了面板**：
-    /// 面板走 `DraftSet::sorted()`——**按 probability 重排**⇒ 把第三段
-    /// 挑好的顺序又冲掉了 ⇒ 那 4.3 秒等于白花。
+    /// 以前是「第三段挑的那条排第一」，而概率是起草段的自评 ⇒
+    /// 同一道题问了两遍，答案可以对不上 ⇒ 面板第一行可能只有 11%，
+    /// 旁边 62% 的反而像"备选"（仓库主人原话：「为何 11% 的置信度会作为首选？」）。
     ///
-    /// ⇒ 现在展示顺序即向量顺序，守卫断言：
-    /// **挑第 2 条 ⇒ 面板第一行就是第 2 条**（`draft_json` 的第 2 条是
-    /// 「我看看时间」，概率 0.3——**比第 1 条低** ⇒ 这才证明第一行来自
-    /// 第三段、不是概率）。
+    /// ⇒ 现在排序是**纯本地**的：按 `probability` 降序。
+    /// 守卫断言：**概率高的那条排第一**（`draft_json` 的第 1 条是 0.7、
+    /// 第 2 条是 0.3 ⇒ 第一行必须是 0.7 那条）。
+    ///
+    /// ⚠ 这条守卫**同时**守着「第三段不再发请求」：mock 只给了两次回答，
+    ///   若代码又去请求第三次，mock 会给出「没有更多回答」⇒ 推理直接失败。
     #[test]
-    fn the_picked_candidate_becomes_the_first_one_on_the_panel() {
+    fn the_highest_probability_candidate_becomes_the_first_one_on_the_panel() {
         let up = upstream(vec![
             Reply(200, openai_reply(judge_json())),
             Reply(200, openai_reply(draft_json())),
-            // 挑**第 2 条**（概率更低的那条）⇒ 第一行必须换人
-            Reply(200, openai_reply(r#"{"best":2}"#)),
         ]);
         let route = Route::custom(Protocol::OpenAiCompatible, up.base_url()).expect("合法");
         let cell = ModelCell::new(route);
@@ -2182,24 +2152,31 @@ mod tests {
         let t = crate::turn(&mut r, &ctx).expect("推理成功");
         assert_eq!(
             t.recommended().map(|c| c.text.as_str()),
-            Some("我看看时间"),
-            "第三段挑的那条必须排第一：{:?}",
+            Some("今晚八点可以"),
+            "概率最高的那条必须排第一（0.7 > 0.3）：{:?}",
             t.draft.candidates
         );
         assert_eq!(t.draft.candidates.len(), 2, "候选一条都不能少");
+        assert_eq!(
+            up.seen().len(),
+            2,
+            "一轮只发两次请求（判断 + 起草）——排序是纯本地的，不该有第三次"
+        );
     }
 
-    /// **第三段答非所问（回原文而不是编号）时，候选一条都不能少**。
+    /// **起草给出的候选一条都不能少，顺序按概率排**（2026-10-25）。
     ///
-    /// 真机 22:26 的形态：模型回了**改写过的原文**⇒ 认不出编号
-    /// ⇒ 第三段判失败 ⇒ 上层降级成「按概率排」⇒ 候选照常、条数不变。
+    /// ⚠ 这条原来叫「第三段答非所问时也不能少候选」——
+    ///   那时第三段会回原文，认不出编号就降级。
+    ///   现在**第三段取消了**（排序是纯本地的）⇒ 降级这条路也不存在了。
+    ///
+    /// ⇒ 守卫改成守**今天的行为**：上游只回两次（判断 + 起草），
+    ///   候选照常两条、条数不变、第一行是概率最高那条。
     #[test]
-    fn a_third_stage_that_answers_with_text_keeps_every_candidate() {
+    fn a_turn_with_only_two_replies_keeps_every_candidate() {
         let up = upstream(vec![
             Reply(200, openai_reply(judge_json())),
             Reply(200, openai_reply(draft_json())),
-            // 回的是**原文**（不是编号）⇒ 认不出 ⇒ 降级
-            Reply(200, openai_reply(r#"{"best":"今晚八点可以"}"#)),
         ]);
         let route = Route::custom(Protocol::OpenAiCompatible, up.base_url()).expect("合法");
         let cell = ModelCell::new(route);
@@ -2214,7 +2191,7 @@ mod tests {
         assert_eq!(
             t.recommended().map(|c| c.text.as_str()),
             Some("今晚八点可以"),
-            "降级时第一行 = 概率最高的那条（今天的行为）"
+            "第一行 = 概率最高的那条（今天的行为）"
         );
     }
 
@@ -2653,7 +2630,7 @@ mod tests {
         crate::turn(&mut r, &ctx).expect("推理成功");
 
         let seen = up.seen();
-        assert_eq!(seen.len(), 3, "一轮三段各一次");
+        assert_eq!(seen.len(), 2, "一轮两次（判断 + 起草；排序是纯本地的）");
         for s in seen.iter() {
             assert_eq!(s.path, "/v1/chat/completions", "端点没生效：{}", s.path);
             assert!(s.body.contains("some-local-model"), "模型名没生效");

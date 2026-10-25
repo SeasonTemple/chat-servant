@@ -100,26 +100,27 @@ fn record_vision_tokens(boxes: &std::sync::Mutex<Option<crate::debug::DebugPane>
     }
 }
 
-/// 一次观察里各段各调了几次模型。**四个都要报，包括 0。**
+/// 一次观察里各段各调了几次模型。**都要报，包括 0。**
 ///
-/// 界面上要能看出「判断 2 · 起草 1 · 排序 1 · 视觉 0」——
-/// 只给一个总数的话，三段里任何一段挂了都分不清是哪段。
+/// 界面上要能看出「判断 2 · 起草 1 · 视觉 0」——
+/// 只给一个总数的话，任何一段挂了都分不清是哪段。
 /// **视觉恒为 0 是正常状态**（默认多模态配置下图片随文本进 B，不额外调），
 /// 不报出来用户会以为没统计。
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct CallCounts {
     pub judge: u32,
     pub draft: u32,
-    pub rank: u32,
     /// 额外视觉模型的调用次数。**只有 B 是纯文本且开了桥时才可能非 0。**
     pub vision: u32,
+    // ⚠ **没有「排序」这一项了**（2026-10-25）：排序是**纯本地**的
+    // （按 probability 降序），不发请求 ⇒ 没有次数可报。
 }
 
 impl CallCounts {
     pub fn explain(&self) -> String {
         format!(
-            "判断 {} · 起草 {} · 排序 {} · 视觉 {}",
-            self.judge, self.draft, self.rank, self.vision
+            "判断 {} · 起草 {} · 视觉 {}",
+            self.judge, self.draft, self.vision
         )
     }
 }
@@ -1076,7 +1077,6 @@ fn snapshot(
         counts: CallCounts {
             judge: st.judge,
             draft: st.draft,
-            rank: st.rank,
             // 视觉桥**默认关闭**（ticket 15 第 1 条），循环里没接桥之前
             // 这里恒为 0——这是**正确值**，不是占位符。
             vision: s.vision.calls(),
@@ -1689,10 +1689,13 @@ fn step(
                 // 顺序很重要：`blind` 只存在于 `DraftSet` 上，
                 //   存进 `s.candidates` 之后就拿不到了（面板契约里没有这个字段）。
                 let draft_is_blind = t.draft.blind;
-                // ⚠ 走**展示顺序**（2026-10-23）：第一行 = 模型明确挑的那条
+                // ⚠ 走**展示顺序**（2026-10-25 订正）：第一行 = **概率最高的那条**
                 //   = `recommended()` = **Auto 档会发出去的那条**。
-                //   原来这里走 `sorted()`（按 probability 重排）⇒ 把第三段
-                //   挑好的顺序又冲掉了 ⇒ 那一整段模型调用等于白花。
+                //   排序是**纯本地**的（按 probability 降序，见 `transport::rank`）
+                //   ⇒ 这里**不再排**。
+                //   原来这里走 `sorted()`（按 probability 重排）⇒ 面板排一次、
+                //   接缝层排一次，两边得出的「第一条」可能不同
+                //   ⇒ 用户点的是屏幕上那条，不能有两个「第一条」。
                 s.candidates = t
                     .draft
                     .display_order()
@@ -2245,11 +2248,11 @@ impl chatservant_reason::Summarizer for NoSummary {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTO_COOLDOWN, AutoGate, BUDGET_MAX, BUDGET_MIN, DraftCandidate, ImagesOut, Message,
-        PaneAnchor, Phase, Readout, RecentN, Relock, SEEN_WINDOW, SESSION, Scratch, Speaker,
-        TierCell, TokenBudget, absorb_round, apply_gate_closed, apply_relock, collect_images,
-        current_phase, gate_opened, header_print, park_on_other_conversation, phase_to_push,
-        read_round, relabel_our_own, snapshot,
+        AUTO_COOLDOWN, AutoGate, BUDGET_MAX, BUDGET_MIN, CallCounts, DraftCandidate, ImagesOut,
+        Message, PaneAnchor, Phase, Readout, RecentN, Relock, SEEN_WINDOW, SESSION, Scratch,
+        Speaker, TierCell, TokenBudget, absorb_round, apply_gate_closed, apply_relock,
+        collect_images, current_phase, gate_opened, header_print, park_on_other_conversation,
+        phase_to_push, read_round, relabel_our_own, snapshot,
     };
     use chatservant_capture::Frame;
     use chatservant_capture::ocr::{OcrError, OcrLine, OcrText};
@@ -2726,6 +2729,75 @@ mod tests {
              多出来的那个在真机上不存在（演示页在骗人），\
              少掉的那个没人验过渲染。"
         );
+    }
+
+    /// **demo 夹具的调用计数必须与后端契约逐字对得上。**
+    ///
+    /// ⚠ **2026-10-25 的病**：第三段（排序）取消之后，后端的 [`CallCounts`]
+    /// 只剩 `judge / draft / vision` 三项，而 12 份 demo 夹具**还写着**
+    /// `"rank": 1` 与 `"model_calls": 3`
+    /// ⇒ **夹具比契约多一个键、总数也多一次**
+    /// ⇒ 演示页展示的调用数与真机对不上（真机现在只有两次）。
+    ///
+    /// ⚠ 为什么之前没人发现：JSON 是**运行时**读的，TS 类型里没有 `rank`
+    /// ⇒ 编译器不管；而那 12 个键**谁都没在看**。
+    /// ⇒ 这条守卫把**键集合直接从 [`CallCounts`] 序列化出来取**（不写死字段名）
+    /// ⇒ 后端加一项、删一项，这里自动跟着变。
+    #[test]
+    fn the_demo_fixtures_count_the_same_calls_the_backend_does() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/demo");
+        let rd = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("读不到夹具目录 {}：{e}", dir.display()));
+        // 契约的键集合：**从后端自己序列化出来**，不写死字段名。
+        let contract: std::collections::BTreeSet<String> =
+            serde_json::to_value(CallCounts::default())
+                .expect("CallCounts 序列化不了")
+                .as_object()
+                .expect("CallCounts 不是对象")
+                .keys()
+                .cloned()
+                .collect();
+        let mut checked = 0usize;
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).expect("夹具读不出来");
+            let v: serde_json::Value = serde_json::from_str(&text)
+                .unwrap_or_else(|err| panic!("{} 不是合法 JSON：{err}", p.display()));
+            let counts = v["counts"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{} 没有 `counts` 对象", p.display()));
+            let keys: std::collections::BTreeSet<String> = counts.keys().cloned().collect();
+            assert_eq!(
+                keys,
+                contract,
+                "{} 的 `counts` 键与后端契约对不上：\
+                 多出来的那个是后端**已经不报**的那一段（演示页在骗人），\
+                 少掉的那个是后端**正在报**的那一段（真机上没人看过它渲染）。",
+                p.display()
+            );
+            let num = |k: &str| -> u64 {
+                counts
+                    .get(k)
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or_else(|| panic!("{} 的 counts.{k} 不是整数", p.display()))
+            };
+            // ⚠ 视觉桥有**自己那份**计数（`s.vision.calls()`），默认关闭；
+            //   `model_calls` 是 `reasoner.calls()` ⇒ 只含判断 + 起草。
+            let total = v["model_calls"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{} 没有 `model_calls`", p.display()));
+            assert_eq!(
+                total,
+                num("judge") + num("draft"),
+                "{} 的 `model_calls` 与「判断 + 起草」对不上。",
+                p.display()
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "夹具目录是空的，等于一份都没验");
     }
 
     /// **候选正文逐字进 JSON。**

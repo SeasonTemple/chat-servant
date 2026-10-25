@@ -127,11 +127,10 @@
     }
   ],
   "reason": "Sent",
-  "model_calls": 3,
+  "model_calls": 2,
   "counts": {
     "judge": 1,
     "draft": 1,
-    "rank": 1,
     "vision": 0
   },
   "relock_pending": false,

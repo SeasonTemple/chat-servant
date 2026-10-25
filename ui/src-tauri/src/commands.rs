@@ -2537,13 +2537,15 @@ fn fingerprint_of(parts: &[(&str, Option<&str>)]) -> u64 {
     h.finish()
 }
 
-/// **两段式路由**：判断走一组，起草与排序走另一组。
+/// **两段式路由**：判断走一组，起草走另一组。
 ///
-/// ## 为什么是「判断 / 起草+排序」这个分法
+/// ## 为什么是「判断 / 起草」这个分法
 ///
 /// 票 43 说的是「决策模型」与「LLM」两组。当前三段式里，判断那一段是
-/// 唯一一个「读上下文、输出几十个字」的，起草与排序是「照着口吻写」的那两段——
+/// 唯一一个「读上下文、输出几十个字」的，起草是「照着口吻写」的那一段——
 /// 前者换便宜的模型省一大截钱，后者换好的模型提质量。
+/// ⚠ 2026-10-25：排序已是**纯本地**（按 probability 降序），不出网
+/// ⇒ 不再占「起草+排序」这一组的额度。
 ///
 /// 图片跟着**起草**走（`ctx.images` 在 draft 那次请求里），所以
 ///   **图片外发走的是回复组**，而图片的视觉计费规则也按回复组取。
@@ -2551,7 +2553,8 @@ fn fingerprint_of(parts: &[(&str, Option<&str>)]) -> u64 {
 /// ## 计数怎么合
 ///
 /// `calls` 是两边的**和**，而「静默期零调用」那条硬约束断言的正是这个数——
-/// 所以它必须覆盖三段全部。分段计数逐项相加，不合并。
+/// 所以它必须覆盖**所有出网的段**。分段计数逐项相加，不合并。
+/// ⚠ 排序不出网 ⇒ 它没有次数可报（`StageCalls` 里那一位已删）。
 struct SplitReasoner {
     decision: chatservant_reason::HttpReasoner,
     llm: chatservant_reason::HttpReasoner,
@@ -2591,7 +2594,6 @@ impl chatservant_reason::Reasoner for SplitReasoner {
         chatservant_reason::StageCalls {
             judge: d.judge + l.judge,
             draft: d.draft + l.draft,
-            rank: d.rank + l.rank,
         }
     }
 }

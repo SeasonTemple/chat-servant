@@ -137,11 +137,10 @@
     }
   ],
   "reason": "有 5 条候选（复核夹具）",
-  "model_calls": 5,
+  "model_calls": 2,
   "counts": {
     "judge": 1,
     "draft": 1,
-    "rank": 1,
     "vision": 0
   },
   "relock_pending": false,

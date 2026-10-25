@@ -219,7 +219,7 @@ fn strip_trailing_period(s: &str) -> &str {
     rest.trim_end()
 }
 
-/// 清洗一组候选。**保持顺序**——排序是第三段的事。
+/// 清洗一组候选。**保持顺序**——排序是接缝层第三段的事，不是这儿。
 pub fn clean_all<'a, I: IntoIterator<Item = &'a str>>(raws: I) -> Vec<String> {
     raws.into_iter().map(clean).collect()
 }
