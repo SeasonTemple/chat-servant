@@ -79,7 +79,7 @@ const PARTS = [
   ['.cs-act', '候选纸条'],
   ['.cs-act-meta', '右侧一列'],
   ['.cs-act-mark', '记号(勾)'],
-  ['.cs-act-prob', '概率'],
+  ['.cs-act-prob', '置信度(笔迹)'],
   ['.cs-act-note', '回执'],
   ['.cs-pick', '档位行'],
   ['.cs-sheet', '整张纸'],
@@ -141,10 +141,12 @@ async function measure(label) {
         };
       }
       // 记号挂在**哪一条**上（反馈 ⑤：记号必须跟着选中项走）。
+      // ⚠ 置信度那一格**不再有文本**（2026-10-25 改成笔迹）⇒ 读它的
+      //   `textContent` 只会得到空串 ⇒ 改成读「有没有笔迹」与它的层数。
       const marks = [...document.querySelectorAll('.cs-act')].map((el, i) => ({
         第几条: i,
         有记号: !!el.querySelector('.cs-act-mark'),
-        概率: el.querySelector('.cs-act-prob')?.textContent.trim() ?? null,
+        置信度笔迹: el.querySelector('.cs-act-prob')?.querySelectorAll('svg path').length ?? 0,
         lead: el.classList.contains('cs-act-is-lead'),
         文字: el.querySelector('.cs-act-text')?.textContent.trim().slice(0, 12) ?? '',
       }));
@@ -226,7 +228,7 @@ for (const r of rows) {
   console.log('  每条候选：');
   for (const m of r.每条) {
     console.log(
-      `    #${m.第几条}  记号=${m.有记号 ? '有' : '无'}  概率=${m.概率 ?? '—'}  墨色=${m.lead ? '是' : '否'}  「${m.文字}」`,
+      `    #${m.第几条}  记号=${m.有记号 ? '有' : '无'}  置信度笔迹=${m.置信度笔迹 ? m.置信度笔迹 + '层' : '无'}  墨色=${m.lead ? '是' : '否'}  「${m.文字}」`,
     );
   }
 }

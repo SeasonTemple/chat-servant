@@ -113,17 +113,20 @@
     {
       "id": "c0",
       "text": "30s 确实短了。我看了日志，请求在第 28 秒才进到下游。我改成 90s，顺手把重试次数从 2 提到 3，你再帮我看一眼。",
-      "probability": 0.7
+      "probability": 0.7,
+      "confidence": "high"
     },
     {
       "id": "c1",
       "text": "我这边先按 30s 跑一轮压测，超时的部分单独打点，晚点给你一个数。",
-      "probability": 0.2
+      "probability": 0.2,
+      "confidence": "mid"
     },
     {
       "id": "c2",
       "text": "刚看了，超时是下游自己的问题，改超时时间不一定管用，我把日志链接发你。",
-      "probability": 0.1
+      "probability": 0.1,
+      "confidence": "low"
     }
   ],
   "reason": "有 3 条候选",

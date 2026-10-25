@@ -6,11 +6,13 @@
 // 「实测为 0」与「写不进 unsafe」差着一个编译期守卫，这里补上后者。
 #![forbid(unsafe_code)]
 
+pub mod confidence;
 pub mod dispatch;
 pub mod frame;
 pub mod redact;
 pub mod scale;
 
+pub use confidence::ConfidenceTier;
 pub use dispatch::{DeliveryReceipt, Dispatch, Dispatcher, Next};
 pub use frame::{Frame, Rect};
 pub use scale::{Billing, Fitted, Unfit, fit, logical_size};

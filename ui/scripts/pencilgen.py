@@ -28,6 +28,7 @@
 放大件见 `target/probe/ref_tick_2x.png` / `ref_ring_2x.png` / `ref_cross_2x.png`。
 """
 import math
+import sys
 
 # ⚠ Windows 上 Python 的 stdout 默认是传统代码页（GitHub 的 Windows runner
 #   上就是 cp1252），一句中文 print 就 UnicodeEncodeError 带栈回溯崩掉。
@@ -37,6 +38,13 @@ import math
 #   不能指望调用方设 PYTHONIOENCODING，必须在脚本里自己改。
 #   errors="replace"：真有编不出来的字符时**降级成 ? 而不是崩**——
 #   台架的失败模式必须是「读数不符」，不是「打印失败 ⇒ 栈回溯」。
+#
+# ⚠⚠ **2026-10-25：这里原本缺 `import sys`**，脚本在自己第 40 行就用
+#   `sys.stdout` ⇒ **一运行就 NameError**。
+#   ⇒ 它从来没被真正执行过——门禁里**没有**「重生成 marks.js 再比对」这一步，
+#   所以产物与来源是否同步，**没有任何机器在管**。
+#   ⇒ 这正是「从未被执行过的分支，不等于它是对的」那条纪律的形态：
+#   一个只写不跑的脚本，坏了也没人知道。
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):        # 3.7+ 都有
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -345,6 +353,82 @@ def nested_block(layers):
     return f"[\n{rows}\n]"
 
 
+# ── 置信度短划（2026-10-25）────────────────────────────────────────
+#
+# ## 它是什么
+#
+# 面板那一格现在**不显示百分数**了（用户定案：首选行只有勾，
+# 备选行改用一道**笔迹轻重**表示置信程度）⇒ 需要一支「短划」。
+#
+# ⚠ **三档只有笔重不同，中心线完全一样**——这是这个方案的全部含义：
+# 「同一道批注，按得重一点还是轻一点」。道数、长度、位置都不参与编码。
+#
+# ## 为什么是三道叠画，而不是单道
+#
+# marks.js 的纪律：**细线没有芯边之分，它的柔边是叠出来的，不是缩出来的**
+# （`TICK_NESTED` 那套嵌套只给粗笔迹）。一道短划正是细笔迹
+# ⇒ 用 [`pass_layers`] 的路子：几道细线紧挨着叠，边缘呈阶梯状毛边。
+#
+# ⚠ 道间距**小于**道宽 ⇒ 三道是**叠**在一起的一道，不是三条分开的线；
+# 间距随档位一起缩 ⇒ 笔越重，划痕越宽（道间距也占宽度）。
+#
+# ## 三档的宽度是量出来的，不是估的
+#
+# 面板上那个槽是 **26×16 px**，取景框 56×34 ⇒ 缩放 0.464。
+# 判据是**真实像素下的墨迹厚度**：高档必须明显粗、低档必须**看得见**
+# （上一轮实测：第一版低档 1.3 单位 = 0.6px ⇒ 淡到等于没有 ⇒ 那一档失效）。
+#
+CONF_LINE = [
+    (9.0, 19.8),
+    (17.0, 17.6),
+    (26.0, 18.8),
+    (35.0, 16.4),
+    (47.0, 15.6),
+]
+
+
+def conf_width(t):
+    """一道随手划的短痕：落笔稍重 → 中段稳 → 收锋。基准（高档）。"""
+    if t < 0.18:
+        return 3.6 + (3.2 - 3.6) * (t / 0.18)
+    u = (t - 0.18) / 0.82
+    return 3.2 + (0.9 - 3.2) * (u ** 0.7)
+
+
+# 三档：(笔重倍率, 道间距倍率)。**间距跟着笔重一起缩**——
+# 否则高档变粗而间距不变，划痕的「宽度」就跟不上笔重。
+CONF_TIERS = {
+    "high": (1.00, 1.00),
+    "mid": (0.71, 0.74),
+    "low": (0.55, 0.56),
+}
+# 基准笔宽（高档的单道笔宽，取景框单位）与基准道间距。
+CONF_BASE_WIDTH = 3.6
+CONF_BASE_GAP = 0.9
+# 三道各自的错位（沿笔划方向为主，垂直方向给一点自然的参差）。
+CONF_PASS_DX = (-0.9, 0.0, 0.9)
+CONF_PASS_DY = (-0.25, 0.30, -0.20)
+# 每道的 opacity。累计 = 1-(1-0.40)³ = 0.784 ⇒ 三档**一样浓**，
+# 差别全在笔重（这正是「同一道批注，轻按 / 重按」）。
+# ⚠ 2026-10-25 实测后从 0.34 提到 0.40：笔重小的档位**覆盖面积也小**，
+#   同样的透明度下低档看着比中档淡得多（实景放大图里很明显）
+#   ⇒ 墨色一起提一档，低档才不会「等于没有」。
+#   ⚠ 三档同步改 ⇒ 档间差异仍然只由笔重决定。
+CONF_PASS_O = 0.40
+
+
+def conf_layers(tier):
+    """一档短划 = 三道叠画的细线。"""
+    w_mul, gap_mul = CONF_TIERS[tier]
+    out = []
+    for dx, dy in zip(CONF_PASS_DX, CONF_PASS_DY):
+        shifted = [(x + dx * gap_mul, y + dy * gap_mul) for x, y in CONF_LINE]
+        out.append(
+            (ribbon(shifted, lambda t, m=w_mul: conf_width(t) * m), CONF_PASS_O)
+        )
+    return out
+
+
 def bbox(path_pts):
     xs = [p[0] for p in path_pts]
     ys = [p[1] for p in path_pts]
@@ -370,6 +454,19 @@ def emit_js(path):
     ring_l_m = pass_layers(RING_LABEL_LINE, ring_label_width, RING_LABEL_PASSES)
     ring_l_big = pass_layers(RING_LABEL_LINE_BIG, ring_label_width, RING_LABEL_PASSES)
     ring_l_huge = pass_layers(RING_LABEL_LINE_HUGE, ring_label_width, RING_LABEL_PASSES)
+    conf_strokes = {t: nested_block(conf_layers(t)) for t in ("high", "mid", "low")}
+    # ⚠ **笔宽元数据**（2026-10-25）：量具要判「三档笔重递减」，
+    #   而**从 path 的 bbox 反推笔宽是测错的**——笔划近水平，
+    #   bbox 高度被**中心线的起伏**主导（起伏 4.2 单位 ≫ 笔宽 3.6），
+    #   量出来的是「起伏 + 笔宽」，三档只差 20% ⇒ 那样的判据几乎恒真。
+    # ⇒ 笔宽由这里给出（它是**定义值**，不是反推值），量具直接读。
+    conf_meta = {
+        t: {
+            "stroke": round(CONF_BASE_WIDTH * CONF_TIERS[t][0], 2),
+            "gap": round(CONF_BASE_GAP * CONF_TIERS[t][1], 2),
+        }
+        for t in ("high", "mid", "low")
+    }
 
     tw, th = bbox(TICK_LINE)
     rw, rh = bbox(RING_LINE)
@@ -428,6 +525,18 @@ def emit_js(path):
  *  2. **多道叠画**（`RING_MARK` / `RING_LABEL_MARK`）只给细笔迹。圈的单道
  *     只有 1.15~1.5px，套 ×0.30 等于 0.35px——看不见。**细线没有芯边
  *     之分，它的柔边是叠出来的，不是缩出来的。**
+ *
+ * ## 置信度短划（2026-10-25）
+ *
+ * 面板那一格**不再显示百分数**，改用一道**笔迹轻重**表示置信程度。
+ * ⇒ 三档（high / mid / low）**中心线完全一样**，只有笔重不同：
+ * 「同一道批注，按得重一点还是轻一点」。道数、长度、位置都不参与编码。
+ *
+ * ⚠ 它是**细笔迹** ⇒ 柔边走**多道叠画**那条路（上面第 2 条），
+ * 不是嵌套。三道的间距**小于**道宽 ⇒ 叠起来是一道划痕，不是三条线。
+ *
+ * ⚠ 三档的墨色**一样浓**（每道 0.34，累计 0.713）：差别全在笔重。
+ * 若低档还额外调淡，就会重演「低档淡到等于没有 ⇒ 那一档失效」。
  */
 
 /** 勾 · 嵌套羽化（由外带 → 芯，o 递增）。粗笔迹的柔边全靠它。 */
@@ -461,6 +570,31 @@ export const CROSS_PATHS = [
   '{cross_a}',
   '{cross_b}',
 ];
+
+/** 置信度短划 · 三档（high / mid / low）。
+ *
+ *  面板那一格**不显示百分数**，这一道划痕就是置信程度本身。
+ *  ⚠ 三档**中心线一样**，只有笔重不同 ⇒ 读法是「按得重一点 / 轻一点」。
+ *  ⚠ 墨色三档一样浓：差别全在笔重。低档若还调淡 ⇒ 那一档就废了
+ *    （实测过：第一版低档 0.6px，淡到等于没有）。 */
+export const CONF_STROKES = {{
+  high: {conf_strokes['high']},
+  mid: {conf_strokes['mid']},
+  low: {conf_strokes['low']},
+}};
+
+/** 置信度短划的**笔宽元数据**（取景框单位）。
+ *
+ *  ⚠ 为什么单独导出来：量具要判「三档笔重递减」，而**从 path 的 bbox
+ *  反推笔宽是测错的**——笔划近水平，bbox 高度被**中心线的起伏**主导
+ *  （起伏 4.2 单位 ≫ 笔宽 3.6）⇒ 量出来的是「起伏 + 笔宽」，
+ *  三档只差 20% ⇒ 那样的判据几乎恒真，等于没有守卫。
+ *  ⇒ 笔宽是**定义值**，由生成器给出，量具直接读它。 */
+export const CONF_META = {{
+  high: {{ stroke: {conf_meta['high']['stroke']}, gap: {conf_meta['high']['gap']} }},
+  mid: {{ stroke: {conf_meta['mid']['stroke']}, gap: {conf_meta['mid']['gap']} }},
+  low: {{ stroke: {conf_meta['low']['stroke']}, gap: {conf_meta['low']['gap']} }},
+}};
 
 /** 共用取景框。1 单位 = 1 px @ 1×。 */
 export const MARK_VIEW = {{ w: {VIEW_W}, h: {VIEW_H} }};

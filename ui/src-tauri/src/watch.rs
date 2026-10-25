@@ -37,6 +37,7 @@ use chatservant_capture::anchor::PaneAnchor;
 use chatservant_capture::surface::WECHAT;
 use chatservant_capture::wgc_alt::capture_one_frame;
 use chatservant_capture::window::find_chat_window;
+use chatservant_core::confidence::ConfidenceTier;
 use chatservant_perceive::{Decision, Message, PaneWatcher, Speaker};
 use chatservant_reason::{Provider, Reasoner, TurnContext};
 use serde::Serialize;
@@ -220,6 +221,15 @@ pub struct DraftCandidate {
     pub id: String,
     pub text: String,
     pub probability: f32,
+    /// 置信度**档位**（高 / 中 / 低）——界面画笔迹轻重用的就是这个。
+    ///
+    /// ⚠ **分档在 Rust 侧算**（[`chatservant_core::confidence::ConfidenceTier`]），
+    /// 阈值只有那一份 ⇒ 界面不自己按概率分档（前端自己算 ⇒ 阈值有第二份
+    /// 拷贝 ⇒ 后端改阈值时界面不跟着改，且**没有任何编译器会告诉你**）。
+    ///
+    /// ⚠ 面板**不显示百分数**了（2026-10-25 用户定案：首选行只有勾，
+    /// 备选行用一道**笔迹轻重**表示置信程度）⇒ 这个字段就是那一格的唯一内容。
+    pub confidence: ConfidenceTier,
 }
 
 /// 「参考上下文」条数的可改句柄。
@@ -1705,6 +1715,8 @@ fn step(
                         id: format!("c{i}"),
                         text: c.text.clone(),
                         probability: c.probability,
+                        // ⚠ 档位在这里算，界面不自己算（阈值只有这一份）。
+                        confidence: ConfidenceTier::from_probability(c.probability),
                     })
                     .collect();
                 s.reason = t.explain();
@@ -2256,6 +2268,7 @@ mod tests {
     };
     use chatservant_capture::Frame;
     use chatservant_capture::ocr::{OcrError, OcrLine, OcrText};
+    use chatservant_core::confidence::ConfidenceTier;
     use chatservant_core::frame::Rect;
     use chatservant_perceive::{Decision, LineSource, PaneWatcher, ViewPlan, ViewPolicy};
     use chatservant_reason::context;
@@ -2363,6 +2376,7 @@ mod tests {
                 id: format!("c{i}"),
                 text: format!("候选 {i}"),
                 probability: 0.5,
+                confidence: ConfidenceTier::from_probability(0.5),
             })
             .collect();
         s
@@ -2800,6 +2814,80 @@ mod tests {
         assert!(checked > 0, "夹具目录是空的，等于一份都没验");
     }
 
+    /// **演示夹具里的候选，带的键与后端契约一模一样；置信度档位与概率对得上。**
+    ///
+    /// ## 为什么又要一条守卫（2026-10-25）
+    ///
+    /// 夹具是**运行时**读的 JSON ⇒ 编译器不管它；TS 类型里也没有 `confidence`
+    /// ⇒ 类型系统也不管它。⇒ 后端加一个字段，夹具不会跟着加，
+    /// **演示页就会拿旧结构去渲染**——而它照样画得出来，只是画的是错的。
+    ///
+    /// ⚠ 判据的期望值**从契约本身取**（[`DraftCandidate`] 序列化出来的键集合），
+    /// 不写死字段名 ⇒ 后端加一项、删一项，这里自动跟着变。
+    /// ⚠ 上一轮就踩过同族：夹具里写着 `"rank": 1` 与 `"model_calls": 3`，
+    /// 而后端早就不报这两样了 ⇒ 演示页展示的数字与真机对不上。
+    #[test]
+    fn the_demo_fixtures_carry_the_same_candidate_shape_the_backend_sends() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/demo");
+        let rd = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("读不到夹具目录 {}：{e}", dir.display()));
+        // 契约的键集合：**从后端自己序列化出来**，不写死字段名。
+        let contract: std::collections::BTreeSet<String> = serde_json::to_value(DraftCandidate {
+            id: String::new(),
+            text: String::new(),
+            probability: 0.0,
+            confidence: ConfidenceTier::Low,
+        })
+        .expect("DraftCandidate 序列化不了")
+        .as_object()
+        .expect("DraftCandidate 不是对象")
+        .keys()
+        .cloned()
+        .collect();
+        let mut checked = 0usize;
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).expect("夹具读不出来");
+            let v: serde_json::Value = serde_json::from_str(&text)
+                .unwrap_or_else(|err| panic!("{} 不是合法 JSON：{err}", p.display()));
+            let arr = match v["candidates"].as_array() {
+                Some(a) if !a.is_empty() => a,
+                _ => continue, // 没有候选的夹具（fresh / silent 等）不参与
+            };
+            for (i, c) in arr.iter().enumerate() {
+                let keys: std::collections::BTreeSet<String> = c
+                    .as_object()
+                    .expect("候选不是对象")
+                    .keys()
+                    .cloned()
+                    .collect();
+                assert_eq!(
+                    keys,
+                    contract,
+                    "{} 的第 {i} 条候选键与后端契约对不上：\
+                     少掉的那个是后端**正在下发**的（演示页渲染不出来），\
+                     多出来的那个是后端**已经不发了**的（演示页在骗人）。",
+                    p.display()
+                );
+                let prob = c["probability"]
+                    .as_f64()
+                    .unwrap_or_else(|| panic!("{} 的第 {i} 条候选没有 `probability`", p.display()));
+                assert_eq!(
+                    c["confidence"].as_str(),
+                    Some(ConfidenceTier::from_probability(prob as f32).as_str()),
+                    "{} 的第 {i} 条候选：置信度档位与概率对不上。\
+                     演示页会照着这个档位画笔迹轻重 ⇒ 画错了就是在骗人。",
+                    p.display()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "一条候选都没验到，等于没验");
+    }
+
     /// **候选正文逐字进 JSON。**
     ///
     /// 票 21 剩下的验收项是「正文里真的出现那句回复」。这句话能被界面
@@ -2840,6 +2928,61 @@ mod tests {
         assert!(
             first["probability"].is_number(),
             "概率必须带过去：界面按它排序，而 Auto 档挑的是第一条"
+        );
+    }
+
+    /// **置信度档位必须带过去，且与概率对得上**（2026-10-25）。
+    ///
+    /// ⚠ 面板那一格画的是**笔迹轻重**，档位就是那一格的**全部内容**
+    /// ⇒ 档位错了 = 画错了，而且**界面看不出错**（它只管照着画）。
+    ///
+    /// ⚠ 这条守卫量的是**事实来源**：它比对的是「后端算出来的档位」
+    /// 与「按同一阈值从概率重新算一遍的档位」，
+    /// 而不是写死一个字符串 ⇒ 阈值改了这里自动跟着改。
+    #[test]
+    fn the_confidence_tier_reaches_the_wire_and_matches_the_probability() {
+        let mut s = scratch_with(1, 3);
+        // 三档各来一条，让守卫真的遍历到不同的档位。
+        for (i, p) in [0.7_f32, 0.2, 0.1].into_iter().enumerate() {
+            s.candidates[i].probability = p;
+            s.candidates[i].confidence = ConfidenceTier::from_probability(p);
+        }
+        let st = chatservant_reason::StageCalls::default();
+        let out = snapshot(
+            &s,
+            None,
+            Phase::Drafted {
+                messages: s.messages.clone(),
+                candidates: s.candidates.clone(),
+            },
+            4,
+            1,
+            st,
+            "起草好了",
+        );
+        let v = serde_json::to_value(&out).unwrap();
+        let arr = v["candidates"].as_array().expect("候选不是数组");
+        assert_eq!(arr.len(), 3, "三条候选都在");
+        for (i, c) in arr.iter().enumerate() {
+            let p = c["probability"].as_f64().expect("概率没带上");
+            assert_eq!(
+                c["confidence"].as_str(),
+                Some(ConfidenceTier::from_probability(p as f32).as_str()),
+                "第 {i} 条的置信度档位与它的概率对不上：\
+                 界面画的是笔迹轻重，档位错了就是画错了"
+            );
+        }
+        // 三档都得真的出现过——不然这条守卫只覆盖了一种情况。
+        let tiers: std::collections::BTreeSet<&str> = arr
+            .iter()
+            .filter_map(|c| c["confidence"].as_str())
+            .collect();
+        assert_eq!(
+            tiers,
+            ["high", "low", "mid"]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<&str>>(),
+            "三档没都出现：守卫只覆盖了一种档位就等于没覆盖"
         );
     }
 
@@ -3313,6 +3456,7 @@ mod tests {
             id: "c1".into(),
             text: "给 A 的草稿".into(),
             probability: 0.5,
+            confidence: ConfidenceTier::from_probability(0.5),
         });
 
         let g = apply_gate_closed(&mut s, Some(&b));
