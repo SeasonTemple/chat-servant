@@ -98,6 +98,34 @@ async function fit() {
     const note = document.querySelector('.cs-act-note');
     const pick = document.querySelector('.cs-pick');
     const draft = document.querySelector('.cs-draft');
+    const name = document.querySelector('.cs-pick-name');
+    const markbox = document.querySelector('.cs-markbox');
+    const svg = document.querySelector('.cs-tick');
+    /* ⚠ 墨迹范围 = 所有 path 的 **user-space bbox**，按 svg 的
+     * viewBox→CSS 比例换算到屏幕坐标。
+     * ⚠ **不是**量 svg 的盒子：盒子里有大片空白画布，量它会把
+     * 「笔有多大」说成「盒子有多大」（同一个错：量偏差要问相对谁）。 */
+    let ink = null;
+    if (svg) {
+      const b = svg.getBoundingClientRect();
+      const vb = svg.viewBox.baseVal;
+      let ux0 = Infinity;
+      let ux1 = -Infinity;
+      let uy0 = Infinity;
+      let uy1 = -Infinity;
+      for (const p of svg.querySelectorAll('path')) {
+        const pb = p.getBBox();
+        ux0 = Math.min(ux0, pb.x);
+        ux1 = Math.max(ux1, pb.x + pb.width);
+        uy0 = Math.min(uy0, pb.y);
+        uy1 = Math.max(uy1, pb.y + pb.height);
+      }
+      const sy = b.height / vb.height;
+      ink = {
+        top: +(b.top + (uy0 - vb.y) * sy).toFixed(1),
+        bottom: +(b.top + (uy1 - vb.y) * sy).toFixed(1),
+      };
+    }
     return {
       clientH: box ? box.clientHeight : null,
       scrollH: box ? box.scrollHeight : null,
@@ -105,10 +133,61 @@ async function fit() {
       回执在: !!note,
       回执高: note ? +note.getBoundingClientRect().height.toFixed(1) : 0,
       档位行top: pick ? +pick.getBoundingClientRect().top.toFixed(1) : null,
+      /* ⚠⚠ **「档位行不动」量的是「档位名」，不是 `.cs-pick` 的盒子上沿。**
+       * 盒子上沿**含那块空的取景框**（2026-10-25 从 54px 收到 10.8px）
+       * ⇒ 盒子矮了 ⇒ 上沿下移 ⇒ 而**用户看到的那行字一像素没动**
+       * （档位行是贴着纸底的，框变矮时框的上沿往下走，名字不动）。
+       * ⇒ 拿盒子上沿当判据 = 拿一个**没人看得见的边**当判据
+       * ⇒ 框一改，判据就红，而界面其实没坏。 */
+      档位名top: name ? +name.getBoundingClientRect().top.toFixed(1) : null,
+      档位名bottom: name ? +name.getBoundingClientRect().bottom.toFixed(1) : null,
+      取景框高: markbox ? +markbox.getBoundingClientRect().height.toFixed(1) : null,
+      候选区高: box ? +box.getBoundingClientRect().height.toFixed(1) : null,
+      候选区底: box ? +box.getBoundingClientRect().bottom.toFixed(1) : null,
+      墨迹top: ink ? ink.top : null,
+      墨迹bottom: ink ? ink.bottom : null,
       正文位高: draft ? +draft.getBoundingClientRect().height.toFixed(1) : null,
       gutter: cs ? cs.scrollbarGutter : null,
     };
   }, SYNTHETIC);
+}
+
+/**
+ * 档位行那三条判据（位置不动 / 取景框不空 / 空白不这么高）。
+ *
+ * ⚠ 为什么它们要**一起**看：收掉空取景框是**位置换空间**——
+ * 框矮 43px ⇒ 候选区高 43px ⇒ 三条纸摊得更开 ⇒ 底下那块空白从
+ * 70.7px 掉到 27.5px。⇒ 少了任何一条，剩下的那条就可能悄悄假绿。
+ *
+ * @param extra 候选区被**别的东西**占掉的高度（回执那档）——
+ *   ⚠ 回执（`.cs-act-note`）就排在候选区与档位行**之间**
+ *   ⇒ 它一出现，候选区就矮一截 ⇒ 候选底往上走 ⇒ 空白变大。
+ *   ⇒ 那部分**不是空白**，判据里要扣掉，否则回执那一档必红。
+ */
+function checkTierRow(m, prefix, extra = 0) {
+  check(
+    m.档位名top === 465.2 && m.档位名bottom === 480,
+    `${prefix}档位名位置不动`,
+    `top=${m.档位名top} bottom=${m.档位名bottom}（期望 465.2 / 480）`,
+  );
+  check(
+    m.墨迹top === 458.5 && m.墨迹bottom === 483.9,
+    `${prefix}标记墨迹位置不动`,
+    `top=${m.墨迹top} bottom=${m.墨迹bottom}（期望 458.5 / 483.9）`,
+  );
+  check(
+    m.取景框高 !== null && m.取景框高 <= 16,
+    `${prefix}档位行上方的取景框不再空着`,
+    `框高=${m.取景框高}px（上限 16）`,
+  );
+  const band =
+    m.候选区底 !== null && m.档位名top !== null ? +(m.档位名top - m.候选区底).toFixed(1) : null;
+  const net = band !== null ? +(band - extra).toFixed(1) : null;
+  check(
+    net !== null && net <= 32,
+    `${prefix}最后一条候选到档位名的空白不这么高`,
+    `空白=${band}px${extra ? ` − 回执占的 ${extra}px` : ''} ⇒ 净 ${net}px（上限 32；原来 70.7）`,
+  );
 }
 
 await page.goto(`${BASE}/panel/?demo=1&state=drafted`, { waitUntil: 'networkidle' });
@@ -121,7 +200,7 @@ check(
   '三条候选放得下（未点候选）',
   `容器 ${before.clientH} / 内容 ${before.scrollH} ⇒ 溢出 ${before.溢出}`,
 );
-check(before.档位行top === 408.5, '档位行位置不动', `top=${before.档位行top}（期望 408.5）`);
+checkTierRow(before, '');
 check(before.正文位高 === 47.5, '正文位高度不动', `h=${before.正文位高}（期望 47.5）`);
 
 // 点第 1 条 ⇒ mock 返回 FixtureSkipped ⇒ 前端不该生成回执
@@ -135,11 +214,7 @@ check(
   '点过候选后仍放得下（无滚动条）',
   `容器 ${after.clientH} / 内容 ${after.scrollH} ⇒ 溢出 ${after.溢出}`,
 );
-check(
-  after.档位行top === 408.5,
-  '点过候选后档位行位置不动',
-  `top=${after.档位行top}（期望 408.5）`,
-);
+checkTierRow(after, '点过候选后');
 
 // ── 真投递那一档：回执**会**出现（一行）⇒ 它必须挤不掉候选 ──────
 await page.evaluate(() => {
@@ -155,7 +230,7 @@ check(
   '有回执时三条仍放得下（无滚动条）',
   `容器 ${sent.clientH} / 内容 ${sent.scrollH} ⇒ 溢出 ${sent.溢出}（回执高 ${sent.回执高}）`,
 );
-check(sent.档位行top === 408.5, '有回执时档位行位置不动', `top=${sent.档位行top}（期望 408.5）`);
+checkTierRow(sent, '有回执时', +(before.候选区高 - sent.候选区高).toFixed(1));
 check(sent.gutter !== '15', '滚动条槽宽已被接管', `gutter=${sent.gutter}`);
 
 console.log(lines.join('\n'));
