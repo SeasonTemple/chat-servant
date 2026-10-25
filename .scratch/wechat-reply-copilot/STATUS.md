@@ -25,7 +25,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** · **2026-10-24 `Auto` 那半条已验**（用户截图：小号会话里确实多了一条绿色气泡） | None（可以立刻做） |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `90-hover-rotation-blurs-the-strip.md` | 4/7 | open · **降级**（2026-10-24 用户判定：「旋转是重点吗？目前如图那么明显的差异？**不才是问题？**」⇒ 材质才是重点，旋转本轮**不动**）· 结论与实测都留着，等用户哪天问起再动 | (票面没写 Blocked by) |
-| `92-all-candidates-are-strips.md` | 17/20 | ready-for-human · 2026-10-24 用户真机报出四条 ⇒ 材质与护栏已落地；**当天晚又改了一次：形制也统一了**（见第七节，票 92 续）⇒ **剩下的是真机复验**（三项，都得人看） | (票面没写 Blocked by) |
+| `92-all-candidates-are-strips.md` | 18/20 | ready-for-human · 2026-10-24 用户真机报出四条 ⇒ 材质与护栏已落地；**当天晚又改了一次：形制也统一了**（见第七节，票 92 续）⇒ **剩下的是真机复验**（三项，都得人看） | (票面没写 Blocked by) |
 | `93-real-chat-text-reached-a-commit.md` | 10/12 | open（2026-10-24 实录：我在票面里写了真会话的一句气泡原文，它进了公开仓的历史）——**守卫已实现**（第三节） | (票面没写 Blocked by) |
 | `95-panel-header-moves-when-candidates-arrive.md` | 6/7 | ready-for-human · 2026-10-24 用户报出 ⇒ 代码侧已定位并修掉（票 92 续）⇒ **剩下的是真机那一眼** | (票面没写 Blocked by) |
 
