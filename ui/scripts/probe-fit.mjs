@@ -79,6 +79,32 @@ const browser = await chromium.launch({ channel: 'chrome' });
 const page = await browser.newPage({ viewport: { width: 380, height: 560 } });
 await page.addInitScript(MOCK_INVOKE);
 
+/* ⚠⚠⚠ **合成短候选必须从「数据源」灌进去，不能改 DOM**（2026-10-25 23:14 实测）。
+ *
+ * ## 为什么
+ * 原先是在量具里 `el.textContent = 合成句`。
+ * ⇒ 点一下候选 ⇒ 组件重渲染 ⇒ **DOM 被还原成夹具自己的长句**
+ * ⇒ 「点过候选后」那一档量的其实是**夹具的长句**，
+ *   而「未点」那一档量的是**合成短句** ⇒ 两档不是同一个东西，
+ *   差异会被误当成「点一下就变形」。
+ *   （实测症状：第一条纸的字盒高 42 → 44px。）
+ *
+ * ## 怎么灌
+ * 演示夹具是 `fetch('/demo/<state>.json')` 取的 ⇒ **在网络层拦它**，
+ * 把 `candidates[].text` 换成合成短句再放行 ⇒
+ * 组件拿到的从头到尾就是短句 ⇒ 重渲染也还原成短句。
+ */
+await page.route('**/demo/*.json', async (route) => {
+  const res = await route.fetch();
+  const json = await res.json();
+  if (Array.isArray(json.candidates)) {
+    json.candidates = json.candidates.map((c, i) =>
+      SYNTHETIC[i] ? { ...c, text: SYNTHETIC[i] } : c,
+    );
+  }
+  await route.fulfill({ json, status: 200, contentType: 'application/json' });
+});
+
 const lines = [];
 let failed = 0;
 function check(ok, name, detail) {
@@ -86,13 +112,25 @@ function check(ok, name, detail) {
   if (!ok) failed += 1;
 }
 
+/**
+ * ⚠⚠⚠ **量布局之前必须先把鼠标挪开**（2026-10-25 23:17 实测）。
+ *
+ * `.cs-act:hover` 有 `transform: translateY(-2px) rotate(-0.5deg)`
+ * ⇒ 点击之后鼠标还悬停在第一条纸上 ⇒ 它的 `getBoundingClientRect()`
+ *   **已经不是布局位置**了：
+ *   · 旋转 0.5° 把 225×42 的纸的包围盒撑成 225.4×44（实测）
+ *   · 再叠上 `translateY(-2px)` ⇒ 首纸上沿比布局位置高 **3.4px**
+ * ⇒ 那会被误判成「纸溢出候选区、被裁」，而布局其实分毫不差。
+ * ⇒ 所以点完候选要先撤悬停 + 等过渡走完再量。
+ */
+async function unhover() {
+  await page.mouse.move(2, 2);
+  await page.waitForTimeout(450);
+}
+
 /** 量候选组的容纳情况。 */
 async function fit() {
-  return page.evaluate((texts) => {
-    const acts = document.querySelectorAll('.cs-act-text');
-    acts.forEach((el, i) => {
-      if (texts[i]) el.textContent = texts[i];
-    });
+  return page.evaluate(() => {
     const box = document.querySelector('.cs-actions');
     const cs = box ? getComputedStyle(box) : null;
     const note = document.querySelector('.cs-act-note');
@@ -148,8 +186,98 @@ async function fit() {
       墨迹bottom: ink ? ink.bottom : null,
       正文位高: draft ? +draft.getBoundingClientRect().height.toFixed(1) : null,
       gutter: cs ? cs.scrollbarGutter : null,
+      /* ⚠⚠ **纸条自己长高，还是「空纸带」**（2026-10-25 22:49）。
+       *
+       * ## 为什么必须量「间隙」
+       * 候选**短**的时候（真机就是 1~2 行），候选区里会多出几十像素；
+       * 旧做法（`justify-content: space-between`）把这几十像素**摊成
+       * 纸与纸之间的空纸带** ⇒ 画面读成「三条小纸条浮在纸上，中间挖了两个洞」
+       * ⇒ 主人原话：「**你觉得这样叫摊开吗？**」
+       *
+       * ⚠⚠ **而 demo 夹具看不见这个坑**：demo 的候选很长（4/3/3 行），
+       *   内容几乎正好填满候选区 ⇒ `space-between` 根本没有余量可摊
+       *   ⇒ **间隙是 −16（撕边互相填进去）** ⇒ 看着一点问题都没有。
+       * ⇒ 所以这里的判据必须用**短候选**（`SYNTHETIC` 就是照真机行数造的）。
+       */
+      纸条间隙: (() => {
+        const rects = [...document.querySelectorAll('.cs-act')].map((a) =>
+          a.getBoundingClientRect(),
+        );
+        const g = [];
+        for (let i = 1; i < rects.length; i++) {
+          g.push(+(rects[i].top - rects[i - 1].bottom).toFixed(1));
+        }
+        return g;
+      })(),
+      /* ⚠⚠⚠ **「铺满」要钉看得见的边缘，不是钉算术**（2026-10-25 23:16 订正）。
+       *
+       * ## 原先那条判据错在哪
+       * 原式是 `sum(纸高) − 32 == 候选区高`。
+       * ⇒ 那个 −32 是「相邻两片各退 8px ⇒ 互相叠 16px × 2 处」的换算，
+       *   **只对 n = 3 恰好成立**（`16×(n−1)` 与 `16×n−16` 在 n=3 时相等），
+       *   候选条数一变就错 ⇒ **判据绑死了一个恰好值**。
+       * ⇒ 而且它量的是**算出来的版面**，不是**用户看到的那摞纸的上下边**。
+       *
+       * ## 现在的判据
+       * 第一条纸的**上沿**与候选区的**上沿**齐、最后一条纸的**下沿**与候选区的
+       * **下沿**齐 ⇒ 这摞纸**正好铺满**候选区。
+       * ⚠ 纸有 `margin: -8px 0`（撕边要溢出布局框）⇒ 所以「齐」指的是
+       *   **纸的边框盒**与**候选区的边框盒**齐，而不是内容盒齐
+       *   —— 实测：未点时 162 == 162、437.7 == 437.7。
+       * ⇒ 差值取绝对值：往上顶出（被裁）或往下留洞（没铺满）都会红。
+       */
+      铺满差: (() => {
+        const rects = [...document.querySelectorAll('.cs-act')].map((a) =>
+          a.getBoundingClientRect(),
+        );
+        if (!rects.length || !box) return null;
+        const b = box.getBoundingClientRect();
+        return {
+          首: +(rects[0].top - b.top).toFixed(1),
+          末: +(rects[rects.length - 1].bottom - b.bottom).toFixed(1),
+        };
+      })(),
+      字心偏差: [...document.querySelectorAll('.cs-act')].map((a) => {
+        const r = a.getBoundingClientRect();
+        const t = a.querySelector('.cs-act-text').getBoundingClientRect();
+        return +((t.top + t.bottom) / 2 - (r.top + r.bottom) / 2).toFixed(1);
+      }),
     };
-  }, SYNTHETIC);
+  });
+}
+
+/**
+ * 「纸自己长高」那三条判据。
+ *
+ * ⚠ 三条要**一起**看：只钉「间隙 ≤ 0」不够（把纸条全挤在一起也能过，
+ * 那就变成另一种难看了）；只钉「铺满」也不够（余量摊在最后一条下面也能过）。
+ */
+function checkTiling(m, prefix) {
+  const gaps = m.纸条间隙 || [];
+  check(
+    gaps.length > 0 && gaps.every((g) => g <= 0),
+    `${prefix}纸条之间没有空纸带`,
+    `间隙 ${gaps.join(' / ')}（≤0 = 撕边互相填进去；>0 就是挖了洞）`,
+  );
+  const diff =
+    m.铺满差 !== null && m.铺满差 !== undefined
+      ? {
+          首: m.铺满差.首,
+          末: m.铺满差.末,
+          max: Math.max(Math.abs(m.铺满差.首), Math.abs(m.铺满差.末)),
+        }
+      : null;
+  check(
+    diff !== null && diff.max <= 1.5,
+    `${prefix}纸自己长高填满候选区`,
+    `首纸上沿−候选区上沿 ${diff?.首} / 末纸下沿−候选区下沿 ${diff?.末}（上限 1.5；都齐 = 铺满）`,
+  );
+  const off = m.字心偏差 || [];
+  check(
+    off.length > 0 && off.every((d) => Math.abs(d) <= 2),
+    `${prefix}字在长出来的那段纸里居中`,
+    `偏差 ${off.join(' / ')}px（上限 2）`,
+  );
 }
 
 /**
@@ -201,11 +329,13 @@ check(
   `容器 ${before.clientH} / 内容 ${before.scrollH} ⇒ 溢出 ${before.溢出}`,
 );
 checkTierRow(before, '');
+checkTiling(before, '');
 check(before.正文位高 === 47.5, '正文位高度不动', `h=${before.正文位高}（期望 47.5）`);
 
 // 点第 1 条 ⇒ mock 返回 FixtureSkipped ⇒ 前端不该生成回执
 await page.locator('.cs-act').first().click();
 await page.waitForTimeout(900);
+await unhover(); // ⚠ 撤掉悬停的 transform，否则量到的不是布局位置（见 unhover 的注释）
 
 const after = await fit();
 check(!after.回执在, '夹具拒投不在面板上摆回执', `回执存在=${after.回执在}`);
@@ -215,6 +345,7 @@ check(
   `容器 ${after.clientH} / 内容 ${after.scrollH} ⇒ 溢出 ${after.溢出}`,
 );
 checkTierRow(after, '点过候选后');
+checkTiling(after, '点过候选后');
 
 // ── 真投递那一档：回执**会**出现（一行）⇒ 它必须挤不掉候选 ──────
 await page.evaluate(() => {
@@ -222,6 +353,7 @@ await page.evaluate(() => {
 });
 await page.locator('.cs-act').first().click();
 await page.waitForTimeout(900);
+await unhover(); // ⚠ 同上：撤掉悬停再量
 
 const sent = await fit();
 check(sent.回执在, '真投递的回执照样显示（不许被一起吞掉）', `回执高=${sent.回执高}`);
@@ -231,6 +363,7 @@ check(
   `容器 ${sent.clientH} / 内容 ${sent.scrollH} ⇒ 溢出 ${sent.溢出}（回执高 ${sent.回执高}）`,
 );
 checkTierRow(sent, '有回执时', +(before.候选区高 - sent.候选区高).toFixed(1));
+checkTiling(sent, '有回执时');
 check(sent.gutter !== '15', '滚动条槽宽已被接管', `gutter=${sent.gutter}`);
 
 console.log(lines.join('\n'));
