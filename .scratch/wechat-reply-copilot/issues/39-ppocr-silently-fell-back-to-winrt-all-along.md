@@ -335,3 +335,75 @@ det 归一化、rec 归一化、det 最短边，v6 与 v4 完全不同
 这是**从未被量化过的第三个选项**。早先「不裁剪」的实测针对的是 WinRT；
 PP-OCR 恰好相反：整帧 1146ms/50 行，裁剪后 455ms/5 行，**而且读得更准**。
 已实现为 `perceive::ViewPlan`（由引擎决定，WinRT=整帧+2×，PP-OCR=裁剪+1×）。
+
+## 2026-10-25：**又回落了**，而这次的症状是**识别质量掉一档**（不是崩溃）
+
+### 怎么发现的
+
+用户报「有一个字识别错了」——面板归属行引文里，那个**左右结构的字被渲染成了另一个字**
+（8× 放大确认：左边是**口**字旁，不是女字旁 ⇒ **那是另一个字**）。
+
+### 根因（这次是路径优先级，不是拼错）
+
+`ocr_pp::models_dir()` 的查找顺序里，**第 2 位**是 `MODELS_OVERRIDE`
+——Tauri 外壳在 `setup()` 里用 `resource_dir()/models` 填的。
+而**开发模式**的 `resource_dir()` 就是 `target/debug/` ⇒ 它指向
+`target/debug/models` ——**那个目录里没有权重**（权重在仓库的 `target/models/`）。
+⇒ 第 2 位**永远挡在**第 3 位（仓库 `target/models/`）前面
+⇒ 仓库里明明有权重，**永远轮不到**
+⇒ PP-OCR 一直不可用 ⇒ 每轮**静默降级到 Windows OCR**。
+
+app 日志（2026-10-25 实测）：
+
+```text
+INFO  chat_servant_app: 装包里没有 PP-OCR 权重；选到 PP-OCR 时会退回 Windows OCR  dir=…\target\debug\models
+WARN  chatservant_capture::ocr: PP-OCR 不可用（无权重或推理失败），本轮起回落 Windows OCR
+```
+
+⚠ **症状与 2026-10-18 那次不同**：那次是「PP-OCR 跑不通」，这次是
+**PP-OCR 压根没被用** ⇒ **降级引擎一直在生产上跑**，只是没人察觉。
+后果不是崩溃，是**识别质量掉一档**：
+Windows OCR 把那个字认成了另一个，PP-OCR 读对。
+
+### 修法
+
+`models_dir()` 里把「选目录」抽成纯函数 `pick_models_dir`：
+
+- **自动推导出来的目录必须真的含有三个权重文件**才采信；否则**继续往下找**；
+- **显式指定（`CHATSERVANT_OCR_MODELS`）仍然无条件尊重**（人说了算）。
+
+⇒ 开发模式下：第 2 位（空目录）被跳过 ⇒ 第 3 位（仓库 `target/models/`）命中。
+⇒ 装机形态不受影响：`resource_dir()/models` 里确实有权重 ⇒ 第 2 位照常命中。
+
+### 守卫（票 39 的老教训：**必须有机器守卫**）
+
+新增两条（`crates/capture/src/ocr_pp.rs`）：
+
+1. `an_automatically_derived_models_dir_is_trusted_only_when_all_weights_are_there`
+   —— 用**假权重文件**在 temp 下造目录 ⇒ **CI 上也能跑**（不依赖真权重）；
+2. `an_explicit_models_dir_is_respected_even_when_it_has_no_weights`
+   —— 守住「显式 > 自动」这条规矩；
+3. `the_chosen_models_dir_actually_holds_the_weights_when_this_machine_has_them`
+   —— 本机有权重时，选出来的目录必须**真的有权重**（本机没权重时跳过）。
+
+### 修完的实测（真 Tauri + 夹具真帧）
+
+```text
+DEBUG watch: roi=… ocr总行=12 本轮行=9 归类=9 消息=7 本轮新到=7（对方=5 我方=2）
+INFO  pump:  emit readout tick=1 phase=drafting peer="…" messages=7
+```
+
+- 面板上那一句**读对了** ✔（降级前那句话里有一个字被认错）；
+- **会话名也认出来了**（降级前是「没认出这是谁的对话」）。
+
+### ⚠ 顺带记一条判据纪律（本轮最大的教训）
+
+我一度用 `xtask ocr`（**PP-OCR 口径**）读出的那句话去证明
+「生产没认错，只是界面糊」⇒ 于是把引文的**字号、字重、颜色**改了三轮，
+最后发现方向全错、全部还原。
+
+⇒ **证明「生产没认错」必须用生产同款路径**。
+`xtask ocr` 与生产当时跑的**根本不是同一个引擎**（一个 PP-OCR、一个 Windows OCR）
+⇒ **两把尺子量同一件事**。
+⇒ 判据纪律的同族：**「实测为 0」与「写不进」差着一个编译期守卫**；
+这里差着**「同一把尺子」**。

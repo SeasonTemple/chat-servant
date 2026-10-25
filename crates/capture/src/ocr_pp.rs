@@ -150,21 +150,68 @@ pub fn models_dir() -> PathBuf {
     // 正是「设成空」。它会盖掉后面全部查找，最后得到一个空路径 ⇒ 静默回落。
     // 实测踩过：那一次的读数是「34 ms 的 OCR」，看着像变快了，其实是回落了。
     // ⇒ 空值按「没设」处理。
-    if let Some(d) = std::env::var_os("CHATSERVANT_OCR_MODELS").filter(|d| !d.is_empty()) {
-        return PathBuf::from(d);
+    let env = std::env::var_os("CHATSERVANT_OCR_MODELS").filter(|d| !d.is_empty());
+    pick_models_dir(env.map(PathBuf::from), MODELS_OVERRIDE.get().cloned())
+}
+
+/// **选权重目录**。抽成纯函数是为了能测（`set_models_dir` 是 `OnceLock`，
+/// 在测试进程里设一次就改不掉了）。
+///
+/// ⚠⚠ **2026-10-25 加的一条：目录里没有权重 ⇒ 继续往下找**（票 39 复发）。
+///
+/// 事故经过：开发模式下 Tauri 外壳在 `setup()` 里调
+/// [`set_models_dir`]，传的是 `resource_dir()/models` ⇒ **开发模式**的
+/// `resource_dir()` 就是 `target/debug/` ⇒ 指向 `target/debug/models`
+/// ——**那个目录里没有权重**（权重在仓库的 `target/models/`）。
+/// 而 [`MODELS_OVERRIDE`] 的查找优先级**高于** [`repo_target_models`]
+/// ⇒ 仓库里明明有权重，却**永远轮不到** ⇒ PP-OCR 一直不可用
+/// ⇒ 每轮都**静默回落 Windows OCR** ⇒ 识别质量掉一档
+/// （真机实测：Windows OCR 把那个左右结构的字认成了另一个字，PP-OCR 读对）。
+///
+/// ⇒ 修法：**自动推导出来的目录必须真的含有权重**才采信；
+/// 显式指定（环境变量）仍然无条件尊重（人显式指定就该让位）。
+fn pick_models_dir(env: Option<PathBuf>, over: Option<PathBuf>) -> PathBuf {
+    // 显式指定：人说了算，哪怕那个目录是空的。
+    if let Some(d) = env {
+        return d;
     }
-    if let Some(d) = MODELS_OVERRIDE.get() {
-        return d.clone();
+    // ⚠ 自动推导的：**必须有权重**才采信（否则继续往下找）。
+    if let Some(d) = over {
+        if weights_present(&d) {
+            return d;
+        }
+        tracing::warn!(
+            dir = %d.display(),
+            "指定的权重目录里没有 PP-OCR 权重 ⇒ 继续往下找（否则会静默降级到 Windows OCR）"
+        );
     }
     if let Some(d) = repo_target_models() {
-        return d;
+        if weights_present(&d) {
+            return d;
+        }
     }
     if let Some(d) = exe_sibling_models() {
-        return d;
+        if weights_present(&d) {
+            return d;
+        }
     }
     std::env::temp_dir()
         .join("dev.chatservant.app")
         .join("models")
+}
+
+/// 这个目录里 PP-OCR 的三个文件是否**齐**。
+///
+/// ⚠ 判据是「三个都在」，不是「目录存在」——
+/// 目录存在但里面是别的模型（或空的）⇒ 一样会回落。
+fn weights_present(dir: &Path) -> bool {
+    [
+        crate::ocr_pp_pipeline::DET_MODEL,
+        crate::ocr_pp_pipeline::REC_MODEL,
+        crate::ocr_pp_pipeline::KEYS_FILE,
+    ]
+    .iter()
+    .all(|f| dir.join(f).is_file())
 }
 
 /// `<仓库>/target/models`。编译期路径；拿不到（或它已经不在仓库里了）就 `None`。
@@ -713,6 +760,91 @@ mod tests {
 
     /// 词典里真实字符的行数。**2026-10-18 实测 PP-OCRv6 small 是 18708 行。**
     const DICT_LINES: usize = 18_708;
+
+    /// ⚠⚠ **2026-10-25：自动推导出来的权重目录里没有权重时，不得采信它**
+    /// （票 39 复发，症状是**识别质量掉一档**而不是崩溃）。
+    ///
+    /// 事故：开发模式下 Tauri 的 `resource_dir()` 就是 `target/debug/` ⇒
+    /// 外壳 `set_models_dir(target/debug/models)` 指向一个**空目录**，
+    /// 而它的查找优先级**高于**仓库的 `target/models`
+    /// ⇒ 仓库里明明有权重却**永远轮不到** ⇒ PP-OCR 一直不可用
+    /// ⇒ 每轮**静默回落 Windows OCR**
+    /// ⇒ 真机实测：Windows OCR 把那个左右结构的字认成了另一个字，PP-OCR 读对。
+    ///
+    /// ⚠ 这条**不依赖真权重**（CI 与别人的机器上没有）⇒ 拿**假权重文件**测，
+    /// 免得整条守卫在 CI 上永远跳过。
+    #[test]
+    fn an_automatically_derived_models_dir_is_trusted_only_when_all_weights_are_there() {
+        let base = std::env::temp_dir().join("chatservant-models-dir-guard-8f3a");
+        let _ = std::fs::remove_dir_all(&base);
+        // 只放 det ⇒ 缺两个 ⇒ 不可信
+        let partial = base.join("partial");
+        std::fs::create_dir_all(&partial).expect("建测试目录");
+        // ⚠ 权重文件名带子目录（`ppocrv6-small/…`）⇒ 写之前得先建父目录。
+        let det_path = partial.join(crate::ocr_pp_pipeline::DET_MODEL);
+        std::fs::create_dir_all(det_path.parent().expect("det 文件有父目录")).expect("建父目录");
+        std::fs::write(det_path, b"").expect("写假权重");
+        // 三个都在 ⇒ 可信
+        let full = base.join("full");
+        std::fs::create_dir_all(&full).expect("建测试目录");
+        for f in [
+            crate::ocr_pp_pipeline::DET_MODEL,
+            crate::ocr_pp_pipeline::REC_MODEL,
+            crate::ocr_pp_pipeline::KEYS_FILE,
+        ] {
+            let p = full.join(f);
+            std::fs::create_dir_all(p.parent().expect("权重文件有父目录")).expect("建父目录");
+            std::fs::write(p, b"").expect("写假权重");
+        }
+
+        assert!(!weights_present(&partial), "只缺权重文件 ⇒ 不可信");
+        assert!(weights_present(&full), "三个都在 ⇒ 可信");
+
+        // ⚠ 核心判据：**缺权重的自动目录不得被采信**（否则就是那次事故）。
+        let picked = pick_models_dir(None, Some(partial.clone()));
+        assert_ne!(
+            picked, partial,
+            "自动推导的目录里没有权重 ⇒ 不得采信（否则会静默回落 Windows OCR）"
+        );
+        // 有权重的自动目录 ⇒ 采信。
+        assert_eq!(pick_models_dir(None, Some(full.clone())), full);
+    }
+
+    /// ⚠ **显式指定（环境变量）仍然无条件尊重**——哪怕那个目录是空的。
+    ///
+    /// 「显式 > 自动」是 `models_dir()` 的第一条规矩：
+    /// 人显式指了地方，就不该被自动规则改掉（哪怕自动规则能找到权重）。
+    #[test]
+    fn an_explicit_models_dir_is_respected_even_when_it_has_no_weights() {
+        let explicit = PathBuf::from("C:/definitely-not-a-models-dir-8f3a");
+        assert_eq!(pick_models_dir(Some(explicit.clone()), None), explicit);
+        assert_eq!(
+            pick_models_dir(Some(explicit.clone()), Some(PathBuf::from("C:/other-8f3a"))),
+            explicit,
+            "环境变量优先于自动推导出来的目录"
+        );
+    }
+
+    /// 本机**有**权重时，选出来的目录必须**真的有权重**。
+    ///
+    /// ⚠ 这条在本机没权重时**跳过**（CI 上没权重是正常的）——
+    /// 上面那条才是 CI 上也能跑的守卫。
+    #[test]
+    fn the_chosen_models_dir_actually_holds_the_weights_when_this_machine_has_them() {
+        let Some(repo) = repo_target_models() else {
+            return;
+        };
+        if !weights_present(&repo) {
+            eprintln!("跳过：本机仓库里没有权重（{}）", repo.display());
+            return;
+        }
+        let picked = pick_models_dir(None, None);
+        assert!(
+            weights_present(&picked),
+            "选出来的目录里必须有权重：{}",
+            picked.display()
+        );
+    }
 
     /// **词典类数 = 文件行数 + blank + space，且 0 号是 blank、末号是空格。**
     ///
