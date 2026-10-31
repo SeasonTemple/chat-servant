@@ -1,6 +1,6 @@
 # 97: 面板归属行没有层级、状态句字号压过内容、滚动反馈是浏览器默认那条深灰柱
 
-**Status:** ready-for-human · 2026-11-01 用户报出（两轮）⇒ 代码侧已改并通过量测 ⇒ **剩下的是真机那一眼**
+**Status:** ready-for-human · 2026-11-01 两轮排版修正后，第三轮按 2K 屏实看放大字号 ⇒ 代码与量测已过 ⇒ **剩下的是真机那一眼**
 
 ## 一、用户原话
 
@@ -8,6 +8,7 @@
 
 > 1.这个滚动条符合目前的设计风格吗？2.这个被挤到下面的观感、滚动的反馈都很差
 
+> 字是否太小了 都比底部档位的文字小，2k屏看着都费劲
 ## 二、根因（两条，第一条是「写着 12px 却从来没生效过」）
 
 ### 2.1 名字与引文同号 —— `peerPx` 的默认值把 12px 顶掉了
@@ -35,8 +36,8 @@
 
 | 问题 | 决定 |
 |---|---|
-| 层级 | **名字当标签、最后一句当内容**：会话名 12px 疏排灰；引文 15px 墨色仿宋 |
-| 状态句字号 | 先定 14px，用户看图后改 **15px**（与引文同号，层级改由颜色扛：墨 = 内容，铅笔灰 = 机器给的记号） |
+| 层级 | **名字当标签、最后一句当内容**：2K 屏复看后定会话名 14px 疏排灰；引文 18px 墨色仿宋 |
+| 状态句字号 | 先定 15px；2K 屏复看后升 **18px**（与引文同号，层级由颜色扛） |
 | 过渡 | **只给正文位 160ms 淡入**，高度不参与动画（避免票 95「表头跳」复发） |
 | 长引文 | **最多 3 行 + 省略号**，全文走 `title` |
 | 滚动条 | **藏掉原生条，改纸边细指示线**（不占位，顺带撤 `scrollbar-gutter`） |
@@ -44,7 +45,7 @@
 
 ## 四、落地
 
-- `ui/src/lib/PaperPanel.svelte`：`peerPx` 默认 `null`；`.cs-where-quote` 15px / `-webkit-line-clamp: 3` + 标准 `line-clamp` 双写 / `title` 全文；四支状态句 15px、正文位 `min-height: 39px`；`animation: cs-draft-fade 160ms`（四支状态句是 `{#if}` 分支、切换换元素，`transition` 一次都不触发，且不做淡出半场——两个 `<p>` 同时在流里会让候选组跳位）；`scrollbar-width: none` + `::-webkit-scrollbar` 双写；`.cs-scroll-mark` 是 `.cs-body-col` 的绝对定位子元素（放进滚动容器会被自己的 mask 吃掉）；双向渐隐折进 `--fade-top` / `--fade-bottom` 两个变量。
+- `ui/src/lib/PaperPanel.svelte`：`peerPx` 默认 `null`；`.cs-where` 14px、`.cs-where-quote` 18px / `-webkit-line-clamp: 3` + 标准 `line-clamp` 双写 / `title` 全文；四支状态句 18px、正文位 `min-height: 43px`；`animation: cs-draft-fade 160ms`；`scrollbar-width: none` + `::-webkit-scrollbar` 双写；`.cs-scroll-mark` 是 `.cs-body-col` 的绝对定位子元素；双向渐隐折进 `--fade-top` / `--fade-bottom` 两个变量。
 - `docs/设计规范.md` 新增 §4.2c-quater（3 行夹取 + title / 藏原生条与纸边线 / 双向渐隐，含「为什么」）。
 - `ui/static/demo/longquote.json`：末句 200 个**合成**字符，让 3 行夹取有真夹具覆盖（此前 12 张夹具共用同一组消息、末句最长 4 字 ⇒ 只能靠 DOM 注入验收）。
 - `ui/scripts/probe-header.mjs`：加 `--scroll` 与 `--inject`；修一处**量具时序 bug**——它原先「滚 → 量 → 等 900ms → 截图」，而那 900ms 是量「停手淡出」用的，带着 screenshot 一起等 ⇒ **截图永远拍在归零之后**（第一版据此判断「线不存在」的判断是对的，但证据是量具自己造的）。现在截图前重新点一次滚动。
@@ -62,7 +63,19 @@
 | 双向渐隐 | 只有底部 32px 且仅 `[data-more]` | 顶/中/底 = 0/32、32/32、32/0 |
 | 长引文 | 无上限 | `quoteLines 2.99` / `quoteTitleLen 200`（夹具，不靠 inject） |
 
-门禁：`pwsh -NoProfile -File scripts\dev.ps1 ui-check` ⇒ 三步 exit=0、
+### 5.1 第三轮：2K 屏可读性（2026-11-01）
+
+| 量 | 改前 | 改后 |
+|---|---|---|
+| 会话名 | 12px | **14px** |
+| 引文 / 状态句 | 15px / 15px | **18px / 18px**（均大于档位名 14.85px） |
+| 单行状态容器 | clientHeight 39 / scrollHeight 23 | **clientHeight 43 / scrollHeight 43**，不再裁切 |
+| 长引文 | clamp 3 | 18px 下仍为 **2.99 行**，`title` 全文 200 字 |
+| 候选 / 档位 | 正常 | 候选区吸收新增高度，档位 top **451.7** 不变 |
+
+2× 像素密度截图：`target/probe/type-readable-2x/panel-drafted-drafted@2x.png`。
+
+本轮门禁：`pwsh -NoProfile -File scripts\dev.ps1 ui-check` ⇒ 三步 exit=0、
 `AUTOFIXER_ALL_CLEAN (12 files)`；`-Filter the_demo_fixtures` ⇒ 3 passed（新夹具不破 Rust 守卫）。
 
 ## 六、指示线：从「量得到、看不见」到达标
@@ -77,8 +90,8 @@
 
 ## 七、验收
 
-- [x] 会话名 12px 疏排 / 引文 15px 墨色（`peerPx` 默认 `null`，生产路径不再命中探针选择器）
-- [x] 四态正文位等高 39px，状态句不被裁
+- [x] 会话名 14px 疏排 / 引文 18px 墨色（2K 屏实看后放大）
+- [x] 单行正文位等高 43px，状态句不被裁；失败提示可自然换行
 - [x] 正文位 160ms 淡入，高度不参与动画
 - [x] 引文 3 行夹取 + `title` 全文（`longquote` 夹具，不靠 DOM 注入）
 - [x] 两个滚动容器都无原生滚动条，`scrollbar-gutter` 已撤
