@@ -61,7 +61,7 @@ param(
 #   两者 `messages` 都是空数组，界面分不出「对方真没说话」与「已停泊」——
 #   真机实测里，正文显示的是「对方说完话，这里才落笔。」，而那个会话
 #   对方明明说过话，**那句话是假的**。⇒ 停泊时 Rust 改给
-#   「锁着别的对话，切回来才继续。」，判据在 `watch.rs` 的
+#   「锁着别的对话，切回来才继续」，判据在 `watch.rs` 的
 #   `a_closed_gate_replaces_the_waiting_line_with_an_honest_one`。
 #   看图（`?demo=1&state=parked`）：正文那一句与 `fresh` **不同**。
 #

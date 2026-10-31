@@ -1237,7 +1237,7 @@
             而面板把「没起草」说成「还没轮到」，用户会一直等一个不会来的落笔。
             ⇒ 只陈述事实，不猜原因（为什么没起草由归属行那句「没认出这是谁的对话」说）。
           -->
-          <p class="cs-draft-text cs-draft-idle">对方说完了，这轮没起草。</p>
+          <p class="cs-draft-text cs-draft-idle">对方说完了，这轮没起草</p>
         {:else}
           <p class="cs-draft-text cs-draft-idle">对方说完话，这里才落笔。</p>
         {/if}

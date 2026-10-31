@@ -14,7 +14,7 @@
   "gate_open": false,
   "messages": [],
   "candidates": [],
-  "status_hint": "锁着别的对话，切回来才继续。",
+  "status_hint": "锁着别的对话，切回来才继续",
   "reason": "当前会话已经不是锁定的那一个（锁定的是「示例锁定会话」）——本轮不动手",
   "model_calls": 0,
   "counts": {
