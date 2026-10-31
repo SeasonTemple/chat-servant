@@ -1,5 +1,5 @@
 {
-  "_note": "演示数据 · auto-longdraft 态。给 ?demo=1&state=auto-longdraft 用。★ 这是**长草稿 + 自动发送档**的组合：比 longdraft 多一行红字警告 ⇒ 正文可用高度再少一行 ⇒ 正文被切得最狠（票 91）。**不含任何真实聊天内容。** ★ 这是**长草稿**那一态：草稿很长，用来复现「草稿把档位行顶出纸外」（票 88）。",
+  "_note": "演示数据 · auto-longdraft 态。给 ?demo=1&state=auto-longdraft 用。**不含任何真实聊天内容。** ★ 2026-11-01 订正用途（票 98）：这是**单条长候选 + 自动发送档**的候选区（`.cs-actions`）压测夹具——正文位（`.cs-draft`）在票 92/97 后恒为单行状态句「候选如下」（scrollH=clientH=43），不再滚动；而 `.cs-actions` 比 `longdraft` 多一行 `Auto` 档红字不可逆警告，实测 `.cs-actions` scrollH=374 > clientH=277（below=97px，比 `longdraft` 的 78px 多切 19px），用来守住「长候选 + Auto 警告行」下候选区滚动渐隐与档位行不出纸（档位格底 487 ≤ 纸底 496）。",
   "anchor": {
     "chat": {
       "x0": 304,

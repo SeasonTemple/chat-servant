@@ -471,7 +471,9 @@
 
   /** 正文区的溢出标记。与 [markOverflow] **同一套判据**，只是另一个容器。 */
   const markOverflowDraft: Attachment<HTMLDivElement> = (node) => {
-    // 读一次候选条数：候选换了 ⇒ 正文（第一条候选）也换了 ⇒ 高度跟着变。
+    // 读一次候选条数与阶段：阶段切到 failed（长错误文本）或候选变化时重算一次。
+    // ⚠ 2026-11-01（票 98）：drafted 态下正文位只放单行「候选如下」（43/43），
+    //   不再随候选变高；这里保留观察是为了 failed 等非单行分支若溢出仍能拿到渐隐与指示线。
     void allCandidates.length;
 
     let fadeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -3565,10 +3567,12 @@
      * ⇒ 正文位**永远不少于一行** ⇒ 候选组吸收全部压缩量
      * ⇒ **候选组顶三态恒定**。
      *
-     * ⚠ **票 88（长草稿把档位行顶出纸）没有被破坏**：
-     * 草稿区仍然是 `overflow-y: auto` 的滚动容器，
-     * 内容长了照样在**自己那块**里滚；`min-height` 只是**下限**，
-     * 不是固定高 ⇒ 草稿区的内容高度仍可远大于 43。
+     * ⚠ **票 88（长草稿把档位行顶出纸）已被票 92/97 的结构改动连根消解**（2026-11-01，票 98 复核）：
+     *   ① `drafted` 态下候选全部住进 `.cs-actions`（`flex: 1 1 auto; min-height: 0; overflow-y: auto`），
+     *      正文位只渲染固定两字状态句「候选如下」（实测 `scrollH == clientH == 43`），长草稿压根不进 `.cs-draft`；
+     *   ② 非 `drafted` 态（如 `failed` 报错极长）下，`.cs-draft` 自身仍有 `flex: 0 1 auto` +
+     *      显式 `min-height: 43px`（覆盖了 flex 默认的 `min-height: auto`）+ `overflow-y: auto`，
+     *      内容再高也只吃列内剩余的 334.3px 并在自己框里滚，推不动 `flex: none` 的 `.cs-pick`（top 恒为 451.7）。
      */
     min-height: 43px;
     overflow-y: auto;
@@ -3769,7 +3773,7 @@
   .cs-draft-status {
     /* 状态句一律铅笔灰：正文位现在**只放状态句**（票 92 续）⇒
        「有墨」不再意味着「这里有一句正文」，而是「这里有一句要告诉你的话」。
-       ⚠ 字号在这一族里**不动**（四支共用 `.cs-draft-text` 的 15px）：
+       ⚠ 字号在这一族里**不动**（四支共用 `.cs-draft-text` 的 18px，2026-11-01 由 15px 升）：
        切换时要改的只有颜色。谁在这里按状态调字号，状态一变正文位就跳一格
        ——那正是「标题部分在动」那一类问题。 */
     color: var(--cs-pencil);

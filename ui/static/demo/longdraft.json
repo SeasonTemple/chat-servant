@@ -1,5 +1,5 @@
 {
-  "_note": "演示数据 · longdraft 态。给 ?demo=1&state=longdraft 用。**不含任何真实聊天内容。** ★ 这是**长草稿**那一态：草稿很长，用来复现「草稿把档位行顶出纸外」（票 88）。",
+  "_note": "演示数据 · longdraft 态。给 ?demo=1&state=longdraft 用。**不含任何真实聊天内容。** ★ 2026-11-01 订正用途（票 98）：票 92/97 把首选移进 `.cs-actions`、正文位（`.cs-draft`）退成单行状态句「候选如下」（scrollH=clientH=43）之后，本夹具压测的对象已从 `.cs-draft` 迁为**候选区 `.cs-actions` 的单条长候选折行与纵向滚动**（`many` 压测条数多 5 条，本夹具压测 3 条里首条 122 字长句折 6 行，实测 `.cs-actions` scrollH=355 > clientH=277，below=78px，档位格底 487 ≤ 纸底 496）。保留 `longdraft` 名字作回归锚点，不再声称压测 `.cs-draft` 滚动。",
   "anchor": {
     "chat": {
       "x0": 304,
