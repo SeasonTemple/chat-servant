@@ -95,7 +95,7 @@ const page = await browser.newPage({ viewport: { width: W, height: H } });
 //   脚本会在 `page.goto` 上抛一个**未捕获的 ERR_CONNECTION_REFUSED**，
 //   读起来像「产品坏了」，而其实是**量具的前提没满足**。
 //   按「量具要能因为量具偏了而失败」那条，量具自己的前提也得先自己喊。
-let reachable = true;
+let reachable;
 try {
   const probeRes = await fetch(BASE, { signal: AbortSignal.timeout(5000) });
   reachable = probeRes.ok;

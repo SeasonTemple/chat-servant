@@ -4,7 +4,7 @@
 逐层核实本仓（Rust crate / npm 包 / CI 运行时与 action）**到底有没有踩到**，
 踩到的修掉，没踩到的把「为什么没踩到」写清楚。
 
-**Status:** 部分完成 · **2026-10-22 仓库侧已修完并验过；剩 4 条要仓库主人拍板或动手**
+**Status:** 部分完成 · **2026-11-01 npm 侧公告批已处置完（2 条升级消掉 + 1 条豁免）；此前剩的 4 条仍待仓库主人拍板或动手**
 
 ## 起因
 
@@ -313,3 +313,56 @@ Rust 侧 `cargo deny` 本来就有豁免机制，npm 侧没有 ⇒ 公告一发�
   一旦 `#lib` 通了，vite 与 tsconfig 两处 `paths` 都能删掉。
 - **老 WebView2 的兼容性没有主动验证过**（vite 8 用 rolldown 替掉 esbuild）⇒
   真机面板已验渲染正常，但更老的 WebView2 未测。
+
+## 2026-11-01 npm 侧新红：三条公告（glob / minimatch / deepmerge）
+
+`pwsh -NoProfile -File scripts\npmaudit.ps1` 判红，报三条不在豁免表：
+`GHSA-3g3m-2fjr-6pw4`（glob）、`GHSA-g3hv-75wg-m249`（minimatch）、
+`GHSA-gcqx-w48m-w2h4`（deepmerge）。三条全在 devDependencies 的构建工具链，
+不进产品包（`ui/build` 全部 js 产物 grep `minimatch|deepmerge|globparts` 零命中，实测 matches=0）。
+
+### 处置：2 条升级消掉 + 1 条豁免
+
+| 公告 | 包 | 处置 | 依据（实测） |
+|---|---|---|---|
+| GHSA-3g3m-2fjr-6pw4 | glob 10.5.0（rimraf@5.0.5 链） | **override `glob: '>=14.0.2'`** | 升后 `pnpm why glob` → glob@14.0.3，全树唯一 |
+| GHSA-g3hv-75wg-m249 | minimatch 3.1.5/9.0.9/10.2.6 | **override `minimatch: '>=11.0.1'`** | 升后 `pnpm why minimatch` → minimatch@11.0.3，全树唯一 |
+| GHSA-gcqx-w48m-w2h4 | deepmerge 4.3.1 | **豁免**（patched: None，无修复版可升） | 见 `scripts/npmaudit.ps1` 的 `$exempt` 表内理由 |
+
+### 为什么 minimatch/glob 必须 override（不能光升 eslint）
+
+- eslint 9→10（`eslint@10.14.0`、`@eslint/js@10.0.1`）确实把自家依赖带新了，
+  但整条链的声明停在旧大版本：`@eslint/config-array` 要 `minimatch ^3.1.5`、
+  `glob@10` 要 `minimatch ^9`、`typescript-estree` 要 `minimatch ^10`，
+  rimraf@5.0.5 要 `glob ^10.3.7` ⇒ **升 eslint 10 后 minimatch 3/9/10、glob 10 仍在**
+  （实测：先只升 eslint 跑 `pnpm why`，三个旧版全在）⇒ 与公告 `<11.0.1` / `<=14.0.1` 相交。
+  ⇒ 唯一出路是 override 全树硬抬（minimatch 9→11 对这些纯字符串匹配用法向后兼容）。
+- ⚠ pnpm 12 **不读** `package.json` 的 `pnpm.overrides`（会打警告并忽略）⇒
+  override 写在 `ui/pnpm-workspace.yaml` 的 `overrides:` 下。
+- eslint@9.39.5 仍会被 `@sveltejs/mcp@0.1.26`（peer `eslint ^9.36.0`）拉进来一份
+  ⇒ 它是**额外副本**，与 eslint 10 共存（`pnpm why eslint@9.39.5` 实测确认）；npm 侧无对应公告，不处理。
+
+### eslint 10 升级的连带改动
+
+- `ui/package.json`：`eslint ^9.15.0→^10.0.0`、`@eslint/js ^9.15.0→^10.0.0`
+  （`eslint-plugin-svelte@3.23.1` peer 允许 ^10；`typescript-eslint@8.72.1` peer 允许 ^10）。
+- `ui/eslint.config.js` **零改动**：`eslint-plugin-svelte` 3.23 flat 配置在 eslint 10 下直接可用
+  （`pnpm lint` 实测全绿；锁文件里 eslint-plugin-svelte 仍是 3.23.0，^3.23.0 解析结果）。
+- `ui/scripts/verify-edge.mjs`：`let reachable = true;` → `let reachable;`
+  —— eslint 10 的 recommended 集新启用 `no-useless-assignment`，两个分支都会先赋值再读，
+  初始化值是死赋值。语义零变化（try/catch 各自赋值后才读）。
+
+### 验收（全部实跑）
+
+- `pnpm install`：`Packages: +32 -9`（eslint 批）→ `+9 -7`（minimatch override）→ `+4 -22`（glob override）。
+- `pnpm check` → `svelte-check found 0 errors and 0 warnings`（exit=0）。
+- `pnpm lint` → `All matched files use Prettier code style!` + eslint 零报错（exit=0）。
+- `pnpm build` → `Wrote site to "build"` `✔ done`，`build` 下 21 个 js 文件、时间戳为当次（exit=0）。
+- `pwsh -NoProfile -File scripts\dev.ps1 ui-check` → exit=0，含 `AUTOFIXER_ALL_CLEAN (12 files)`。
+- `pwsh -NoProfile -File scripts\npmaudit.ps1` → exit=0，输出「1 条公告已逐条豁免」+ 逐条理由横幅。
+- 行尾：四个改动文件 `git ls-files --eol` 全部 `i/lf w/lf`（npmaudit.ps1 首写后曾现 w/mixed，已显式转回 LF 并复跑验证）。
+- git 提交次数：0。
+
+### 仍然开着（沿旧账）
+
+- 本机 Go（1.24.12 < 1.27.3）、老 WebView2 兼容性主动验证、`#lib` 官方路线——见上文各节，未动。

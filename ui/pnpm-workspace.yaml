@@ -46,3 +46,14 @@ minimumReleaseAgeExclude:
 #     （crypto/tls、crypto/x509、Deno 安装器、esbuild 自己的 dev server）
 #     ⇒ 实际暴露面接近零。真正的长期解是 vite 8（用 Rolldown/Rust 替掉 esbuild，
 #     那个 Go 二进制直接消失）——**2026-10-24 已随 SvelteKit 3 升到 vite 8**。
+
+# ── minimatch 越界硬抬（2026-11-01，票 81）─────────────────────────────
+# GHSA-g3hv-75wg-m249（minimatch DoS via globparts amplification）的
+# vulnerable 范围是 <11.0.1，patched >=11.0.1。但整条 eslint 链的声明
+# 都停在旧大版本（@eslint/config-array 要 ^3.1.5、glob@10 要 ^9、
+# typescript-estree 要 ^10），升 eslint 10 也**不会**把它们带过 11。
+# ⇒ 只能把 minimatch 全树 override 到 >=11.0.1（minimatch 9→11 对这些
+#   纯字符串匹配用法是向后兼容的：9/10/11 的 API 都是 makeRe/minimatch）。
+overrides:
+  minimatch: '>=11.0.1'
+  glob: '>=14.0.2'

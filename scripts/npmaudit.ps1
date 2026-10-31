@@ -54,18 +54,33 @@ else { 'https://registry.npmjs.org' }
 
 # ── 豁免表：GHSA 编号 → 为什么不适用 ─────────────────────────────────
 # ⚠ **每条都要能指着代码说出「这条路径不存在」**，否则不许进这张表。
-# ⚠ **2026-10-24：表空了。**
-#   之前这里有两条（`@sveltejs/kit < 3.0.0` 的两条 low 级公告），
-#   当时是**权宜之计**（升框架要动整条前端链，先把门禁的噪声压住）。
-#   ⇒ **正解已经落地**：SvelteKit 升到 3.1.0（票 81）⇒ `pnpm audit` 归零
-#   （实测：`No known vulnerabilities found`，exit 0）⇒ 那两条公告**不再存在**。
-#   ⇒ 豁免表清空。
+# ⚠ **2026-10-24：表曾清空**（SvelteKit 升 3.1.0 后 `pnpm audit` 归零，
+#   两条 kit low 公告随之消失，见上节历史）。
+# ⚠ **2026-11-01：进了第一条**（票 81，deepmerge，详见表内理由）。
 #
 # ⚠ **机制留着**：下一次公告来了还用得上 ⇒ 门槛是
 #   ① 逐条列 GHSA 编号（不许按包名豁免）；
 #   ② 理由必须是「**这条路径在本产品里不存在**」（「危害小」不算）；
 #   ③ **新公告照样红**（表里没有的就是红的）。
 $exempt = @{
+    # deepmerge mergeObject() 原型污染（GHSA-gcqx-w48m-w2h4，low）。
+    # Patched: None —— 4.3.1 就是最新版，**没有修复版可升**（pnpm view 实测）。
+    # 「这条路径在本产品里不存在」的依据（2026-11-01 实测，票 81）：
+    #   · 唯一消费方是 `@sveltejs/vite-plugin-svelte@7.3.1`（pnpm why 实测，
+    #     全树只有这一条链），它是**构建期插件**——deepmerge 只在
+    #     vite 插件的配置合并里跑，输入是**本仓自己的 vite.config / svelte 配置**，
+    #     不碰任何用户输入、不进运行时。
+    #   · `ui/package.json` 的 dependencies 只有 @lucide/svelte / @tauri-apps/api /
+    #     gsap 三个 ⇒ deepmerge 不进产品包：`ui/build` 全部 js 产物里
+    #     grep minimatch|deepmerge|globparts 零命中（实测 matches=0）。
+    #   · 原型污染需要**攻击者控制的合并输入**；这里两个输入都是仓库内
+    #     构建配置文件（ui/vite.config.js），没有注入面。
+    # ⇒ 上游出 patched 版本后**删掉这条**，让升级正解接管。
+    'GHSA-gcqx-w48m-w2h4' = @'
+deepmerge 4.3.1 无修复版（patched: None）。唯一路径是构建期插件
+@sveltejs/vite-plugin-svelte 的配置合并，输入只有本仓自己的 vite/svelte
+配置文件，不进运行时、不进产品包（ui/build 产物 grep 零命中）。
+'@
 }
 
 Push-Location (Join-Path $PSScriptRoot '..' 'ui')
