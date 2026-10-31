@@ -1536,6 +1536,16 @@ fn step(
     // 见 [`chatservant_perceive::PaneWatcher::rewind`]：水位线不在 `Scratch`
     // 里，所以「把这个会话的状态清干净」这件事天然会漏掉它。
     if s.relock.take() {
+        // 2026-11-01：这条路径原来**一行日志都没有** ⇒ 真机上出现「同一批消息被推理了两次」
+        // （同一帧两轮 `本轮新到=7`、两次 Judge+Draft）时，日志既不能证实也不能否证
+        // 「是不是重锁了」——清账本的全仓只有 `apply_relock` 一处，而它静默。
+        // ⚠ 只打个数，不打正文（硬约束 3）。
+        tracing::info!(
+            target: "chat_servant::watch",
+            "重锁：清空账本并退水位线（清之前 seen={} messages={}）",
+            s.seen.len(),
+            s.messages.len()
+        );
         apply_relock(s);
         watcher.rewind();
     }
@@ -4688,6 +4698,35 @@ mod tests {
         let shared = g.clone();
         shared.request();
         assert!(g.pending(), "clone 与本体必须是同一个请求槽");
+    }
+
+    /// **重锁分支必须留下日志**（2026-11-01 加）。
+    ///
+    /// 这条守的不是行为，是**可诊断性**：真机上出现过「同一批消息被推理两次」
+    /// （同一帧两轮 `本轮新到` 逐字相同、两次 Judge+Draft），而清账本的全仓只有
+    /// `apply_relock` 一处。它当时**一行 tracing 都没有** ⇒ 日志既不能证实也不能
+    /// 否证「是不是重锁了」，只能靠排除法猜。
+    ///
+    /// ⇒ 判据是「分支体里有没有 `tracing::`」，不是「日志写了什么」：
+    /// 措辞可以改，**静默地删掉**才是要拦的形态。
+    /// ⚠ 窗口只取 `if s.relock.take() {` 到 `apply_relock(s);` 之间，
+    /// 而 `prod` 已经切掉了测试段 ⇒ 判据不会匹配到自己。
+    #[test]
+    fn the_relock_branch_says_so_in_the_log() {
+        let source = include_str!("watch.rs");
+        let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let marker = format!("if s.{}.take() {{", "relock");
+        let branch = prod
+            .split(&marker)
+            .nth(1)
+            .and_then(|s| s.split("apply_relock(s);").next())
+            .unwrap_or("");
+        assert!(!branch.is_empty(), "重锁分支不见了——判据悬空等于没有");
+        assert!(
+            branch.contains("tracing::"),
+            "重锁分支又变成静默的了——它清空账本并退水位线，\
+             没有这行日志就分不清「重锁」与「有别的路径在清账本」"
+        );
     }
 
     /// 锁错会话之后能修正：清掉旧锁 → 下一轮以当前像素为新基准。
