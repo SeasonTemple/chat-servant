@@ -408,40 +408,95 @@
    */
   let moreBelowDraft = $state(false);
 
+  /** 上面还有没有。与 `moreBelow` 同源、同判据、反方向——
+   *  「滚下去之后上面还有」只能靠它说出来。 */
+  let moreAbove = $state(false);
+  let moreAboveDraft = $state(false);
+
+  /** 细指示线的几何（{ top, height }，px）。height 为 0 = 这条容器压根不能滚。 */
+  let actsThumb = $state({ top: 0, height: 0 });
+  let draftThumb = $state({ top: 0, height: 0 });
+
+  /** 正在滚 ⇒ 指示线浮出来；停手 800ms 后归 false ⇒ 淡出。 */
+  let actsScrolling = $state(false);
+  let draftScrolling = $state(false);
+
+  /**
+   * 细指示线的几何：**位置与长度都按 scrollTop / scrollHeight 的比例**算，
+   * 也就是原生滚动条拇指那套算法（拇指长 = 轨道 × 可见占比）。
+   * ⚠ offsetTop 是相对 .cs-body-col 的 ⇒ 它必须是 position: relative。
+   */
+  function thumbOf(node: HTMLElement) {
+    const span = node.scrollHeight;
+    const track = node.clientHeight;
+    if (span <= track + 1) return { top: 0, height: 0 };
+    return {
+      top: node.offsetTop + track * (node.scrollTop / span),
+      height: Math.max(24, (track * track) / span),
+    };
+  }
+
   const markOverflow: Attachment<HTMLDivElement> = (node) => {
     // 读一次候选条数，让「候选换了」也重新量一次：
-    // 增删候选会改 `scrollHeight`，而那不是 Svelte 的响应式来源。
+    // 增删候选会改 scrollHeight，而那不是 Svelte 的响应式来源。
     void allCandidates.length;
 
-    const update = () => {
+    let fadeTimer: ReturnType<typeof setTimeout> | undefined;
+    const sync = () => {
       moreBelow = node.scrollHeight - node.scrollTop - node.clientHeight > 1;
+      moreAbove = node.scrollTop > 1;
+      actsThumb = thumbOf(node);
     };
-    update();
-    node.addEventListener('scroll', update, { passive: true });
+    const onScroll = () => {
+      sync();
+      if (actsThumb.height === 0) return;
+      actsScrolling = true;
+      clearTimeout(fadeTimer);
+      fadeTimer = setTimeout(() => {
+        actsScrolling = false;
+      }, 800);
+    };
+    sync();
+    node.addEventListener('scroll', onScroll, { passive: true });
     // 窗口尺寸变了、字号探针改了，容器高度跟着变。
-    const ro = new ResizeObserver(update);
+    // ⚠ 这里只 sync：ResizeObserver 不是「人在滚」⇒ 不许把指示线点亮。
+    const ro = new ResizeObserver(sync);
     ro.observe(node);
     return () => {
-      node.removeEventListener('scroll', update);
+      node.removeEventListener('scroll', onScroll);
       ro.disconnect();
+      clearTimeout(fadeTimer);
     };
   };
 
-  /** 正文区的溢出标记。与 [`markOverflow`] **同一套判据**，只是另一个容器。 */
+  /** 正文区的溢出标记。与 [markOverflow] **同一套判据**，只是另一个容器。 */
   const markOverflowDraft: Attachment<HTMLDivElement> = (node) => {
     // 读一次候选条数：候选换了 ⇒ 正文（第一条候选）也换了 ⇒ 高度跟着变。
     void allCandidates.length;
 
-    const update = () => {
+    let fadeTimer: ReturnType<typeof setTimeout> | undefined;
+    const sync = () => {
       moreBelowDraft = node.scrollHeight - node.scrollTop - node.clientHeight > 1;
+      moreAboveDraft = node.scrollTop > 1;
+      draftThumb = thumbOf(node);
     };
-    update();
-    node.addEventListener('scroll', update, { passive: true });
-    const ro = new ResizeObserver(update);
+    const onScroll = () => {
+      sync();
+      if (draftThumb.height === 0) return;
+      draftScrolling = true;
+      clearTimeout(fadeTimer);
+      fadeTimer = setTimeout(() => {
+        draftScrolling = false;
+      }, 800);
+    };
+    sync();
+    node.addEventListener('scroll', onScroll, { passive: true });
+    const ro = new ResizeObserver(sync);
     ro.observe(node);
     return () => {
-      node.removeEventListener('scroll', update);
+      node.removeEventListener('scroll', onScroll);
       ro.disconnect();
+      clearTimeout(fadeTimer);
     };
   };
 
@@ -589,8 +644,18 @@
   type DraftFontKey = keyof typeof DRAFT_FONTS;
   let draftFont = $state<DraftFontKey | null>(null);
 
-  /** 归属行字号探针（`?peersz=`），数字直接是 CSS px。 */
-  let peerPx = $state<number>(15);
+  /** 归属行字号探针（`?peersz=`），数字直接是 CSS px。
+   *  ⚠ **默认 null，不是 15**（2026-10-31 订正）。原来是 `15`，而
+   *  `data-peer-px` 是**恒设**的属性 ⇒ 那条
+   *  `[data-peer-px]:not([data-peer-px=''])` 的 `calc(var(--peer-probe) * 1px)`
+   *  在**生产路径上永远生效** ⇒ 归属行实际是 15px，
+   *  `.cs-where` 里写的 12px 一次都没生效过。
+   *  用户原话「对话方名称和最新回复的文字大小没有差异」就是这么来的：
+   *  名字 15px、引文也 15px（继承自 `.cs-where`）——两者一样大。
+   *  ⚠ 探针口只能由探针口触发（同 `data-draft-font` 那条纪律）：
+   *  默认空串 ⇒ 选择器不匹配 ⇒ 走基线 12px。
+   */
+  let peerPx = $state<number | null>(null);
 
   /**
    *  归属行**名字**的呈现探针（`?peer=`）。
@@ -1132,6 +1197,23 @@
   {:else}
     <div class="cs-body-col" class:cs-has-acts={allCandidates.length > 0}>
       <!--
+        纸边细指示线（见 .cs-scroll-mark）。**必须是 .cs-body-col 的直接子元素**：
+        两个滚动容器都带 mask-image，放进去会连自己一起被渐隐吃掉。
+        几何由 attachment 里的 thumbOf() 按滚动比例写在这两个 style 上。
+      -->
+      <span
+        class="cs-scroll-mark"
+        data-scrolling={draftScrolling}
+        style:transform="translateY({draftThumb.top}px)"
+        style:height="{draftThumb.height}px"
+      ></span>
+      <span
+        class="cs-scroll-mark"
+        data-scrolling={actsScrolling}
+        style:transform="translateY({actsThumb.top}px)"
+        style:height="{actsThumb.height}px"
+      ></span>
+      <!--
         归属行。**只回答一件事**：这句话是替谁写的。
 
         ⚠ 这里原先在右边塞了档位。2026-10-13 实测截图自查发现那样做会
@@ -1159,7 +1241,7 @@
           <span class="cs-peer-unknown">没认出这是谁的对话</span>
         {/if}
         {#if lastFromThem}
-          <span class="cs-where-quote">{lastFromThem.text}</span>
+          <span class="cs-where-quote" title={lastFromThem.text}>{lastFromThem.text}</span>
         {/if}
       </p>
 
@@ -1167,7 +1249,12 @@
       正文行。**只有墨色**：`--cs-mark` 在真实纸底上只有 3.00 : 1，掉出 AA，
       正文小字用它就是不合规（app.css 的注释记着这条是怎么翻的）。
     -->
-      <div class="cs-draft" {@attach markOverflowDraft} data-more={moreBelowDraft}>
+      <div
+        class="cs-draft"
+        {@attach markOverflowDraft}
+        data-more={moreBelowDraft}
+        data-more-above={moreAboveDraft}
+      >
         {#if drafted}
           <!--
             ⚠⚠ **正文位不再显示候选**（票 92，2026-10-24）。
@@ -1276,7 +1363,13 @@
         ⇒ 容器看**全部候选**；纸条列表现在也看**全部候选**（同一个集合）。
       -->
       {#if allCandidates.length > 0}
-        <div class="cs-actions" data-no-drag {@attach markOverflow} data-more={moreBelow}>
+        <div
+          class="cs-actions"
+          data-no-drag
+          {@attach markOverflow}
+          data-more={moreBelow}
+          data-more-above={moreAbove}
+        >
           <!--
             不可逆前置说明 —— 规范 §4.2b 定它在**按钮上方**。
 
@@ -1760,20 +1853,24 @@
       filter: none;
     }
 
-    /* ⚠ 候选区的底部渐隐在 HC 下也必须**手动撤掉**（2026-10-16，与上面同理由）。
-     *
-     *   `mask-image` 不属于 forced-colors 的接管范围，UA 不会替我们关掉它 ⇒
-     *   高对比度用户会拿到**被压暗的最后一条候选**。
-     *   而 HC 下「下面还有」本来就已经说清楚了：滚动条仍在、条数仍在，
-     *   压暗只是把内容牺牲给一个装饰信号。 */
-    .cs-actions[data-more='true'] {
+    /* ⚠ 候选区的渐隐在 HC 下也必须**手动撤掉**（2026-10-16，与上面同理由）。
+   *
+   *   mask-image 不属于 forced-colors 的接管范围，UA 不会替我们关掉它 ⇒
+   *   高对比度用户会拿到**被压暗的首条/末条候选**。
+   *   而 HC 下「下面还有」本来就已经说清楚了：滚动条仍在、条数仍在，
+   *   压暗只是把内容牺牲给一个装饰信号。
+   * ⚠ 2026-11-01：mask 现在**常驻**（上下两条渐隐都靠它，见那组变量）
+   *   ⇒ 选择器不能再挂 [data-more]，否则「滚下去但还没到底」那一刻
+   *   上边缘渐隐会在 HC 下留下来。改成无条件撤。 */
+    .cs-actions {
       -webkit-mask-image: none;
       mask-image: none;
     }
 
-    /* 正文区同理（2026-10-24）：`mask-image` 不属于 forced-colors 的接管范围，
-       UA 不会替我们关掉 ⇒ 高对比度用户会拿到**被压暗的正文**。 */
-    .cs-draft[data-more='true'] {
+    /* 正文区同理（2026-10-24）：mask-image 不属于 forced-colors 的接管范围，
+     UA 不会替我们关掉 ⇒ 高对比度用户会拿到**被压暗的正文**。
+     ⚠ 同样改成无条件撤（2026-11-01，理由见上一条）。 */
+    .cs-draft {
       -webkit-mask-image: none;
       mask-image: none;
     }
@@ -2038,13 +2135,40 @@
     flex: 0 1 auto;
     min-height: 0;
     overflow-y: auto;
-    /* ⚠ `scrollbar-gutter: stable` —— 滚动条占的那 15px **永远预留**。
-     *   不加的话，第 4 条候选一出现滚动条就冒出来、正文宽度从 233.3
-     *   掉到 218.3，而**首条候选会因此从 3 行折成 4 行** ——
-     *   也就是说「多一条候选」会**把前面的候选变长**，纸面高度跟着跳。
-     *   ⇒ 宽度必须与条数无关，否则每次增删候选都要重量具。
+    /* ⚠⚠ **scrollbar-gutter: stable 已撤**（2026-11-01，第 2 阶段）。
+     *
+     * 它原来在的理由：滚动条占的那 15px 会让正文宽从 233.3 掉到 218.3，
+     * 而**首条候选会因此从 3 行折成 4 行** ——「多一条候选」把前面的候选变长了。
+     * （2026-11-01 实测：撤掉之后 `.cs-act-text` 宽 **231**，
+     *   `.cs-actions` 的 `offsetWidth == clientWidth == 316` ⇒ 滚动条一像素都没占。）
+     *
+     * ⇒ 原生滚动条现在被藏掉（见 .cs-draft, .cs-actions 那条）
+     *   ⇒ **宽度不再随「能不能滚」变** ⇒ 预留 15px 的理由消失了。
+     *   ⚠ 但「理由消失」不等于「问题消失」：宽度仍必须与条数无关，
+     *     藏滚动条只是把这件事变成结构性的（能滚与不能滚都占 0px）。
+     *
+     * ⚠ 改这里之后**必须重量具**，drafted / auto / many 三个都量。
      */
-    scrollbar-gutter: stable;
+    /* 双向渐隐：上下各一个变量给长度，0 = 那一边不渐隐
+     * （两边都由下面的 [data-*] 规则按滚动位置改）。
+     * ⚠ 常驻 mask-image：两侧都为 0 时四条 stop 退化成「全不透明」，
+     *   与没有 mask 逐像素相同 ⇒ 不必再写一条「不渐隐时撤掉」的反向规则。 */
+    --fade-top: 0px;
+    --fade-bottom: 0px;
+    -webkit-mask-image: linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 var(--fade-top),
+      #000 calc(100% - var(--fade-bottom)),
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 var(--fade-top),
+      #000 calc(100% - var(--fade-bottom)),
+      transparent 100%
+    );
     display: flex;
     flex-direction: column;
     /* ⚠⚠ **6 → 10 → 6 → 0**（票 44，2026-10-16 真撕边后归零）。
@@ -2185,15 +2309,19 @@
    * ⚠ 32px ≈ 半条撕边纸条（实测单条自然高 71.1）：
    *   小了只化掉撕口最外侧，读起来还是「直边切断」；
    *   大了会吃掉上一条的纸芯。
+ * ⚠ 32px ≈ 半条撕边纸条（实测单条自然高 71.1）：
+   *   小了只化掉撕口最外侧，读起来还是「直边切断」；
+   *   大了会吃掉上一条的纸芯。
    */
   .cs-actions[data-more='true'] {
-    -webkit-mask-image: linear-gradient(
-      to bottom,
-      #000 0,
-      #000 calc(100% - 32px),
-      transparent 100%
-    );
-    mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 32px), transparent 100%);
+    --fade-bottom: 32px;
+  }
+
+  /* 上边缘渐隐（2026-11-01，第 2 阶段）：滚下去之后「上面还有」只能靠它说，
+   * 底部那条说不了这件事——这正是补它出来的原因。
+   * ⚠ 与下边缘**同一个 32px**：两侧长度不同会让纸面看起来是歪的。 */
+  .cs-actions[data-more-above='true'] {
+    --fade-top: 32px;
   }
 
   /* 正文区的底部渐隐 —— 与上面 **同一套做法**（2026-10-24，票 91）。
@@ -2208,16 +2336,68 @@
    * （第一条候选，2026-10-24 改成纸条）⇒ 撕口被齐腰切断，
    * 正是撕边语言里最刺眼的那种坏法。
    *
-   * ⇒ 同一套渐隐：把下缘化掉 ⇒ 读成「纸往下延伸」。
+ * ⇒ 同一套渐隐：把下缘化掉 ⇒ 读成「纸往下延伸」。
+   * ⚠ 2026-11-01 起**上下都渐隐**，且与 .cs-actions 是同一套做法
+   *   （同一产品里两种滚动的做法不许不同）。
    */
   .cs-draft[data-more='true'] {
-    -webkit-mask-image: linear-gradient(
-      to bottom,
-      #000 0,
-      #000 calc(100% - 32px),
-      transparent 100%
-    );
-    mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 32px), transparent 100%);
+    --fade-bottom: 32px;
+  }
+
+  .cs-draft[data-more-above='true'] {
+    --fade-top: 32px;
+  }
+
+  /* 纸边细指示线（2026-11-01，第 2 阶段）：滚动时浮出约 3px 铅笔灰，
+   * 停手 800ms 后淡出。**它替掉的是原生滚动条**——WebView2 默认那条深灰竖条
+   * 与纸的语言完全不搭，还占掉 15px 正文宽。
+   *
+   * ⚠ 它是 .cs-body-col 的**绝对定位子元素**，**不能**放进滚动容器里：
+   *   两个容器都带 mask-image（上下渐隐），放进去会被自己那道渐隐吃掉。
+   * ⚠ 纵向位置与长度由 thumbOf() 按 scrollTop / scrollHeight 比例写进内联 style。
+   */
+  .cs-scroll-mark {
+    position: absolute;
+    right: 0;
+    /* 2px 发丝线（2026-11-01 用户定案）：3px 时对比度达标，但图上仍读成「一根细滚动条」
+     * —— 改成 2px 之后它是「纸边的一道划痕」，量的是线不是条。
+     * 对比度与粗细无关：合成 rgb(84,96,102) 对纸底仍是 5.54:1，仍 ≥3:1。 */
+    width: 2px;
+    /* 铅笔灰：它是**提示**不是内容（墨 = 内容，铅笔灰 = 机器给的记号）。
+     * ⚠ 2026-11-01 实测：原值 pencil @0.55 的合成色 rgb(152,156,151)，与纸底
+     *   rgb(245,237,214) 只有 2.38:1 —— 低于非文本元件的 3:1（WCAG 1.4.11）
+     *   ⇒ 量得到、看不见。pencil-2 @0.9 合成 rgb(84,96,102) ⇒ 5.54:1
+     *   （换到撕口那种偏暗纸 rgb(232,222,196) 上仍 4.84:1）。
+     */
+    background: var(--cs-pencil-2);
+    border-radius: 2px;
+    opacity: 0;
+    /* 它盖在候选纸条的撕口上，只负责显示：不许抢走悬停与点击。 */
+    pointer-events: none;
+    z-index: 2;
+    transition: opacity 220ms var(--cs-ease);
+  }
+
+  .cs-scroll-mark[data-scrolling='true'] {
+    opacity: 0.9;
+  }
+
+  /* 藏掉原生滚动条（2026-11-01，第 2 阶段）。
+   *
+   * ⚠ 两条都要写：scrollbar-width 是标准属性，::-webkit-scrollbar 是 Chromium
+   *   的老口子。只写一条，换一次 UA 就可能又冒出来。
+   * ⚠ 藏掉之后**宽度不再随「能不能滚」变** ⇒ .cs-actions 上那条
+   *   scrollbar-gutter: stable 的存在理由随之消失，已一并撤掉。
+   */
+  .cs-draft,
+  .cs-actions {
+    scrollbar-width: none;
+  }
+
+  .cs-draft::-webkit-scrollbar,
+  .cs-actions::-webkit-scrollbar {
+    width: 0;
+    height: 0;
   }
 
   /* 不可逆前置说明（规范 §4.2b：它在按钮上方）。
@@ -2687,8 +2867,9 @@
    *
    *  12.5px 是**票 44** 按「候选行动作行是按钮、12.5px 是按钮标签」定的；
    *  但仓库主人看了整屏之后问的是「**字那么小干啥**」——
-   *  候选正文是**面板上唯一小于 14px 的文字**（归属行 15px、档位名 14.85px、
-   *  正文 21px 仿宋）⇒ 把它抬到与正文族下限（14px，票 35）齐平。
+   *  候选正文是**面板上唯一小于 14px 的正文**（其余：归属行名字 12px、
+   *  引文 15px、状态句 15px、档位名 14.85px）
+   *  ⇒ 把它抬到与正文族下限（14px，票 35）齐平。
    *
    *  ⚠ **代价是实测的，不是估的**（`ui/scripts/shoot-panel.mjs`）：
    *  12.5 → 14px ⇒ 第二条候选从 2 行变 3 行、候选区 135 → 142、
@@ -3134,6 +3315,11 @@
      */
     min-height: 0;
     margin: 0 auto;
+    /* ⚠ **指示线的包含块**（2026-11-01）：.cs-scroll-mark 是这一列的绝对定位子元素，
+     *   它的 top 用滚动容器的 offsetTop 算 ⇒ 这一列必须是 position: relative，
+     *   否则 offsetTop 相对别的祖先解析，整条线纵向偏移。
+     * ⚠ 这里原本没有定位：加它**不动布局**（relative 不改盒子尺寸）。 */
+    position: relative;
     /* ⚠⚠⚠ **`padding-bottom: 24 → 40`**（2026-10-16，票 44 的「档位名骑在纸的
      * 撕口上」那一项）。
      *
@@ -3236,21 +3422,34 @@
   }
 
   .cs-where-quote {
-    display: block;
+    /* ⚠ 最多 **3 行** + 省略号（2026-11-01，第 2 阶段）：对方一条 7 行的长消息
+     * 会把候选整组挤出纸外。完整原话走 title（鼠标悬停可读），而它本来就在
+     * 微信窗口里 ⇒ 纸面这一格只需**认得出上下文**，不需要全文。
+     * ⚠ display: block → -webkit-box 是这条的全部代价：行数夹取只在这个盒模型下存在。 */
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
     margin-top: 3px;
-    color: var(--cs-pencil);
-    /* ⚠ **600，不是 400**（2026-10-14，票 24 实测定案，见设计规范 §4.3）。
+    /* ⚠ **15px 墨色仿宋 = 「内容」层**（2026-10-31，用户原话：「对话方名称和最
+     * 新回复的文字大小没有差异」）。
      *
-     * 引文是归属行里字数最多的一行，12px 常规字重下 **75.1% 的笔画 ≤1px**。
-     * 加粗把它压到 15.8%；抬字号只买来约 7 个百分点。
+     * 原来这一行是 12px 铅笔灰 ⇒ 读成「归属行的第三段标签」，与名字同一级。
+     * 但它是**对方说的那句原话**：读的人靠它认上下文，不靠它认人。
+     * ⇒ 名字留作标签（`.cs-peer` 12px + 疏排），这一行升成与正文同族的 15px 墨色。
+     * ⚠ 用墨色而不是铅笔灰：墨 = 引人读的那一层（app.css 的分工），
+     *   铅笔灰留给机器给的标签。
      *
-     * ⚠ 层级怎么办：名字、引文、档位名三行现在**都是 600**，所以
-     *   **层级不再靠字重**，改由别的东西扛——
-     *     · 名字：`.cs-peer` 的 **0.18em 疏排**（`tracked` 变体）+ 更深的
-     *       `--cs-pencil-2`（6.13 : 1）
-     *     · 引文：`--cs-pencil`（5.10 : 1）
-     *   「机器认出来的名字」这层语义靠**疏排 + 更深的灰**，不是粗细。
+     * ⚠ 层级现在靠**字号 + 颜色**扛；字重两者都是 600。
+     *
+     * ⚠ **600，不是 400**（2026-10-14，票 24 实测定案，见设计规范 §4.3）：
+     *   仿宋字面细，降字重会让笔画断到 1px 以下。那条实测在 12px 下量的，
+     *   15px 只会更实 ⇒ 字重不跟着字号动。
      * ⚠ 同样**不要写 500**：本机雅黑没有 500 字重，渲出来等于 400。 */
+    color: var(--cs-ink);
+    font-family: FangSong, STFangsong, '仿宋', serif;
+    font-size: 15px;
     font-weight: 600;
   }
 
@@ -3321,14 +3520,32 @@
    */
   .cs-draft {
     flex: 0 1 auto;
-    /* ⚠⚠⚠ **`min-height: 0` → `47.5px`（2026-10-25，用户反馈 ②③）**。
+    /* 双向渐隐的变量（与 .cs-actions 同一套，理由见那条规则的注释）。 */
+    --fade-top: 0px;
+    --fade-bottom: 0px;
+    -webkit-mask-image: linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 var(--fade-top),
+      #000 calc(100% - var(--fade-bottom)),
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 var(--fade-top),
+      #000 calc(100% - var(--fade-bottom)),
+      transparent 100%
+    );
+    /* ⚠⚠⚠ **`min-height: 0` → 给一个下限**（2026-10-25，用户反馈 ②③）。
      *
      * ## 为什么正文位的高度会三态不同
      *
      * `.cs-draft` 是 `.cs-body-col`（flex 列）里的一个 flex 项，
      * `flex: 0 1 auto` ⇒ **可以被压缩**。
-     * ⇒ 候选一多、列装不下时，flex 算法按基 sizes **分摊压缩量**，
-     * 正文位也被压扁 ⇒ **三态高度各不相同**（实测）：
+     * ⇒ 候选一多、列装不下时，flex 算法按基准尺寸**分摊压缩量**，
+     * 正文位也被压扁 ⇒ **三态高度各不相同**（2026-10-25 实测，此时状态句
+     * 还是 21px、框是 47.5px）：
      *
      * | 态 | 正文位高 | 候选组顶 |
      * |---|---|---|
@@ -3336,24 +3553,31 @@
      * | 候选出现 | **41.9** | 164.4 |
      * | 选过之后 | **39.1** | 161.6 |
      *
-     * ⇒ 候选组**跟着漂了 2.8px**，而正文位那行 21px 仿宋在 39.1px 的框里
+     * ⇒ 候选组**跟着漂了 2.8px**，而 21px 那一行在 39.1px 的框里
      * **已经放不下**（31.5 + 8 + 8 = 47.5）⇒ 状态句被裁掉一截。
      * ⇒ 用户原话：「候选生成前的布局，候选出现的布局，选择候选后的布局
      *   **依旧不一致**」。
      *
      * ## 修法：给正文位一个**下限**
      *
-     * `47.5px` = **一行 21px 仿宋（21 × 1.5 = 31.5）+ 上下各 8px padding**，
-     * 是状态句的自然高度（实测三态的段落盒都是 31.5）。
+     * 下限 = **状态句的自然高度** = 一行 15px 仿宋（15 × 1.5 = 22.5）+ 上下各 8px
+     * padding = 38.5 ⇒ 取 **39px**。
+     * ⚠ 2026-10-31 状态句由 21px 缩到 15px ⇒ 下限从 47.5 跟着缩到 39。
+     *   ⚠ 38.5 不是整数：向上取整到 39——矮半点就得靠 `clientHeight` 取整，
+     *     四态会在 38/39 之间抖，那等于把「不跳格」交给舍入方向。
+     *   这一条**必须跟字号一起动**：留 47.5 是个比内容高 9px 的空框，
+     *   用户抱怨的「提示文字占了很大的范围」就还是那个范围。
+     * ⚠ **不能只写 26px 那种「看着差不多」的值**：26 < 39 ⇒ 压缩时框比内容矮，
+     *   `overflow-y: auto` 会让状态句变成可滚动的（=还是被裁）。
      * ⇒ 正文位**永远不少于一行** ⇒ 候选组吸收全部压缩量
      * ⇒ **候选组顶三态恒定**。
      *
      * ⚠ **票 88（长草稿把档位行顶出纸）没有被破坏**：
      * 草稿区仍然是 `overflow-y: auto` 的滚动容器，
      * 内容长了照样在**自己那块**里滚；`min-height` 只是**下限**，
-     * 不是固定高 ⇒ 草稿区的内容高度仍可远大于 47.5。
+     * 不是固定高 ⇒ 草稿区的内容高度仍可远大于 39。
      */
-    min-height: 47.5px;
+    min-height: 39px;
     overflow-y: auto;
     /* ⚠ **`padding: 8px 0`**：给正文位留**呼吸**（一行状态句上下各 8px）。
      * ⚠ 2026-10-24 订正：这条 padding 当初是**给撕边纸片让位**的
@@ -3363,6 +3587,29 @@
      * ⇒ 撕边纸片全在 `.cs-actions` 里 ⇒ 那边那条 8px 才是给撕口让位的。
      */
     padding: 8px 0;
+  }
+
+  /* 状态句切换时**淡入**（2026-10-31，用户原话：「也没有任何过渡效果」）。
+   *
+   * ⚠ 为什么是 `animation` 而不是 `transition`：四支状态句是 `{#if}` 的四条分支，
+   *   切换**换的是元素**（旧 `<p>` 销毁、新 `<p>` 插入）。新元素身上没有
+   *   「从某个值变到另一个值」的过程 ⇒ 在它上面写 `transition: opacity`
+   *   一次都不会触发，那是条**看着对、实际不执行**的声明。
+   *   插入动画才会在每次切换时真的跑一遍。
+   * ⚠ **没有「淡出」那一半**：那要一个 out 动画把旧 `<p>` 留在流里 160ms，
+   *   两个 `<p>` 同时存在 ⇒ 正文位在那 160ms 里高一倍 ⇒ 候选组跳位。
+   *   票 95 踩的就是「表头跳」，所以宁可只淡入。
+   * ⚠ 只动 opacity：**高度不参与任何动画**。
+   * ⚠ `prefers-reduced-motion` 不在这个文件里再写一遍——app.css 那条
+   *   全局 `animation-duration: 1ms !important` 已经把它压掉了。
+   */
+  @keyframes cs-draft-fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
 
   /* ⚠⚠⚠ **正文位不再承载候选**（2026-10-24，票 92 续）。
@@ -3394,15 +3641,30 @@
   .cs-draft-text {
     margin: 0;
     font-family: FangSong, STFangsong, '仿宋', serif;
-    font-size: 21px;
+    font-size: 15px;
     line-height: 1.5;
     color: var(--cs-ink);
     letter-spacing: 0.01em;
+    animation: cs-draft-fade 160ms var(--cs-ease);
     /* ⚠ 2026-10-24 订正：正文位**不再显示那句要发出去的话**（票 92 续）
      * ⇒ 这里承载的是**状态句**（2026-10-25 起是「候选如下」），不是正文。
-     * ⇒ 字号仍是 21px 仿宋：**与另外几支状态句同族**（`.cs-draft-idle` /
-     *   `.cs-draft-pending` / `.cs-draft-failed` 只改颜色、不改字号）
-     *   ⇒ 状态切换时正文位**不跳格**。
+     *
+     * ⚠⚠ **21px → 15px**（2026-10-31 先落到 14px；2026-11-01 用户再判
+     * 「状态句看着比底部档位名小」⇒ 定到 15px）。
+     * 起因原话：「所谓的提示文字却占了很大的范围且文字很大」。
+     * §4.2a 那个 21px 定案量的是**要发出去的正文**（字面率、断笔、行数）；
+     * 正文搬去动作区之后这里只剩一句四五个字的状态话
+     * ⇒ 继续按正文尺寸摆，它就比归属行（12px）大出两号，成了全屏第二大的东西。
+     * ⇒ **15px = 与「对方最后一句」同号**（`.cs-where-quote`）：两者都是「一句话」，
+     *   谁也不该比谁大；**层级改由颜色扛** —— 引文是墨色（要读的内容），
+     *   状态句是铅笔灰（机器给的说明）。
+     * ⚠ **不能停在 14px**：档位名是 14.85px（`calc(11px × var(--tk))`，`--tk` 默认 1.35），
+     *   14 < 14.85 ⇒ 状态句读成「比档位还次要」的一行小字，而它恰好是唯一
+     *   说明「现在在干嘛」的话。15 比档位名大半档，又不与引文抢。
+     * ⚠ 四支状态句（`-status` / `-pending` / `-idle` / `-failed`）**只改颜色、
+     *   不改字号** ⇒ 改字号只改这一处。
+     * ⚠ 切换时**不许跳格**：四态的框高靠 `.cs-draft` 的 `min-height` 钉住（见下），
+     *   不是靠字号。
      *
      * ⚠ `user-select: text` 现在只作用在**状态句**上（选中无害）。
      * ⇒ **候选正文不可选中**：纸条是 `<button>`，而 `Auto` 档下点一下就发
@@ -3523,7 +3785,8 @@
   .cs-draft-status {
     /* 状态句一律铅笔灰：正文位现在**只放状态句**（票 92 续）⇒
        「有墨」不再意味着「这里有一句正文」，而是「这里有一句要告诉你的话」。
-       ⚠ 字号**不缩**（仍是 21px）：缩了会让状态切换时正文位**跳一格**
+       ⚠ 字号在这一族里**不动**（四支共用 `.cs-draft-text` 的 15px）：
+       切换时要改的只有颜色。谁在这里按状态调字号，状态一变正文位就跳一格
        ——那正是「标题部分在动」那一类问题。 */
     color: var(--cs-pencil);
   }

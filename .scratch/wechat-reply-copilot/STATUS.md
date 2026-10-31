@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **96** ｜ 验收项全勾 **72** ｜ 已收但留有说明项 **17** ｜ 未收 **7**
+票据总数 **98** ｜ 验收项全勾 **72** ｜ 已收但留有说明项 **17** ｜ 未收 **9**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -29,6 +29,8 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `93-real-chat-text-reached-a-commit.md` | 10/12 | open（2026-10-24 实录：我在票面里写了真会话的一句气泡原文，它进了公开仓的历史）——**守卫已实现**（第三节） | (票面没写 Blocked by) |
 | `95-panel-header-moves-when-candidates-arrive.md` | 6/7 | ready-for-human · 2026-10-24 用户报出 ⇒ 代码侧已定位并修掉（票 92 续）⇒ **剩下的是真机那一眼** | (票面没写 Blocked by) |
 | `96-draft-candidates-anchored-to-my-own-lines.md` | 4/6 | ready-for-human · 缺陷 A 已修（真机 + 单测双证）· 缺陷 B 停在「四条预处理路全证伪」，等下轮拍板 | (票面没写 Blocked by) |
+| `97-the-panel-had-no-type-hierarchy-and-a-browser-scrollbar.md` | 8/9 | ready-for-human · 2026-11-01 用户报出（两轮）⇒ 代码侧已改并通过量测 ⇒ **剩下的是真机那一眼** | (票面没写 Blocked by) |
+| `98-longdraft-no-longer-stresses-the-draft-scroller.md` | 0/0 | needs-triage · 2026-11-01 由票 97 的量测顺带发现 | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
