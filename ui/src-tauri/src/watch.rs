@@ -1336,6 +1336,63 @@ fn history_line(m: &Message) -> String {
     format!("{who}：{}", m.text)
 }
 
+/// 「两个字被 rec 当成一个字」的诊断判据。返回 (类别, 宽, 高)。
+///
+/// ## 这里只做诊断，不改任何判读
+///
+/// 真机实测（票 96 缺陷 B）：一个 33×20 的框里是两个字，而 PP-OCRv6 small /
+/// medium、v5 server、v4 server **四份权重**都读不对——整块读成 1 个码位
+/// （p≈0.99）；拆成左右两半再喂，右半能读对，左半在三代模型上的最大概率都
+/// ≤0.0024。⇒ 这是模型的 **prior**，不是分辨率不够；换权重、调采样、
+/// 框内超采样六次都白费。
+///
+/// 本地渲染 + 形状匹配（`msyh.ttc` + 抹掉长宽比 + NCC）能认出来，但代价是
+/// 引入字体光栅化器、依赖微软专有字体（**不能**打包进安装包）、且只验过
+/// **一个**正例。所以先不修，先量频率——判据就是这里，落点是 `step` 里那行日志。
+///
+/// 两种形态各记一类，因为它们在真机上的样子不一样：
+/// - `单码位宽框`：整块被读成**一个**汉字（`w >= 1.5*h`）。阈值来自同帧实测：
+///   除目标行（1.62）外，其余「只认出 1 个 token」的行宽高比都在 0.88~1.33。
+/// - `混进片假名`：读出来带**片假名**。中文对话里片假名几乎只有 OCR 才产生，
+///   而那一块正是被读成「一个汉字 + 一个片假名」。
+///
+/// ⚠ 日志里**只许打几何，不许打正文**（硬约束 3）——那一个字就是聊天内容。
+fn merged_pair_suspect(m: &Message) -> Option<(&'static str, i32, i32)> {
+    let w = m.rect.width();
+    let h = m.rect.height();
+    if h <= 0 {
+        return None;
+    }
+    let mut chars = m.text.chars();
+    let only = chars.next()?;
+    if chars.next().is_none()
+        && is_cjk_ideograph(only)
+        && w as f32 >= WIDE_SINGLE_CHAR_RATIO * h as f32
+    {
+        return Some(("单码位宽框", w, h));
+    }
+    if m.text.chars().any(is_katakana) && m.text.chars().any(is_cjk_ideograph) {
+        return Some(("混进片假名", w, h));
+    }
+    None
+}
+
+/// 「单码位宽框」的判据下限，见 [`merged_pair_suspect`]。
+const WIDE_SINGLE_CHAR_RATIO: f32 = 1.5;
+
+/// 汉字：CJK 统一表意文字（常用区、扩展 A、兼容区）。
+///
+/// 判据是**码位区间**，不是「看起来像汉字」——emoji、全角标点、假名都该被排除，
+/// 否则这一条诊断会被它们带偏（真机里那些行本来也窄，报出来只会稀释频率）。
+fn is_cjk_ideograph(c: char) -> bool {
+    matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF)
+}
+
+/// 片假名（含半角）。见 [`merged_pair_suspect`] 的第二类。
+fn is_katakana(c: char) -> bool {
+    matches!(c as u32, 0x30A1..=0x30FA | 0x30FC..=0x30FF | 0xFF66..=0xFF9D)
+}
+
 /// 这一轮该不该起草。**这是唯一的判据入口**，`step` 只调它。
 ///
 /// ## 为什么要「最后一句是对方说的」这半个条件
@@ -1681,6 +1738,19 @@ fn step(
         //   打 `committed_bottom()` 会滞后一轮 —— 看起来像「位置没记上」。
         newest,
     );
+
+    // 窄框诊断（票 96 缺陷 B 的延伸）：两个字被 rec 并成一字的形态。
+    //
+    // ⚠ 只打**几何**，不打正文（硬约束 3）；一条新到的消息最多一行，
+    //   所以稳定态是零输出。唯一用途是量频率：这件事一天一次与一周一次，
+    //   决定要不要为它引入字体光栅化 + 18708 字的形状匹配。没有这个数，
+    //   任何「值不值得」都是猜的。
+    for (kind, w, h) in novel.iter().filter_map(merged_pair_suspect) {
+        tracing::debug!(
+            target: "chat_servant::watch",
+            "窄框诊断：{kind} {w}x{h}",
+        );
+    }
 
     // ⑤ 有对方说话才推理。**没读到就不推理**——省的不只是钱，
     // 还有一次可能失败的外部调用。
@@ -2347,8 +2417,8 @@ mod tests {
         Message, NoSummary, PaneAnchor, Phase, Readout, RecentN, Relock, SEEN_WINDOW, SESSION,
         Scratch, Speaker, TierCell, TokenBudget, absorb_round, apply_gate_closed, apply_relock,
         collect_images, current_phase, gate_opened, header_print, history_line,
-        park_on_other_conversation, phase_to_push, read_round, relabel_our_own, should_draft_now,
-        snapshot,
+        merged_pair_suspect, park_on_other_conversation, phase_to_push, read_round,
+        relabel_our_own, should_draft_now, snapshot,
     };
     use chatservant_capture::Frame;
     use chatservant_capture::ocr::{OcrError, OcrLine, OcrText};
@@ -3509,6 +3579,51 @@ mod tests {
             vec!["刚到的"],
             "只有没出现过的那条才算新到的；实际 {texts:?}"
         );
+    }
+
+    /// **诊断只报那两种形态，其余一律不报。**
+    ///
+    /// 这条守的是「诊断自己别乱报」：它要是把普通单字行也报出来，
+    /// 频率统计就没有分母意义了 —— 真机上每屏都有单字行。
+    ///
+    /// 两种形态都是真机实测来的（票 96 缺陷 B 那一帧）：
+    /// 一个是 33×20 的框里两个汉字被读成 1 个码位；另一个是同一帧在别的
+    /// 判读下变成「一个汉字 + 一个片假名」。
+    #[test]
+    fn merged_pair_suspect_flags_exactly_the_two_shapes_seen_on_a_real_screen() {
+        let mut wide = a_msg("好");
+        wide.rect = chatservant_core::frame::Rect::new(381, 214, 415, 235);
+        assert_eq!(
+            merged_pair_suspect(&wide),
+            Some(("单码位宽框", 34, 21)),
+            "34×21 的单码位框应当命中"
+        );
+
+        // 同一块被读成「一个汉字 + 一个片假名」——框不宽也要报，这是第二类。
+        let mut kana = a_msg("好テ");
+        kana.rect = chatservant_core::frame::Rect::new(381, 214, 415, 235);
+        assert_eq!(
+            merged_pair_suspect(&kana).map(|(k, _, _)| k),
+            Some("混进片假名")
+        );
+
+        let mut normal = a_msg("好");
+        normal.rect = chatservant_core::frame::Rect::new(77, 184, 99, 204);
+        assert!(
+            merged_pair_suspect(&normal).is_none(),
+            "近似方框的单码位行不该报"
+        );
+
+        let mut two = a_msg("好的");
+        two.rect = chatservant_core::frame::Rect::new(381, 214, 415, 235);
+        assert!(
+            merged_pair_suspect(&two).is_none(),
+            "两个汉字（都读对了）不是这个形态"
+        );
+
+        let mut latin = a_msg("ok");
+        latin.rect = chatservant_core::frame::Rect::new(381, 214, 700, 235);
+        assert!(merged_pair_suspect(&latin).is_none(), "非汉字不参与");
     }
 
     /// **旧消息重新出现在画面里（滚动翻出）⇒ 不算新的。**
