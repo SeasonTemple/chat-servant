@@ -1,6 +1,6 @@
 # 93: 真人聊天原文进了提交——以及一版**能真的守住它**的机器守卫
 
-**Status:** open（2026-10-24 实录：我在票面里写了真会话的一句气泡原文，它进了公开仓的历史）——**守卫已实现**（第三节）
+**Status:** open · 守卫已实现（第三节）· **919cfca 那笔历史改写已确认做完**（2026-11-01 实测 `git cat-file -t 919cfca` = `fatal: Not a valid object name`，5 条黑名单逐条 `git log --all -S` 全 0 命中）；仍开着的只有两处判据边界：5 字以下短句拦不住、片段粒度拦不住（见第四节与末节）
 
 ## 一、事件（我自己犯的）
 
@@ -186,7 +186,13 @@
 - [x] **明写的豁免口**：`real-chat-ok:` + **非空理由** ⇒ 该行不拦，且输出里**点出来**（空理由不算豁免）
 - [x] 回头扫本仓**当前内容**（`git ls-files`，不是暂存区）⇒ 清单在 `target/probe/real-chat-leaks-in-repo.txt`（gitignored）；⚠ 命中里**绝大多数是误报**，见第三节那张表
 - [ ] ⚠ **5 字以下的短句**仍然抓不到（门槛 6 的固有边界）⇒ 要不要更彻底 ⇒ **要拍板**
-- [ ] **仓库主人拍板**：要不要改写 919cfca（+ 强推）把那一句从公开仓历史里抹掉
+- [x] **仓库主人拍板**：要不要改写 919cfca（+ 强推）把那一句从公开仓历史里抹掉
+  ⇒ **已拍板改写，而且当时真的做完了**（2026-11-01 实测核对）：`git cat-file -t 919cfca` 报
+  `fatal: Not a valid object name 919cfca`，`git reflog --all` 里也搜不到它
+  ⇒ 那个提交在**本机对象库里已经不存在**，说明当时那次改写 + 强推确实执行过。
+  5 条黑名单条目逐条 `git log --all -S <entry>` ⇒ **每条 0 个提交** ⇒ 现存全部历史里
+  没有一条真人原话。⚠ 但 `AGENTS.md` 那句「文件里没有了 ≠ 没泄露过」仍然成立：
+  旧对象早就在 GitHub 的对象库里，被 fork / 缓存出去的那份擦不掉。
 - [x] 黑名单的**来源与落点**定下来（`target/probe/real-chat-blacklist.txt`，本机私有、gitignored，**不入库**；刷新脚本 `scripts/refresh-real-chat-blacklist.ps1`）
 - [x] 守卫实现：扫**暂存区**与**提交信息**，命中即红并打印命中句（`scripts/check-real-chat.ps1` + `.githooks/pre-commit` + `.githooks/commit-msg`）
 - [x] 守卫**自己**有守卫（`scripts/check-hooks.ps1` 断言两个 hook 都在、都含那句横幅，且横幅三处逐字一致）
