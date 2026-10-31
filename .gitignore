@@ -49,13 +49,14 @@ config.json
 # 第三方参考项目（自带 LICENSE，MIT/GPL 混合）。只读，不入库。
 examples/
 
-# 技能库只入库 .agents/ 这一份。.claude/ .minimax/ .zcode/ 是同一个技能库在
-# 各 CLI 运行时下的副本（AGENTS.md 里它们本应是 symlink，本机落成了实体目录），
-# 四份内容逐字相同，重复入库只会让公开仓库凭空多出约 2400 个第三方文件。
-# 换机器后由 skills-lock.json 重建副本即可。
+# 技能库只入库 .agents/ 这一份。.minimax/skills 与 .zcode/skills 现在是指向
+# .agents/skills 的目录联接（junction），不再是副本；.claude/ 已删（用户：不用）。
+# .codex/ 是 pstack 装 Codex 侧的产物。三处都不入库：入库只会让公开仓库
+# 凭空多出约 2400 个第三方文件。
 /.claude/
 /.minimax/
 /.zcode/
+/.codex/
 
 # Python 字节码。`.agents/skills/` 下的 skill 带 Python 脚本，
 # 跑过一次就留下 `__pycache__`，那是本机产物，**换台机器重建也一样**，
@@ -68,7 +69,13 @@ __pycache__/
 #
 # 这条最初是为霞鹜文楷加的。那支字体现已**整体撤掉**（`app.css` 里
 # 不再有 `@font-face`，探针 `?draft=lxgw` 也删了）——正文走本机真有的
-# 仿宋，见票 22 的「霞鹜文楷评估」。规则留着当护栏：真要重开这条路时，
+ui/static/fonts/
+
+# ⚠ 2026-11-01 实测：有个**本机在跑的工具**（不是本仓的代码）每隔几秒就把
+# `%SystemDrive%\ProgramData\Microsoft\Windows\Caches\*.db` 落到仓库根下，
+# 目录名就是字面量 `%SystemDrive%`（约 954 KB / 3 个文件，删掉几分钟内又出现）。
+# 谁干的还没查到（进程命令行取不到）；先拦住它别进公开仓库。
+/%SystemDrive%/
 # 别一不小心把 14.9 MB 的全量 TTF 打进安装包。
 #
 # ⚠ 这条注释原先写「GB2312 子集 ~300 KB 量级」，**实测差了 5 倍**
@@ -76,3 +83,8 @@ __pycache__/
 # `ui/scripts/subset_font.py` 取真数，别照抄。
 
 ui/static/fonts/
+
+# ⚠ pstack 的 poteto-mode 自带一个 `scripts/node_modules`（1045 文件 / 33.9 MB）——
+# 那是它的构建产物，不是技能本体：同目录有 `package.json` + `bun.lock`，重建即可。
+# 入库 = 公开仓库凭空多 34 MB，而且它和 lock 必然漂。
+.agents/skills/*/scripts/node_modules/

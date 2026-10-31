@@ -91,7 +91,7 @@ Rust 核心 + Tauri 2 外壳 + Svelte 5 前端，先打通微信单聊。
 - `ui/` — SvelteKit 5 前端
 - `ui/src-tauri/` — Tauri 2 外壳：命令层、托盘、观察循环
 - `ui/static/demo/*.json` — 演示夹具，`?demo=1&state=<名字>`（⚠ 不止「八态」：还有 `many`（候选太多）与 `longdraft`（草稿太长）两个**排版复核夹具**）
-- `.agents/skills/` — 技能库，68 个，**实际只有 6 个可用**（见「Skill 库」一节）
+- `.agents/skills/` — 技能库，113 个（69 策展 + 44 pstack），**策展那 69 个里只有 6 个可用**（见「Skill 库」一节）
 - `.github/` — CI（与 `gate.ps1` 的**步的集合**对齐；⚠ 别数「几步」，见下）、release（tag 驱动，出 msi+nsis）
 - `.githooks/` — commit-msg 校验 Conventional Commits、pre-commit 凭据闸
 
@@ -601,12 +601,18 @@ Five canonical roles, default strings: `needs-triage`, `needs-info`,
 Single-context: `CONTEXT.md` at the root, ADRs in `docs/adr/`. Read `CONTEXT.md`
 before writing code that uses domain terms. See `docs/agents/domain.md`.
 
-## Skill 库：`.agents/skills/`（68 个，一半有毒）
+## Skill 库：`.agents/skills/`（113 个：69 策展 + 44 pstack）
 
-装着的 68 个 skill 里，**只有 6 个真的能用**，52 个 Tauri 系全是模板生成的空壳，
+策展那 69 个 skill 里，**只有 6 个真的能用**，52 个 Tauri 系全是模板生成的空壳，
 其中 **12 个还带编造的包名与命令**（npm 上查无此包）。所以「主动用 skill」
 在本仓的正确含义是**先查这张表再决定读不读**，而不是照单全收——
 判断依据见下面「两条通用规矩」。
+
+⚠ **2026-10-25 起这个目录还多了 44 个 pstack 技能**（`npx @shiwenbin1617/pstack
+add --all --host codex --scope project --no-memory`，v0.15.2，Codex 侧 `$how` 那套；
+`.codex/agents/` 里只落 2 个 toml）。它们不是模板空壳，但**不在**上面那张「6 个
+可信」表里——那张表评的是**策展**的 69 个，pstack 是另一套。入口是 `$setup-pstack`
+→ `$poteto-mode`。装它是**用户 2026-10-25 明示要求**，不是「装得多就能用」那条路子。
 
 ### 唯一可信的 6 个
 
@@ -701,10 +707,14 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
 
 ### 其余约定
 
-`skills-lock.json` 记录装了哪些版本。`.claude/` / `.minimax/` / `.zcode/` 是 CLI
-为别的运行时做的 symlink，**不要手改它们的内容**。⚠ **仓库只跟踪 `.agents/`
-一份**（2026-10-12 起）——那三个副本已 gitignore，入库的是四份逐字相同的
-第三方文件，约 2400 个，纯冗余。
+`skills-lock.json` 记录装了哪些版本。⚠ **2026-10-25 改**：`.minimax/skills` 与
+`.zcode/skills` 现在是**指向 `.agents/skills` 的目录联接（junction）**，不再是两份
+11.7 MB 的独立副本（副本换版必漂）；`.claude/` **已删掉**（用户当天判定：不用）。
+`.codex/` 是 pstack 装 Codex 侧的产物，三者都已 gitignore ⇒ **仓库只跟踪
+`.agents/` 一份**（2026-10-12 起）。
+
+⚠ junction 的副作用：**某个 CLI 若往自己的 skills 目录写新技能，会顺着联接写进
+受跟踪的 `.agents/skills`** ⇒ 装新技能只走 `.agents/` 一处，装完核 `git status`。
 
 `examples/jev-chat-windows/` 是被替代的参考实现（Python）。可以读它的
 `docs/KICKOFF.md`、`app/ocr.py`、`app/capture.py` 了解已实测的结论，
