@@ -451,8 +451,8 @@ struct Scratch {
     /// ## 为什么要单独一路，而不是混进 `history`
     ///
     /// 「说话风格」和「对话内容」回答的是两个问题：前者是「我平时怎么说话」，
-    /// 后者是「现在该回什么」。混在一起模型无从区分——`history` 渲染出来
-    /// 时**不带说话人标签**（见 `Trimmed::render`），它会把样本当成对方说过的话。
+    /// 后者是「现在该回什么」。混在一起两件事都会退化成同一份大杂烩：
+    /// `history` 里两边的原话按时间混排，而口吻样本要的是**只属于我的那几句**。
     mine: Vec<String>,
     /// 最近一次识别出的消息流。**发给界面渲染用。**
     ///
@@ -1044,6 +1044,25 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
 ///   光说「不动手」用户不知道该干嘛，「切回来才继续」才是动作。
 const GATE_CLOSED_HINT: &str = "锁着别的对话，切回来才继续。";
 
+/// **我方把着话头时**面板要说的话。
+///
+/// ## 它替掉的是一句假话（2026-10-25 真机，缺陷帧 `frame-1793475836.png`）
+///
+/// 那一帧：对方 1 条在最上面、我方 8 条在后面。闸开、这轮没起草、阶段是
+/// `Read` ⇒ [`Phase::status_hint`] 返回 `None` ⇒ 前端回落到它自己写死的那句
+/// 「对方说完了，这轮没起草。」——而那一帧里**最后一句是我方说的**，
+/// 那句话是假的。
+///
+/// ## 为什么前端堵不住
+///
+/// 它的判据是「最后一条**对方**消息存不存在」（`ui/src/lib/PaperPanel.svelte:249`
+/// 的 `messages.filter(m => m.speaker === 'Them').at(-1)`），不是「最后一条消息
+/// 是不是对方」——我方把着话头时它照样非空。文案归 Rust 出（`types.ts` 的纪律），
+/// 所以判据也在这边，前端零改动。
+///
+/// 与 [`GATE_CLOSED_HINT`] 同风格：短句、只陈述现状、不下指令。
+const I_HAVE_THE_FLOOR_HINT: &str = "你说了最后一句，等对方回话。";
+
 /// 「刚读出消息、模型还没回来」和「这轮没有对方说话」混成同一个态——
 /// 那正是前端一直在猜、猜错的那件事。
 fn snapshot(
@@ -1059,7 +1078,19 @@ fn snapshot(
     //   `Phase::status_hint`，而结构体字面量是按书写顺序求值的。
     // 闸关着时**改用** [`GATE_CLOSED_HINT`]，理由见那里那条注释。
     let status_hint = if s.gate_open {
-        phase.status_hint().map(str::to_owned)
+        phase.status_hint().map(str::to_owned).or_else(|| {
+            // 只有 `Read` 这一档才补：`Drafting` 有「正在起草」，`Failed` 故意
+            // 不说话（靠顶部告警条），`Drafted` 本身就是产出——补一句会把真状态
+            // 盖掉。
+            match &phase {
+                Phase::Read { messages }
+                    if matches!(messages.last().map(|m| m.speaker), Some(Speaker::Me)) =>
+                {
+                    Some(I_HAVE_THE_FLOOR_HINT.to_owned())
+                }
+                _ => None,
+            }
+        })
     } else {
         Some(GATE_CLOSED_HINT.to_owned())
     };
@@ -1279,6 +1310,43 @@ fn absorb_round(
     // 面板只并**新的**：重读到的旧消息不该在面板上重复出现。
     *display = chatservant_perceive::merge_into_stream(display, &novel);
     novel
+}
+
+/// 一行进 `history` 的样子：**带说话人**。
+///
+/// ## 为什么标签写在写入口，而不是渲染时
+///
+/// [`chatservant_reason::Context::trim`] 与 `Trimmed::render` 手上只有
+/// `Vec<String>`，到那一步说话人已经丢了。标签在这里焊进正文之后，
+/// 摘要那一路（同样只吃字符串）、摘要失败时的兜底那一路、以及将来任何读
+/// `history` 的人都会自动带上——不用每处各记一条规则，而「每处各记一条」
+/// 正是这个缺陷活下来的原因。
+fn history_line(m: &Message) -> String {
+    let who = match m.speaker {
+        Speaker::Me => "我",
+        Speaker::Them => "对方",
+        // 既不是我也不是对方（系统提示之类）。**也要给个标签**——
+        // 留一行光秃秃的原文，模型就又回到「这几行分不出谁说的」那个状态。
+        Speaker::System => "系统",
+    };
+    format!("{who}：{}", m.text)
+}
+
+/// 这一轮该不该起草。**这是唯一的判据入口**，`step` 只调它。
+///
+/// ## 为什么要「最后一句是对方说的」这半个条件
+///
+/// 2026-10-25 真机：对方只有 1 条（在很上面），用户自己 8 条在后面。
+/// 模型看到最后一段全是「我」，于是顺着用户自己的话往下写——面板给出的
+/// 候选是在接用户的话，而不是回复对方。
+///
+/// 用户刚说完、对方还没回时本来就没有可回复的对象，所以这一条同时挡住
+/// 「自问自答」（`Auto` 档下多发一条的入口）。
+///
+/// `peer_spoke_now` 那半是硬约束第 6 条：没有新的对方消息就一次都不调，
+/// 最后一句是不是对方说的都不例外。
+fn should_draft_now(peer_spoke_now: bool, visible: &[Message]) -> bool {
+    peer_spoke_now && matches!(visible.last().map(|m| m.speaker), Some(Speaker::Them))
 }
 
 /// 当前这一刻的阶段：**有没有候选**决定是 `Read` 还是 `Drafted`。
@@ -1612,7 +1680,14 @@ fn step(
 
     // ⑤ 有对方说话才推理。**没读到就不推理**——省的不只是钱，
     // 还有一次可能失败的外部调用。
-    if newest.is_some() {
+    // ⑥ 起草闸：对方本轮有新话，**且当前可见消息的最后一条是对方说的**。
+    //
+    // 后半个条件是 2026-10-25 真机那个缺陷的落点：对方只有 1 条（很靠上），
+    // 用户自己 8 条在后面 ⇒ 模型看到最后一段全是「我」，于是接着用户的话
+    // 往下写——生成的是用户下一句要说什么，而不是回复对方。
+    // 用户刚说完、对方还没回时本来就没有可回复的对象，所以这一条同时挡住
+    // 「自问自答」。判据只读已有的消息列表与 `Speaker`，不新造状态。
+    if should_draft_now(newest.is_some(), &messages) {
         // **先把「读到消息了、模型还没回来」这件事推出去**，再去做耗时的事。
         //
         // 这是 S3（起草中）唯一的来源。少了这一帧，起草中这一态在真机上
@@ -1647,7 +1722,11 @@ fn step(
         // ⚠ **只追加新到的**（`novel`）。ROI 现在覆盖整块消息区，
         // `messages` 里含全部可见消息；全量追加会让每轮都把整段历史
         // 再塞一遍给模型（上下文被重复灌水）。
-        s.history.extend(novel.iter().map(|m| m.text.clone()));
+        // ⚠ **每行必须带说话人**（2026-10-25，与上面那个闸同一次修）：
+        // 只存正文时 `Trimmed::render` 拼出来的是九行光秃秃的原文，模型
+        // 分不出谁说的 ⇒ 顺着用户自己的话往下写。标签焊在写入口，摘要那一路
+        // （也只吃字符串）和下面的兜底那一路就都自动带上了。
+        s.history.extend(novel.iter().map(history_line));
 
         // 口吻样本走**另一路**（`FEATURE.md` 的「单独一路」）。
         //
@@ -2261,10 +2340,11 @@ impl chatservant_reason::Summarizer for NoSummary {
 mod tests {
     use super::{
         AUTO_COOLDOWN, AutoGate, BUDGET_MAX, BUDGET_MIN, CallCounts, DraftCandidate, ImagesOut,
-        Message, PaneAnchor, Phase, Readout, RecentN, Relock, SEEN_WINDOW, SESSION, Scratch,
-        Speaker, TierCell, TokenBudget, absorb_round, apply_gate_closed, apply_relock,
-        collect_images, current_phase, gate_opened, header_print, park_on_other_conversation,
-        phase_to_push, read_round, relabel_our_own, snapshot,
+        Message, NoSummary, PaneAnchor, Phase, Readout, RecentN, Relock, SEEN_WINDOW, SESSION,
+        Scratch, Speaker, TierCell, TokenBudget, absorb_round, apply_gate_closed, apply_relock,
+        collect_images, current_phase, gate_opened, header_print, history_line,
+        park_on_other_conversation, phase_to_push, read_round, relabel_our_own, should_draft_now,
+        snapshot,
     };
     use chatservant_capture::Frame;
     use chatservant_capture::ocr::{OcrError, OcrLine, OcrText};
@@ -2550,6 +2630,138 @@ mod tests {
             out.status_hint.as_deref(),
             Some(super::GATE_CLOSED_HINT),
             "闸关着还显示「正在起草，通常几秒」，用户会白等"
+        );
+    }
+
+    /// **我方把着话头时，面板不许说「对方说完了」。**
+    ///
+    /// ## 2026-10-25 真机（缺陷帧 `frame-1793475836.png`）
+    ///
+    /// 对方 1 条在最上面、我方 8 条在后面。闸开、这轮没起草、阶段是 `Read`
+    /// ⇒ `Phase::status_hint` 返回 `None` ⇒ 前端回落到它自己写死的那句
+    /// 「对方说完了，这轮没起草。」——而那一帧里**最后一句是我方说的**。
+    ///
+    /// 前端判据（`ui/src/lib/PaperPanel.svelte:249`）是「最后一条**对方**消息」，
+    /// 不是「最后一条消息是不是对方」⇒ 我方把着话头时它照样非空 ⇒ 前端堵不住。
+    #[test]
+    fn when_i_have_the_floor_the_panel_says_so() {
+        let st = chatservant_reason::StageCalls::default();
+        let mut s = scratch_with(0, 0);
+        s.gate_open = true;
+
+        let mut messages = vec![a_msg("对方最上面那一句")];
+        messages.extend((0..8).map(|i| mine_msg(&format!("我自己的第 {i} 句"))));
+        let out = snapshot(
+            &s,
+            None,
+            Phase::Read { messages },
+            1,
+            0,
+            st,
+            "这一轮对方没有新消息",
+        );
+        assert_eq!(
+            out.status_hint.as_deref(),
+            Some(super::I_HAVE_THE_FLOOR_HINT),
+            "最后一句是我方却不说这句 ⇒ 前端回落到「对方说完了」那句假话"
+        );
+        assert_ne!(
+            out.status_hint.as_deref(),
+            Some(super::GATE_CLOSED_HINT),
+            "闸开着我方把着话头，不能说成「锁着别的对话」"
+        );
+        assert_ne!(
+            super::I_HAVE_THE_FLOOR_HINT,
+            super::GATE_CLOSED_HINT,
+            "两句必须不同，否则上面那条断言测不出东西"
+        );
+
+        // 一条消息都没有 ⇒ 保持现状，不凭空说「你说了最后一句」。
+        let empty = snapshot(
+            &s,
+            None,
+            Phase::Read {
+                messages: Vec::new(),
+            },
+            1,
+            0,
+            st,
+            "还没读到",
+        );
+        assert!(
+            empty.status_hint.is_none(),
+            "没有消息却说「你说了最后一句」：{:?}",
+            empty.status_hint
+        );
+
+        // 最后一句是对方 ⇒ 这句也不许出现（那时该等的是起草，不是等对方）。
+        let theirs = snapshot(
+            &s,
+            None,
+            Phase::Read {
+                messages: vec![mine_msg("我先说"), a_msg("对方回我")],
+            },
+            1,
+            0,
+            st,
+            "对方刚说完",
+        );
+        assert!(
+            theirs.status_hint.is_none(),
+            "最后一句是对方却说「你说了最后一句」：{:?}",
+            theirs.status_hint
+        );
+
+        // 另外三档不受影响：补一句会盖掉它们各自的话（或故意不说话）。
+        let drafting = snapshot(
+            &s,
+            None,
+            Phase::Drafting {
+                messages: vec![mine_msg("x")],
+            },
+            1,
+            1,
+            st,
+            "起草中",
+        );
+        assert_eq!(
+            drafting.status_hint.as_deref(),
+            Some("正在起草，通常几秒"),
+            "起草中说成了「你说了最后一句」"
+        );
+        let drafted = snapshot(
+            &s,
+            None,
+            Phase::Drafted {
+                messages: vec![mine_msg("x")],
+                candidates: Vec::new(),
+            },
+            1,
+            1,
+            st,
+            "有候选",
+        );
+        assert!(
+            drafted.status_hint.is_none(),
+            "drafted 被塞了这句：{:?}",
+            drafted.status_hint
+        );
+        let failed = snapshot(
+            &s,
+            None,
+            Phase::Failed {
+                messages: vec![mine_msg("x")],
+                error: "OCR 失败".into(),
+            },
+            1,
+            0,
+            st,
+            "这一轮没跑通",
+        );
+        assert!(
+            failed.status_hint.is_none(),
+            "failed 被塞了这句：{:?}",
+            failed.status_hint
         );
     }
 
@@ -3428,6 +3640,97 @@ mod tests {
             rect: chatservant_core::frame::Rect::new(0, 0, 10, 10),
             evidence: "测试".into(),
         }
+    }
+
+    fn mine_msg(text: &str) -> Message {
+        Message {
+            id: format!("Me:{text}"),
+            speaker: Speaker::Me,
+            text: text.into(),
+            rect: chatservant_core::frame::Rect::new(0, 0, 10, 10),
+            evidence: "测试".into(),
+        }
+    }
+
+    /// **用户刚说完、对方还没回 ⇒ 不起草。**
+    ///
+    /// ## 这条守的是什么（2026-10-25 用户真机报出）
+    ///
+    /// 真机现场：对方只有 1 条（很靠上），用户自己 8 条在后面。
+    /// 起草照样触发 ⇒ 模型顺着**用户自己的话**往下写 ⇒ 面板给出的候选
+    /// 是在接用户的话，而不是回复对方。
+    ///
+    /// ## 判据就是分支条件本身
+    ///
+    /// `should_draft_now` 是 `step()` 里那个 `if` 的**唯一**条件，而起草那一段
+    /// （本轮唯一会调模型的出口）在它里面 ⇒ 它返回 `false` 就等于**零模型调用**。
+    #[test]
+    fn the_drafting_gate_shuts_while_i_have_the_floor() {
+        let mut visible = vec![a_msg("对方最上面那一句")];
+        visible.extend((0..8).map(|i| mine_msg(&format!("我自己的第 {i} 句"))));
+        assert!(
+            !should_draft_now(true, &visible),
+            "最后一句是我方却仍进起草 ⇒ 模型只能接着用户自己的话往下写"
+        );
+
+        visible.push(a_msg("对方回的最后一句"));
+        assert!(should_draft_now(true, &visible), "最后一句是对方 ⇒ 该起草");
+
+        // 硬约束第 6 条：没有新的对方消息时，最后一句是谁说的都不许调模型。
+        assert!(
+            !should_draft_now(false, &visible),
+            "没有新的对方消息却要起草 ⇒ 静默期零调用当场作废"
+        );
+        assert!(
+            !should_draft_now(true, &[]),
+            "一条消息都没读到 ⇒ 没有可回复的对象"
+        );
+    }
+
+    /// **送进模型的每一行都带说话人**（同上那次修的另一半）。
+    ///
+    /// 走的是生产那一路：`history` → `Context::trim` → `Trimmed::render`。
+    /// 少了这一半，模型看到的是几行光秃秃的原文，分不出谁说的——
+    /// 那正是「接用户的话」的另一半原因。
+    #[test]
+    fn every_line_the_model_sees_names_its_speaker() {
+        let recent = [
+            a_msg("对方先开口"),
+            mine_msg("我回了一句"),
+            a_msg("对方又来一句"),
+        ];
+        let history: Vec<String> = recent.iter().map(history_line).collect();
+
+        let mut c = NoSummary;
+        let rendered = context::Context::new()
+            .trim(SESSION, &history, 12, &mut c)
+            .expect("裁剪")
+            .render();
+
+        // 第一行是 `[最近的对话]` 标题，不是消息正文。
+        let lines: Vec<&str> = rendered.lines().skip(1).collect();
+        assert_eq!(lines.len(), 3, "最近三条要原样送：{rendered}");
+        for line in &lines {
+            assert!(
+                line.starts_with("对方：") || line.starts_with("我："),
+                "这一行没有说话人标记 ⇒ 模型分不出谁说的：{line}"
+            );
+        }
+        assert!(
+            lines[0].ends_with("对方先开口"),
+            "正文被改写了：{}",
+            lines[0]
+        );
+        assert!(
+            lines[1].starts_with("我："),
+            "我方那句被标成了别人：{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].starts_with("对方："),
+            "对方那句被标成了我方：{}",
+            lines[2]
+        );
     }
 
     /// **换会话时：状态留着，面板显示清空。**
