@@ -516,3 +516,53 @@ cargo run -q -p xtask -- perceive --file target/probe/wx.png
 ① `2:nearest` 仍是 2 行 ⇒ 双线性只解决了「生产同款口径」，不是全部答案；
 ② `ocr_accuracy`（合成语料字准）本机**没有语料**（`target/probe/ocrbench` 不存在），
 跑起来是 `finished in 0.00s` 的**跳过**——按 AGENTS.md 那条，0.00s 不是绿。
+
+## 十六、把字准判据跑起来：语料造出来了，但它**抓不到这一类错**（2026-11-01）
+
+第十五节那次改动（`rec_input` 点采样 → 双线性）手上只有「这一帧两行」的单点证据，
+所以先把 `ocr_accuracy` 真的跑起来——它此前在本机是 `finished in 0.00s` 的**跳过**
+（缺 `target/probe/ocrbench/`）。
+
+### 跑起来了
+
+```
+uv run --no-project --with pillow python scripts/ocrbench/gen_corpus.py
+cargo test -p chatservant-capture --test ocr_accuracy -- --include-ignored --nocapture
+```
+
+⇒ 语料 60 张 / 真值 300 行；默认子集一行读数：
+
+```
+合成语料字准（默认子集）：行 60，字符 865，编辑 1，CER 0.12%，召回 100%，逐行全对 98%，几何漏检 0%
+test result: ok ... finished in 15.50s
+```
+
+`finished in 15.50s` 才是「真的跑了」（同 AGENTS.md 那条 0.00s 的坑）。
+阈值（`crates/capture/tests/ocr_accuracy.rs`）：`CER_CEILING = 0.01`、
+`RECALL_FLOOR = 0.95`、`GEOM_MISS_CEILING = 0.02`，且 CI 上缺语料是**硬失败**
+（`assert!(!required, "CI 上缺件不许跳过")`）。
+
+### 但它是平的：A/B 一模一样
+
+把 `rec_input` 换回点采样再跑同一套语料（改完立刻换回来）：
+
+| `rec_input` | CER | 编辑数 | 逐行全对 |
+|---|---|---|---|
+| 点采样（旧） | **0.12%** | 1 | 98% |
+| 双线性（现） | **0.12%** | 1（同一个字：一 → —） | 98% |
+
+⇒ **合成语料看不见这个 bug 类**。原因是它的字是 PIL 以目标字号**直接渲染**出来的：
+笔画边缘干净、框也切得准，3~4 倍点采样上采样之后结构还在。真帧那次难在别处
+（深色主题、亚像素灰阶、整帧又经 det 侧缩放）。
+
+⇒ 结论分两半，都不能含糊：
+1. `c8decb5` **不劣化**——在这个唯一会红、且在 CI 上也真跑的判据上是平的；
+2. 但它的**正面证据仍然只有那一帧**。而 `CER_CEILING = 1%` 对现状（0.12%）有 **8 倍余量**
+   ⇒ 这条判据能挡住「整体崩掉」，挡不住「只剩两行错」。
+
+### 要让判据守得住这一类，得改语料而不是改阈值
+
+最小可行做法：给语料加一组**「大字号渲染 → 按 3 倍 LANCZOS 下采样」**的图，
+逼出「一行只有 8~14 px、却要放大 3~6 倍送 rec」那个真实条件。那时点采样与双线性
+应当分得开，这条判据才算真的守住了彳/ィ 这一类。
+⚠ 不要用「把 `CER_CEILING` 收到 0.3%」代替它——那只是把余量压小，判据仍然瞎。
