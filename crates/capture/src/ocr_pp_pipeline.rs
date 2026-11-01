@@ -362,10 +362,11 @@ pub fn rec_input(frame: &Frame, box_: Rect, out_w: usize) -> Vec<f32> {
     let (fw, fh) = (frame.width() as usize, frame.height() as usize);
     let src = frame.as_bytes();
     let mut out = vec![0.0f32; 3 * h * out_w];
+    let pad_y = if box_.height() <= 16 { 1 } else { 0 };
     let bx = box_.x0.max(0) as usize;
-    let by = box_.y0.max(0) as usize;
+    let by = (box_.y0 - pad_y).max(0) as usize;
     let bw = (box_.width().max(1) as usize).min(fw.saturating_sub(bx));
-    let bh = (box_.height().max(1) as usize).min(fh.saturating_sub(by));
+    let bh = ((box_.height() + pad_y * 2).max(1) as usize).min(fh.saturating_sub(by));
     // ⚠ 这里是**双线性**，不是最近邻点采样（2026-11-01）。
     // 框高常常只有 8~14 px，而 rec 的输入高固定 48 ⇒ 这是 3~6 倍的**上采样**。
     // 点采样 ``y * bh / h`` 等于每几个源像素取一个，上采样时把笔画边缘的灰度
@@ -830,12 +831,20 @@ impl HomoglyphFold {
     #[inline]
     fn pick(&self, row: &[f32], mut best: usize, mut prob: f32) -> (usize, f32) {
         let p_chi = row[self.chi] + row[self.kata_i] + row[self.kata_small_i];
-        if best == self.kata_i || best == self.kata_small_i || p_chi > prob {
+        // 当窄字「彳」（约 5px 宽）恰好落在两个 8px CTC 步幅柱正中间时，
+        // 真帧实测 `<blank>=0.517, 彳=0.373, イ=0.055, ィ=0.050`（p_chi=0.478，
+        // 其余 18706 类合计仅 0.005；而真正空白柱的 p_chi < 0.0001）。
+        let non_blank = (1.0 - row[BLANK]).max(1e-6);
+        let chi_beats_blank =
+            best == BLANK && p_chi >= 0.18 && row[self.chi] >= 0.08 && p_chi >= non_blank * 0.75;
+        if best == self.kata_i || best == self.kata_small_i || p_chi > prob || chi_beats_blank {
             best = self.chi;
             prob = p_chi;
         }
         let p_chu = row[self.chu] + row[self.kata_te];
-        if best == self.kata_te || p_chu > prob {
+        let chu_beats_blank =
+            best == BLANK && p_chu >= 0.18 && row[self.chu] >= 0.08 && p_chu >= non_blank * 0.75;
+        if best == self.kata_te || p_chu > prob || chu_beats_blank {
             best = self.chu;
             prob = p_chu;
         }
