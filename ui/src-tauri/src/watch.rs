@@ -1490,6 +1490,56 @@ fn gate_opened(s: &mut Scratch) -> bool {
 }
 
 /// 跑一轮。`Ok(Some(anchor))` = 有新内容；`Ok(None)` = 静默期。
+fn try_auto_send_pending(s: &mut Scratch) -> bool {
+    if s.candidates.is_empty() {
+        return false;
+    }
+    let now = std::time::Instant::now();
+    let tier_is_auto =
+        crate::commands::current_tier() == chatservant_core::dispatch::Dispatch::Auto;
+    if let Err(why) = s.auto_gate.may_auto_send(tier_is_auto, now) {
+        if tier_is_auto && !s.auto_gate.spent_this_round {
+            tracing::info!(target: "chat_servant::watch", "自动发送等待冷却：{why}");
+        }
+        return false;
+    }
+    let Some(top) = s.candidates.first().cloned() else {
+        return false;
+    };
+    crate::commands::sync_candidates(&s.candidates);
+    match crate::commands::auto_send(&top.id) {
+        Ok(receipt) => {
+            tracing::info!(
+                target: "chat_servant::watch",
+                "自动发送回执：{}",
+                receipt.explain()
+            );
+            if !matches!(
+                receipt,
+                chatservant_core::dispatch::DeliveryReceipt::NotSent
+                    | chatservant_core::dispatch::DeliveryReceipt::Failed(_)
+            ) {
+                s.auto_gate.record_sent(now);
+                s.candidates.clear();
+                crate::commands::sync_candidates(&s.candidates);
+                s.reason = format!(
+                    "{}。已按最高置信度自动发送：{}",
+                    s.reason,
+                    receipt.explain()
+                );
+                true
+            } else {
+                s.reason = format!("{}。自动发送未成：{}", s.reason, receipt.explain());
+                false
+            }
+        }
+        Err(e) => {
+            s.reason = format!("{}。自动发送失败：{e}", s.reason);
+            false
+        }
+    }
+}
+
 fn step(
     watcher: &mut PaneWatcher,
     reasoner: &mut Box<dyn Reasoner + Send>,
@@ -1611,9 +1661,12 @@ fn step(
         // 没变：一行都没读。**这是硬约束第 6 条的落点**，
         // 而「这一帧 0 像素 / 0 次 OCR」正是它唯一可信的证据。
         record_cost(last_boxes, 0, None, pane_area(anchor.chat), 0);
-        // ⚠ 但「刚从停泊切回来」这一轮**要推一帧**：面板还停在
-        // 「锁着别的对话，切回来才继续」，而我们已经切回来了。
-        return Ok(if just_opened { Some(anchor) } else { None });
+        let auto_fired = try_auto_send_pending(s);
+        return Ok(if just_opened || auto_fired {
+            Some(anchor)
+        } else {
+            None
+        });
     };
 
     // ③ **OCR 的画面与倍数由引擎决定**，产品路径与探针走同一个入口
@@ -1878,14 +1931,6 @@ fn step(
                 //
                 // 顺序很重要：`blind` 只存在于 `DraftSet` 上，
                 //   存进 `s.candidates` 之后就拿不到了（面板契约里没有这个字段）。
-                let draft_is_blind = t.draft.blind;
-                // ⚠ 走**展示顺序**（2026-10-25 订正）：第一行 = **概率最高的那条**
-                //   = `recommended()` = **Auto 档会发出去的那条**。
-                //   排序是**纯本地**的（按 probability 降序，见 `transport::rank`）
-                //   ⇒ 这里**不再排**。
-                //   原来这里走 `sorted()`（按 probability 重排）⇒ 面板排一次、
-                //   接缝层排一次，两边得出的「第一条」可能不同
-                //   ⇒ 用户点的是屏幕上那条，不能有两个「第一条」。
                 s.candidates = t
                     .draft
                     .display_order()
@@ -1895,78 +1940,13 @@ fn step(
                         id: format!("c{i}"),
                         text: c.text.clone(),
                         probability: c.probability,
-                        // ⚠ 档位在这里算，界面不自己算（阈值只有这一份）。
                         confidence: ConfidenceTier::from_probability(c.probability),
                     })
                     .collect();
                 s.reason = t.explain();
 
-                // ---- `Auto` 档自动发送：五道护栏在这里汇合 ----
-                //
-                //**这是唯一一处「程序替人把话发进聊天窗口」的地方。**
-                //   每一条不满足都只降级成「只填入」，绝不放行。
-                //
-                // 对方又开口了 ⇒ 新一轮（允许再发一次）。
-                //   冷却**不在这里清**——见 [`AutoGate::begin_new_round`]。
                 s.auto_gate.begin_new_round();
-
-                let now = std::time::Instant::now();
-                // 档位从 `STATE` 读，与 `commands::dispatch` **同一个来源**。
-                //   这里不去猜、不缓存——两份判断迟早分叉，而分叉方向永远是「多发」。
-                let tier_is_auto =
-                    crate::commands::current_tier() == chatservant_core::dispatch::Dispatch::Auto;
-
-                // 护栏 ④：降级候选**不自动发**。
-                // `blind` = 判断失败时的降级产物，它的 probability 没有意义，
-                // 「挑最高置信度那条」在这里等于按一个假数字做决定。
-                // ⇒ 宁可只填入让人看一眼，也不要替人发一条不知道哪来的话。
-                let verdict = if draft_is_blind {
-                    Err("这轮判断降级了，概率不可信，只填入")
-                } else {
-                    s.auto_gate.may_auto_send(tier_is_auto, now)
-                };
-
-                if let Err(why) = verdict {
-                    if tier_is_auto && !s.candidates.is_empty() {
-                        tracing::info!("自动发送未放行：{why}——保持只填入");
-                    }
-                } else if let Some(top) = s.candidates.first().cloned() {
-                    // 候选已按 probability 降序 ⇒ `candidates[0]` 就是最高置信度。
-                    // **这一句真机上没验过**（要真把话打进微信窗口），
-                    //   见 `.scratch/…/20-two-dispatch-tiers.md` 的 Update。
-                    // ⚠ 先把刚起草好的本轮候选同步进 `STATE`，否则 `cs-pump` 还没醒来时
-                    //   `auto_send` → `candidate_text` 读到的是 `Drafting` 阶段清空的 `[]`。
-                    crate::commands::sync_candidates(&s.candidates);
-                    match crate::commands::auto_send(&top.id) {
-                        Ok(receipt) => {
-                            tracing::info!(
-                                target: "chat_servant::watch",
-                                "自动发送回执：{}",
-                                receipt.explain()
-                            );
-                            if !matches!(
-                                receipt,
-                                chatservant_core::dispatch::DeliveryReceipt::NotSent
-                                    | chatservant_core::dispatch::DeliveryReceipt::Failed(_)
-                            ) {
-                                s.auto_gate.record_sent(now);
-                                s.reason = format!(
-                                    "{}。已按最高置信度自动发送：{}",
-                                    s.reason,
-                                    receipt.explain()
-                                );
-                            } else {
-                                s.reason =
-                                    format!("{}。自动发送未成：{}", s.reason, receipt.explain());
-                            }
-                        }
-                        Err(e) => {
-                            // 发失败**不记冷却**：那不是「发出去了」，
-                            //   而冷却的作用是防连发，刷失败没意义。
-                            s.reason = format!("{}。自动发送失败：{e}", s.reason);
-                        }
-                    }
-                }
+                try_auto_send_pending(s);
             }
             // `NothingToDo` = 静默期，**不是错误**
             Err(chatservant_reason::ReasonError::NothingToDo) => {
