@@ -1,20 +1,19 @@
 """从面板自己的纸上裁下真撕边、3D 边缘折皱与内芯纤维，生成候选行的位图 —— 票 44 / 票 90。
 
-## 2026-11-01 四轮收敛（保留原窄宽 + 边缘 3D 折皱 + 内芯纤维折皱，消掉内嵌方框与直角块）
+## 2026-11-01 五轮收敛（锐化上沿撕口 + 强化四边 3D 折皱 + 零内嵌方框）
 
-1. **为什么之前「边缘折皱」没了**：
-   - 旧 `stripgen.py` 用 `DESHADE_KEEP = 0.08` 把外圈 32px 的色差压掉了 92%，连同面板边缘
-     原本画着的 V 形豁口明暗与 3D 边缘折皱（`top x=80..680`、`left y=545..705`、`right y=385..545`）
-     一起抹成了平涂纯色；
-   - 而 `128×128` 窄图被 `border-image ... stretch` 横向拉 5 倍后，原本斜向的边缘折皱被拉扁成横条。
-2. **现在的做法（`600×160`，`SLICE = 32` 源 px = `16 CSS px`）**：
-   - **边缘 3D 折皱 1:1 保留 + 余弦羽化过渡**：四条边直接从 `probe-sheet.png` 取带 3D 折皱与豁口的
-     真实边缘段（保留 55%~78% 的边缘明暗浮雕），并在 `d = 16..31` 之间用余弦权重 `0.5*(1+cos(πt))`
-     平滑羽化进内芯纹理 ⇒ 撕口处保留完整的 3D 边缘折皱，而 `d = 31..32`（`SLICE = 32` 接缝处）
-     权重归零，**天然零台阶、零内嵌方框**；
-   - **内芯兼具纸纹与横向纤维折皱**：内芯叠加面板净区纸纹（0.45×）与横向纤维折皱（0.65×）；
-   - **保持原版窄宽度**：左右边内移 4 源 px（平均内缩 17~22 源 px），四角逐点 `min` 连续求交，
-     外圈 6 源 px 与 `<20` 残影清零。
+1. **为什么之前纸条上边不够清晰、边框折皱不够**：
+   - 源图顶边的 alpha 从 0 爬到 245 跨了 16 源 px（8 CSS px 的宽缓半透明带），而 `drop-shadow`
+     是向下偏移的，导致纸条上边与同色底纸之间变成一团 8px 宽的雾，看不清上沿边界；
+   - 之前把边缘折皱系数压在 `0.55~0.72` 且从 `d=16` 就开始向内羽化，把 `d=16..24` 处最明显的
+     3D 边框折皱抹淡了一半。
+2. **修法（`600×160`，`SLICE = 32`）**：
+   - **锐化撕口 alpha 剖面（`sharpen_alpha`）+ 撕口纸厚边缘浮雕（`edge_bevel`）**：将四边半透明过渡带
+     以 145 为中心收紧 2.4 倍，并在撕口边缘（`a ≈ 195`）叠加纸张厚度的微立体明暗，使纸条尤其是
+     **上边（top edge）**轮廓清晰锐利；
+   - **强化四边 3D 边框折皱（`keep = 1.20`，保持到 `d = 23`）**：完整保留 `d = 0..23` 的 3D 边框折皱，
+     仅在最后 8 源 px（`d = 23..31`）用余弦羽化过渡到内芯纤维（`SLICE = 32` 接缝色差 `1.915 < 2.5`，
+     无内嵌方框）。
 """
 from __future__ import annotations
 
@@ -39,19 +38,24 @@ SLICE = 32
 PANEL_RGB = np.array([243.0, 230.0, 192.0], dtype=np.float32)
 
 
-def norm_edge_rgb(edge_rgba: np.ndarray, keep: float) -> np.ndarray:
+def norm_edge_rgb(edge_rgba: np.ndarray, keep: float, edge_bevel: float) -> np.ndarray:
     rgb = edge_rgba[:, :, :3]
     a = edge_rgba[:, :, 3]
-    m = a > 220
+    m = a > 210
     med = np.median(rgb[m], axis=0) if m.any() else PANEL_RGB
-    alpha_scale = np.clip((a - 140.0) / 100.0, 0.0, 1.0)[:, :, None]
-    dev = np.clip((rgb - med) * keep * alpha_scale, -24.0, 16.0)
-    return np.clip(PANEL_RGB + dev, 0, 255)
+    alpha_gate = np.clip((a - 80.0) / 50.0, 0.0, 1.0)[:, :, None]
+    dev = np.clip((rgb - med) * keep * alpha_gate, -46.0, 20.0)
+    rim = np.exp(-0.5 * ((a - 195.0) / 32.0) ** 2)[:, :, None] * edge_bevel
+    return np.clip(PANEL_RGB + dev + rim, 0, 255)
 
 
 def feather_weight(d_idx: int) -> float:
-    t = float(np.clip((d_idx - 16.0) / 15.0, 0.0, 1.0))
+    t = float(np.clip((d_idx - 23.0) / 8.0, 0.0, 1.0))
     return float(0.5 * (1.0 + np.cos(np.pi * t)))
+
+
+def sharpen_alpha(a: np.ndarray) -> np.ndarray:
+    return np.clip((a - 145.0) * 2.4 + 145.0, 0.0, 255.0)
 
 
 def build() -> None:
@@ -63,7 +67,6 @@ def build() -> None:
     if (sw, sh) != (760, 1120):
         sys.exit(f"源纸尺寸异常: {(sw, sh)} != (760, 1120)")
 
-    # 1. 内芯：面板净区纸纹 + 横向纤维折皱
     base_crop = src[260 : 260 + OUT_H, 80 : 80 + OUT_W, :3]
     base_mean = base_crop.mean(axis=(0, 1))
     crease_src = Image.fromarray(
@@ -72,15 +75,12 @@ def build() -> None:
     crease_arr = np.asarray(crease_src, dtype=np.float32)
     crease_dev = crease_arr - crease_arr.mean(axis=(0, 1))
     rgb_interior = np.clip(
-        PANEL_RGB + (base_crop - base_mean) * 0.45 + crease_dev * 0.65,
-        PANEL_RGB - 13.0,
-        PANEL_RGB + 13.0,
+        PANEL_RGB + (base_crop - base_mean) * 0.55 + crease_dev * 0.75,
+        PANEL_RGB - 15.0,
+        PANEL_RGB + 15.0,
     )
 
-    # 2. 四边：取源图带 3D 边缘折皱与豁口的真实边带，左右内移 4 源 px 保持窄宽度
     top_rgba = src[0:SLICE, 80 : 80 + OUT_W].copy()
-    # 源图 x=590..650 (即 top_rgba 的 510..570) 顶部有一处向外凸出的半透明耳状残影，
-    # 经 drop-shadow 会投出一枚椭圆暗斑；用相邻净撕口段替换该 60px 区间。
     top_rgba[:, 505:565, :] = top_rgba[:, 205:265, :]
     bot_rgba = src[sh - SLICE : sh, 80 : 80 + OUT_W].copy()
     left_rgba = np.zeros((OUT_H, SLICE, 4), dtype=np.float32)
@@ -88,12 +88,11 @@ def build() -> None:
     right_rgba = np.zeros((OUT_H, SLICE, 4), dtype=np.float32)
     right_rgba[:, 0 : SLICE - 4, :] = src[385 : 385 + OUT_H, sw - (SLICE - 4) : sw, :]
 
-    top_rgb = norm_edge_rgb(top_rgba, 0.72)
-    bot_rgb = norm_edge_rgb(bot_rgba, 0.55)
-    left_rgb = norm_edge_rgb(left_rgba, 0.78)
-    right_rgb = norm_edge_rgb(right_rgba, 0.78)
+    top_rgb = norm_edge_rgb(top_rgba, keep=1.20, edge_bevel=-16.0)
+    bot_rgb = norm_edge_rgb(bot_rgba, keep=0.95, edge_bevel=-12.0)
+    left_rgb = norm_edge_rgb(left_rgba, keep=1.20, edge_bevel=-14.0)
+    right_rgb = norm_edge_rgb(right_rgba, keep=1.20, edge_bevel=-14.0)
 
-    # 3. 在 d=16..31 之间余弦羽化进内芯，保证撕口处有 3D 边缘折皱、SLICE=32 处零接缝
     rgb_out = rgb_interior.copy()
     for d in range(SLICE):
         w = feather_weight(d)
@@ -108,21 +107,21 @@ def build() -> None:
             w * right_rgb[:, SLICE - 1 - d, :] + (1.0 - w) * rgb_out[:, OUT_W - 1 - d, :]
         )
 
-    # 4. Alpha：四边真撕口 + 四角连续求交 + 外沿残影清零
-    alpha = np.full((OUT_H, OUT_W), 255.0, dtype=np.float32)
-    a_t = top_rgba[:, :, 3]
+    a_t = sharpen_alpha(top_rgba[:, :, 3])
     a_t[-1, :] = np.maximum(a_t[-1, :], 254)
-    a_b = bot_rgba[:, :, 3]
+    a_b = sharpen_alpha(bot_rgba[:, :, 3])
     a_b[0, :] = np.maximum(a_b[0, :], 254)
-    a_l = left_rgba[:, :, 3]
+    a_l = sharpen_alpha(left_rgba[:, :, 3])
     a_l[:, -1] = np.maximum(a_l[:, -1], 254)
-    a_r = right_rgba[:, :, 3]
+    a_r = sharpen_alpha(right_rgba[:, :, 3])
     a_r[:, 0] = np.maximum(a_r[:, 0], 0)
+
+    alpha = np.full((OUT_H, OUT_W), 255.0, dtype=np.float32)
     alpha[0:SLICE, :] = np.minimum(alpha[0:SLICE, :], a_t)
     alpha[OUT_H - SLICE : OUT_H, :] = np.minimum(alpha[OUT_H - SLICE : OUT_H, :], a_b)
     alpha[:, 0:SLICE] = np.minimum(alpha[:, 0:SLICE], a_l)
     alpha[:, OUT_W - SLICE : OUT_W] = np.minimum(alpha[:, OUT_W - SLICE : OUT_W], a_r)
-    alpha[alpha < 20] = 0
+    alpha[alpha < 24] = 0
     alpha[0:6, :] = 0
     alpha[OUT_H - 6 : OUT_H, :] = 0
     alpha[:, 0:6] = 0

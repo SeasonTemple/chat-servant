@@ -618,9 +618,7 @@
       sentNote = { ok: false, text: `投递失败：${e}` };
     } finally {
       sending = false;
-      setTimeout(() => {
-        if (busyId === candidateId) busyId = null;
-      }, 220);
+      busyId = null;
     }
   }
 
@@ -2667,11 +2665,11 @@
     border-style: solid;
     border-width: 16px;
     border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
-    filter: drop-shadow(0 2px 3px rgb(24 18 10 / 0.12));
+    filter: drop-shadow(0 1px 3px rgb(24 18 10 / 0.16));
     transform-origin: 0 0;
     transition:
-      transform var(--cs-dur) var(--cs-ease),
-      filter var(--cs-dur) var(--cs-ease);
+      transform 85ms ease-out,
+      filter 85ms ease-out;
   }
 
   /* ── 悬停 / 聚焦：只加深纸条投影（不做形变，文字零变换不发糊；压角留给点击） ── */
@@ -2695,7 +2693,7 @@
   .cs-act-busy::before {
     transform: matrix3d(1.12, 0.022, 0, 0.00038, 0, 1.09, 0, 0.00075, 0, 0, 1, 0, 0, 0, 0, 1);
     filter: drop-shadow(0 2px 3px rgb(24 18 10 / 0.12));
-    transition-duration: var(--cs-dur-fast);
+    transition-duration: 55ms;
   }
   .cs-act:active .cs-act-meta,
   .cs-act-busy .cs-act-meta {
