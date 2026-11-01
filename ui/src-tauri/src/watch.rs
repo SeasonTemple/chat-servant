@@ -565,7 +565,7 @@ struct AutoGate {
 /// 冷却时长。**30 秒**是自动回复的常见量级。
 ///
 /// 为什么不是 0：冷却为 0 等于没有冷却，对方连发两条我就回两条。
-const AUTO_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+const AUTO_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl AutoGate {
     /// 这一轮**能不能自动发**。纯判定，不产生副作用。

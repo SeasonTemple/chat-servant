@@ -362,7 +362,7 @@ pub fn rec_input(frame: &Frame, box_: Rect, out_w: usize) -> Vec<f32> {
     let (fw, fh) = (frame.width() as usize, frame.height() as usize);
     let src = frame.as_bytes();
     let mut out = vec![0.0f32; 3 * h * out_w];
-    let pad_y = if box_.height() <= 16 { 1 } else { 0 };
+    let pad_y = if box_.height() <= 22 { 1 } else { 0 };
     let bx = box_.x0.max(0) as usize;
     let by = (box_.y0 - pad_y).max(0) as usize;
     let bw = (box_.width().max(1) as usize).min(fw.saturating_sub(bx));
