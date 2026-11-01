@@ -389,3 +389,18 @@ Manual 只填入 / `watch.rs` 的自动发送），只打**回执文案**
 
 ⇒ 同屏那张截图还暴露了另一件事（**票 92**）：用户报「发送后似乎把发送的消息
 也当成了新接收消息，又执行了一次候选列举」⇒ 已加「我方刚发出的话不算对方说的」护栏。
+
+## 2026-11-01 真机复验与收口：清空后填入 + 起草完成自动发送全链路打通
+
+真机逐项复验并补齐以下三处缺口：
+
+1. **填入与自动发送前先清空聊天输入框（`226dc5d`）**：
+   - `crates/capture/src/inject.rs` 新增 `clear_input()`（`Ctrl+A` 全选 + `Backspace` 清空），在 `fill_input_box` 的 `paste()`（`Ctrl+V`）之前执行；
+   - `Manual`（只填入）与 `Auto`（自动发送）共用该入口，切换点选不同候选或输入框已有残留文字时不再首尾拼接。
+2. **修复 `Auto` 档生成候选后未自动发送的跨线程时序缺陷（`0452945` / `84118b5`）**：
+   - `watch::step` 在推送 `Phase::Drafting` 时，`cs-pump` 线程会将全局 `STATE.s.candidates` 置空为 `[]`；而起草完成时 `watch::step` 在函数返回前立刻调用 `commands::auto_send("c0")` → `deliver_send` → `candidate_text("c0")`，此时 `cs-pump` 尚未醒来同步新候选，导致 `candidate_text("c0")` 恒返回 `None`；
+   - 新增 `commands::sync_candidates(&s.candidates)`，在 `auto_send` 前先把本轮新候选写进 `STATE`，真机验证第一轮起草完成后直接自动填入并回车发出。
+3. **第二轮及多轮全自动回复闭环（`c19ded3`）**：
+   - 抽出 `try_auto_send_pending(s)`，在起草完成当下与每秒静默 tick（`Decision::Quiet`）两处均调用；
+   - 去掉 `draft_is_blind`（前序 `Judge` 偶发网络超时）对 `Auto` 档的拦截（只要 `Draft` 成功产出排序候选即可发）；
+   - 若起草完成时恰逢上一轮 `10s` 冷却尚未走完，或用户在候选生成后才切到「自动发送」档，冷却结束后的下一秒 tick 自动补发，发送成功后立即清空 `s.candidates` 转入「等待回复」态。
