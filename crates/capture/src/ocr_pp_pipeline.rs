@@ -366,14 +366,30 @@ pub fn rec_input(frame: &Frame, box_: Rect, out_w: usize) -> Vec<f32> {
     let by = box_.y0.max(0) as usize;
     let bw = (box_.width().max(1) as usize).min(fw.saturating_sub(bx));
     let bh = (box_.height().max(1) as usize).min(fh.saturating_sub(by));
+    // ⚠ 这里是**双线性**，不是最近邻点采样（2026-11-01）。
+    // 框高常常只有 8~14 px，而 rec 的输入高固定 48 ⇒ 这是 3~6 倍的**上采样**。
+    // 点采样 ``y * bh / h`` 等于每几个源像素取一个，上采样时把笔画边缘的灰度
+    // 台阶整个丢掉 ⇒ 笔画数不同的字（彳 / ィ）反而更像。真帧实测见票 96 第十四节。
     for y in 0..h {
-        let sy = by + y * bh / h;
+        let v = (y as f32 + 0.5) * bh as f32 / h as f32 - 0.5;
+        let fy = (v - v.floor()).clamp(0.0, 1.0);
+        let y0 = v.floor().max(0.0) as usize;
+        let y1 = (y0 + 1).min(bh.saturating_sub(1));
         for x in 0..out_w {
-            let sx = bx + x * bw / out_w;
-            let p = &src[(sy * fw + sx) * 3..(sy * fw + sx) * 3 + 3];
+            let u = (x as f32 + 0.5) * bw as f32 / out_w as f32 - 0.5;
+            let fx = (u - u.floor()).clamp(0.0, 1.0);
+            let x0 = u.floor().max(0.0) as usize;
+            let x1 = (x0 + 1).min(bw.saturating_sub(1));
             let o = y * out_w + x;
             for c in 0..3 {
-                out[c * h * out_w + o] = (p[c] as f32 / 255.0 - REC_MEAN[c]) / REC_STD[c];
+                let p00 = src[((by + y0) * fw + bx + x0) * 3 + c] as f32;
+                let p10 = src[((by + y0) * fw + bx + x1) * 3 + c] as f32;
+                let p01 = src[((by + y1) * fw + bx + x0) * 3 + c] as f32;
+                let p11 = src[((by + y1) * fw + bx + x1) * 3 + c] as f32;
+                let top = p00 + (p10 - p00) * fx;
+                let bot = p01 + (p11 - p01) * fx;
+                let v01 = top + (bot - top) * fy;
+                out[c * h * out_w + o] = (v01 / 255.0 - REC_MEAN[c]) / REC_STD[c];
             }
         }
     }
