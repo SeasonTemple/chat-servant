@@ -69,6 +69,7 @@ Auto 档同一条现象：静息 107.82 / 2076.3 ⇒ 悬停 93.39 / 1471.8（−
 - [x] **用户拍板**：去不去那 0.5°（按候选 ① 落地：去掉 `rotate(-0.5deg)`，保留 `translateY(-2px)` 上抬 + 影加深）
 - [x] 按拍板结果改 CSS + 同步规范第 434 行 + 量具复跑（2026-11-01 落地：`ui/src/lib/PaperPanel.svelte` 去掉 `rotate(-0.5deg)`；同步 `docs/设计规范.md` §4.2c-bis 与 §4.2c-ter 两处悬停行；`ui/scripts/probe-act-states.mjs` @2x 本轮复跑通过）
 - [ ] 真机复验（需要人眼，等真机那一眼）
+      材料：`cd ui && node scripts/shoot-board.mjs` 出的八格对照板（见 `docs/本机验收清单.md` §3.2）——看第 ⑧ 格（悬停对照，左静息右悬停）。
 
 ## 六、顺带纠正的一条**上轮错误结论**
 

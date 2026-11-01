@@ -100,3 +100,4 @@
 - [x] `ui-check` 三步 OK；夹具守卫 `the_demo_fixtures_*` 仍绿
 - [ ] **真机那一眼**：面板在自己屏幕上「名字 / 引文 / 状态句」的层级读着顺不顺，
       以及滚动时那道 2px 线是否刚好（纸纹深处会不会断）
+      材料：`cd ui && node scripts/shoot-board.mjs` 出的八格对照板（见 `docs/本机验收清单.md` §3.2）——看第 ① ③ 格（drafted / drafting 的层级）。
