@@ -4,7 +4,11 @@
 #
 #**2026-10-15 纠正：本机直连 github.com 完全可用，代理是多余的。**
 # 实测：`git -c http.proxy= -c https.proxy= ls-remote .../advisory-db HEAD` ⇒ exit=0。
-# 而本机并没有 `127.0.0.1:7897` 那个代理（Test-NetConnection ⇒ False）。
+# ⚠ **2026-11-01 订正**：这句在 2026-10-15 是真的，今天不是了 ——
+#   实测 `Test-NetConnection 127.0.0.1:7897` ⇒ True、进程里有 `verge-mihomo`
+#   （与 AGENTS.md 2026-10-21 那条订正一致：两条路都可用）。
+#   ⇒ 真正会出事的是「代理开着、但 Clash 关了」：指向无人监听的端口 ⇒
+#     TLS 握手失败 / EOF，看起来像 advisory-db 拉不到。所以默认仍然直连。
 # ⇒ 下面默认**不挂代理**；代理改成可选（设了环境变量才用）。
 #
 # 保留 openssl 后端：schannel 走 HTTP CONNECT 代理经常握手失败，openssl 能通。
