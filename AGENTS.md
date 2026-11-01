@@ -209,103 +209,61 @@ Start-Process pnpm.cmd -ArgumentList 'dev' -WorkingDirectory "$repo\ui" `
 ⇒ ② dev server 死过一轮之后，**已跑的应用要重启**才有面板
 （webview 连的是死连接，不会自己重连）。
 
-### 「切会话」这类路径怎么在真机上验（2026-10-23 实测）
+### 真机上验「屏幕内容变了」这类路径（2026-10-23 实测）
 
-**这台机器禁止输入注入**：`SetCursorPos` 直接返回 `False`（光标纹丝不动），
-UIA 的 `Invoke` 在微信 4.0 的 Qt 单元（`mmui::ChatSessionCell`）上是空操作。
-⇒ **点不动别的程序**，「让用户手动切一下再读日志」是唯一剩下的办法。
-
-但**不必靠人点**：应用有**夹具帧源**，`CHATSERVANT_FIXTURE=<png>` 时
-**每一轮都重读那个文件** ⇒ **把文件换掉就等于「屏幕内容变了」**。
-于是「切走 → 切回」可以这样验（真实 OCR + 生产接缝，零 GUI）：
+**这台机器禁止输入注入**：`SetCursorPos` 直接返回 `False`（光标纹丝不动），UIA 的 `Invoke`
+在微信 4.0 的 Qt 单元（`mmui::ChatSessionCell`）上是空操作 ⇒ **点不动别的程序**。
+但**不必靠人点**：`CHATSERVANT_FIXTURE=<png>` 时**每一轮都重读那个文件**
+⇒ **把文件换掉就等于「屏幕内容变了」**（真实 OCR + 生产接缝，零 GUI）：
 
 ```powershell
-# 1) 两张同尺寸的**真机帧**（不同会话），拷到一个会被反复读的工作文件上
-Copy-Item target\probe\wechat-now.png target\probe\fixture-swap.png -Force
-# 2) 起应用（夹具模式），等它锁定第一张帧
 $env:CHATSERVANT_FIXTURE = (Resolve-Path target\probe\fixture-swap.png).Path
-# 3) 「切走」：把工作文件换成第二张帧（**先写临时文件再 Move-Force**，
-#    否则应用可能读到写了一半的 PNG）
-Copy-Item target\probe\wechat-ftt.png target\probe\_t.png -Force
+# 「换画面」：先写临时文件再 Move-Force，否则应用可能读到写了一半的 PNG
+Copy-Item target\probe\<另一张帧>.png target\probe\_t.png -Force
 Move-Item target\probe\_t.png target\probe\fixture-swap.png -Force
-# 4) 「切回」：换回第一张
 ```
 
 判读日志（`RUST_LOG=info,chat_servant::watch=debug,chat_servant::pump=debug`）：
-`emit readout ... peer="X" messages=N` 那一行是**证据行**——
-`messages=0` = 停泊时面板没显示锁定会话的内容；
-`phase=read`（**不是** `drafting`）= 切回来**没有**重复推理；
-`一轮 Nms` = 该轮耗时（**含那 1 秒的 tick**，所以它比「这一轮真正花的
-CPU 时间」大 1 秒；静默期约 1.17s）。
+`emit readout ... peer="X" messages=N` 是**证据行**——`messages=0` = 停泊时面板没显示锁定会话的
+内容；`phase=read`（**不是** `drafting`）= 切回来**没有**重复推理；`一轮 Nms` **含那 1 秒的 tick**
+（静默期约 1.17s），所以它比这一轮真正花的 CPU 时间大 1 秒。
 
-⚠ **用户感知的是端到端延迟**，不是「一轮 Nms」：
-**端到端 = 换帧时刻 → `emit readout` 的时间戳**（日志自带毫秒时间戳，
-两边都是 UTC，直接相减）。2026-10-23 08:51 实测（当前代码）：
-**切走 1389 ms / 切回 890 ms**；那一整场 `roi=` 行**只有启动那一次**
-⇒ 切走切回**一条消息都没读**；`phase=drafting` **只有启动那次**
-⇒ **零模型调用**。
+⚠ **用户感知的是端到端延迟**，不是「一轮 Nms」：**端到端 = 换帧时刻 → `emit readout` 的时间戳**
+（日志自带毫秒时间戳，两边都是 UTC，直接相减）。2026-10-23 08:51 实测（当前代码）：
+**切走 1389 ms / 切回 890 ms**；整场 `roi=` 行**只有启动那一次** ⇒ 切走切回**一条消息都没读**；
+`phase=drafting` **只有启动那次** ⇒ **零模型调用**。「切换会话 7s+」是**修之前**的数
+（3.28 s 一轮 **+ 一次多出来的推理 6~9 s**），票见 `issues/82-*.md`。
 
-⇒ 「切换会话 7s+」那个数是**修之前**的（3.28 s 一轮 **+ 一次多出来的
-推理 6~9 s**）。票见 `.scratch/wechat-reply-copilot/issues/82-*.md`。
+### 「同一会话里对方来了新消息」怎么验（2026-10-23 实测，主线 P0 的最后一环）
 
-⚠ 夹具帧是**别人的真实对话**（`target/probe/` 已被 gitignore）：
-**不许**把它们的内容写进提交信息、注释或测试夹具。
-
-### 「同一会话里对方来了新消息」怎么在真机上验（2026-10-23 实测）
-
-上一节那套（换夹具帧 = 屏幕内容变了）**同样适用**，而且这是主线 P0 的
-最后一环：**对方在**同一会话**里又发了一条 ⇒ 面板要不要更新**。
-
-⚠ **先看这个几何**，否则验的东西是假的：**微信的消息列表是「底部对齐」的** ——
-对话变长时**视口整体上移**，最新的那条始终贴在输入框上方。
-
-⇒ **新消息落在旧水位线之上**（实测：A 帧最后一条下沿 569，
-B 帧新增的那几条在 y 130..567）⇒ 任何按**像素行**划出来的增量带
+上一节那套**同样适用**。⚠ **先看这个几何**，否则验的东西是假的：**微信的消息列表是「底部对齐」
+的**——对话变长时**视口整体上移**，最新的那条始终贴在输入框上方 ⇒ **新消息落在旧水位线之上**
+（实测：A 帧最后一条下沿 569，B 帧新增的那几条在 y 130..567）⇒ 任何按**像素行**划出来的增量带
 `[水位线, 底部)` **结构性地读不到它**。
 
-```powershell
-# 两张**同会话**的真机帧：B 比 A 晚（对方又发了几条，视口上移）
-Copy-Item target\probe\wechat-now.png target\probe\fixture-swap.png -Force
-$env:CHATSERVANT_FIXTURE = (Resolve-Path target\probe\fixture-swap.png).Path
-# …起应用、等它读完第一张…
-# 换成第二张（先写临时文件再 Move-Force）
-Copy-Item target\probe\wx-before.png target\probe\_t.png -Force
-Move-Item target\probe\_t.png target\probe\fixture-swap.png -Force
-```
+判读 `roi=… 本轮行=N 消息=M`：**`本轮行=0` = 一条新消息都没读进来**（这正是 2026-10-23 修掉的
+那个形态）；`emit readout ... messages=N` 的 N 增长 ⇒ 面板更新了。
 
-判读日志里的 `roi=… 本轮行=N 消息=M` 这一行：
-**`本轮行=0` = 一条新消息都没读进来**（这正是 2026-10-23 修掉的那个形态）；
-`emit readout ... messages=N` 的 N 增长 ⇒ 面板更新了。
+⚠ **守卫要能抓住回归，就得能复现旧机制**（本轮踩了两轮）：① 守卫必须**走产品路径**（旧形态
+横跨两个 crate，只在引擎层测抓不住）；② 守卫必须**推进水位线**（复现 `step()` 的真实行为），
+否则旧机制下 ROI 不收窄 ⇒ **守卫假绿**。——「守卫量的是谁」：量**事实来源**，不是量常量。
+⚠ 夹具帧是**别人的真实对话**（`target/probe/` 已被 gitignore）：**不许**把它们的内容写进提交
+信息、注释或测试夹具。
 
-⚠ **守卫要能抓住回归，就得能复现旧机制**（本轮踩了两轮）：
-① 守卫必须**走产品路径**（旧形态横跨两个 crate，只在引擎层测抓不住）；
-② 守卫必须**推进水位线**（复现 `step()` 的真实行为），
-否则旧机制下 ROI 不收窄 ⇒ **守卫假绿**。
-——「守卫量的是谁」：量**事实来源**，不是量常量。
+### 同批踩到的三条（都属「守卫假绿」家族）
 
-⚠ **改文件时行尾不能变**（2026-10-23 踩到，一口气咬了三次）：
-仓库 `.gitattributes` 是 `eol=lf`。⚠ **PowerShell 的 `WriteAllLines` 按 Windows 默认
-写 CRLF** ⇒ 整个文件被转成 CRLF ⇒
-① `git diff` 冒出一堆无关改动；
-② **按 `"\n}\n"` 切窗的源码守卫切不准**（CRLF 下没有这个子串）
-⇒ 窗口吞掉整个生产段 ⇒ 把**注释里**的字也算进去 ⇒ **假红**
-（本轮就看到 `the_watch_layer_does_not_hand_roll_the_ocr_recipe` 变红，
-而它守的东西根本没被改）。
-⇒ 用 `WriteAllText`（保留原内容）或写完**显式转回 LF**；
-改完用 `git ls-files --eol <file>` 核一遍。
-
-⚠ **失败原因要进日志**：原来只有界面上的 `Phase::Failed` 带原因，
-日志里只有一句 `phase=failed` ⇒ **线上看不到「为什么失败」** ⇒ 只能靠猜。
-⇒ 失败分支补一行 `warn!("这一轮失败：{e}")`。
-
-⚠ **顺序类的缺陷，合成夹具测不出来**（同轮又踩了一次）：
-夹具每轮都是**新画面** ⇒ 「先算后并」与「先并后算」结果**一样** ⇒ 守卫假绿。
-⇒ ① 守卫要能分岔，就得让**状态在两轮之间真的变过** ⇒ **连着走两轮**；
-② 「先算什么、再算什么」收进**一个生产函数**，顺序固化在函数体内，守卫直接测它。
-
-⚠ **症状极隐蔽**：顺序错了，面板照样涨（累积干的）、推理照样触发（被旧消息触发）
-⇒ **只有中间量对不上**才暴露。⇒ 排查时**把每个中间量都打出来对账**，别只看最终结果
-（那次就是 `本轮新到=2` 与「真正新增 5 条」对不上才逮住）。
+- ⚠ **改文件时行尾不能变**：`.gitattributes` 是 `eol=lf`，而 PowerShell 的 `WriteAllLines` 按 Windows
+  默认写 CRLF ⇒ ① `git diff` 冒出一堆无关改动；② **按 `"\n}\n"` 切窗的源码守卫切不准**（CRLF 下
+  没有这个子串）⇒ 窗口吞掉整个生产段 ⇒ 把**注释里**的字也算进去 ⇒ **假红**（本轮就看到
+  `the_watch_layer_does_not_hand_roll_the_ocr_recipe` 变红，而它守的东西根本没被改）。
+  ⇒ 用 `WriteAllText`（保留原内容）或写完**显式转回 LF**；改完 `git ls-files --eol <file>` 核一遍。
+- ⚠ **失败原因要进日志**：原来只有界面上的 `Phase::Failed` 带原因，日志里只有一句 `phase=failed`
+  ⇒ **线上看不到「为什么失败」** ⇒ 只能靠猜。⇒ 失败分支补 `warn!("这一轮失败：{e}")`。
+- ⚠ **顺序类的缺陷，合成夹具测不出来**：夹具每轮都是**新画面** ⇒「先算后并」与「先并后算」
+  **结果一样** ⇒ 守卫假绿。⇒ ① 守卫要能分岔，就得让**状态在两轮之间真的变过** ⇒ **连着走两轮**；
+  ② 「先算什么、再算什么」收进**一个生产函数**，顺序固化在函数体内，守卫直接测它。
+  ⚠ **症状极隐蔽**：顺序错了，面板照样涨（累积干的）、推理照样触发（被旧消息触发）
+  ⇒ **只有中间量对不上**才暴露（那次是 `本轮新到=2` 与「真正新增 5 条」对不上才逮住）。
 
 ### 内循环：不要每次都跑全门禁（2026-10-16 加）
 
@@ -358,7 +316,7 @@ pwsh -NoProfile -File scripts\gate.ps1 -Only 'cargo,ui'
 
 ### 门禁是**四轨并行**的（2026-10-19 改）
 
-`gate.ps1` 现在把 16 步分到四条轨，**同时**跑，父进程流式转发输出：
+`gate.ps1` 把 16 步分到四条轨**同时**跑，父进程流式转发输出：
 
 | 轨 | 步骤 | 为什么这么分 |
 |---|---|---|
@@ -367,62 +325,33 @@ pwsh -NoProfile -File scripts\gate.ps1 -Only 'cargo,ui'
 | `net` | cargo deny | 联网拉 advisory-db，与本机编译零共享 |
 | `ui` | check ∥ lint ∥ autofixer → build | 三步只读可并行；build 最后（vite 与 `svelte-kit sync` 都写 `.svelte-kit`） |
 
-⚠ `license consistency` 归 `rust` 轨**反直觉**：它看着像纯读文件，
-但里面有 `cargo metadata`，吃同一把锁。
+⚠ `license consistency` 归 `rust` 轨**反直觉**：它看着像纯读文件，但里面有 `cargo metadata`，吃同一把锁。
+实测 **229.3s → 94.4s**（热缓存，16 核本机）——⚠ 这个数会过期，**以 `gate.ps1` 每轮自打的耗时表为准**，
+别照抄任何数字或旧表进文档与结论。
 
-实测：**229.3s → 94.4s**（热缓存，16 核本机）。⚠ 这张数字会过期，
-`gate.ps1` 每轮都打印自己的分步耗时，**以它为准**。
+⚠⚠ **读那张表的规矩**：每步秒数是它**自己那条轨上**的耗时，四轨同时跑 ⇒ **各步秒数之和 ≠ 门禁墙钟**
+（脚本同时打「最慢的一步」与「步秒之和」两行，后者不是墙钟）。并行组那三步的秒数是**整组墙钟**，
+不是各自耗时。⚠ **组在表里折叠成一行** `ui-static（并行组 3 步：…）` **只计一次**：若各记一次，
+步秒之和会多算 2×组墙钟（实测从 96.2s 虚增到 230.8s，正好撞上「并行化**之前**的串行基线 229.3s」
+⇒ 下一个读表的人会直接读成「并行化白做了」）。
 
-⚠⚠ **并行化之后读分步耗时的方式变了**：每步的秒数是它**自己那条轨上**的耗时，
-四条轨是同时跑的 ⇒ **各步秒数之和 ≠ 门禁墙钟**（脚本会同时打
-「最慢的一步」与「步秒之和」两行，别把后者当墙钟）。
-并行组那三步的秒数是**整组的墙钟**，不是各自耗时。
+⚠ **折叠的判据是「模式」不是「数值相同」**：组里只要有一步被 `-Skip` / `-Only` 过滤掉，整组就**退回
+逐个跑**、各自记时（否则会把三个不同耗时说成一个）。⇒ 想看 ui 三步**各自**的真实耗时用
+`-Only 'ui svelte-check'`（单步跑会让整组退回逐个）；`-Only 'ui'` 仍命中三步 ⇒ 拿到的还是组墙钟。
 
-⚠⚠ **耗时表里并行组折叠成一行，只计一次**（2026-10-20 加）：
-三步共用同一份组墙钟，若各记一次，「步秒之和」会**多算 2×组墙钟**
-——修完计时回传那处硬写的 `0` 之后，步秒之和实测从 **96.2s 跳到 230.8s**，
-而上面那个「并行化**之前**的串行基线」正好是 **229.3s**
-⇒ 下一个读表的人会直接读成「并行化白做了」。
-⇒ 现在表里是一行 `ui-static（并行组 3 步：…）`，只计一次。
+⚠ 每步仍打自己的 `==== name ====` 与 `>>> name OK|FAILED [Ns] (exit=N)`，可诊断性没牺牲；
+唯一的差别是**步与步的输出不再按声明顺序出现**。⚠ 手工传 `-Child <lane>` 可单跑一条轨（内部用）。
 
-⚠ **折叠的判据是「模式」不是「数值相同」**：组里只要有一步被
-`-Skip` / `-Only` 过滤掉，整组就**退回逐个跑**（各步是自己的耗时）
-⇒ 那时**不折叠**（否则会把三个不同的耗时说成一个）。
-⇒ 想看 ui 那三步**各自**的真实耗时，用 `-Only 'ui svelte-check'`
-（单步跑会让整组退回逐个）；`-Only 'ui'` 仍命中三步 ⇒ 拿到的还是组墙钟。
-
-⚠⚠ **每步仍打自己的 `==== name ====` 与 `>>> name OK|FAILED [Ns] (exit=N)`**，
-可诊断性没牺牲。唯一的差别是**步与步的输出不再按声明顺序出现**。
-
-⚠⚠ **新增步必须登记轨**，否则它**不会被任何轨跑到**，而门禁照样报 ALL GREEN。
-`gate.ps1` 里的 `Assert-Lanes` 会直接红掉这种漏登记（还有「laneOf 里留了
-已删步名」的镜像情形）。⚠ 这条断言是并行化**新增**的必需品：
+⚠⚠ **新增步必须登记轨**，否则它**不会被任何轨跑到**，而门禁照样报 ALL GREEN。`Assert-Lanes` 直接
+红掉这种漏登记（还有「laneOf 里留了已删步名」的镜像情形）。⚠ 这条断言是并行化**新增**的必需品：
 串行版本里「忘了写一行」是显然的，并行版本里它变成**静默**的。
 
-⚠ 手工传 `-Child <lane>` 可单跑一条轨（内部用；四轨并列 `cheap`/`rust`/`net`/`ui`）。
-
-热缓存下各步实测耗时（2026-10-16，PowerShell 7）——⚠ **这张表已过期**，
-它记的是**并行化之前**的串行耗时；现在请以 `gate.ps1` 每轮自打的那份为准：
-
-| 步 | 秒 | 步 | 秒 |
-|---|---|---|---|
-| `cargo test --workspace` | 36.9 | `ui svelte-check` | 10.0 |
-| `ui svelte-autofixer` | 10.8 | `ui lint` | 8.0 |
-| `cargo clippy -D warnings` | 20.5 | `cargo fmt --all --check` | 3.6 |
-| `cargo deny check` | 11.9 | `mojibake scan` | 2.3 |
-| `ui build` | 10.5 | `sheet pack in sync` | 1.9 |
-
-⚠ 这张表会过期。`gate.ps1` 现在每轮都打印自己的分步耗时，**以它为准**，
-不要照抄这张表进任何文档或结论里。
-
-⚠⚠ **GitHub CI 上跑同一套门禁要 20~26 分钟**（2026-10-22 实测五次：
-17m22s / 19m8s / 20m21s / 21m10s / 23m46s）⇒ **别把「慢」当成「卡死」**。
-瓶颈是 **Gate 10 `cargo deny check`**：它要冷 clone `advisory-db`
-（本机只要 4.9s 是因为**有缓存**，runner 上没有）。
-⇒ 判活的方法不是干等，是 `gh api …/actions/runs/<id>/jobs` 看**卡在哪一步**：
-前 23 步（fmt / clippy / test / OCR accuracy / secret scan）都过了、
-只剩 `Gate 10` 在跑 ⇒ 就是正常的网络慢。
-⚠ `actions/cache` 现在只缓存 cargo 产物，**没缓存 advisory-db** ⇒ 想提速先看这里。
+⚠⚠ **GitHub CI 上跑同一套门禁要 20~26 分钟**（2026-10-22 实测五次：17m22s / 19m8s / 20m21s /
+21m10s / 23m46s）⇒ **别把「慢」当成「卡死」**。瓶颈是 **Gate 10 `cargo deny check`**：它要冷
+clone `advisory-db`（本机只要 4.9s 是因为**有缓存**，runner 上没有）。⇒ 判活不是干等，是
+`gh api …/actions/runs/<id>/jobs` 看**卡在哪一步**：前 23 步（fmt / clippy / test / OCR accuracy /
+secret scan）都过了、只剩 `Gate 10` 在跑 ⇒ 就是正常的网络慢。⚠ `actions/cache` 只缓存 cargo
+产物，**没缓存 advisory-db** ⇒ 想提速先看这里。
 
 ⚠ **手写 Rust 之后必须先 `cargo fmt --all`**——门禁第一步就是 `fmt --check`，超长行必红。
 
@@ -465,102 +394,48 @@ BUSL-1.1（见 `LICENSE`），而依赖白名单禁 BUSL——不矛盾，那条
 
 ### ⚠ 产物一律留在项目所在盘，不许写进 C 盘的 `%APPDATA%` / `%LOCALAPPDATA%`
 
-**用户明确要求，且已经说过多次。**
-
-本机项目在 `E:`，而 `%APPDATA%` / `%LOCALAPPDATA%` 在 `C:`。凡是**可再生成**
-的东西——构建产物、探针帧、门禁日志、**模型权重**、评测语料——一律放
-`E:\devSpace\chat-servant-m31f\target\` 下面，那儿已被 `.gitignore` 覆盖。
-
-2026-10-18 之前 `ocr_pp::models_dir()` 默认是
-`%APPDATA%\dev.chatservant.app\models\`，已改成
-`<仓库>/target/models/`（查找顺序见该函数的文档）。⚠ 这不是随手改的默认值，
-是「装一次权重就悄悄换掉了生产引擎 + 占系统盘」两个问题叠在一起。
-
-⚠⚠ **2026-10-18 当天又抓到同一家族的第二个实例：`ort` 的运行时缓存。**
-
-`crates/capture` 依赖的 `ort`（`download-binaries` 特性）会在**构建时**
-把 ONNX Runtime 静态库下到 `%LOCALAPPDATA%\ort.pyke.io\`——
-2026-10-18 实测 **660.9 MB**（`onnxruntime.lib` 289 MB + 325 MB 两个版本，
-外加三份 `DirectML.dll`）。那也是 C 盘，也是**自动发生的**，没人显式装。
-
-⚠ **它不读任何环境变量**，`ort-sys/src/internal/dirs.rs` 写死走 Win32 API：
-
-```rust
-pub fn cache_dir() -> Option<PathBuf> {
-    known_folder_local_app_data().map(|h| h.join("ort.pyke.io"))  // SHGetKnownFolderPath
-}
-```
-
-⇒ 改 `LOCALAPPDATA` **无效**（`SHGetKnownFolderPath` 绕过环境变量）。
-唯一的 ort 侧入口 `ORT_LIB_LOCATION` 语义是「指向一套**已存在**的 lib 目录」，
-**不是缓存位置**：设了它 ort 就不再下载 ⇒ CI 上没有那些文件会**直接编译失败**。
-
-⇒ **解法是 junction**：本机把 `%LOCALAPPDATA%\ort.pyke.io` 做成指向
-`<仓库>/target/ort-cache/` 的目录联接。ort 照旧往那个路径写，字节落在 E 盘。
-重建办法：
-
-```powershell
-# ⚠ 复制要用**字面绝对路径**（见「工具调用纪律」里 bash 策略那条）：
-#   变量拼出来的目标在工作区内会被安全策略判成「无法静态校验」而拦下。
-Copy-Item -LiteralPath "C:\Users\<you>\AppData\Local\ort.pyke.io\dfbin\x86_64-pc-windows-msvc\<hash>\onnxruntime\lib\onnxruntime.lib" `
-          -Destination "E:\workspace\chat-servant\target\ort-cache\dfbin\x86_64-pc-windows-msvc\<hash>\onnxruntime\lib\onnxruntime.lib" -Force
-# 删原目录走**可恢复删除**（硬安全策略禁永久删除命令）：
-& "$env:USERPROFILE\.minimax\bin\mavis-trash.cmd" "$env:LOCALAPPDATA\ort.pyke.io"
-New-Item -ItemType Junction -Path "$env:LOCALAPPDATA\ort.pyke.io" `
-         -Target "$PWD\target\ort-cache"
-```
-
-⚠ 为什么 junction 比环境变量好：**它只在那个一个目录上生效，不污染别的项目，
-且 CI 完全不受影响**（runner 上没有这个联接，ort 照旧下到 runner 自己的
-`LOCALAPPDATA`，ephemeral 无所谓）。反之若把 `ORT_LIB_LOCATION` 写进
-`.cargo/config.toml`，CI 会因为找不到那些 `.lib` 而编译失败。
-
-⚠⚠ **2026-10-19：这个联接会消失，而且当时那句话是假的。**
-本轮开工时实测 `fsutil reparsepoint query` 报「不是重解析点」——
-**联接早没了，C 盘又有 306.9 MiB**，而 AGENTS.md 这里却写着「本机已把……做成
-目录联接」。⇒ 「已做过」的陈述**不等于**「现在还成立」，每轮都得实测一次：
-
-```powershell
-fsutil reparsepoint query "$env:LOCALAPPDATA\ort.pyke.io"   # 期望含 Mount Point
-```
-
-⚠ **为什么会消失**（推断，未直接抓到现场）：`cargo clean -p <包>` 之类操作
-会把 `%LOCALAPPDATA%\ort.pyke.io` 当**普通目录**删掉重建 ⇒ 联接变回真目录，
-字节就又落回 C 盘。⇒ 每次跑过 `cargo clean` 后都要复查上面那条。
-
-⚠ **验证到什么程度（2026-10-19 补做，结论比原来强）**：
-原来只验了「链接路径可用」，「ort 的 build script 重跑时会不会把联接吃掉」
-**是读代码推断的**。本轮补做了强制重编译验证：
-
-```powershell
-cargo clean -p ort-sys        # 只清这一个包 ⇒ 它的 build script 必然重跑
-cargo build -p chatservant-capture
-fsutil reparsepoint query "$env:LOCALAPPDATA\ort.pyke.io"   # 实测仍是 Mount Point ✓
-```
-
-⇒ 结论：**build script 重跑不会吃掉联接**（`ort-sys` 被重编译、
-`Compiling ort-sys v2.0.0-rc.10` 实打实出现过，9.44s，联接存活、
-306.9 MiB 仍在 E 盘）。⚠ 但这只证明了「重跑不吃掉」，
-**没解释「当初为什么消失」**——那句话仍是推断，别当已证。
-
-⚠⚠ **教训（这才是该记住的那半）**：修 `ocr_pp::models_dir()` 时我只改了
-**显式写到的那一处**，没扫依赖链上第二处——同一个红线、第二个实例，
-而且第二处是**构建时自动发生**的，连"某人手动装了"这条线索都没有。
-⇒ 判据不能是「我上次修了哪个默认值」，而是
-**「这条依赖链上还有谁会往用户目录写东西」**。
-
-⚠⚠ **2026-10-19 追加的第三处**：`%APPDATA%\dev.chatservant.app\models\`
-里还躺着 14.9 MiB 的旧权重（两个 `.onnx`）。**现在的代码根本不读那里**——
-`ocr_pp::models_dir()` 的查找顺序是「环境变量 > 外壳 > 仓库 target/models >
-exe 旁 > `%TEMP%`」，**没有 `%APPDATA%`**（`ocr_pp.rs:147-168`；
-守卫 `ui/src-tauri/src/main.rs:408` 的 `models_dir_still_finds_the_repo_weights_without_a_shell`
-会断言落点不含 `AppData`）。⇒ 那是旧版留下的**死文件**，已删。
-⚠ 同目录下的 `close_behavior.txt` / `mark_shape.txt` **必须留着**：
-它们是**用户设置**（关闭行为、记号形状），按上面那条判据
-「不能 ⇒ 才值得放用户目录并征求同意」，用户设置就该留在用户目录。
+**用户明确要求，且已经说过多次。** 本机项目在 `E:`，而 `%APPDATA%` / `%LOCALAPPDATA%` 在 `C:`。
+凡是**可再生成**的东西——构建产物、探针帧、门禁日志、**模型权重**、评测语料——一律放
+`E:\devSpace\chat-servant-m31f\target\`（已被 `.gitignore` 覆盖）。
 
 判据：**问「这东西能不能再跑一遍生成」**。能 ⇒ 放 `target/`，删了不心疼；
-不能 ⇒ 才值得放用户目录并征求同意。
+不能 ⇒ 才值得放用户目录并征求同意。**用户设置**（`close_behavior.txt` / `mark_shape.txt`）
+就该留在用户目录，别当垃圾删。
+
+⚠ 这条**不只管一件事**：同一个红线在这条链上有三个实例，修一处不等于修完。
+
+1. **权重目录。** 2026-10-18 之前 `ocr_pp::models_dir()` 默认是
+   `%APPDATA%\dev.chatservant.app\models\`，已改成 `<仓库>/target/models/`（查找顺序见该函数文档：
+   环境变量 > 外壳 > 仓库 target/models > exe 旁 > `%TEMP%`，**没有 `%APPDATA%`**；
+   `ocr_pp.rs:147-168`）。⚠ 这不是随手改的默认值，是「装一次权重就悄悄换掉了生产引擎 +
+   占系统盘」两个问题叠在一起。残留在旧路径的 14.9 MiB 旧权重是**死文件**（已删）。
+   守卫：`ui/src-tauri/src/main.rs:408` 的 `models_dir_still_finds_the_repo_weights_without_a_shell`
+   断言落点不含 `AppData`。
+2. **`ort` 的运行时缓存（构建时自动发生，没有任何「某人手动装了」的线索）。**
+   `crates/capture` 依赖的 `ort`（`download-binaries`）会把 ONNX Runtime 静态库下到
+   `%LOCALAPPDATA%\ort.pyke.io\`——2026-10-18 实测 **660.9 MB**（289 MB + 325 MB 两个版本的
+   `onnxruntime.lib`，外加三份 `DirectML.dll`）。⚠ **它不读任何环境变量**，
+   `ort-sys/src/internal/dirs.rs` 写死走 Win32 `SHGetKnownFolderPath`
+   （`pub fn cache_dir() -> Option<PathBuf> { known_folder_local_app_data().map(|h| h.join("ort.pyke.io")) }`）
+   ⇒ 改 `LOCALAPPDATA` **无效**。唯一入口 `ORT_LIB_LOCATION` 语义是「指向一套**已存在**的 lib
+   目录」，**不是缓存位置**：设了它 ort 就不再下载 ⇒ CI 上没有那些文件会**直接编译失败**。
+   ⇒ **解法是 junction**：把 `%LOCALAPPDATA%\ort.pyke.io` 做成指向 `<仓库>/target/ort-cache/`
+   的目录联接，ort 照旧往那个路径写、字节落在 E 盘。⚠ 比环境变量好在**只在那一个目录上生效**，
+   不污染别的项目，CI 完全不受影响（runner 上没有联接，ort 照旧下到它自己的 `LOCALAPPDATA`）。
+   重建：`& "$env:USERPROFILE\.minimax\bin\mavis-trash.cmd" "$env:LOCALAPPDATA\ort.pyke.io"`（可恢复删除）
+   然后 `New-Item -ItemType Junction -Path "$env:LOCALAPPDATA\ort.pyke.io" -Target "$PWD\target\ort-cache"`。
+   ⚠ 复制文件时用**字面绝对路径**，变量拼出来的目标在工作区内会被安全策略判成「无法静态校验」。
+3. ⚠⚠ **2026-10-19：那个联接会消失，而当时文档里「本机已做成联接」是假的。**
+   实测 `fsutil reparsepoint query "$env:LOCALAPPDATA\ort.pyke.io"`（期望含 Mount Point）报
+   「不是重解析点」⇒ 联接早没了、C 盘又有 306.9 MiB。⇒ **「已做过」不等于「现在还成立」，每轮实测一次。**
+   ⚠ **为什么会消失**（推断，未抓到现场）：`cargo clean -p <包>` 会把它当**普通目录**删掉重建
+   ⇒ 每次跑过 `cargo clean` 后都要复查。⚠ 但「build script 重跑会不会吃掉联接」是**实测过**的：
+   `cargo clean -p ort-sys` + `cargo build -p chatservant-capture` ⇒ 联接仍在（`Compiling ort-sys
+   v2.0.0-rc.10` 实打实出现，9.44s）。那只证明「重跑不吃掉」，**没解释当初为什么消失**。
+
+⚠⚠ **真正的教训**：修 `models_dir()` 时我只改了**显式写到的那一处**，没扫依赖链上第二处——
+同一个红线、第二个实例，而且第二处是**构建时自动发生**的。⇒ 判据不是「我上次修了哪个默认值」，
+而是**「这条依赖链上还有谁会往用户目录写东西」**。
 
 ## 文档分工
 
@@ -656,41 +531,32 @@ add --all --host codex --scope project --no-memory`，v0.15.2，Codex 侧 `$how`
 
 ### ⚠ 52 个 Tauri 系 skill：默认按「不存在」处理
 
-`.agents/skills/tauri*/` 整个家族（52 个）是**同一模板批量生成**的，
-`SKILL.md` 约 70 行 + `examples/usage.md` 恰好 53 行、代码块数完全相同，
-正文只有 When-to-use / Outputs / Scope / Gotchas（Gotchas 五条还是
-「注意版本兼容性」这种通用废话），**没有一个字是本仓需要的具体 API**。
-
+`.agents/skills/tauri*/` 整个家族（52 个）是**同一模板批量生成**：`SKILL.md` 约 70 行 +
+`examples/usage.md` 恰好 53 行、代码块数完全相同，正文只有 When-to-use / Outputs / Scope /
+Gotchas（五条还是「注意版本兼容性」这种废话），**没有一个字是本仓需要的具体 API**。
 更糟的是**生成器把 skill 目录名直接当成了包名**，于是示例里出现查无此包的东西
-（2026-10-13 复核：`https://registry.npmjs.org/tauri-plugin-tauri-ipc` 返回
-`Not found`）：
+（2026-10-13 复核：`https://registry.npmjs.org/tauri-plugin-tauri-ipc` 返回 `Not found`）：
 
 ```ts
-// .agents/skills/tauri-ipc/examples/usage.md 原文
-import { init } from 'tauri-plugin-tauri-ipc';        // ← npm 上不存在这个包
-await invoke('plugin:tauri-ipc|do_something');        // ← 不存在这个命令
-emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目录名 + '-event'
+// .agents/skills/tauri-ipc/examples/usage.md 原文 —— 照抄编译不过
+import { init } from 'tauri-plugin-tauri-ipc';   // npm 上不存在这个包
+await invoke('plugin:tauri-ipc|do_something');   // 不存在这个命令
 ```
 
-真实写法是 `@tauri-apps/api/core` 的 `invoke('我的命令名')`，命令名必须对应
-自己写的 `#[tauri::command]`，不可能长这样。照抄这段**编译不过**。
-
-含编造包名/命令的 12 个：`tauri`、`tauri-ipc`、`tauri-window`、`tauri-security`、
-`tauri-config`、`tauri-concept`、`tauri-build`、`tauri-mobile`、`tauri-scaffold`、
-`tauri-setup`、`tauri-framework-security`、`tauri-framework-upgrade`。
+真实写法是 `@tauri-apps/api/core` 的 `invoke('我的命令名')`，命令名必须对应自己写的
+`#[tauri::command]`，不可能长这样。含编造包名/命令的 12 个：`tauri`、`tauri-ipc`、
+`tauri-window`、`tauri-security`、`tauri-config`、`tauri-concept`、`tauri-build`、
+`tauri-mobile`、`tauri-scaffold`、`tauri-setup`、`tauri-framework-security`、
+`tauri-framework-upgrade`。
 
 ⚠ **别把「5 个包名是真的」当成「这 5 个能用」**：`tauri-app-clipboard` / `-dialog` /
-`-file-system` / `-http-client` / `-notification` 的示例确实引了真实包
-（`@tauri-apps/plugin-clipboard-manager` 等），但它们仍是同一份 53 行模板，
-而且**假设本仓装了这些插件——本仓 `ui/src-tauri/Cargo.toml` 里一个
-`tauri-plugin-*` 都没有**，照抄等于引入一整个本项目不存在的依赖面。
-**判据是「本项目用不用得上」，不是「API 是不是真的」。**
+`-file-system` / `-http-client` / `-notification` 的示例确实引了真实包，但它们仍是同一份
+53 行模板，而且**假设本仓装了这些插件——`ui/src-tauri/Cargo.toml` 里一个 `tauri-plugin-*`
+都没有**，照抄等于引入一整个不存在的依赖面。**判据是「本项目用不用得上」，不是「API 是不是真的」。**
 
-**规矩**：Tauri 2 的写法**以 `AGENTS.md` 的「容易踩的坑」和 `docs/` 为准**，
-不引这些 skill 的示例。确实要查 Tauri 官方文档，走 `web_fetch https://v2.tauri.app/...`
-或它们的 References 里列的链接，别读本地模板。
-顺带一提：本仓 `tauri` 钉 `=2.12.1` 而 `tauri-build` 钉 `=2.7.1`，
-这是**实测过的真实坑**（见 `ui/src-tauri/Cargo.toml` 注释），
+**规矩**：Tauri 2 的写法**以本文的「容易踩的坑」和 `docs/` 为准**，不引这些 skill 的示例；
+要查官方文档走 `web_fetch https://v2.tauri.app/...`，别读本地模板。顺带一提：本仓 `tauri` 钉
+`=2.12.1` 而 `tauri-build` 钉 `=2.7.1`（实测过的真实坑，见 `ui/src-tauri/Cargo.toml` 注释），
 而 `tauri-framework-upgrade` 讲的是 v1→v2 迁移——**跟这个问题无关，别指望它**。
 
 ### 两条通用规矩（本仓版）
@@ -772,6 +638,18 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
 - **`(await invoke<T>('...')) ?? x` 在 vite dev 的产物里会被编译成 `(await ...)()`**——
   多一个调用。生产产物正常。排查前端 bug 时**先确认 dev 与 prod 的产物差异**。
 - **空的 `catch {}` 会把这类 bug 藏到看不见。**
+  ⚠ **2026-11-01：这句话终于有机器守卫了**（票 100）。此前它只是一句文档——
+  clippy 不管 `.svelte`，svelte-check / eslint / prettier 也都不把 `.catch(() => {})` 当错误
+  （`no-empty` 只管 `catch {}` 这个**语句**形态，不管**回调**形态）。实测就躺了一整年：
+  票 66（2026-10-18）把 `−`（收进托盘）那支改成 `console.error`，而 `×`（退出）那支
+  原样留着 `.catch(() => {})`——它偏偏是**唯一**能让进程停下来的按钮，按下去没反应时
+  日志里连一行原因都没有。
+  ⇒ 守卫是 `ui/src-tauri/src/commands.rs` 的 `mod window_button_tests`：
+  ① `the_panel_never_swallows_a_failure_silently` 扫面板源码的**非注释行**，
+  出现 `catch(() => {})` 即红并打印行号；② `both_window_buttons_say_why_they_failed`
+  要求两枚窗口键的失败分支都含 `console.error`——**判据不是「不是空的就行」**，
+  `catch(() => 0)` 在用户眼里一样。⚠ 覆盖范围只有 `PaperPanel.svelte`；
+  要扩面就照同一套读源码的做法加，**不要**上「这个 catch 空得有没有道理」的启发式。
 - ⚠⚠ **跳过一个选项 ≠ 否决了它。** 2026-10-16 票 45 踩的：两个候选方案之间
   不达标，于是**换源色**——而**「保持原源色、只调混色比例」这个第三选项
   从头到尾没被量化过**。补算之后结论没变（新源色确实对），
@@ -877,88 +755,56 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
 
 ### 病因实测：**两个都在涨**，而回收机制曾经一天都没生效过（2026-10-16 二次订正）
 
-⚠ **本节原先写「多哈希残留只占 `deps` 的 1%（0.02 GiB），撑不起那个量级」——
-那个结论是错的，实测是 55%。** 错在**基线取法**：那次是拿「`target/`
-清空后全新构建」当对照，而**逐轮叠加**出来的多版本产物正好被那一次清空抹掉了，
-于是对照里看不见它。⇒ **「清空后重建」不能当日常状态的基线。**
+⚠ **本节原先写「多哈希残留只占 `deps` 的 1%，撑不起那个量级」——那个结论是错的，实测是 55%。**
+错在**基线取法**：那次是拿「`target/` 清空后全新构建」当对照，而**逐轮叠加**出来的多版本
+产物正好被那一次清空抹掉了 ⇒ **「清空后重建」不能当日常状态的基线**。
 
-2026-10-16 实测（`ui/scripts/targetaudit.py`，`deps` = 11.63 GiB / 732 个包）：
-
-| 包 | 哈希份数 | 占用 |
-|---|---|---|
-| `tract_core` | 11 | **1094 MiB** |
-| `chatservant_capture` | **38** | 809 MiB |
-| `chatservant_reason` | 36 | 759 MiB |
-| `tauri_utils` | 12 | 405 MiB |
-| **多版本包合计** | | **6.38 GiB = `deps` 的 55%** |
-
-连**自己写的 crate 都有 30~38 份**：每跑一轮 `clippy --all-targets` /
-`test --workspace` / `tauri dev`，同一份代码就多留一组新哈希，旧的永不删除。
-
-真实数据（同机、`target/` 清空后全新 `cargo build --workspace` 对比，全量 2 分 1 秒）：
-
-| | 全新一次 | 日常+门禁几轮后 | 倍数 |
-|---|---|---|---|
-| `deps` | 1.90 GB | 10.55 GB | 5.5× |
-| `incremental` | **0.18 GB** | **3.88 GB** | **21×** |
-| `build` | 0.31 GB | 1.41 GB | 4.5× |
-| **合计** | **2.82 GB** | **16.20 GB** | 5.7× |
-
-⇒ 每跑一轮就往里叠一层。既然是叠加，`cargo clean` 就只是**救急**，
-日常必须有自动机制兜底。
+2026-10-16 实测（`ui/scripts/targetaudit.py`）：`deps` 11.63 GiB / 732 个包，其中**多版本包
+合计 6.38 GiB = 55%**——`tract_core` 11 份 1094 MiB、`chatservant_capture` 38 份 809 MiB、
+`chatservant_reason` 36 份 759 MiB、`tauri_utils` 12 份 405 MiB。连**自己写的 crate 都有 30~38 份**：
+每跑一轮 `clippy --all-targets` / `test --workspace` / `tauri dev`，同一份代码就多留一组哈希。
+⇒ 节流前后（全量 `cargo build --workspace` 2 分 1 秒）：`deps` 1.90→10.55 GB（5.5×）、
+`incremental` 0.18→3.88 GB（**21×**）、`build` 0.31→1.41 GB（4.5×）、合计 2.82→16.20 GB（5.7×）。
+⇒ 既然是叠加，`cargo clean` 只是**救急**，日常必须有自动机制兜底。
 
 ### 现在的两道防线
 
-1. **`[profile.dev] incremental = false`**（根 `Cargo.toml`，2026-10-14 定）。
-   依据有两条，都是实测：① `scripts/gate.ps1` 早就在开头设
-   `$env:CARGO_INCREMENTAL = "0"`，注释记着原因——增量目录会被锁（os error 5），
-   clippy 因此以 101 退出而那不是代码红。⇒ 门禁早就认定它有害，只是**仅在门禁
-   运行期间**关，日常构建仍是默认 true。现在升格成全局配置，两条路径一致。
-   代价：改 Rust 代码后重编更慢（全量约 2 分钟）；本项目日常改动大头在前端，
-   走 Vite HMR 不碰这里，代价可接受。
+1. **`[profile.dev] incremental = false`**（根 `Cargo.toml`，2026-10-14 定）。依据都是实测：
+   ① `scripts/gate.ps1:76` 早就在开头设 `$env:CARGO_INCREMENTAL = "0"`，注释记着原因——
+   增量目录会被锁（os error 5），clippy 因此以 101 退出而那不是代码红 ⇒ 门禁早就认定它有害，
+   只是**仅在门禁运行期间**关。现在升格成全局配置，两条路径一致。代价是改 Rust 后重编更慢
+   （全量约 2 分钟），而本项目日常改动大头在前端、走 Vite HMR 不碰这里，可接受。
 
-2. **`scripts/targetgc.py`，已挂在 `gate.ps1` 末尾**。**保留 `.fingerprint`**
-   （Cargo 判断要不要重编全靠它，删了会让整棵依赖树重编）。被文件锁住的跳过
-   并计数，不报错。它**不参与 `$fail`**——磁盘占用不是代码质量，红了会让人
-   误以为代码有问题。
+2. **`scripts/targetgc.py`，挂在 `gate.ps1` 末尾**。**保留 `.fingerprint`**（Cargo 判断要不要
+   重编全靠它，删了会让整棵依赖树重编）；被文件锁住的跳过并计数、不报错；**不参与 `$fail`**
+   ——磁盘占用不是代码质量，红了会让人误以为代码有问题。
 
-   ⚠⚠ **判据必须是 cargo 自己说的，不能是 mtime**（2026-10-16 实测打出来的）。
-   原来的实现是「每个包保留 mtime 最新的 3 个哈希，删其余的」，理由是
-   clippy / test / build 各自留一组、都要用。**它会误删**：按那套删掉 10.8 GiB
-   之后，紧接着 `cargo test --workspace` 从 **36.9s 变成 139.3s**。
+   ⚠⚠ **判据必须是 cargo 自己说的，不能是 mtime**（2026-10-16 实测打出来的）。原来的实现是
+   「每包保留 mtime 最新的 3 个哈希」（理由：clippy / test / build 各留一组都要用），
+   **它会误删**：按那套删掉 10.8 GiB 之后，紧接着 `cargo test --workspace` 从 36.9s 变成 139.3s。
+   错因值得记住：**cargo 命中缓存时不会 touch 已有的产物文件** ⇒ 表面跑过的多是几天前编好、
+   这次直接复用的（mtime 很旧），而当天 clippy 那组 mtime 很新 ⇒ **「最新的」不等于「在用的」**。
+   凡是要按时间/新旧做删除判据，先问「这个时间戳到底代表什么」。
 
-   错因值得记住：**cargo 命中缓存时不会 touch 已有的产物文件。**
-   一轮门禁里 `cargo test` 表面跑过，但多数产物是几天前编好、这次直接复用的，
-   mtime 依然很旧；而当天 clippy 产出的另一组哈希 mtime 很新。
-   ⇒ **「最新的」不等于「在用的」**。凡是要按时间/新旧做删除判据，
-   先问「这个时间戳到底代表什么」。
-
-   现在的做法：跑一次
-   `cargo test --workspace --all-targets --no-run --message-format=json`，
-   把 `compiler-artifact` 的 `filenames` 收成**活产物集合**，
-   集合之外且超过 `--min-age-hours` 的才是尾巴。**列举失败就一个都不删。**
-
-   ⚠ 只问**一条** plan：问三条（test/build/clippy）实测要 **80 秒**。
-     代价是 clippy 产物不在清单里、会被回收，下一轮 clippy 重跑一次（20.5s）。
-     配 24 小时冷却后，这笔账是划算的。
+   现在的做法：跑一次 `cargo test --workspace --all-targets --no-run --message-format=json`，
+   把 `compiler-artifact` 的 `filenames` 收成**活产物集合**，集合之外且超过 `--min-age-hours`
+   的才是尾巴。**列举失败就一个都不删。** ⚠ 只问**一条** plan：问三条实测 80 秒；代价是 clippy
+   产物不在清单里、会被回收，下一轮 clippy 重跑一次（20.5s），配 24 小时冷却后这笔账划算。
    ```bash
    uv run --no-project python scripts/targetgc.py --dry-run   # 只报告，不动手（不受冷却限制）
    uv run --no-project python scripts/targetgc.py --force     # 无视冷却，立刻收一次
    uv run --no-project python scripts/targetgc.py --report    # 只出体积报告
    ```
 
-   ⚠⚠ **Python 一律走 `uv run --no-project`，不写裸 `python`**（2026-10-20 实测）：
-   本机 PATH 上**没有裸 `python`**（`python scripts/targetgc.py` 直接 exit 9009），
-   Python 由 uv 管理、装在**项目盘**（`G:\tools\uv\python`，不在 C 盘）。
-   ⇒ `gate.ps1` 与 `dev.ps1` 本来就是这个写法，**文档与脚本头部曾各写着一份裸
-   `python`** ⇒ 照着文档敲的人当场 exit 9009，而文档本身不会红。
-   ⇒ 改这些命令时**连同脚本 docstring 一起改**，否则下次又分叉。
+   ⚠⚠ **Python 一律走 `uv run --no-project`，不写裸 `python`**（2026-10-20 实测）：本机 PATH 上
+   **没有裸 `python`**（直接 exit 9009），Python 由 uv 管理、装在**项目盘**（`G:\tools\uv\python`）。
+   `gate.ps1` 与 `dev.ps1` 本来就是这个写法，**而文档与脚本头部曾各写着一份裸 `python`**
+   ⇒ 照着文档敲的人当场 exit 9009，文档本身却不会红 ⇒ 改这些命令时**连同脚本 docstring 一起改**。
 
-   ⚠ **「超过阈值却一件没扫到」必须自己喊**。原来只打
-   `swept 0 ... freed 0.0 B`，读起来和「一切正常」完全一样——而那正是
-   2026-10-16 现场的状态：17.1 GiB、阈值 8 GiB、扫到 **0** 个文件。
-   老实现的判据是「7 天没被动过」，而项目天天在构建，**每轮都扫不到东西**。
-   机制失效几个月没人发现，就是因为它失败时不说话。
+   ⚠ **「超过阈值却一件没扫到」必须自己喊**：原来只打 `swept 0 ... freed 0.0 B`，读起来和
+   「一切正常」完全一样——而那正是 2026-10-16 现场：17.1 GiB、阈值 8 GiB、扫到 **0** 个文件。
+   老判据是「7 天没被动过」，而项目天天在构建 ⇒ **每轮都扫不到东西**，机制失效几个月没人发现，
+   就是因为它失败时不说话。
 
 ### 仍然只有这两个操作会让占用「跳一下」
 
