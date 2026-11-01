@@ -52,7 +52,6 @@
     RING_LABEL_MARK_BIG,
     RING_LABEL_MARK_HUGE,
     RING_MARK,
-    CONF_STROKES,
     MARK_VIEW,
     RING_VIEW,
     TICK_VIEW,
@@ -290,6 +289,18 @@
     mid: '中',
     low: '低',
   };
+
+  /** 三格阶梯信号条（▂▄▆）点亮几格（1 / 2 / 3）。 */
+  function confBars(row: Candidate, idx: number): 1 | 2 | 3 {
+    if (row.confidence === 'high' || (idx === 0 && row.probability >= 0.35)) return 3;
+    if (
+      row.confidence === 'mid' &&
+      (idx <= 1 || row.probability >= (allCandidates[1]?.probability ?? 0))
+    ) {
+      return 2;
+    }
+    return 1;
+  }
 
   /**
    * 动作区要列的备选，**每一项带上它在原始候选数组里的下标**（票 68，2026-10-19）。
@@ -1661,23 +1672,23 @@
                     `role="img"` + `aria-label`，把「置信度：高/中/低」说出来。
                     ⚠ 换掉文本之前它是可以被读到的 ⇒ 这条不能丢。
                   -->
+                  {@const lit = confBars(row, i)}
                   <span
                     class="cs-act-prob"
                     role="img"
-                    aria-label="置信度：{CONF_LABEL[row.confidence]}"
+                    aria-label="置信度：{CONF_LABEL[row.confidence]}（{lit}/3 格）"
                   >
                     <svg
                       class="cs-pencil-mark"
-                      viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}"
+                      viewBox="0 0 26 16"
                       width="26"
                       height="16"
                       aria-hidden="true"
                       filter="url(#pencil)"
                     >
-                      {#each CONF_STROKES[row.confidence] as l (l.d)}<path
-                          d={l.d}
-                          fill-opacity={l.o}
-                        />{/each}
+                      <path d="M4 9.5h3.8v4.5H4z" fill-opacity={lit >= 1 ? 0.88 : 0.2} />
+                      <path d="M11.1 5.5h3.8v8.5h-3.8z" fill-opacity={lit >= 2 ? 0.88 : 0.2} />
+                      <path d="M18.2 1.5h3.8v12.5h-3.8z" fill-opacity={lit >= 3 ? 0.88 : 0.2} />
                     </svg>
                   </span>
                 {/if}

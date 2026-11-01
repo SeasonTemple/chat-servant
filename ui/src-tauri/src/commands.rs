@@ -800,6 +800,20 @@ fn deliver_send(hwnd: windows::Win32::Foundation::HWND, candidate_id: &str) -> D
 /// 这里只负责「既然决定发了，那就发」——
 /// 判断与执行分成两处，是为了**判断可以被测穷尽**，
 /// 而执行不行（它要真按回车）。
+/// 在 `watch::step` 起草完成后立刻把本轮新候选写进 `STATE`（2026-11-01 修）。
+///
+/// 若等 `cs-pump` 线程（每 300ms 轮询一次 `latest_bg`）再去更新 `STATE.s.candidates`，
+/// 那么 `watch::step` 在刚生成完候选、立即调 `auto_send(&top.id)` 时，
+/// `STATE.s.candidates` 里还是 `Phase::Drafting` 期间被清空的 `[]`，
+/// 导致 `deliver_send` → `candidate_text("c0")` 恒返回 `None`、自动发送永远失败。
+pub fn sync_candidates(candidates: &[crate::contract::DraftCandidate]) {
+    if let Ok(mut g) = STATE.lock()
+        && let Some(s) = g.as_mut()
+    {
+        s.candidates = candidates.to_vec();
+    }
+}
+
 pub fn auto_send(candidate_id: &str) -> Result<DeliveryReceipt, String> {
     // 防重记录必须在这里更新，而不是只在循环里记：
     //   循环记的那份在 `Scratch` 里，而这个函数才是真正按下回车的地方。

@@ -1910,23 +1910,31 @@ fn step(
                     // 候选已按 probability 降序 ⇒ `candidates[0]` 就是最高置信度。
                     // **这一句真机上没验过**（要真把话打进微信窗口），
                     //   见 `.scratch/…/20-two-dispatch-tiers.md` 的 Update。
+                    // ⚠ 先把刚起草好的本轮候选同步进 `STATE`，否则 `cs-pump` 还没醒来时
+                    //   `auto_send` → `candidate_text` 读到的是 `Drafting` 阶段清空的 `[]`。
+                    crate::commands::sync_candidates(&s.candidates);
                     match crate::commands::auto_send(&top.id) {
                         Ok(receipt) => {
-                            // ⚠ **自动发送必须留日志**（2026-10-24 补）：
-                            //   这是程序**自己**按下回车的那条路 ⇒ 不可逆 ⇒
-                            //   日志是事后唯一的证据。
-                            //   ⚠ 只打回执文案，不含候选正文。
                             tracing::info!(
                                 target: "chat_servant::watch",
                                 "自动发送回执：{}",
                                 receipt.explain()
                             );
-                            s.auto_gate.record_sent(now);
-                            s.reason = format!(
-                                "{}。已按最高置信度自动发送：{}",
-                                s.reason,
-                                receipt.explain()
-                            );
+                            if !matches!(
+                                receipt,
+                                chatservant_core::dispatch::DeliveryReceipt::NotSent
+                                    | chatservant_core::dispatch::DeliveryReceipt::Failed(_)
+                            ) {
+                                s.auto_gate.record_sent(now);
+                                s.reason = format!(
+                                    "{}。已按最高置信度自动发送：{}",
+                                    s.reason,
+                                    receipt.explain()
+                                );
+                            } else {
+                                s.reason =
+                                    format!("{}。自动发送未成：{}", s.reason, receipt.explain());
+                            }
                         }
                         Err(e) => {
                             // 发失败**不记冷却**：那不是「发出去了」，
