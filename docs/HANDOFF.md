@@ -82,7 +82,7 @@ Windows 桌面程序：在你自己的微信单聊窗口旁边挂一块悬浮面
 
 shell 是 PowerShell。**复杂命令一律落 `.ps1` 用 `pwsh -NoProfile -File` 跑**，
 不要用 `-Command` 拼——引号会被吃掉，`Set-Content -Encoding UTF8` 还会写 BOM
-（§3.7 有完整的后果）。
+（§4.7 有完整的后果）。
 
 ⚠ **磁盘**：`target/` 没有 GC，只增不减。改 `[profile.*]` 或增删 feature
 会让旧产物**永不删除**（实测一次 profile 改动 + 一次 feature 改动：
