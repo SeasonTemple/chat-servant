@@ -16,10 +16,12 @@ Remove-Item $log -ErrorAction SilentlyContinue
 # |---|---|---|
 # | `chat_servant::watch` | `watch.rs` **显式 `target:`** | `tick=… peer=… candidates=`（info）、`一轮 Nms`、`roi=… 归类=`（debug） |
 # | `chat_servant::pump` | `commands.rs` **显式 `target:`** | `emit readout tick=… phase=… peer=… messages=… candidates=`（**票 21 的证据行**） |
+# | `chat_servant_app::commands` | `commands.rs` **显式 `target:`** | 命令层里那些露过原因的分支 |
+# | `chat_servant_app::close` | `main.rs` **显式 `target:`** | `收到关闭请求 label=main action=Quit|Hide`（**票 99 的证据行**：关窗口选了退出却没退的时候，这一行是唯一能告诉你走的哪一档的东西） |
 # | `chat_servant_app` | `src-tauri` 的 bin（包名 `chat-servant-app`，连字符转下划线） | 托盘、命令层 |
 # | `chatservant_capture` / `chatservant_perceive` | 工作区 crate | OCR 与归类细节 |
 #
-# ⚠ 上面两行显式 target **必须逐个点名**。守卫
+# ⚠ 上面标着「**显式 `target:`**」的那几条**必须逐个点名**（现在是四条）。守卫
 # `xtask` 的 `every_explicit_tracing_target_is_named_in_the_run_app_filter`
 # 会扫源码里每一个显式 `target:` 并要求这里逐个命中 ⇒ 谁新增一条忘了同步，这边就红。
 # ⚠ 判据不是读源码猜的：从当前编译产物
@@ -29,7 +31,7 @@ Remove-Item $log -ErrorAction SilentlyContinue
 # 一致（都下划线），但历史上 `watch.rs` 里**有一条**曾写成 `chat-servant::watch`
 # （连字符），2026-10-18 已统一。target 字符串对 `EnvFilter` 不透明，
 # **一条拼错就等于那一路的日志永远收不到**，而且它不报错，只是安静。
-$env:RUST_LOG = 'info,chat_servant::watch=debug,chat_servant::pump=debug,chat_servant_app=debug,chat_servant_app::commands=debug,chatservant_capture=debug,chatservant_perceive=debug'
+$env:RUST_LOG = 'info,chat_servant::watch=debug,chat_servant::pump=debug,chat_servant_app=debug,chat_servant_app::commands=debug,chat_servant_app::close=debug,chatservant_capture=debug,chatservant_perceive=debug'
 
 # ⚠ 起法用 `Start-Process`，**不是**因为「这样能脱离作业对象」——
 # 2026-10-18 实测（`target/probe/detach-test.ps1`，无头、判据是存活）：

@@ -1,6 +1,6 @@
 # 99: 「关闭时」那个设置只写不读 —— 选哪一档都关不掉面板
 
-**Status:** 4/5 · 2026-11-01 code landed + guarded（`CloseRequested` 先读偏好）；剩「真机按一次 Alt+F4」要人眼
+**Status:** 5/5 · 2026-11-01 code landed + guarded（`CloseRequested` 先读偏好），并在真二进制上验完两档（`WM_CLOSE` 代替手按 `Alt+F4`，分岔点相同）
 
 ## 一、事实（怎么发现的）
 
@@ -74,8 +74,21 @@ if let WindowEvent::CloseRequested { api, .. } = event {
 - [x] 判据是纯函数、可单测（`close_action_from`）
 - [x] 接线有源码守卫，且自证过会红
 - [x] 设置页文案不再承诺做不到的事（`Alt+F4` 现在跟着那一档走）
-- [ ] **真机按一次**：`Exit` 档下 `Alt+F4` 应真的退出（托盘图标一起消失）；切 `Tray` 后应只是收起来。
-      本机禁输入注入（`SetCursorPos` 返回 False），这条只能人眼。
+- [x] **真机验过两档**（2026-11-01，真二进制 + 真窗口，没有人点）：
+      `Exit` 档 `action=Quit` ⇒ 窗口被销毁（`IsWindow=False`）、进程 exit code **0**；
+      `Tray` 档 `action=Hide` ⇒ 窗口还在但不可见（`IsWindow=True` / `IsVisible=False`）、
+      进程活着且观察循环继续走 tick。
+      量法：`target/probe/_wmclose2.ps1`（gitignored）启动 `target/debug/chat-servant-app.exe`，
+      向主窗口发 `WM_CLOSE`（0x0010），再用 `IsWindow` / `IsWindowVisible` / `HasExited` 取证。
+      ⚠ **用的是 `WM_CLOSE`，不是真的按 `Alt+F4`**：系统快捷键走的也是
+      `WM_SYSCOMMAND` ⇒ `WM_CLOSE` ⇒ tao 的 `CloseRequested`，分岔点在同一个地方；
+      不同的只是「键盘那一段路」，而它不属于本仓代码。
+      ⚠ 取证前必须**重建过** `target/debug/chat-servant-app.exe`：本轮第一次跑的是
+      一份早于本修的旧二进制（表现正好是**旧行为**：窗口隐藏、进程不退）
+      ⇒ 差点把修好的行为当成没修好，就是「拿陈旧产物去验新代码」这个老坑。
+      → 同时给 `main.rs` 的分支补了一行 `tracing::info!`（`target: "chat_servant_app::close"`，
+      打 `label` + `action`）：这条分支之前在日志里**一个字都没有**，
+      所以上面那个差点只能靠猜。
 
 ## 六、口径变化（本票之后）
 

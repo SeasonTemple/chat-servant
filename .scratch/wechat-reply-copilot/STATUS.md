@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **100** ｜ 验收项全勾 **76** ｜ 已收但留有说明项 **16** ｜ 未收 **8**
+票据总数 **100** ｜ 验收项全勾 **77** ｜ 已收但留有说明项 **16** ｜ 未收 **7**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -29,7 +29,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `95-panel-header-moves-when-candidates-arrive.md` | 6/7 | ready-for-human · 2026-10-24 用户报出 ⇒ 代码侧已定位并修掉（票 92 续）⇒ **剩下的是真机那一眼** | (票面没写 Blocked by) |
 | `96-draft-candidates-anchored-to-my-own-lines.md` | 7/8 | ready-for-human · 缺陷 A 已修（真机 + 单测双证）· 缺陷 B 频率已量完（去重后 19 条新消息里命中 4 条、共 3 帧）⇒ **方向已按假设记为已知边界、不引入依赖**（两轮提问都超时，见「决策记录（假设出口）」）· 仍开的只有「点候选后不再起草」那一眼（需人手） | (票面没写 Blocked by) |
 | `97-the-panel-had-no-type-hierarchy-and-a-browser-scrollbar.md` | 8/9 | ready-for-human · 2026-11-01 两轮排版修正后，第三轮按 2K 屏实看放大字号 ⇒ 代码与量测已过 ⇒ **剩下的是真机那一眼** | (票面没写 Blocked by) |
-| `99-close-behavior-was-written-but-never-read.md` | 4/5 | 4/5 · 2026-11-01 code landed + guarded（`CloseRequested` 先读偏好）；剩「真机按一次 Alt+F4」要人眼 | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
 
@@ -132,3 +131,4 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `89-drag-shows-the-whole-window-rectangle.md` | 7/7 |
 | `93-real-chat-text-reached-a-commit.md` | 15/15 |
 | `98-longdraft-no-longer-stresses-the-draft-scroller.md` | 3/3 |
+| `99-close-behavior-was-written-but-never-read.md` | 5/5 |

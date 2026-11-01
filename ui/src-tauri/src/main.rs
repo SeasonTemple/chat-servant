@@ -101,7 +101,16 @@ fn main() {
                     "debug" => {}
                     // 主面板：按偏好分岔。
                     _ => {
-                        if commands::close_action(&app) == commands::CloseAction::Quit {
+                        let action = commands::close_action(&app);
+                        // 落点必须进日志：这条分支在票 99 之前无条件 `hide_panel`，
+                        // 于是「选了退出却关不掉」在日志里一个字都没有。
+                        tracing::info!(
+                            target: "chat_servant_app::close",
+                            label = %label,
+                            action = ?action,
+                            "收到关闭请求"
+                        );
+                        if action == commands::CloseAction::Quit {
                             // `quit_app` 走 `app.exit(0)`，窗口随进程一起没了，
                             // 这条事件链到此为止 ⇒ 不需要也不该再 prevent。
                             let _ = commands::quit_app(app);
