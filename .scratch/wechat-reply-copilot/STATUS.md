@@ -27,7 +27,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `90-hover-rotation-blurs-the-strip.md` | 6/7 | open · **候选 ① 已落地，6/7 项完成，等真机那一眼**（2026-11-01：去掉 `.cs-act:hover, .cs-act:focus-visible` 的 `rotate(-0.5deg)`，保留 `translateY(-2px)` + `drop-shadow(0 8px 16px rgb(24 18 10 / 0.26))`；同步 `docs/设计规范.md`；`probe-act-states.mjs` @2x 复测锐度方差从 −44.9% 回到 +0.12%） | (票面没写 Blocked by) |
 | `92-all-candidates-are-strips.md` | 18/20 | ready-for-human · 2026-10-24 用户真机报出四条 ⇒ 材质与护栏已落地；**当天晚又改了一次：形制也统一了**（见第七节，票 92 续）⇒ **剩下的是真机复验**（三项，都得人看） | (票面没写 Blocked by) |
 | `95-panel-header-moves-when-candidates-arrive.md` | 6/7 | ready-for-human · 2026-10-24 用户报出 ⇒ 代码侧已定位并修掉（票 92 续）⇒ **剩下的是真机那一眼** | (票面没写 Blocked by) |
-| `96-draft-candidates-anchored-to-my-own-lines.md` | 6/7 | ready-for-human · 缺陷 A 已修（真机 + 单测双证）· 缺陷 B 频率已量完（去重后 19 条新消息里命中 4 条、共 3 帧）⇒ **方向已按假设记为已知边界、不引入依赖**（两轮提问都超时，见「决策记录（假设出口）」）· 仍开的只有「点候选后不再起草」那一眼（需人手） | (票面没写 Blocked by) |
+| `96-draft-candidates-anchored-to-my-own-lines.md` | 7/8 | ready-for-human · 缺陷 A 已修（真机 + 单测双证）· 缺陷 B 频率已量完（去重后 19 条新消息里命中 4 条、共 3 帧）⇒ **方向已按假设记为已知边界、不引入依赖**（两轮提问都超时，见「决策记录（假设出口）」）· 仍开的只有「点候选后不再起草」那一眼（需人手） | (票面没写 Blocked by) |
 | `97-the-panel-had-no-type-hierarchy-and-a-browser-scrollbar.md` | 8/9 | ready-for-human · 2026-11-01 两轮排版修正后，第三轮按 2K 屏实看放大字号 ⇒ 代码与量测已过 ⇒ **剩下的是真机那一眼** | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
