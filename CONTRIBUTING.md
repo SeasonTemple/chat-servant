@@ -210,8 +210,8 @@ BSL 1.1 不在 GitHub 的许可列表里，所以仓库页面会显示 `Other`�
 夹具是 `scripts/ocrbench/gen_corpus.py` 造的**合成语料**（逐字答案键、不含真人内容）。
 
 ```bash
-cargo test -p chatservant-capture --test ocr_accuracy -- --nocapture   # 默认 12 张，约 19 秒
-$env:CS_OCR_CER_FULL='1'; cargo test -p chatservant-capture --test ocr_accuracy -- --nocapture   # 全量 60 张，约 88 秒
+cargo test -p chatservant-capture --test ocr_accuracy -- --nocapture   # 默认 14 张，约 20 秒
+$env:CS_OCR_CER_FULL='1'; cargo test -p chatservant-capture --test ocr_accuracy -- --nocapture   # 全量 90 张，约 88 秒
 ```
 
 ⚠ **它与下面的真帧台架不能互相替代**，两条各有各的射程：
@@ -275,6 +275,10 @@ null 只解决**编得过**（tauri-build 的 glob），而字准测试要的是
 
 ⇒ 复核用的 run `39144160245`（commit `f010e9e`）：`Gate 8` **14.52s**、
 `Gate 8b` **20.71s**、**CER 0.23%**——与本机**逐位相同**。
+⚠ 2026-11-01 语料加了两批（形近字句 + `ds=3` 那 30 张降采样图），数字整体变了：
+run `41290000248`（commit `0279c96`）的 `Gate 8b` 是 **20.66s**、**CER 0.63%**、
+逐行全对 93%，与本机实测（18.2s / 0.63% / 93%）**逐位相同**；全量 450 行 **88s**。
+⇒ 判据没有因为加难而变成假红：`CER_CEILING` 同时抬到 1.5%（理由见该测试的阈值注释）。
 ⇒ 顺带证伪了两件本机代表不了 runner 的事：modelscope.cn 在美国 runner 上可达、
 ort 在 runner 上真能加载 ONNX Runtime 并推理（不是只链接得上）。
 
