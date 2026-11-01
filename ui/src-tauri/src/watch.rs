@@ -341,21 +341,14 @@ fn load_frame(
             .map_err(|e| format!("读夹具 {} 失败：{e}", path.display()));
     }
 
-    let hit = find_chat_window(&WECHAT).map_err(|e| format!("找窗口失败：{e}"))?;
+    let hit = find_chat_window(&WECHAT).map_err(|e| {
+        tracing::debug!(error = %e, "找窗口失败");
+        "未检测到微信窗口".to_string()
+    })?;
     *last_hwnd = Some(hit.hwnd_raw);
 
-    // **先问能不能抓到，再决定要不要试。**
-    //
-    // 这里必须用 `why_wgc_unreadable`，**不能**用区域抓屏那套判据。
-    // 区域抓屏读的是屏幕像素，被盖住就完蛋；但 **WGC 就是为抓被遮挡窗口
-    // 设计的**（实测 2026-10-07：6/9 采样点被盖住，八段 e2e 照样全通）。
-    //
-    // 原先这里用的是带遮挡检查的 `why_unreadable`，于是**只要有任何东西
-    // 盖住微信就直接返回错误**——而那永远是常态。后果是观察循环一次帧都
-    // 没抓到过，界面上只有一句「抓不到：窗口被别的窗口盖住了」，
-    // 帧计数恒为 0，进程 CPU 恒为 0。
     if let Some(why) = chatservant_capture::region::why_wgc_unreadable(hit.hwnd_raw) {
-        return Err(format!("抓不到：{why}"));
+        return Err(why);
     }
 
     let frame = capture_one_frame(hit.hwnd_raw).map_err(|e| {

@@ -259,17 +259,17 @@ pub fn why_wgc_unreadable(hwnd_raw: isize) -> Option<String> {
     let hwnd = HWND(hwnd_raw as *mut c_void);
     // SAFETY: 两个调用都只**读**窗口状态，不解引用指针、不写内存。
     if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
-        return Some("窗口不可见（可能在别的虚拟桌面或已最小化到托盘）".into());
+        return Some("微信窗口未打开".into());
     }
     // SAFETY: 只读窗口状态，不解引用指针、不写内存。
     if unsafe { IsIconic(hwnd) }.as_bool() {
-        return Some("窗口已最小化——还原它才能抓到".into());
+        return Some("微信已最小化".into());
     }
     // cloaked 要排在遮挡**前面**：被藏起来的窗口在屏幕坐标上仍然占位，
     // `WindowFromPoint` 会命中它自己，于是遮挡检查说「没被挡」——
     // 而真正的原因是它根本不参与合成。两个维度都过才谈得上「能抓」。
     if is_cloaked(hwnd_raw) {
-        return Some("窗口被 DWM 藏起来了（多半在另一个虚拟桌面上）——切回它所在的桌面".into());
+        return Some("微信在另一虚拟桌面".into());
     }
     None
 }

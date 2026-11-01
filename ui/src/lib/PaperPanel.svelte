@@ -548,7 +548,7 @@
    * ⚠ 夹具模式本身仍然在**窗口标题**上标着（`· 夹具模式`），
    *   开发者看得到，而面板是产品面。
    */
-  const DISPATCH_SILENT = new Set(['FixtureSkipped']);
+  const DISPATCH_SILENT = new Set(['FixtureSkipped', 'Filled', 'PossiblySent', 'Sent', 'TimedOut']);
 
   /**
    *  动作按钮用哪个变体（见 `docs/设计规范.md` §4.2c）。
@@ -1298,7 +1298,7 @@
             {readout.status_hint ?? '正在写……'}
           </p>
         {:else if readout?.phase === 'failed'}
-          <p class="cs-draft-text cs-draft-failed">没写成：{readout.error}</p>
+          <p class="cs-draft-text cs-draft-failed">{readout.error}</p>
         {:else if readout?.status_hint}
           <!--
             ⚠ 这一支守的是「闸关着」那条路径（2026-10-14 真机实测出来的假话）：

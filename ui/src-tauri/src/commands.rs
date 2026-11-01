@@ -844,16 +844,11 @@ fn outcome_name(r: &DeliveryReceipt) -> &'static str {
 ///
 /// 长句尤其明显：回执本来就该一屏读完，重复一遍直接把它顶出面板。
 /// ⇒ 停下时说一次；只有在「接下来真的还有一步动作」时才接「下一步」。
-fn receipt_detail(tier: Dispatch, receipt: &DeliveryReceipt, next: &Next) -> String {
+fn receipt_detail(_tier: Dispatch, receipt: &DeliveryReceipt, next: &Next) -> String {
     let why = receipt.explain();
     match next {
-        Next::Halt { reason } if reason == why => format!("档位 {}｜{}", tier_name(tier), why),
-        _ => format!(
-            "档位 {}｜{}｜下一步：{}",
-            tier_name(tier),
-            why,
-            next.explain()
-        ),
+        Next::Halt { reason } if reason == why => why.to_string(),
+        _ => format!("{why}｜下一步：{}", next.explain()),
     }
 }
 
@@ -2994,9 +2989,9 @@ mod budget_ceiling_tests {
         let said2 = receipt_detail(Dispatch::Manual, &r2, &n2);
         assert!(said2.contains("下一步"), "可重试时要说下一步：{said2}");
 
-        // 两支都要带档位——用户得知道这句是在哪一档下发生的。
-        assert!(said.contains("仅填入"), "缺档位：{said}");
-        assert!(said2.contains("仅填入"), "缺档位：{said2}");
+        // 面板底部已有常驻档位开关，回执不再重复前缀「档位 …」（2026-11-01 用户定案）。
+        assert!(!said.contains("档位"), "不应带冗余档位前缀：{said}");
+        assert!(!said2.contains("档位"), "不应带冗余档位前缀：{said2}");
     }
 
     /// **候选换过之后，上一轮的防重记录立刻作废。**
