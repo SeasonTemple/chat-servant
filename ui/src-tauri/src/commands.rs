@@ -4005,3 +4005,70 @@ mod close_action_tests {
         assert_eq!(close_action_from(CloseBehavior::Tray), CloseAction::Hide);
     }
 }
+
+/// 「窗口那两枚键失败时不许闭嘴」这件事的测试。
+///
+/// ⚠ 2026-11-01 核 `ui/src/lib/PaperPanel.svelte` 时发现：`−`（收进托盘）那支
+/// 早在票 66 就把空 catch 换成了 `console.error('收进托盘失败：', e)`，
+/// 而 `×`（退出）那支还留着 `.catch(() => {})`——一句原因都不打。
+/// 这一枚偏偏是**唯一**能让进程停下来的按钮。
+///
+/// 「空 catch 会把 bug 藏到看不见」是本文档写死的判据，但此前**没有任何机器守卫**：
+/// 谁再写一个空的 `catch {}`，clippy / svelte-check / eslint 一样全绿。
+#[cfg(test)]
+mod window_button_tests {
+    fn panel_source() -> String {
+        let file =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/PaperPanel.svelte");
+        std::fs::read_to_string(&file).expect("读得到面板源码")
+    }
+
+    /// 面板上**一处**空 catch 都不许有。
+    ///
+    /// 判据是字面量 `catch(() => {})`：写注释是允许的（`drag_window_by` 那支就带着
+    /// 「拖不动也不能把界面弄坏」的说明），**沉默**不允许。
+    #[test]
+    fn the_panel_never_swallows_a_failure_silently() {
+        let src = panel_source();
+        // 守卫自己会提到那个字面量，所以按**行首空白 + 调用点**匹配，避开注释行。
+        let mut offenders = Vec::new();
+        for (i, line) in src.lines().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with("//") || t.starts_with('*') {
+                continue;
+            }
+            if line.contains("catch(() => {})") {
+                offenders.push(format!("{}:{}", i + 1, t));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "面板上有空的 catch（按下去没反应时日志里连原因都没有）：\n  {}",
+            offenders.join("\n  ")
+        );
+    }
+
+    /// 两枚窗口键的失败分支都得**说得出原因**。
+    ///
+    /// ⚠ 别把这条写成「只要不是空 catch 就行」：`catch(() => {})` 与
+    /// `catch(() => 0)` 在用户眼里是一样的。判据是**那行日志在**。
+    #[test]
+    fn both_window_buttons_say_why_they_failed() {
+        let src = panel_source();
+        for (cmd, why) in [("hide_panel", "收进托盘"), ("quit_app", "退出")] {
+            let at = src
+                .find(&format!("invoke('{cmd}')"))
+                .unwrap_or_else(|| panic!("面板里找不到 invoke('{cmd}')"));
+            // 取到这一句的结尾（分号或行尾），足够覆盖整条链式调用。
+            let tail = &src[at..];
+            let end = tail.find('}').map_or(tail.len(), |e| e + 1);
+            let call = &tail[..end];
+            assert!(
+                call.contains("console.error"),
+                "invoke('{cmd}') 的失败分支没有 console.error ⇒ 用户看到的是「按了没反应」，\
+                 而 {why} 失败的原因谁都不知道：\n  {}",
+                call.replace('\n', " ")
+            );
+        }
+    }
+}

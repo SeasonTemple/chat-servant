@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **99** ｜ 验收项全勾 **75** ｜ 已收但留有说明项 **16** ｜ 未收 **8**
+票据总数 **100** ｜ 验收项全勾 **76** ｜ 已收但留有说明项 **16** ｜ 未收 **8**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -60,6 +60,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `07-conditioning-mask-and-scale.md` | 8/8 |
 | `08-delivery-state-machine.md` | 7/7 |
 | `10-reasoning-seam.md` | 8/8 |
+| `100-the-quit-button-swallowed-its-own-failure.md` | 2/2 |
 | `11-context-trim-and-lazy-summary.md` | 7/7 |
 | `13-credentials-and-settings.md` | 8/8 |
 | `14-overlay-candidates-and-dispatch-ui.md` | 11/11 |

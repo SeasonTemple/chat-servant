@@ -1132,7 +1132,11 @@
         data-no-drag
         title="退出 · 停了就是停了"
         aria-label="退出"
-        onclick={() => void invoke('quit_app').catch(() => {})}
+        onclick={() =>
+          // ⚠ 别写空 catch：按下去没反应时，日志里连一句原因都没有。
+          //   `quit_app` 本身不会失败（它直接 `app.exit(0)`），但 IPC 桥可以——
+          //   而这一枚是**唯一**能让进程停下来的按钮。
+          void invoke('quit_app').catch((e) => console.error('退出失败：', e))}
       >
         <svg
           width="20"
