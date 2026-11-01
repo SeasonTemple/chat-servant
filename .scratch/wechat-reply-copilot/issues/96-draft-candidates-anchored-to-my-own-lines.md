@@ -695,3 +695,12 @@ cargo test -q -p chatservant-capture --test ocr_accuracy -- --include-ignored --
   - `xtask ocr` 在 `1:nearest` / `2:nearest` / `2:bilinear` 三个口径下全部逐字读对；
   - 合成语料默认子集（70 行）：编辑数 `6 → 5`，**CER `0.63% → 0.52%`**（`zh_14_light_s1` 第 4 字 `彳 → イ` 消失）；
   - 重编并重启应用（`pid=17352`），真机面板截图 `target/probe/panel-fixed-homoglyph.png` 顶部引文里的「彳亍」「口巴」均已完整显示。
+
+## 十五、2026-11-01 真机长行复验补充：单行纵向 1px 余量 + 步幅边界归并 + 同文重发保留
+
+1. **20 字长行防吞「彳」（`7dc1fa2` / `f5c7015`）**：
+   - 20 字长行的 `det` 框高仅 `14~17px`，上沿紧贴字顶削掉了「彳」最顶上一短撇的第 1 行像素；
+   - `rec_input` 对高度 `<= 22px` 的单行框上下各留 `1px` 纵向余量（补 1px 后 `p_chi` 从 `0.205` 回升至 `0.706~0.810`）；
+   - `HomoglyphFold::pick` 补步幅边界判据：当 `best == BLANK` 但 `p_chi >= 0.18`、`彳 >= 0.08` 且占该步全部非空类总概率 `>= 75%` 时归并回「彳」（「亍」同理）。
+2. **对方重发同文消息不丢展示流（`07c586e`）**：
+   - `watch::absorb_round` 在 `novel_messages`（多重集计数）判定新消息后，直接将 `novel` 追加进 `display`（`s.messages`）并赋唯一 `#N` id，不再调 `merge_into_stream` 按集合二次去重，避免对方重发同一句话时面板引文卡在旧句。
