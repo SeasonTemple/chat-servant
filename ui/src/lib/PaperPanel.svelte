@@ -1861,7 +1861,11 @@
     .cs-act,
     .cs-act:hover,
     .cs-act:focus-visible,
-    .cs-act:active {
+    .cs-act:active,
+    .cs-act::before,
+    .cs-act:hover::before,
+    .cs-act:focus-visible::before,
+    .cs-act:active::before {
       filter: none;
     }
 
@@ -2555,11 +2559,12 @@
     padding: 3px 10px;
     border-style: solid;
     border-width: 16px;
-    border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
+    border-color: transparent;
     color: var(--cs-ink);
     font: 600 13px/1.5 inherit;
     text-align: left;
     cursor: pointer;
+    isolation: isolate;
     /* 常态：一片安静躺着的纸。
      *
      * ⚠⚠ **两层影决定的是「它有没有落在纸上」，不是装饰。**
@@ -2638,51 +2643,53 @@
      *    被紧挨在它后面的下一条候选纸条（DOM 顺序靠后）直接盖住了 80%！
      *    给 hover/focus-visible 补 `z-index: 2` 并抬起 `-3px` + `0 10px 18px / 34%`，
      *    悬停那一条真正浮在相邻纸条之上。 */
+  }
+
+  /* ── 纸条本底放到 `::before` 伪元素上（2026-11-01，票 90 根治） ────────
+   *
+   * 为什么纸条的 `border-image`、`filter: drop-shadow` 与 3D 压角 `transform`
+   * 必须挂在 `::before` 而不是 `.cs-act` 本体上：
+   *   ① 一旦对 `.cs-act` 本体施加任何旋转或 3D `perspective` 变换，Chromium 会把
+   *      `.cs-act`（连同里面的 `.cs-act-text` 文字）一起光栅化成位图合成层并做双线性重采样，
+   *      导致悬停那条候选的文字肉眼发糊（票 90 实测拉普拉斯锐度方差暴跌 −42.9%）；
+   *   ② 把纸条与压角变换拆到兄弟伪元素 `::before`（`z-index: -1`）之后，
+   *      `.cs-act` 本体与 `.cs-act-text` 全程保持 `transform: none` 原生像素栅格对齐
+   *      ⇒ 文字在悬停/按下时 **100% 锐利零重采样**，而底下的纸条伪元素可以自由做
+   *      「固定左侧（`transform-origin: 0% 35%`）、下压右下角」的物理形变！ */
+  .cs-act::before {
+    content: '';
+    position: absolute;
+    inset: -16px;
+    z-index: -1;
+    pointer-events: none;
+    border-style: solid;
+    border-width: 16px;
+    border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
     filter: drop-shadow(0 2px 3px rgb(24 18 10 / 0.12));
-    transform-origin: 100% 100%;
+    transform-origin: 0% 35%;
     transition:
       transform var(--cs-dur) var(--cs-ease),
       filter var(--cs-dur) var(--cs-ease);
   }
 
-  /* ── 悬停 / 聚焦：**把它拿起来**（票 90，只上抬、不旋转） ────────
-   *
-   * ⚠ 位移只有 2px：纸张很轻，抬得太高读成「浮起来的气泡」。
-   *   抬起的作用只是**让手知道它可以被拿走**。
-   *
-   * ⚠ **不加 `rotate(-0.5deg)`**（2026-10-24 / 2026-11-01 实测，票 90，
-   *   量具 `ui/scripts/probe-act-states.mjs` @2x）：
-   *   Chromium 对带旋转的元素提独立合成层并对文字与撕边位图做双线性重采样
-   *   ⇒ 锐度方差（拉普拉斯方差）实测掉 **−42.9%**（1838.7 → 1049.7；
-   *     票 92 含手绘勾后复测 drafted 3737.4 → 2060.9 即 **−44.9%**，
-   *     auto 3917.8 → 2338.6 即 **−40.3%**），那一行肉眼比相邻行「糊」；
-   *   而整数位移 `translateY(-2px)` 保持像素对齐、不触发重采样
-   *   ⇒ 锐度不掉（1838.7 → 1844.2 即 **+0.3%**；改后生产复测 drafted 3737.3 → 3741.7
-   *     即 **+0.12%**，auto 3917.8 → 3988.1 即 **+1.79%**）。
-   *
-   * 悬停与 `:focus-visible` 用**同一条规则**：键盘 Tab 到这一条时它也该被拿起来，
-   * 否则鼠标用户知道「能点」而键盘用户只能靠焦点环猜——两条路径给出同一个反馈，
-   * 才算「同一个东西的两种到达方式」，而不是两个控件。 */
+  /* ── 悬停 / 聚焦：固定左侧，微倾右下角；文字本体零变换不发糊 ──────── */
   .cs-act:hover,
   .cs-act:focus-visible {
     z-index: 2;
-    transform: perspective(520px) rotateX(-1.8deg) rotateY(-1.8deg) translateY(1px);
-    filter: drop-shadow(-2px 3px 5px rgb(24 18 10 / 0.18));
+  }
+  .cs-act:hover::before,
+  .cs-act:focus-visible::before {
+    transform: perspective(560px) rotateY(1.8deg) rotateZ(0.45deg);
+    filter: drop-shadow(0 3px 5px rgb(24 18 10 / 0.18));
   }
 
-  /* ── 按下：**压回纸面** ────────────────────────────────────────
-   *
-   * ⚠ 抬起与按下必须是**一对**：只做抬起的话，按下去纸条不动，
-   *   反馈就只剩「变了个色」——而这片纸不会变色，它本来就是纸。
-   *   压回去（1px + 影子收掉）读成「手指把它按在桌上」，
-   *   是纸张唯一有的那一种「被操作了」。
-   *
-   * `:active` 抓的是**真实鼠标按住的那一瞬**，比 `:hover` 更窄，
-   *   所以两者的位移量必须分开写：悬停 -2px，按下 +1px。 */
+  /* ── 按下：固定左侧，下压右下角贴向纸面 ──────────────────────────── */
   .cs-act:active {
     z-index: 2;
-    transform: perspective(420px) rotateX(-3.2deg) rotateY(-3.2deg) translateY(2px);
-    filter: drop-shadow(-1px 1px 2px rgb(24 18 10 / 0.09));
+  }
+  .cs-act:active::before {
+    transform: perspective(440px) rotateY(3.4deg) rotateZ(0.85deg);
+    filter: drop-shadow(0 1px 2px rgb(24 18 10 / 0.08));
     transition-duration: var(--cs-dur-fast);
   }
 
@@ -2724,7 +2731,8 @@
   }
 
   /* 「正在投递」：**只有被点的那一条**。其余纸条的投影一根不动。 */
-  .cs-act-busy {
+  .cs-act-busy,
+  .cs-act-busy::before {
     filter: none;
     cursor: progress;
   }
