@@ -3,9 +3,20 @@
 #
 # ⚠ 旧的 `onlyBuiltDependencies` **不能与它并存**——两个白名单语义相反，
 #   共存时新的那个会失效，被拦下的包依然跑不了 postinstall。
-#
 # esbuild 的 postinstall 只是把预编译二进制链出来，不执行网络请求、
 # 不编译用户代码；SvelteKit 的构建必须经过它，所以显式放行。
+#
+# ⚠⚠ **2026-11-01 订正：esbuild 已经不在依赖树里了。**
+#   `0f25d64` 把 SvelteKit 升到 3.x / vite 升到 8 之后，打包器换成 **rolldown**
+#   （Rust），上面那句「SvelteKit 的构建必须经过它」**不再成立**。实测：
+#   `pnpm why esbuild` 零输出 exit=0、`node_modules/.pnpm` 下 `esbuild*` 目录
+#   **0 个**、`rolldown@1.2.15 ← vite@8.3.5` 在树里、`node_modules` 下没有任何
+#   包带 preinstall/install/postinstall 脚本。
+#
+#   ⇒ 这一行现在**不承重**：删了也没有包会被拦。留着是因为（a）万一将来又有
+#   依赖带构建脚本，白名单的写法在这里能直接复用；（b）「字段名写错就静默
+#   失效」这条仍然成立（写成 `onlyBuiltDependencies` 不会报错，只会不生效）。
+#   ⚠ **别按这份注释去推断「项目还在用 esbuild」** —— 那是这张文件上最容易过期的一句。
 
 allowBuilds:
   esbuild: true
