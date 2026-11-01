@@ -946,6 +946,38 @@ impl Default for CloseBehavior {
     }
 }
 
+/// 系统关闭请求（`Alt+F4`、系统「关闭窗口」、任务栏右键关闭）落到哪一边。
+///
+/// ⚠⚠ **这个偏好曾经只写不读**（2026-11-01 之前，票 99）：`main.rs` 的
+/// `CloseRequested` 分支无条件 `hide_panel` + `api.prevent_close()`，于是设置页
+/// 那句「按 × 直接退出。程序不会在后台继续跑」是**假话**——选哪一档都关不掉。
+///
+/// 判据住在这里而不是散在 `main.rs` 里，是因为它是这条路径上唯一会分岔的地方：
+/// 纯函数 [`close_action_from`] 可测，而 `AppHandle` 不可测。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseAction {
+    /// 退出进程。
+    Quit,
+    /// 收进托盘，进程继续跑。
+    Hide,
+}
+
+/// 偏好 → 动作。**纯函数**：两个输入两种输出，没有第三个分支。
+fn close_action_from(b: CloseBehavior) -> CloseAction {
+    match b {
+        CloseBehavior::Exit => CloseAction::Quit,
+        CloseBehavior::Tray => CloseAction::Hide,
+    }
+}
+
+/// 收到系统关闭请求时该做什么。判据只有偏好这一个来源。
+///
+/// [`read_close_behavior`] 已经把「选了 tray 但托盘没了」折回 `Exit`
+/// ⇒ 这里返回 `Hide` 时 `hide_panel` 的前置条件一定成立。
+pub(crate) fn close_action(app: &AppHandle) -> CloseAction {
+    close_action_from(read_close_behavior(app))
+}
+
 /// 读「关闭时」。**读不到就按默认的 `Exit`** —— 那是最不容易出事的那个。
 #[tauri::command]
 pub fn get_close_behavior(app: AppHandle) -> CloseBehavior {
@@ -3955,5 +3987,21 @@ mod send_path_guard_tests {
                 c.text
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod close_action_tests {
+    use super::{CloseAction, CloseBehavior, close_action_from};
+
+    /// 偏好与动作是**一一对应**的，不许有第三支把两档并成一处。
+    ///
+    /// 这条守的是 2026-11-01 之前那个形态：`CloseRequested` 分支不读偏好，
+    /// 两档都走「收进托盘」。它测不出来「main.rs 有没有调它」，那一半由
+    /// `main.rs` 的 `the_close_request_reads_the_preference_before_hiding` 守。
+    #[test]
+    fn close_action_follows_the_preference() {
+        assert_eq!(close_action_from(CloseBehavior::Exit), CloseAction::Quit);
+        assert_eq!(close_action_from(CloseBehavior::Tray), CloseAction::Hide);
     }
 }

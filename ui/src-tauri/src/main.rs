@@ -89,17 +89,26 @@ fn main() {
                 // 一旦它从别的途径（比如系统「关闭窗口」快捷键）被关掉，
                 // 用户连同托盘图标一起弄丢了，那才叫找不回来。
                 //
-                // 所以：**只有托盘菜单里的「退出」能真正结束进程。**
-                // 其余一律吞掉。
+                // ⚠⚠ **但「一律吞掉」同样是错的**（2026-11-01 改，票 99）。
+                // 设置页「窗口 → 按窗口控制键时：退出 / 收进托盘」那一档，
+                // 在此之前**只写不读**：分支无条件 `hide_panel`，于是两个选项
+                // 结果一样，而设置页写着「按 × 直接退出。程序不会在后台继续跑」。
+                // ⇒ 落点由偏好定：`Exit` 就真退，只有 `Tray` 才收起来。
                 let app = window.app_handle().clone();
                 let label = window.label().to_string();
                 match label.as_str() {
                     // 识别画布：本来就有标题栏，关掉就关掉。
                     "debug" => {}
-                    // 主面板：关不掉。它只能「收进托盘」。
+                    // 主面板：按偏好分岔。
                     _ => {
-                        let _ = commands::hide_panel(app);
-                        api.prevent_close();
+                        if commands::close_action(&app) == commands::CloseAction::Quit {
+                            // `quit_app` 走 `app.exit(0)`，窗口随进程一起没了，
+                            // 这条事件链到此为止 ⇒ 不需要也不该再 prevent。
+                            let _ = commands::quit_app(app);
+                        } else {
+                            let _ = commands::hide_panel(app);
+                            api.prevent_close();
+                        }
                     }
                 }
             }
@@ -408,6 +417,54 @@ mod wiring_tests {
             !d.to_string_lossy().contains("%APPDATA%") && !d.to_string_lossy().contains("AppData"),
             "权重又落回系统盘了：{}（硬约束：产物一律留项目所在盘）",
             d.display()
+        );
+    }
+
+    /// 系统关闭请求**必须先读偏好，再决定吞不吞**。
+    ///
+    /// 这条守的是 2026-11-01 之前那个形态（票 99）：`CloseRequested` 分支不读
+    /// 偏好、无条件 `hide_panel` + `api.prevent_close()`，于是设置页里
+    /// 「退出 / 收进托盘」两个选项结果一样，而文案写着「按 × 直接退出」。
+    ///
+    /// 为什么是**源码扫描**而不是调一遍：判据本体（`commands::close_action`）
+    /// 由 `commands.rs` 的 `close_action_follows_the_preference` 量，可它证明不了
+    /// 「这里有没有调它」——`AppHandle` 起不来，闭包也没法单独执行。
+    /// ⇒ 量的是**接线**：这段分支里要读偏好、要有真退出那支、且不许在它前面预防。
+    #[test]
+    fn the_close_request_reads_the_preference_before_hiding() {
+        let source = include_str!("main.rs");
+        let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+        // 从 `CloseRequested` 切到下一个顶层注册点：中间只有这一个处理器。
+        let start = prod
+            .find("WindowEvent::CloseRequested")
+            .expect("main.rs 里没有 CloseRequested ⇒ 关闭拦截整段没了");
+        let end = prod[start..]
+            .find(".invoke_handler(")
+            .expect("找不到 invoke_handler ⇒ 切窗锚点变了，先修这条守卫")
+            + start;
+        let handler = &prod[start..end];
+
+        let at = handler.find("commands::close_action(").unwrap_or_else(|| {
+            panic!("关闭分支没有读「关闭时」偏好（票 99 那个形态回来了）：{handler}")
+        });
+        assert!(
+            handler.contains("commands::CloseAction::Quit") && handler.contains("quit_app("),
+            "偏好为「退出」时没有真正的退出分支：{handler}"
+        );
+        // `prevent_close` 必须在读偏好**之后**——排在前面就说明它又变回无条件吞掉。
+        let prevent = handler
+            .find("api.prevent_close()")
+            .expect("主面板不再拦关闭请求了？那收进托盘会连窗口一起没");
+        assert!(
+            prevent > at,
+            "`prevent_close` 出现在读偏好之前 ⇒ 关闭请求还是被无条件吞掉：{handler}"
+        );
+        // 识别画布有自己的标题栏，那条放行分支不该被顺手改成「也收起来」。
+        let debug_arm = ["\"debug\"", "=> {}"].join(" ");
+        assert!(
+            handler.contains(&debug_arm),
+            "识别画布的放行分支没了：{handler}"
         );
     }
 }

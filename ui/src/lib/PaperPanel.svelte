@@ -1130,7 +1130,7 @@
         class="cs-glyph cs-glyph-quit"
         type="button"
         data-no-drag
-        title={closeBehavior === 'tray' ? '退出 · 停了就是停了' : '退出'}
+        title="退出 · 停了就是停了"
         aria-label="退出"
         onclick={() => void invoke('quit_app').catch(() => {})}
       >
