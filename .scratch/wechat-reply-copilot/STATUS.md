@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **100** ｜ 验收项全勾 **80** ｜ 已收但留有说明项 **16** ｜ 未收 **4**
+票据总数 **100** ｜ 验收项全勾 **81** ｜ 已收但留有说明项 **16** ｜ 未收 **3**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -24,7 +24,6 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 |---|---|---|---|
 | `20-two-dispatch-tiers.md` | 18/19 | ready-for-human · **现行决定日期 2026-10-15** · **2026-10-24 `Auto` 那半条已验**（用户截图：小号会话里确实多了一条绿色气泡） | None（可以立刻做） |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
-| `90-hover-rotation-blurs-the-strip.md` | 6/7 | open · **候选 ① 已落地，6/7 项完成，等真机那一眼**（2026-11-01：去掉 `.cs-act:hover, .cs-act:focus-visible` 的 `rotate(-0.5deg)`，保留 `translateY(-2px)` + `drop-shadow(0 8px 16px rgb(24 18 10 / 0.26))`；同步 `docs/设计规范.md`；`probe-act-states.mjs` @2x 复测锐度方差从 −44.9% 回到 +0.12%） | (票面没写 Blocked by) |
 | `97-the-panel-had-no-type-hierarchy-and-a-browser-scrollbar.md` | 9/10 | ready-for-human · 2026-11-01 层级那一半已由 agent 看真机截图记过 ⇒ **未勾的只剩滚动那半**（那道 2px 线在纸纹深处会不会断），需要鼠标滚轮 | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
@@ -126,6 +125,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `86-rank-dropped-candidates-when-text-was-rewritten.md` | 6/6 |
 | `87-tokio-asyncfd-unsound-advisory.md` | 5/5 |
 | `89-drag-shows-the-whole-window-rectangle.md` | 7/7 |
+| `90-hover-rotation-blurs-the-strip.md` | 7/7 |
 | `92-all-candidates-are-strips.md` | 20/20 |
 | `93-real-chat-text-reached-a-commit.md` | 15/15 |
 | `95-panel-header-moves-when-candidates-arrive.md` | 7/7 |

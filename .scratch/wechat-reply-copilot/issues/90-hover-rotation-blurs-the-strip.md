@@ -1,6 +1,6 @@
 # 90: 悬停时那条候选「变糊」——0.5° 旋转让合成层重采样
 
-**Status:** open · **候选 ① 已落地，6/7 项完成，等真机那一眼**（2026-11-01：去掉 `.cs-act:hover, .cs-act:focus-visible` 的 `rotate(-0.5deg)`，保留 `translateY(-2px)` + `drop-shadow(0 8px 16px rgb(24 18 10 / 0.26))`；同步 `docs/设计规范.md`；`probe-act-states.mjs` @2x 复测锐度方差从 −44.9% 回到 +0.12%）
+**Status:** done · 7/7 完成（2026-11-01：纸条 `border-image` / `filter` / 3D 变换拆到兄弟伪元素 `.cs-act::before`，文字本体保持 `transform: none`，用户真机确认「文字确实不会糊了」）
 
 ## 一、现象
 
@@ -68,8 +68,7 @@ Auto 档同一条现象：静息 107.82 / 2076.3 ⇒ 悬停 93.39 / 1471.8（−
 - [x] 量具入库：`ui/scripts/probe-act-states.mjs`（可复跑）
 - [x] **用户拍板**：去不去那 0.5°（按候选 ① 落地：去掉 `rotate(-0.5deg)`，保留 `translateY(-2px)` 上抬 + 影加深）
 - [x] 按拍板结果改 CSS + 同步规范第 434 行 + 量具复跑（2026-11-01 落地：`ui/src/lib/PaperPanel.svelte` 去掉 `rotate(-0.5deg)`；同步 `docs/设计规范.md` §4.2c-bis 与 §4.2c-ter 两处悬停行；`ui/scripts/probe-act-states.mjs` @2x 本轮复跑通过）
-- [ ] 真机复验（需要人眼，等真机那一眼）
-      材料：`cd ui && node scripts/shoot-board.mjs` 出的八格对照板（见 `docs/本机验收清单.md` §3.2）——看第 ⑧ 格（悬停对照，左静息右悬停）。
+- [x] 真机复验（需要人眼，等真机那一眼）—— 2026-11-01 用户真机实测确认通过（「2.文字确实不会糊了」，见提交 `a6c6b94`）
 
 ## 六、顺带纠正的一条**上轮错误结论**
 

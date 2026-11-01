@@ -42,9 +42,10 @@ PANEL_RGB = np.array([243.0, 230.0, 192.0], dtype=np.float32)
 def norm_edge_rgb(edge_rgba: np.ndarray, keep: float) -> np.ndarray:
     rgb = edge_rgba[:, :, :3]
     a = edge_rgba[:, :, 3]
-    m = a > 180
+    m = a > 220
     med = np.median(rgb[m], axis=0) if m.any() else PANEL_RGB
-    dev = np.clip((rgb - med) * keep, -32.0, 18.0)
+    alpha_scale = np.clip((a - 140.0) / 100.0, 0.0, 1.0)[:, :, None]
+    dev = np.clip((rgb - med) * keep * alpha_scale, -24.0, 16.0)
     return np.clip(PANEL_RGB + dev, 0, 255)
 
 
@@ -78,6 +79,9 @@ def build() -> None:
 
     # 2. 四边：取源图带 3D 边缘折皱与豁口的真实边带，左右内移 4 源 px 保持窄宽度
     top_rgba = src[0:SLICE, 80 : 80 + OUT_W].copy()
+    # 源图 x=590..650 (即 top_rgba 的 510..570) 顶部有一处向外凸出的半透明耳状残影，
+    # 经 drop-shadow 会投出一枚椭圆暗斑；用相邻净撕口段替换该 60px 区间。
+    top_rgba[:, 505:565, :] = top_rgba[:, 205:265, :]
     bot_rgba = src[sh - SLICE : sh, 80 : 80 + OUT_W].copy()
     left_rgba = np.zeros((OUT_H, SLICE, 4), dtype=np.float32)
     left_rgba[:, 4:SLICE, :] = src[545 : 545 + OUT_H, 0 : SLICE - 4, :]

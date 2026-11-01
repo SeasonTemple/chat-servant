@@ -618,7 +618,9 @@
       sentNote = { ok: false, text: `投递失败：${e}` };
     } finally {
       sending = false;
-      busyId = null;
+      setTimeout(() => {
+        if (busyId === candidateId) busyId = null;
+      }, 220);
     }
   }
 
@@ -2666,31 +2668,39 @@
     border-width: 16px;
     border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
     filter: drop-shadow(0 2px 3px rgb(24 18 10 / 0.12));
-    transform-origin: 0% 35%;
+    transform-origin: 0 0;
     transition:
       transform var(--cs-dur) var(--cs-ease),
       filter var(--cs-dur) var(--cs-ease);
   }
 
-  /* ── 悬停 / 聚焦：固定左侧，微倾右下角；文字本体零变换不发糊 ──────── */
+  /* ── 悬停 / 聚焦：固定左侧与上沿，右下角微倾；文字本体零变换不发糊 ── */
   .cs-act:hover,
   .cs-act:focus-visible {
     z-index: 2;
   }
   .cs-act:hover::before,
   .cs-act:focus-visible::before {
-    transform: perspective(560px) rotateY(1.8deg) rotateZ(0.45deg);
+    transform: matrix3d(1.04, 0.007, 0, 0.000126, 0, 1.03, 0, 0.000375, 0, 0, 1, 0, 0, 0, 0, 1);
     filter: drop-shadow(0 3px 5px rgb(24 18 10 / 0.18));
   }
 
-  /* ── 按下：固定左侧，下压右下角贴向纸面 ──────────────────────────── */
-  .cs-act:active {
+  /* ── 按下 / 点击投递：射影同应性 matrix3d 钉死左上(0,0)、左下(0,H)、右上(W,0)，
+   *    只把右下角(W,H)向纸面内侧与下方压入；保留整条底影（不设 filter:none），
+   *    彻底消除「整条纸片一起平塌按下」的观感。 ──────────────────── */
+  .cs-act:active,
+  .cs-act-busy {
     z-index: 2;
   }
-  .cs-act:active::before {
-    transform: perspective(440px) rotateY(3.4deg) rotateZ(0.85deg);
-    filter: drop-shadow(0 1px 2px rgb(24 18 10 / 0.08));
+  .cs-act:active::before,
+  .cs-act-busy::before {
+    transform: matrix3d(1.12, 0.022, 0, 0.00038, 0, 1.09, 0, 0.00075, 0, 0, 1, 0, 0, 0, 0, 1);
+    filter: drop-shadow(0 2px 3px rgb(24 18 10 / 0.12));
     transition-duration: var(--cs-dur-fast);
+  }
+  .cs-act:active .cs-act-meta,
+  .cs-act-busy .cs-act-meta {
+    transform: translateY(2px);
   }
 
   /* ⚠ 焦点环用墨不用红（规范 §5.4）。
@@ -2731,9 +2741,7 @@
   }
 
   /* 「正在投递」：**只有被点的那一条**。其余纸条的投影一根不动。 */
-  .cs-act-busy,
-  .cs-act-busy::before {
-    filter: none;
+  .cs-act-busy {
     cursor: progress;
   }
 
