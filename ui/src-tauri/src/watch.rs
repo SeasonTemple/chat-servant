@@ -1304,8 +1304,32 @@ fn absorb_round(
         seen.drain(..seen.len() - SEEN_WINDOW);
     }
 
-    // 面板只并**新的**：重读到的旧消息不该在面板上重复出现。
-    *display = chatservant_perceive::merge_into_stream(display, &novel);
+    // `novel` 已经由 `novel_messages(seen, current)` 按多重集计数滤掉了旧消息，
+    // 这里面的每一条都是本轮真正新到的（包括对方隔了几句之后把同一句话又发了一遍）。
+    // 若再丢进 `merge_into_stream` 按 `DEDUP_TAIL` 集合去重，会把对方第二次发的同文消息
+    // 当重复删掉，导致面板引文卡在上一条旧消息（如「ガガーリン吉」）不更新。
+    for m in &novel {
+        display.push(m.clone());
+    }
+    if display.len() > chatservant_perceive::MESSAGE_WINDOW {
+        let drop_n = display.len() - chatservant_perceive::MESSAGE_WINDOW;
+        display.drain(..drop_n);
+    }
+    let mut used_ids = std::collections::HashSet::new();
+    for m in display.iter_mut() {
+        let base = format!("{:?}:{}", m.speaker, m.text);
+        if used_ids.insert(base.clone()) {
+            m.id = base;
+        } else {
+            for n in 2u32.. {
+                let cand = format!("{base}#{n}");
+                if used_ids.insert(cand.clone()) {
+                    m.id = cand;
+                    break;
+                }
+            }
+        }
+    }
     novel
 }
 
