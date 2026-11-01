@@ -39,6 +39,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Windows 的 stdout 默认 cp1252，打印中文会 UnicodeEncodeError（CI 的 runner 尤其）。
+# 别指望调用方记得设 PYTHONIOENCODING —— 样板见 scripts/targetgc.py。
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent.parent
 
 LINE_RE = re.compile(
