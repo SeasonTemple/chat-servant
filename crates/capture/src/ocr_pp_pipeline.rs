@@ -71,7 +71,7 @@ pub struct ModelSet {
 /// | | v4 mobile | **v6 small（本套）** |
 /// |---|---|---|
 /// | det 归一化 | `(x/255 - [.485,.456,.406]) / [.229,.224,.225]` | **`(x/255 - .5) / .5`** |
-/// | rec 归一化 | `(x/255 - .5) / .5` | **只 `x/255`** |
+/// | rec 归一化 | `(x/255 - .5) / .5` | **`(x/255 - .5) / .5`**（与 rapidocr `resize_norm_img` 一致） |
 /// | det 最短边 | 原生 | **放大到 ≥736** |
 ///
 /// 带着 v4 的常数去跑 v6，det 是**一个框都读不出来**（`cargo xtask ocr
@@ -86,7 +86,7 @@ pub const V6_SMALL: ModelSet = ModelSet {
     keys: "ppocrv6-small/ppocrv6_dict.txt",
     label: "PP-OCRv6 small",
     det_norm: ([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-    rec_norm: ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+    rec_norm: ([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
     det_min_side: 736,
 };
 
@@ -789,13 +789,83 @@ pub fn ctc_decode(vals: &[f32], shape: &[usize], chars: &[String]) -> (String, f
         );
         return (String::new(), 0.0);
     }
+    let raw = ctc_decode_pass(vals, t, c, chars, None);
+    // 中文行里的「彳/亍 ↔ イ/ィ/テ」同形歧义归并（票 96）：
+    // PP-OCRv6 词典同时含汉字「彳/亍」与无衬线体下几乎同形的片假名「イ/ィ/テ」。
+    // 单字概率被这三个类瓜分后会出现两种退化：
+    //   ① 假名分支略高 ⇒ 中文行里冒出「ィ/イ/テ」；
+    //   ② 三家合起来 > 0.5（确定有字），但被拆成三份后每一份都略低于 <blank>（如 0.42）
+    //      ⇒ greedy argmax 选了 <blank>，把「彳」直接吞掉（「彳亍」→「亍」）。
+    // 只在整行含其它汉字（确系中文语境）时把同形假名的概率归并回「彳/亍」，纯日文/西文不动。
+    if let Some(fold) = HomoglyphFold::find(chars) {
+        let folded = ctc_decode_pass(vals, t, c, chars, Some(&fold));
+        if folded.0 != raw.0 && has_cjk_context(&folded.0) {
+            return folded;
+        }
+    }
+    raw
+}
+
+/// 「彳/亍」与无衬线体同形片假名「イ/ィ/テ」在词典里的下标。
+struct HomoglyphFold {
+    chi: usize,
+    kata_i: usize,
+    kata_small_i: usize,
+    chu: usize,
+    kata_te: usize,
+}
+
+impl HomoglyphFold {
+    fn find(chars: &[String]) -> Option<Self> {
+        let idx = |target: &str| chars.iter().position(|s| s == target);
+        Some(Self {
+            chi: idx("彳")?,
+            kata_i: idx("イ")?,
+            kata_small_i: idx("ィ")?,
+            chu: idx("亍")?,
+            kata_te: idx("テ")?,
+        })
+    }
+
+    #[inline]
+    fn pick(&self, row: &[f32], mut best: usize, mut prob: f32) -> (usize, f32) {
+        let p_chi = row[self.chi] + row[self.kata_i] + row[self.kata_small_i];
+        if best == self.kata_i || best == self.kata_small_i || p_chi > prob {
+            best = self.chi;
+            prob = p_chi;
+        }
+        let p_chu = row[self.chu] + row[self.kata_te];
+        if best == self.kata_te || p_chu > prob {
+            best = self.chu;
+            prob = p_chu;
+        }
+        (best, prob)
+    }
+}
+
+/// 行内是否含有「彳/亍」之外的汉字（用来确认处于中文语境，避免误伤纯片假名行）。
+fn has_cjk_context(s: &str) -> bool {
+    s.chars()
+        .any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c) && c != '彳' && c != '亍')
+}
+
+fn ctc_decode_pass(
+    vals: &[f32],
+    t: usize,
+    c: usize,
+    chars: &[String],
+    fold: Option<&HomoglyphFold>,
+) -> (String, f32) {
     let mut text = String::new();
     let mut prev = usize::MAX;
     let mut conf_sum = 0.0f32;
     let mut conf_n = 0usize;
     for i in 0..t {
         let row = &vals[i * c..(i + 1) * c];
-        let (best, prob) = argmax(row);
+        let (mut best, mut prob) = argmax(row);
+        if let Some(f) = fold {
+            (best, prob) = f.pick(row, best, prob);
+        }
         if best != prev && best != BLANK {
             // 直接用 `chars[best]`，**不是 `chars[best - 1]`**。
             // `chars[0]` 是给 blank 留的空占位，真实字符从 `chars[1]` 起，
@@ -1787,8 +1857,8 @@ mod tests {
             (DET_STD[1], 0.5, "det std[1]"),
             (DET_STD[2], 0.5, "det std[2]"),
             // v6 的 rec 只除 255：用 mean=0 / std=1 表达「不减均值」。
-            (REC_MEAN[0], 0.0, "rec mean[0]"),
-            (REC_STD[0], 1.0, "rec std[0]"),
+            (REC_MEAN[0], 0.5, "rec mean[0]"),
+            (REC_STD[0], 0.5, "rec std[0]"),
         ] {
             assert!(
                 (got - want).abs() < 1e-6,
@@ -2773,6 +2843,48 @@ mod tests {
             "C 比词典多 1 类时居然还解出了文本：{text:?}。\
              这是 2026-10-18 真机「逐行 0 行」的同一个 bug"
         );
+    }
+
+    /// **中文行里「彳/亍」的概率被同形片假名「イ/ィ/テ」瓜分时，归并回汉字，不吞字也不冒假名。**
+    ///
+    /// 2026-11-01 真机复现（票 96）：在 `t=12` 处模型给出
+    /// `<blank>=0.424, ィ=0.329, 彳=0.138, イ=0.107`——非空概率合计 0.574 > 0.424，
+    /// 但被拆成三份后单类最高只有 0.329 < 0.424，朴素 `argmax` 选了 `<blank>` 把「彳」吞掉；
+    /// 另一处 `<blank>=0.219, ィ=0.435, 彳=0.299` 则选出假名「ィ」。
+    /// 同时验证反面：不含其它汉字的纯假名行（如 `"イィテ"`）原样保留，不被误改。
+    #[test]
+    fn ctc_folds_katakana_homoglyphs_in_chinese_lines_without_touching_pure_kana() {
+        // 0=blank, 1=不, 2=彳, 3=イ, 4=ィ, 5=亍, 6=テ
+        let chars: Vec<String> = vec!["", "不", "彳", "イ", "ィ", "亍", "テ"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let c = chars.len();
+        // T=3：
+        //   t=0：「不」= 0.99
+        //   t=1：<blank>=0.424, 彳=0.138, イ=0.107, ィ=0.329（单类最高是 <blank>，三家合力 0.574）
+        //   t=2：亍=0.30, テ=0.45, <blank>=0.25（单类最高是假名「テ」，两家合力 0.75）
+        let mut vals = vec![0.0f32; 3 * c];
+        vals[1] = 0.99;
+        vals[c] = 0.424;
+        vals[c + 2] = 0.138;
+        vals[c + 3] = 0.107;
+        vals[c + 4] = 0.329;
+        vals[2 * c] = 0.25;
+        vals[2 * c + 5] = 0.30;
+        vals[2 * c + 6] = 0.45;
+        let (text, _) = ctc_decode(&vals, &[1, 3, c], &chars);
+        assert_eq!(
+            text, "不彳亍",
+            "中文行里同形假名瓜分概率后仍丢字或冒假名：{text:?}"
+        );
+
+        // 反面：整行没有其它汉字（纯假名），不触发归并。
+        let mut pure_kana = vec![0.0f32; 2 * c];
+        pure_kana[4] = 0.80; // ィ
+        pure_kana[c + 6] = 0.85; // テ
+        let (kana_text, _) = ctc_decode(&pure_kana, &[1, 2, c], &chars);
+        assert_eq!(kana_text, "ィテ", "纯假名行被误改成了汉字：{kana_text:?}");
     }
 
     /// **det 预处理输出长度对，且是 `[1,3,H,W]` 的 NCHW 排列。**
