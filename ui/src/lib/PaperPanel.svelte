@@ -2212,8 +2212,16 @@
      *   `margin: -8px` 的撕边外沿要靠这段空间露出去 ——
      *   裁掉就等于啃进纸芯（最浅一档内缩只有 5.5 CSS px）。
      *   ⇒ 这 8px 不是内边距，是**裁切线的让位**，与上面那条互不冲突。
+     *
+     *   ⚠ 2026-11-01 真机调优：左右同样留 14px 让位 + 负边距 -14px 抵消。
+     *   `.cs-actions` 有 `overflow-x: hidden; overflow-y: auto` 与 `mask-image`；
+     *   若左右 padding 为 0，`.cs-act` 的 `drop-shadow` 扩散到 x=0 / x=316 时会被
+     *   容器边界齐平截断，在候选组四周切出深色矩形暗框。
+     *   外扩 14px padding 并用 margin: -6px -14px 抵消后，纸条内容宽仍为 316px 不变，
+     *   而阴影在触及容器裁剪壁之前已自然衰减到 0。
      */
-    padding: 8px 0;
+    margin: -6px -14px;
+    padding: 14px 14px;
   }
 
   /* ⚠⚠⚠ **有候选时：候选区吃满剩余空间，三张纸摊开填满**（2026-10-25，
@@ -2630,7 +2638,8 @@
      *    被紧挨在它后面的下一条候选纸条（DOM 顺序靠后）直接盖住了 80%！
      *    给 hover/focus-visible 补 `z-index: 2` 并抬起 `-3px` + `0 10px 18px / 34%`，
      *    悬停那一条真正浮在相邻纸条之上。 */
-    filter: drop-shadow(0 2px 4px rgb(24 18 10 / 0.16));
+    filter: drop-shadow(0 2px 3px rgb(24 18 10 / 0.12));
+    transform-origin: 100% 100%;
     transition:
       transform var(--cs-dur) var(--cs-ease),
       filter var(--cs-dur) var(--cs-ease);
@@ -2657,8 +2666,8 @@
   .cs-act:hover,
   .cs-act:focus-visible {
     z-index: 2;
-    transform: translateY(-3px);
-    filter: drop-shadow(0 10px 18px rgb(24 18 10 / 0.34));
+    transform: perspective(520px) rotateX(-1.8deg) rotateY(-1.8deg) translateY(1px);
+    filter: drop-shadow(-2px 3px 5px rgb(24 18 10 / 0.18));
   }
 
   /* ── 按下：**压回纸面** ────────────────────────────────────────
@@ -2671,8 +2680,9 @@
    * `:active` 抓的是**真实鼠标按住的那一瞬**，比 `:hover` 更窄，
    *   所以两者的位移量必须分开写：悬停 -2px，按下 +1px。 */
   .cs-act:active {
-    transform: translateY(1px) rotate(0deg);
-    filter: drop-shadow(0 2px 4px rgb(24 18 10 / 0.14));
+    z-index: 2;
+    transform: perspective(420px) rotateX(-3.2deg) rotateY(-3.2deg) translateY(2px);
+    filter: drop-shadow(-1px 1px 2px rgb(24 18 10 / 0.09));
     transition-duration: var(--cs-dur-fast);
   }
 
