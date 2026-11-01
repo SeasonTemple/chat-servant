@@ -2674,7 +2674,15 @@
       filter var(--cs-dur) var(--cs-ease);
   }
 
-  /* ── 悬停不做形变与阴影变化（2026-11-01 用户定案：只在点击时下压右下角） ── */
+  /* ── 悬停 / 聚焦：只加深纸条投影（不做形变，文字零变换不发糊；压角留给点击） ── */
+  .cs-act:hover,
+  .cs-act:focus-visible {
+    z-index: 2;
+  }
+  .cs-act:hover::before,
+  .cs-act:focus-visible::before {
+    filter: drop-shadow(0 6px 12px rgb(24 18 10 / 0.24));
+  }
 
   /* ── 按下 / 点击投递：射影同应性 matrix3d 钉死左上(0,0)、左下(0,H)、右上(W,0)，
    *    只把右下角(W,H)向纸面内侧与下方压入；保留整条底影（不设 filter:none），
