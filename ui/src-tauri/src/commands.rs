@@ -806,7 +806,7 @@ fn deliver_send(hwnd: windows::Win32::Foundation::HWND, candidate_id: &str) -> D
 /// 那么 `watch::step` 在刚生成完候选、立即调 `auto_send(&top.id)` 时，
 /// `STATE.s.candidates` 里还是 `Phase::Drafting` 期间被清空的 `[]`，
 /// 导致 `deliver_send` → `candidate_text("c0")` 恒返回 `None`、自动发送永远失败。
-pub fn sync_candidates(candidates: &[crate::contract::DraftCandidate]) {
+pub fn sync_candidates(candidates: &[crate::watch::DraftCandidate]) {
     if let Ok(mut g) = STATE.lock()
         && let Some(s) = g.as_mut()
     {
