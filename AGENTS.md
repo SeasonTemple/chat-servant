@@ -553,7 +553,7 @@ fsutil reparsepoint query "$env:LOCALAPPDATA\ort.pyke.io"   # 实测仍是 Mount
 里还躺着 14.9 MiB 的旧权重（两个 `.onnx`）。**现在的代码根本不读那里**——
 `ocr_pp::models_dir()` 的查找顺序是「环境变量 > 外壳 > 仓库 target/models >
 exe 旁 > `%TEMP%`」，**没有 `%APPDATA%`**（`ocr_pp.rs:147-168`；
-守卫 `main.rs:369 models_dir_still_finds_the_repo_weights_without_a_shell`
+守卫 `ui/src-tauri/src/main.rs:408` 的 `models_dir_still_finds_the_repo_weights_without_a_shell`
 会断言落点不含 `AppData`）。⇒ 那是旧版留下的**死文件**，已删。
 ⚠ 同目录下的 `close_behavior.txt` / `mark_shape.txt` **必须留着**：
 它们是**用户设置**（关闭行为、记号形状），按上面那条判据
