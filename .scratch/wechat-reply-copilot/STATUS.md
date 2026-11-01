@@ -128,5 +128,5 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `86-rank-dropped-candidates-when-text-was-rewritten.md` | 6/6 |
 | `87-tokio-asyncfd-unsound-advisory.md` | 5/5 |
 | `89-drag-shows-the-whole-window-rectangle.md` | 7/7 |
-| `93-real-chat-text-reached-a-commit.md` | 12/12 |
+| `93-real-chat-text-reached-a-commit.md` | 15/15 |
 | `98-longdraft-no-longer-stresses-the-draft-scroller.md` | 3/3 |
