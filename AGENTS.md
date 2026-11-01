@@ -775,9 +775,15 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
   - 且若当时算过，会顺带挖出一条更值钱的结论：**只看单条判据会选到
     另一组「都达标但全冷」的 token** ⇒ 那才是判据必须成对出现的原因。
 
-- **`ui/pnpm-workspace.yaml` 的 `allowBuilds: {esbuild: true}` 不能删。** 设置名写错
-  （用 `onlyBuiltDependencies`）**不会报错，只会静默不生效**，然后
-  `pnpm install` 之后连 `pnpm build` 都跑不起来。
+- **`ui/pnpm-workspace.yaml` 的 `allowBuilds` 字段名不能写错。** 设置名写错
+  （用 `onlyBuiltDependencies`）**不会报错，只会静默不生效**，被拦下的包
+  postinstall 不跑，然后 `pnpm install` 之后连 `pnpm build` 都跑不起来。
+  ⚠ **2026-11-01 订正**：这里原来写「`allowBuilds: {esbuild: true}` 不能删」——
+  **那个 esbuild 已经不在依赖树里了**（`0f25d64` 升 SvelteKit 3 / vite 8 之后
+  改由 rolldown 打包）。实测 `pnpm why esbuild` **零输出 exit=0**、
+  `ui/node_modules/.pnpm` 下 `esbuild*` 目录 **0 个**、`rolldown@1.2.15 ← vite@8.3.5` 在。
+  ⇒ 这一行现在**不承重**（删了也没有包会被拦）；留着是因为「字段名写错就静默失效」
+  那半仍是活的知识，而它守的东西已经换人了。
 - **Win11 托盘溢出区（`TopLevelWindowForOverflowXamlIsland`）的 UIA 坐标不可信**——
   实测图标报的 `BoundingRectangle` 会跑到 popup 自己外面。展开按钮还是 **toggle**，
   连点两次会把已经展开的溢出区关掉。
