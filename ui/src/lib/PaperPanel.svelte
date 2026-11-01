@@ -2622,9 +2622,15 @@
      *   轮廓 ⇒ 直边自动消失，撕口那一侧的投影随撕口起伏。
      *   ⚠ 不是「调淡一点就算修好」：只要还用矩形投影，
      *     撕边留出的每一条透明边上都还会浮出一条直线。 */
-    /* 2026-11-01（用户真机反馈）：静息态不能给 20% 的重影——未 hover 时三条都像带方框阴影，
-     * 与 hover 的 26% 几乎拉不开差距。静息态只留 5% 极浅贴纸影，明显投影留给 hover。 */
-    filter: drop-shadow(0 1px 2px rgb(24 18 10 / 0.05));
+    /* 2026-11-01（用户真机二轮反馈）：
+     * ① 之前把静息态压到 5% 导致纸条与底纸完全融成一片、看不出候选是撕边纸条；
+     *    恢复 16% 贴纸影（配合 632×160 全宽真撕口位图，轮廓参差清晰且无内嵌方框）；
+     * ② 原先 hover 的阴影之所以「只是加深了一点」，真实根因是 `.cs-act` 有 `margin: -8px 0`
+     *    纵向叠压，而 `.cs-act:hover` 没提 `z-index` ⇒ 第 1/2 条向下投出的 `+8px` 阴影
+     *    被紧挨在它后面的下一条候选纸条（DOM 顺序靠后）直接盖住了 80%！
+     *    给 hover/focus-visible 补 `z-index: 2` 并抬起 `-3px` + `0 10px 18px / 34%`，
+     *    悬停那一条真正浮在相邻纸条之上。 */
+    filter: drop-shadow(0 2px 4px rgb(24 18 10 / 0.16));
     transition:
       transform var(--cs-dur) var(--cs-ease),
       filter var(--cs-dur) var(--cs-ease);
@@ -2650,8 +2656,9 @@
    * 才算「同一个东西的两种到达方式」，而不是两个控件。 */
   .cs-act:hover,
   .cs-act:focus-visible {
-    transform: translateY(-2px);
-    filter: drop-shadow(0 8px 16px rgb(24 18 10 / 0.26));
+    z-index: 2;
+    transform: translateY(-3px);
+    filter: drop-shadow(0 10px 18px rgb(24 18 10 / 0.34));
   }
 
   /* ── 按下：**压回纸面** ────────────────────────────────────────
