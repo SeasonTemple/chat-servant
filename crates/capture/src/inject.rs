@@ -28,7 +28,7 @@ use windows::Win32::System::Memory::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_V,
+    KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY, VK_A, VK_BACK, VK_CONTROL, VK_V,
 };
 
 use chatservant_core::dispatch::DeliveryReceipt;
@@ -302,6 +302,18 @@ fn send_inputs(inputs: &mut [INPUT]) -> Result<(), String> {
     }
 }
 
+/// 先 `Ctrl+A` 全选输入框既有内容，再按 `Backspace` 清空（2026-11-01 真机补齐）。
+///
+/// 无论 `Manual`（只填入）下切换不同候选，还是 `Auto`（自动发送）下点候选发送，
+/// 都必须先把输入框里上一次填入或残留的文字清掉再粘贴，否则多次点选会在输入框里首尾拼接。
+pub fn clear_input() -> Result<(), String> {
+    send_keys(&[VK_CONTROL, VK_A])?;
+    std::thread::sleep(Duration::from_millis(12));
+    send_keys(&[VK_BACK])?;
+    std::thread::sleep(Duration::from_millis(12));
+    Ok(())
+}
+
 /// Ctrl+V。
 pub fn paste() -> Result<(), String> {
     send_keys(&[VK_CONTROL, VK_V])
@@ -367,7 +379,10 @@ pub fn fill_input_box(text: &str, target: HWND) -> DeliveryReceipt {
         return DeliveryReceipt::Failed(format!("无法把焦点交给目标窗口：{e}"));
     }
 
-    // 第三步：Ctrl+V。
+    // 第三步：先清空输入框（Ctrl+A + Backspace），再 Ctrl+V 粘贴。
+    if let Err(e) = clear_input() {
+        return DeliveryReceipt::Failed(format!("清空输入框失败：{e}"));
+    }
     if let Err(e) = paste() {
         // 焦点已经抢到了，**可能**在重试期间用户已经粘贴了。
         // 但 Ctrl+V 只有一发：失败就是没发出去，可以重放。
@@ -640,6 +655,21 @@ mod tests {
     }
 
     /// 单键时序列就是 down/up 一对。
+    #[test]
+    fn clear_input_uses_ctrl_a_chord_then_backspace() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_A, VK_BACK, VK_CONTROL};
+        assert_eq!(
+            seq(&[VK_CONTROL, VK_A]),
+            vec![
+                (VK_CONTROL.0, false),
+                (VK_A.0, false),
+                (VK_A.0, true),
+                (VK_CONTROL.0, true),
+            ]
+        );
+        assert_eq!(seq(&[VK_BACK]), vec![(VK_BACK.0, false), (VK_BACK.0, true)]);
+    }
+
     #[test]
     fn a_single_key_is_a_plain_down_up() {
         use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
