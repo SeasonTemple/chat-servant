@@ -64,6 +64,9 @@ THEMES = ["light", "dark"]
 LANGS = ["zh", "en", "mixed"]
 SEEDS = [0, 1]
 
+# 小字组的降采样倍数：渲染字号 = size * DS，缩回后等效字号 = size。
+DS = 3
+
 # 取自真实 IM 的句式，刻意控制在 4~16 字，保证单行放得下。
 POOL = {
     "zh": [
@@ -79,6 +82,14 @@ POOL = {
         "我把会议纪要发群里了",
         "文档链接发你邮箱了",
         "服务器昨晚重启过一次",
+        # 下面这几条是故意挑形近字的（2026-11-01，票 96）：真机那次错的是
+        # 「彳」被读成片假名「ィ」——三笔 vs 两笔。语料里没有这些字，
+        # 这条判据就永远看不见那一类错。
+        "他彳亍在门口没进去",
+        "这个字念彳亍的彳",
+        "于 丁 亍 干 这几个长得像",
+        "口 ロ 囗 这三个别混",
+        "カ 力 刀 也容易看错",
     ],
     "en": [
         "Can you send me the file",
@@ -129,10 +140,22 @@ MARGIN = 24
 PEEK = 3  # 纵向留白，避免气泡贴边被 det 截断
 
 
-def render(lang: str, size: int, theme: str, seed: int) -> dict:
-    """渲染一张语料图，返回带 ground truth 的记录。"""
-    rng = random.Random(f"{SEED}-{lang}-{size}-{theme}-{seed}")
-    font = ImageFont.truetype(str(FONTS / FONT_BY_LANG[lang]), size)
+def render(lang: str, size: int, theme: str, seed: int, ds: int = 1) -> dict:
+    """渲染一张语料图，返回带 ground truth 的记录。
+
+    ## ds：先按 ds 倍字号渲染，再按 ds 倍 LANCZOS 下采样
+
+    为什么要这一组（2026-11-01，票 96 第十六节）：真微信截图里一行只有 8~14 px 高，
+    而 rec 的输入高固定 48 ⇒ 送进去前要放大 3~6 倍。直接调 ImageFont 以 12px 渲染
+    出来的字**笔画是干净的**，放大之后结构还在，于是合成语料完全看不出那类错
+    （实测：点采样与双线性在默认子集上 CER 都是 0.12%，一模一样）。
+
+    先大后缩才会留下**重采样过的灰阶边缘**，那才是真实条件。
+    真值里 font_px 记的是缩完之后的等效字号，render_px 记实际渲染的字号。
+    """
+    px = size * ds
+    rng = random.Random(f"{SEED}-{lang}-{size}-{theme}-{seed}-ds{ds}")
+    font = ImageFont.truetype(str(FONTS / FONT_BY_LANG[lang]), px)
     col = THEME_COLORS[theme]
 
     # 挑 5 条不重复的句子
@@ -142,9 +165,9 @@ def render(lang: str, size: int, theme: str, seed: int) -> dict:
     first_is_self = rng.random() < 0.5
 
     probe = ImageDraw.Draw(Image.new("RGB", (8, 8)))
-    pad_x = max(6, round(size * 0.6))
-    pad_y = max(3, round(size * 0.35))
-    gap_y = max(8, round(size * 0.7))
+    pad_x = max(6, round(px * 0.6))
+    pad_y = max(3, round(px * 0.35))
+    gap_y = max(8, round(px * 0.7))
 
     boxes = []
     for t in texts:
@@ -178,7 +201,7 @@ def render(lang: str, size: int, theme: str, seed: int) -> dict:
 
         draw.rounded_rectangle(
             [x, y, x + tw + 2 * pad_x, y + th + 2 * pad_y],
-            radius=max(4, round(size * 0.35)),
+            radius=max(4, round(px * 0.35)),
             fill=fill,
         )
         # 字形实际落点：textbbox 有 bearing，往内缩 pad + 上 bearing
@@ -207,7 +230,15 @@ def render(lang: str, size: int, theme: str, seed: int) -> dict:
         )
         y += th + 2 * pad_y + gap_y
 
-    ident = f"{lang}_{size}_{theme}_s{seed}"
+    if ds > 1:
+        # LANCZOS：真实截图的缩放也是带低通的，最近邻会人为保留高频、把测试变简单
+        img = img.resize((round(width / ds), round(height / ds)), Image.LANCZOS)
+        width, height = img.size
+        for ln in lines:
+            for key in ("band", "bubble"):
+                ln[key] = [round(v / ds) for v in ln[key]]
+
+    ident = f"{lang}_{size}_{theme}_s{seed}" + (f"_ds{ds}" if ds > 1 else "")
     path = CORPUS / f"{ident}.png"
     img.save(path)
 
@@ -216,6 +247,8 @@ def render(lang: str, size: int, theme: str, seed: int) -> dict:
         "path": str(path.relative_to(ROOT)).replace("\\", "/"),
         "lang": lang,
         "font_px": size,
+        "render_px": px,
+        "ds": ds,
         "font_file": FONT_BY_LANG[lang],
         "theme": theme,
         "seed": seed,
@@ -233,6 +266,14 @@ def main() -> None:
         for size in SIZES
         for theme in THEMES
         for seed in SEEDS
+    ]
+    # 小字那一组：先按 DS 倍字号渲染、再缩回去（见 render 的 docstring）。
+    # 只取 seed 0 —— 这一组是用来抓「一行只有 8~14 px」那类错的，不需要两套种子。
+    images += [
+        render(lang, size, theme, 0, ds=DS)
+        for lang in LANGS
+        for size in SIZES
+        for theme in THEMES
     ]
     TRUTH.parent.mkdir(parents=True, exist_ok=True)
     TRUTH.write_text(
