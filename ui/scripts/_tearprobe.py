@@ -19,6 +19,25 @@
 **坑二：控制台是 GBK，中文全变 mojibake。** 本项目的教训（见 AGENTS.md）：
 脚本落文件再读，不要靠 stdout 看中文。
 
+**坑三（2026-11-01 才发现，此前两版都错）：缩放常数不能取 380×560。**
+本脚本原来写 `FRAME_W, FRAME_H = 380.0, 560.0`，即把 760×1120 源图当成铺满
+整张面板。实际几何在 `ui/static/probe-sheet.svg` 里：
+
+    <svg width="380" height="560" viewBox="0 0 380 560">
+      <g filter="url(#sheetDrop)" transform="translate(16,0)">
+        <image x="0" y="0" width="348" height="512" ...>
+
+`.cs-sheet` 用 `background: url('/probe-sheet.svg') center / 100% 100%` 把这张
+SVG 拉到 380×560，而 1 SVG 用户单位本来就等于 1 面板 CSS px ⇒
+**源 px -> 面板 px 的正确系数是 348/760 = 0.4579（横）、512/1120 = 0.4571（纵），
+且纸的左缘在面板 x=16。** 旧系数 380/760 = 0.5 偏大 1.09 倍，还会把 x 整体
+左移 16px——于是「顶边内缩 12~27 源 px」被说成「6~13.5 CSS px」，而真值是
+5.5~12.8（顶边）与 8.7~21.5（底边）。量具错了，引它的文档全跟着错。
+
+⇒ 教训不是「这次算错了」，而是**量具自己也得有出处**：这条系数来自 SVG 的
+`<image width/height>` 与 `<g transform>`，改素材时这两处会变，脚本必须从 SVG
+里读，不能写死。下面 `svg_geometry()` 就是干这个的。
+
 跑：uv run --with pillow python ui/scripts/_tearprobe.py
 """
 
@@ -43,24 +62,47 @@ for _stream in (sys.stdout, sys.stderr):
 
 HERE = Path(__file__).resolve().parent.parent  # ui/
 SRC = HERE / "static" / "probe-sheet.png"
+SVG = HERE / "static" / "probe-sheet.svg"
 OUT = Path("target/probe/tearprobe.txt")
 
-FRAME_W, FRAME_H = 380.0, 560.0
+
+def svg_geometry() -> tuple[float, float, float, float, float]:
+    """从 SVG 读出 (画布宽, 画布高, 纸宽, 纸高, 纸左边距)，都是面板 CSS px。"""
+    import re
+
+    text = SVG.read_text(encoding="utf-8")
+    canvas = re.search(r'<svg[^>]*width="([\d.]+)"[^>]*height="([\d.]+)"', text)
+    image = re.search(r'<image[^>]*width="([\d.]+)"[^>]*height="([\d.]+)"', text)
+    shift = re.search(r'transform="translate\(([-\d.]+),', text)
+    if not (canvas and image and shift):
+        raise SystemExit("probe-sheet.svg 结构变了：读不到 svg/image/translate —— 量具要改")
+    return (
+        float(canvas.group(1)),
+        float(canvas.group(2)),
+        float(image.group(1)),
+        float(image.group(2)),
+        float(shift.group(1)),
+    )
 
 
 def main() -> None:
     im = Image.open(SRC).convert("RGBA")
     w, h = im.size
     px = im.load()
-    sx = FRAME_W / w
-    sy = FRAME_H / h
+    canvas_w, canvas_h, paper_w, paper_h, paper_x = svg_geometry()
+    sx = paper_w / w          # 源 px -> 面板 CSS px（横向）
+    sy = paper_h / h          # 源 px -> 面板 CSS px（纵向）
+    # ⚠ 纸的左缘在面板 x=paper_x，所以「源图第 0 列」不等于「面板第 0 列」。
 
     amax = max(px[x, y][3] for y in range(0, h, 3) for x in range(0, w, 3))
     thr = amax - 6
     L: list[str] = []
     p = L.append
 
-    p(f"源图 {w}x{h}   面板 CSS 缩放 x{sx:.4f} y{sy:.4f}")
+    p(f"源图 {w}x{h}")
+    p(f"SVG 画布 {canvas_w:g}x{canvas_h:g}，纸 <image> {paper_w:g}x{paper_h:g} 左缘 x={paper_x:g}")
+    p(f"源 px -> 面板 CSS px：x {sx:.4f}  y {sy:.4f}（{1 / sx:.2f} 源 px / CSS px）")
+    p("⚠ 这两个数从 SVG 的 <image width/height> 与 <g transform> 读出来，不写死（坑三）")
     p(f"alpha 最大值 {amax}   实心阈值 A>={thr}（相对最大值，坑一）")
     p("")
 
@@ -79,6 +121,38 @@ def main() -> None:
     p(f"  ⇒ 顶边内缩 min={min(valid)} max={max(valid)} "
       f"均值={sum(valid) / len(valid):.1f} 源px（= "
       f"{sum(valid) / len(valid) * sy:.1f} CSS px）")
+    p("    ⚠ 这个 min/max 把**画幅两端的空隙列**也算进来了：x=0 与 x=744 那几列整条"
+      "透明，读到的是 -1 与 208 这种数，它们不是撕口。下文另有「内容列」区间。")
+    p("")
+
+    # ── 顶边 / 底边：只取内容列（纸的实际横向范围，去掉两端收边） ──────
+    # ⚠ 为什么单独一段：整幅 min/max 会被两端的空隙列与圆角收边支配（顶边读到
+    #   208 源 px、底边两侧读到 43 CSS px），而那些列上面根本没有内容。
+    #   布局关心的只有「内容会落在的那一段」，所以判据必须收在这里。
+    p("── 顶边 / 底边内缩：只取内容列（面板 x 32 .. 348）──")
+    # ⚠ 换算式必须**先减纸左缘**再除 sx：源列 0 对应面板 x=paper_x，不是 x=0。
+    #   写成 32/sx 会得到源列 70，实际应为 (32-16)/sx = 35；右端同理少算 16px。
+    band = range(int(round((32 - paper_x) / sx)), int(round((348 - paper_x) / sx)))
+    for label, finder in (("顶边", "top"), ("底边", "bottom")):
+        vals = []
+        for x in band:
+            if not (0 <= x < w):
+                continue
+            if finder == "top":
+                y = next((yy for yy in range(h) if px[x, yy][3] >= thr), None)
+                if y is not None:
+                    vals.append(y)
+            else:
+                y = next((yy for yy in range(h - 1, -1, -1) if px[x, yy][3] >= thr), None)
+                if y is not None:
+                    vals.append(h - 1 - y)
+        if not vals:
+            p(f"  {label}：该区间内无实心像素")
+            continue
+        srt = sorted(vals)
+        q = lambda pct: srt[min(len(srt) - 1, int(len(srt) * pct / 100))]
+        p(f"  {label}内缩 {srt[0]}~{srt[-1]} 源px = {srt[0] * sy:.1f}~{srt[-1] * sy:.1f} "
+          f"面板 CSS px   p50={q(50) * sy:.1f}  列数 {len(srt)}")
     p("")
 
     p("── 顶边 alpha 剖面（20 行，看渐变层数）──")

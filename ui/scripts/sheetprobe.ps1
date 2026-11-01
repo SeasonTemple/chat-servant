@@ -132,11 +132,11 @@ try {
     Write-Output ("    x = {0:P0} ({1,4} px)  ->  {2,5} CSS px" -f $frac, $x, $px)
   }
   Write-Output ''
-  Write-Output '  panel/+page.svelte:169 的注释写「撕口 17.5px 已含在 SVG 里」'
-  Write-Output '  ⚠ 实测 7~11 CSS px，**对不上**。而且这不是 alpha 阈值造成的：'
-  Write-Output '    alpha 门槛从 250 降到 1，五个列的读数只在 5.5~11 之间动，够不到 17.5。'
-  Write-Output '  → padding-top: 40px 仍比实测撕口深，**布局是安全的**，'
-  Write-Output '    但那句「17.5px 已含在 SVG 里」是不实描述，已订正为实测值。'
+  Write-Output '  ⚠ 上面这五个数是 **SVG 固有空间**（348 宽），不是面板 CSS 空间；'
+  Write-Output '    面板空间要再乘 380/348 = 1.09，见下面「右上角」那一段。'
+  Write-Output '  ⚠ 五列只是个采样：全幅按同一门槛扫，12~28 源 px（x=40..720），'
+  Write-Output '    极值出现在右端 x>744 的空隙列，那不是撕口。'
+  Write-Output '  → padding-top: 40px 比实测撕口深得多，**布局是安全的**（票 44 验过）。'
 
   # ── 角部：窗口键所在的那一小块必须单独量 ──────────────────────
   # ⚠ 为什么单独一段：上面那五个采样点在 y = 画幅的 15%~85%，
