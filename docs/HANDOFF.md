@@ -23,6 +23,7 @@
 | 设计规范、未决设计问题 | `docs/设计规范.md` / `docs/面板设计.md` | §编号，可引用 |
 | 为什么要这么改 | commit message | Conventional Commits |
 | 环境事实（依赖版本、当前状态） | **直接跑命令** | `git log` / `cargo deny check` |
+| **前端做到哪一步了** | `docs/前端设计进度.md` | 单一出处（2026-11-01 整篇按实测校过一次） |
 
 > ⚠ **最后一行是最容易被违反的一条。** 抄一份 `git status` 或
 > `cargo test` 的输出进仓库，必然过期，而且过期之后没人会去删它——
@@ -183,7 +184,7 @@ cd ui && pnpm dev      # 然后开 http://localhost:1420/?demo=1&state=drafted
 **云端改 UI 就在这个页面上迭代。**
 
 ⚠ 夹具里手写的字段（尤其 `phase`）曾经骗过人：真实链路少发一个字段，
-八态却照样在 demo 里全渲染得出来。改数据契约时，**demo 绿不等于真机通**。
+`?demo=1&state=` 照样全渲染得出来（个数以 `git ls-files ui/static/demo` 为准，别写死）。改数据契约时，**demo 绿不等于真机通**。
 
 ---
 
