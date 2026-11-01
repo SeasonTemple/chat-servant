@@ -119,7 +119,7 @@ pub const PEER_NAME_UPSCALE: u32 = 3;
 /// ⚠ 真机实测：「小号」的墨迹到偏移 47，加余量后裁到 55，
 /// 而对照实验里用的是 112 px 宽（比这宽得多）⇒ 结论一致：
 /// 裁到「墨迹右边界 + 余量」与裁到 112 px 的**读数逐字相同**。
-pub const PEER_NAME_BAND_PAD: i32 = 8;
+pub const PEER_NAME_BAND_PAD: i32 = 24;
 
 /// 从**推导出的头部行**里读会话名。坐标系要求同 [`crate::identity`]——**整帧**。
 ///
