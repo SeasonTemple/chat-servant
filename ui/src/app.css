@@ -404,50 +404,19 @@ button {
  *    `::-webkit-scrollbar` 是 Chromium 的 —— WebView2 是 Chromium，
  *    所以本机真正生效的是后者，而**只写标准属性在 Blink 里被忽略**。
  */
+/* 2026-11-01（规范 §4.2c-quater 统一）：全仓所有滚动容器（.cs-set / .cs-draft / .cs-actions）
+ * 一律藏掉原生滚动条（消掉 6px 灰块与横向滚动条），改用上下 32px 边缘渐隐 + 滚动时浮出的 2px 纸边细线。 */
 .cs-set,
+.cs-draft,
 .cs-actions {
-  /***这里必须只写 `::-webkit-scrollbar`，不能同时写标准属性**（2026-10-16 实测）。
-   *
-   *   CSS 滚动条模块规定：`scrollbar-width` **不为 `auto`** 时，
-   *   Blink 会**忽略** `::-webkit-scrollbar` 的那一套。于是两套都写 =
-   *   标准属性生效、webkit 那套被跳过，实测槽宽 = **10px**（`thin` 的值），
-   *   而不是设计的 6px —— `budget.html` 量 `offsetWidth - clientWidth` 读到的就是 10。
-   *
-   *   原先 `PanelSettings.svelte` 里两套都写，注释还写着
-   *   「只写标准属性在 WebView2 里不生效」，**那句话把因果说反了**：
-   *   不是标准属性不生效，是它**接管之后** webkit 那套不生效。
-   *
-   *   只写 webkit 那套会失去 Firefox 支持。本项目**只发 Windows 安装包**
-   *     （`.github/workflows/release.yml` 出 msi + nsis），运行时是 WebView2
-   *     = Chromium ⇒ 这条代价是 0。哪天要支持 Firefox，得把标准属性
-   *     **换成** webkit 那套，而不是两者并存。
-   */
-  scrollbar-width: auto;
+  scrollbar-width: none;
 }
 
 .cs-set::-webkit-scrollbar,
+.cs-draft::-webkit-scrollbar,
 .cs-actions::-webkit-scrollbar {
-  width: 6px;
-}
-
-.cs-set::-webkit-scrollbar-track,
-.cs-actions::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.cs-set::-webkit-scrollbar-thumb,
-.cs-actions::-webkit-scrollbar-thumb {
-  /* ⚠ 混纸，不混 `transparent`：滚动条画在纸上面，而半透明底色在
-   *   Tauri 透明窗口里整层不绘制（见 `--cs-paper` 的注释）。
-   *   42% 是当初定的手感，**没改**，只是把混色对象从 `transparent`
-   *   换成背后那张纸——在浏览器里逐像素等价。 */
-  background: color-mix(in srgb, var(--cs-ink-2) 42%, var(--cs-paper));
-  border-radius: 1px;
-}
-
-.cs-set::-webkit-scrollbar-thumb:hover,
-.cs-actions::-webkit-scrollbar-thumb:hover {
-  background: var(--cs-ink-2);
+  width: 0;
+  height: 0;
 }
 
 /* 键盘可达性：面板里所有可点的东西都必须有可见焦点环。

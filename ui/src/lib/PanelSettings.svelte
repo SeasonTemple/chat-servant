@@ -42,6 +42,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+  import type { Attachment } from 'svelte/attachments';
   import TierSwitch from '$lib/TierSwitch.svelte';
   import SegSlider from '$lib/SegSlider.svelte';
   import { IS_DEMO as DEMO } from '$lib/runtime';
@@ -613,6 +614,46 @@
       hint: '自定义端点：协议与厂商解耦，填 base_url 即可。',
     },
   ];
+
+  let moreBelow = $state(false);
+  let moreAbove = $state(false);
+  let setThumb = $state({ top: 0, height: 0 });
+  let setScrolling = $state(false);
+
+  const markSetOverflow: Attachment<HTMLDivElement> = (node) => {
+    let fadeTimer: ReturnType<typeof setTimeout> | undefined;
+    const sync = () => {
+      moreBelow = node.scrollHeight - node.scrollTop - node.clientHeight > 1;
+      moreAbove = node.scrollTop > 1;
+      const span = node.scrollHeight;
+      const track = node.clientHeight;
+      setThumb =
+        span <= track + 1
+          ? { top: 0, height: 0 }
+          : {
+              top: node.offsetTop + track * (node.scrollTop / span),
+              height: Math.max(24, (track * track) / span),
+            };
+    };
+    const onScroll = () => {
+      sync();
+      if (setThumb.height === 0) return;
+      setScrolling = true;
+      clearTimeout(fadeTimer);
+      fadeTimer = setTimeout(() => {
+        setScrolling = false;
+      }, 800);
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(node);
+    node.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      clearTimeout(fadeTimer);
+      ro.disconnect();
+      node.removeEventListener('scroll', onScroll);
+    };
+  };
 </script>
 
 <!--
@@ -622,7 +663,13 @@
 -->
 <PencilDefs />
 
-<div class="cs-set">
+<span
+  class="cs-scroll-mark"
+  data-scrolling={setScrolling}
+  style:transform="translateY({setThumb.top}px)"
+  style:height="{setThumb.height}px"
+></span>
+<div class="cs-set" {@attach markSetOverflow} data-more={moreBelow} data-more-above={moreAbove}>
   <!--
     一次就说清最要紧的那件事：**改完不用重启**。
     早先是挂在「发送档位」下面那一行，只有走过那一节的人才看得到，
@@ -1142,12 +1189,25 @@
              它回答不了任何问题，看着却像个选择器）；清单为空时给输入框。 -->
         <p class="cs-label" title={g.model_note}>模型名</p>
         {#if g.models.length > 1}
-          <SegSlider
-            value={g.model}
-            options={g.models.map((id) => ({ id, label: id }))}
-            label="模型名"
-            onchange={(v) => pickModel(g, v)}
-          />
+          <div class="cs-chips">
+            {#each g.models as m (m)}
+              <button
+                class="cs-btn cs-btn-mini"
+                class:primary={m === g.model}
+                aria-pressed={m === g.model}
+                onclick={() => pickModel(g, m)}
+                disabled={busy[g.id]}
+              >
+                {m}{#if m === g.model}<span class="cs-chip-ring" aria-hidden="true">
+                    <svg viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}" filter="url(#pencil)">
+                      {#each TICK_NESTED as layer (layer.d)}
+                        <path d={layer.d} fill-opacity={layer.o} />
+                      {/each}
+                    </svg>
+                  </span>{/if}
+              </button>
+            {/each}
+          </div>
         {:else if g.models.length === 1}
           <p class="cs-note">{g.model || g.models[0]}</p>
         {:else}
@@ -1333,10 +1393,45 @@
        在同一窗口里铺一块白底会留下一道接缝，而接缝正是这项目一直在删的。
      ══════════════════════════════════════════════════════════════ */
 
+  .cs-scroll-mark {
+    position: absolute;
+    top: 0;
+    right: 32px;
+    width: 2px;
+    background: var(--cs-pencil-2);
+    border-radius: 2px;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 2;
+    transition: opacity 220ms var(--cs-ease);
+  }
+
+  .cs-scroll-mark[data-scrolling='true'] {
+    opacity: 0.9;
+  }
+
   .cs-set {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: none;
+    --fade-top: 0px;
+    --fade-bottom: 0px;
+    -webkit-mask-image: linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 var(--fade-top),
+      #000 calc(100% - var(--fade-bottom)),
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 var(--fade-top),
+      #000 calc(100% - var(--fade-bottom)),
+      transparent 100%
+    );
     display: flex;
     flex-direction: column;
     gap: 0.45rem;
@@ -1396,6 +1491,26 @@
      *     也可能属于一个自己不画东西的容器。
      */
     margin-bottom: 44px;
+  }
+
+  .cs-set::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+
+  .cs-set[data-more='true'] {
+    --fade-bottom: 32px;
+  }
+
+  .cs-set[data-more-above='true'] {
+    --fade-top: 32px;
+  }
+
+  @media (forced-colors: active) {
+    .cs-set {
+      -webkit-mask-image: none;
+      mask-image: none;
+    }
 
     /* ⚠ **滚动条的样子不在这里**（2026-10-16 提到 `app.css`）。
      *
