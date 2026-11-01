@@ -101,8 +101,15 @@ if ($entries.Count -eq 0) {
 
 # 最小的黑名单条目长度。用来**先**剔掉明显不可能命中的候选行，
 # 免得对每个候选都把整份黑名单扫一遍。
+# 最小的候选长度门槛。用来**先**剔掉明显不可能命中的候选行，
+# 免得对每个候选都把整份黑名单扫一遍。
+# ⚠ 这个门槛必须同时覆盖**两条**判据：整句那条要 `>= 最短条目`，
+#   片段那条只要 `>= $FRAGMENT_FLOOR` ⇒ 取两者较小者。
+#   （2026-11-01 实测栽过一次：门槛还按整句的最短条目算 ⇒ 比它短的候选行
+#     在收候选那一步就被丢了 ⇒ 片段判据**静默失效**，守卫照样打「没有命中」。）
 $minLen = ($entries | ForEach-Object { $_.Length } | Measure-Object -Minimum).Minimum
-
+$FRAGMENT_FLOOR = 8
+if ($minLen -gt $FRAGMENT_FLOOR) { $minLen = $FRAGMENT_FLOOR }
 # ── 豁免判定 ────────────────────────────────────────────────────────────────
 # 返回理由（非空 ⇒ 这是明写的豁免）；返回 $null ⇒ 不是豁免。
 # ⚠ **空理由不算豁免** —— 否则 `real-chat-ok:` 后面漏写就等于白拿一张通行证。
@@ -199,6 +206,30 @@ foreach ($l in $prev) {
 # ⚠ 用 **hashtable** 而不是 List：判重要用「来源+文件+行+条目」四元组
 #   （同一行可能命中多个条目，都要报出来）。
 $hits = @{}
+
+# ── 片段粒度（2026-11-01 补，票 93 那条「整句拦得住、片段拦不住」的待办）──
+# 只比整句时，**抄半句**是拦不住的：黑名单里没有哪一条等于那半句 ⇒ 逐字比对 Miss。
+# 实测就吃过一次：票 92 的正文里抄了某条真人原话的**前九个字**，整句比对全绿
+# （那句话此后一直躺在仓库里，直到本轮用 n-gram 另扫一遍才发现）。
+#
+# 判据：候选行里只要出现了某条黑名单条目中**连续 8 字**的片段，就算命中。
+# ⚠ 只枚举**长度恰为下限**的片段、而不是枚举全部长度：
+#   任何 ≥ 下限的片段必然包含一个恰为下限的片段 ⇒ 判据等价，代价小一个数量级。
+# ⚠ 下限取 8（与黑名单 6 字门槛留出 2 字余量）：下限越低，误报越像通用词，
+#   而 6 字门槛那套**逐行豁免口**（见文件头 .NOTES）就是为通用词误报准备的。
+# ⚠ 实测代价（2026-11-01，本机 5 条黑名单：全部 ≥6 字子串 278 个；只枚举恰为 8 字的片段只需 36 个）：
+#   全仓 1534 个跟踪文件逐行扫，**只命中 1 个文件**，命中的正是那处真漏。
+# ⚠ $FRAGMENT_FLOOR 的**唯一**赋值在上面收窄 $minLen 那处 —— 别在这里再写一份。
+$fragments = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$maxEntryLen = 0
+foreach ($e in $entries) {
+  if ($e.Length -gt $maxEntryLen) { $maxEntryLen = $e.Length }
+  if ($e.Length -lt $FRAGMENT_FLOOR) { continue }
+  for ($k = 0; $k -le $e.Length - $FRAGMENT_FLOOR; $k++) {
+    $null = $fragments.Add($e.Substring($k, $FRAGMENT_FLOOR))
+  }
+}
+
 foreach ($c in $cands) {
   foreach ($e in $entries) {
     if ($c.Line.Length -lt $e.Length) { continue }
@@ -210,9 +241,39 @@ foreach ($c in $cands) {
       #   ⇒ 现在**报全**：一行命中几条就报几条（同一条目重复命中去重）。
       $key = "$($c.Source)|$($c.File)|$($c.At)|$e"
       if (-not $hits.ContainsKey($key)) {
-        $hits[$key] = [pscustomobject]@{ Source = $c.Source; File = $c.File; At = $c.At; Line = $c.Line; Entry = $e }
+        $hits[$key] = [pscustomobject]@{ Source = $c.Source; File = $c.File; At = $c.At; Line = $c.Line; Entry = $e; Fragment = $false; Piece = '' }
       }
     }
+  }
+  if ($fragments.Count -eq 0 -or $c.Line.Length -lt $FRAGMENT_FLOOR) { continue }
+  $limit = $c.Line.Length - $FRAGMENT_FLOOR
+  $s = 0
+  while ($s -le $limit) {
+    if (-not $fragments.Contains($c.Line.Substring($s, $FRAGMENT_FLOOR))) { $s++; continue }
+    # 命中下限之后**尽量往后延长**：报出来的片段越长，越能一眼看出抄的是哪一句。
+    $len = $FRAGMENT_FLOOR
+    while ($s + $len -lt $c.Line.Length -and $len -lt $maxEntryLen) {
+      $probe = $c.Line.Substring($s, $len + 1)
+      $grew = $false
+      foreach ($e in $entries) {
+        if ($e.Contains($probe, [StringComparison]::Ordinal)) { $grew = $true; break }
+      }
+      if (-not $grew) { break }
+      $len++
+    }
+    $piece = $c.Line.Substring($s, $len)
+    $owner = ''
+    foreach ($e in $entries) {
+      if ($e.Contains($piece, [StringComparison]::Ordinal)) { $owner = $e; break }
+    }
+    # 整句都在 ⇒ 上面那轮已经报过了，这里不再重复报一次。
+    if ($owner -and -not $c.Line.Contains($owner, [StringComparison]::Ordinal)) {
+      $key = "$($c.Source)|$($c.File)|$($c.At)|$piece"
+      if (-not $hits.ContainsKey($key)) {
+        $hits[$key] = [pscustomobject]@{ Source = $c.Source; File = $c.File; At = $c.At; Line = $c.Line; Entry = $owner; Fragment = $true; Piece = $piece }
+      }
+    }
+    $s += $len
   }
 }
 
@@ -220,10 +281,16 @@ if ($hits.Count -gt 0) {
   Write-Output '✗ 真人聊天原文闸：命中了本机真帧里的**真人聊天原文**。'
   Write-Output '  （硬约束第 3 条：提交信息、夹具、注释、示例代码里都不写真实聊天内容。）'
   Write-Output ''
-  foreach ($h in $hits) {
+  foreach ($h in $hits.Values) {
     Write-Output ("  来源：{0}{1}" -f $h.Source, $(if ($h.File) { "（{0}:{1}）" -f $h.File, $h.At } else { "（第 {0} 行）" -f $h.At }))
     Write-Output ("  命中的那行：{0}" -f $h.Line)
-    Write-Output ("  命中的条目：{0}" -f $h.Entry)
+    if ($h.Fragment) {
+      # ⚠ 片段命中时**不要**把整条黑名单条目打出来 —— 那会把「没被抄的那半句」
+      #   也一起印到终端/CI 日志里，比命中的那段泄露得更多。只印命中的那一段。
+      Write-Output ("  命中的片段：{0}（这段连续 {1} 字在一句真人原话里出现过，整句 {2} 字）" -f $h.Piece, $h.Piece.Length, $h.Entry.Length)
+    } else {
+      Write-Output ("  命中的条目：{0}" -f $h.Entry)
+    }
     Write-Output ''
   }
   Write-Output '  ⇒ 把这句从提交里去掉。引用真帧时引用它的**位置/形状/颜色**'
