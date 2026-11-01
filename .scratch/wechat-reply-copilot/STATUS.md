@@ -26,7 +26,7 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
 | `90-hover-rotation-blurs-the-strip.md` | 6/7 | open · **候选 ① 已落地，6/7 项完成，等真机那一眼**（2026-11-01：去掉 `.cs-act:hover, .cs-act:focus-visible` 的 `rotate(-0.5deg)`，保留 `translateY(-2px)` + `drop-shadow(0 8px 16px rgb(24 18 10 / 0.26))`；同步 `docs/设计规范.md`；`probe-act-states.mjs` @2x 复测锐度方差从 −44.9% 回到 +0.12%） | (票面没写 Blocked by) |
 | `92-all-candidates-are-strips.md` | 19/20 | ready-for-human · 2026-11-01 措辞那条已由 agent 看真机截图记过（四个字「候选如下」、不带句号）⇒ **未勾的只剩一处**：点一条候选之后不再起草，需要人手点 | (票面没写 Blocked by) |
-| `96-draft-candidates-anchored-to-my-own-lines.md` | 7/8 | ready-for-human · 缺陷 A 已修（真机 + 单测双证）· 缺陷 B 频率已量完（去重后 19 条新消息里命中 4 条、共 3 帧）⇒ **方向已按假设记为已知边界、不引入依赖**（两轮提问都超时，见「决策记录（假设出口）」）· 仍开的只有「点候选后不再起草」那一眼（需人手） | (票面没写 Blocked by) |
+| `96-draft-candidates-anchored-to-my-own-lines.md` | 7/8 | ready-for-human · 缺陷 A 已修（真机 + 单测双证）· 缺陷 B 真实存在（2026-10-24「行，不急」→「行彳亍」），但 ⚠ **2026-11-01 订正：那个 4/19 量的是形状不是错字**（见第十一节，实测两条命中全是源文本本来就含片假名）⇒ 发生率至今没有可靠测量 · 方向仍按假设记为已知边界、不引入依赖（两轮提问都超时，见「决策记录（假设出口）」）· 仍开的只有「点候选后不再起草」那一眼（需人手） | (票面没写 Blocked by) |
 | `97-the-panel-had-no-type-hierarchy-and-a-browser-scrollbar.md` | 9/10 | ready-for-human · 2026-11-01 层级那一半已由 agent 看真机截图记过 ⇒ **未勾的只剩滚动那半**（那道 2px 线在纸纹深处会不会断），需要鼠标滚轮 | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
@@ -132,3 +132,12 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `95-panel-header-moves-when-candidates-arrive.md` | 7/7 |
 | `98-longdraft-no-longer-stresses-the-draft-scroller.md` | 3/3 |
 | `99-close-behavior-was-written-but-never-read.md` | 5/5 |
+
+## 四、⚠ 脚本当场抓出来的漂移（Status 行自己写的数字与实点不符）
+
+| 票 | Status 写的 | 机器点的 |
+|---|---|---|
+| `96-draft-candidates-anchored-to-my-own-lines.md` | 4/19 | 7/8 |
+
+> 这些不是脚本猜的，是 Status 行里的 `N/M` 与实际勾选数量对不上。
+> **按本表的数字读进度**，别按 Status 读。
