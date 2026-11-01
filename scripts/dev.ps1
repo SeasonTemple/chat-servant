@@ -99,7 +99,7 @@ chat-servant 开发入口（用 pwsh 7 运行）
   }
 
   'check' {
-    # 与 `scripts/gate.ps1:75` **逐字相同**的那份 TAURI_CONFIG 覆盖。
+    # 与 `scripts/gate.ps1:103` **逐字相同**的那份 TAURI_CONFIG 覆盖。
     # 没有权重的机器上（`target/` 是 gitignored 的，干净检出就没有），
     # cargo 一编 chat-servant-app 就挂在 tauri-build 的 resources glob 上、
     # exit 101 ⇒ clippy 与 test 一起红，而红的原因跟代码无关。

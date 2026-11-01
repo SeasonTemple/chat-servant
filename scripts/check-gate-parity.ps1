@@ -563,7 +563,7 @@ if (-not (Test-Path $ciPath)) {
 # 而 `target/` 是 gitignored 的 ⇒ **干净检出上那个目录不存在**，tauri-build 的
 # build script 在每个 cargo 步骤抛 `GlobPathNotFound`（tauri-utils `resources.rs:289`）。
 #
-# 门禁早就知道这件事（`gate.ps1:75` 设了 `TAURI_CONFIG` 覆盖），
+# 门禁早就知道这件事（`gate.ps1:103` 设了 `TAURI_CONFIG` 覆盖），
 # 而**本机还有两个入口会直接跑 cargo**：
 #   · `scripts/targetgc.py` —— 列举活产物时跑 `cargo test --no-run`；
 #   · `scripts/dev.ps1` —— `check` / `test` 两个动词直接跑 cargo。

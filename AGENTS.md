@@ -829,7 +829,7 @@ emit('tauri-ipc-event', { status: 'active' });        // ← 事件名就是目�
   ⚠ 判据是**逐 job**不是逐文件：一个 workflow 里可以同时有「取好权重才打包的 build job」
   与「什么都没取的 verify job」，文件级判断会把两者混成一句。详见 `CONTRIBUTING.md` §6b。
 - ⚠⚠ **本机凡是跑 cargo 的入口，都必须带同一份 `TAURI_CONFIG` 覆盖**——
-  现在是**三处**：`scripts/gate.ps1:75`、`scripts/dev.ps1`（`check`/`test` 两个动词）、
+  现在是**三处**：`scripts/gate.ps1:103`、`scripts/dev.ps1`（`check`/`test` 两个动词）、
   `scripts/targetgc.py`（列举活产物那次）。
   起因：`tauri.conf.json` 的 `bundle.resources` 指向 `../../target/models/ppocrv6-small/*`，
   而 `target/` 是 gitignored 的 ⇒ 干净检出上那个目录不存在，tauri-build 遍历 resources
