@@ -117,7 +117,10 @@ Deno 安装器（我们是 Node）、esbuild 自己的 dev server（我们用 Vi
       `pnpm audit --registry=https://registry.npmjs.org` → **No known vulnerabilities found**。
       ⚠ 影响面：本机 node 只跑 **本地 dev server**（vite）与门禁的 ui 步，
       **CI 不受影响**（CI 用 `node-version: 22` → 自动拿 22.23.4）。
-- [ ] **本机 Go**：**2026-10-22 实测 go1.24.12**（`D:\Go\bin\go.exe`）< 修复版 **1.27.3**
+- [x] **本机 Go**：**2026-10-22 实测 go1.24.12**（`D:\Go\bin\go.exe`）< 修复版 **1.27.3**
+      ⇒ **2026-11-01 定为「记账不动」**（两轮 `ask_user_question` 都超时 ⇒ 按 G8 记假设）：
+      本仓没有 Go 代码、门禁与 CI 都不跑 Go，升它是**机器卫生**不是欠账；
+      **会重新打开的条件**：本仓真出现 Go 代码，或 esbuild 那个二进制哪天进了产品路径。
       ⇒ 要仓库主人自己升
       ⚠ 原票面写「go1.27.0」，**实测是 1.24.12** ⇒ 差的是**一个大版本**，不是小版本落后
       ⚠ 且 Go 公告明说：**只更新环境不重新编译，程序仍曝露**
@@ -134,7 +137,11 @@ Deno 安装器（我们是 Node）、esbuild 自己的 dev server（我们用 Vi
       ⚠ 判据形状要定：取不到（网络/镜像源无端点）时**判红还是跳过**——
       按票 67 的先例（「取不到就红，不让它静默变成跳过」）应是**判红**，
       但那意味着国内网络下这道步会经常红 ⇒ **要仓库主人拍板**
-- [ ] **vite 8 + kit 3 升级**（另一个项目级决定）：
+- [x] **vite 8 + kit 3 升级**（另一个项目级决定）⇒ **2026-11-01 定为「本轮不做，另开票」**
+      （两轮 `ask_user_question` 都超时 ⇒ 按 G8 记假设）：
+      它是一次真正的升级项目（kit 3 大版本 + 会牵动 `@sveltejs/vite-plugin-svelte` 7.x），
+      与本票「处置三条公告」不是同一个改动面；混在一起做，回归出问题就分不清是谁的锅。
+      **会重新打开的条件**：npm 侧再冒出一条只有 Rolldown 能绕开的公告，或仓库主人点名要升。
       vite 8 用 **Rolldown（Rust）替掉 esbuild** ⇒ **那个 Go 二进制直接消失**，
       这才是 Go 那条线的长期解。⚠ 但 kit 3 是大版本（有 breaking changes），
       且会牵动 `@sveltejs/vite-plugin-svelte` 7.x ⇒ 是一次真正的升级项目

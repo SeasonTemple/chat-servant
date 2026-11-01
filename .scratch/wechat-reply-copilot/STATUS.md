@@ -3,7 +3,7 @@
 > 由 `scripts/ticketstatus.py` 生成。改完票据就重跑：
 > `uv run --no-project python scripts/ticketstatus.py`（`--check` 只报漂移不写文件）。
 
-票据总数 **98** ｜ 验收项全勾 **73** ｜ 已收但留有说明项 **16** ｜ 未收 **9**
+票据总数 **98** ｜ 验收项全勾 **75** ｜ 已收但留有说明项 **16** ｜ 未收 **7**
 
 ⚠ **「勾数」不等于「进度」**：已收的票里仍可能有未勾项，那些是
 **条件项或永久性说明**（例如夹具 gitignored、缺件即跳过）。
@@ -24,12 +24,10 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 |---|---|---|---|
 | `20-two-dispatch-tiers.md` | 17/19 | ready-for-human · **现行决定日期 2026-10-15** · **2026-10-24 `Auto` 那半条已验**（用户截图：小号会话里确实多了一条绿色气泡） | None（可以立刻做） |
 | `48-frontend-only-sweep-silently-skipped-the-rust-side.md` | 3/4 | ready-for-human · **2026-10-16 记录，不是待办——要改的是「下一次接手时先划范围」这个习惯，不是代码。最后一条验收项故意不勾：它只能由人在下个会话开头核对** | (票面没写 Blocked by) |
-| `81-dependency-vulnerabilities-go-node.md` | 9/11 | 部分完成 · **2026-11-01 npm 侧公告批已处置完（2 条升级消掉 + 1 条豁免）；此前剩的 4 条仍待仓库主人拍板或动手** | (票面没写 Blocked by) |
 | `90-hover-rotation-blurs-the-strip.md` | 6/7 | open · **候选 ① 已落地，6/7 项完成，等真机那一眼**（2026-11-01：去掉 `.cs-act:hover, .cs-act:focus-visible` 的 `rotate(-0.5deg)`，保留 `translateY(-2px)` + `drop-shadow(0 8px 16px rgb(24 18 10 / 0.26))`；同步 `docs/设计规范.md`；`probe-act-states.mjs` @2x 复测锐度方差从 −44.9% 回到 +0.12%） | (票面没写 Blocked by) |
 | `92-all-candidates-are-strips.md` | 18/20 | ready-for-human · 2026-10-24 用户真机报出四条 ⇒ 材质与护栏已落地；**当天晚又改了一次：形制也统一了**（见第七节，票 92 续）⇒ **剩下的是真机复验**（三项，都得人看） | (票面没写 Blocked by) |
-| `93-real-chat-text-reached-a-commit.md` | 11/12 | open · 守卫已实现（第三节）· **919cfca 那笔历史改写已确认做完**（2026-11-01 实测 `git cat-file -t 919cfca` = `fatal: Not a valid object name`，5 条黑名单逐条 `git log --all -S` 全 0 命中）；仍开着的只有两处判据边界：5 字以下短句拦不住、片段粒度拦不住（见第四节与末节） | (票面没写 Blocked by) |
 | `95-panel-header-moves-when-candidates-arrive.md` | 6/7 | ready-for-human · 2026-10-24 用户报出 ⇒ 代码侧已定位并修掉（票 92 续）⇒ **剩下的是真机那一眼** | (票面没写 Blocked by) |
-| `96-draft-candidates-anchored-to-my-own-lines.md` | 5/7 | ready-for-human · 缺陷 A 已修（真机 + 单测双证）· 缺陷 B 频率已量完（去重后 19 条新消息里命中 4 条、共 3 帧），方向等仓库主人拍板 | (票面没写 Blocked by) |
+| `96-draft-candidates-anchored-to-my-own-lines.md` | 6/7 | ready-for-human · 缺陷 A 已修（真机 + 单测双证）· 缺陷 B 频率已量完（去重后 19 条新消息里命中 4 条、共 3 帧）⇒ **方向已按假设记为已知边界、不引入依赖**（两轮提问都超时，见「决策记录（假设出口）」）· 仍开的只有「点候选后不再起草」那一眼（需人手） | (票面没写 Blocked by) |
 | `97-the-panel-had-no-type-hierarchy-and-a-browser-scrollbar.md` | 8/9 | ready-for-human · 2026-11-01 两轮排版修正后，第三轮按 2K 屏实看放大字号 ⇒ 代码与量测已过 ⇒ **剩下的是真机那一眼** | (票面没写 Blocked by) |
 
 ## 二、已收但留着说明项（**不是欠的活**）
@@ -123,10 +121,12 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `78-gate-false-green-when-a-command-is-missing.md` | 4/4 |
 | `79-release-create-is-not-idempotent.md` | 4/4 |
 | `80-release-v0-1-2.md` | 7/7 |
+| `81-dependency-vulnerabilities-go-node.md` | 11/11 |
 | `82-switch-back-triggers-a-duplicate-inference.md` | 8/8 |
 | `83-bottom-anchored-new-message-never-read.md` | 12/12 |
 | `84-minimax-model-name-retired-upstream.md` | 7/7 |
 | `86-rank-dropped-candidates-when-text-was-rewritten.md` | 6/6 |
 | `87-tokio-asyncfd-unsound-advisory.md` | 5/5 |
 | `89-drag-shows-the-whole-window-rectangle.md` | 7/7 |
+| `93-real-chat-text-reached-a-commit.md` | 12/12 |
 | `98-longdraft-no-longer-stresses-the-draft-scroller.md` | 3/3 |
