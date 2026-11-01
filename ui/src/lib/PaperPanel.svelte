@@ -2622,7 +2622,9 @@
      *   轮廓 ⇒ 直边自动消失，撕口那一侧的投影随撕口起伏。
      *   ⚠ 不是「调淡一点就算修好」：只要还用矩形投影，
      *     撕边留出的每一条透明边上都还会浮出一条直线。 */
-    filter: drop-shadow(0 3px 6px rgb(24 18 10 / 0.2));
+    /* 2026-11-01（用户真机反馈）：静息态不能给 20% 的重影——未 hover 时三条都像带方框阴影，
+     * 与 hover 的 26% 几乎拉不开差距。静息态只留 5% 极浅贴纸影，明显投影留给 hover。 */
+    filter: drop-shadow(0 1px 2px rgb(24 18 10 / 0.05));
     transition:
       transform var(--cs-dur) var(--cs-ease),
       filter var(--cs-dur) var(--cs-ease);
