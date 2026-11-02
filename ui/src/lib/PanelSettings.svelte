@@ -46,7 +46,7 @@
   import TierSwitch from '$lib/TierSwitch.svelte';
   import SegSlider from '$lib/SegSlider.svelte';
   import { IS_DEMO as DEMO } from '$lib/runtime';
-  import { markShape, type MarkShape } from '$lib/mark-shape.svelte';
+  import { markShape } from '$lib/mark-shape.svelte';
   import type { BudgetView, Tier } from '$lib/types';
   import PencilDefs from '$lib/PencilDefs.svelte';
 
