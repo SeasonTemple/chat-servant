@@ -961,9 +961,15 @@
       而报错（它只报反过来的 `css_unused_selector`）——
       所以这一类缺口靠门禁抓不到，只能靠数。
   -->
-  <button class="cs-btn cs-btn-ink" onclick={() => toggleImagesOut(!imagesOut)}>
-    {imagesOut ? '已开启（点击关闭）' : '已关闭（点击开启）'}
-  </button>
+  <SegSlider
+    value={imagesOut ? 'on' : 'off'}
+    label="图片识别"
+    options={[
+      { id: 'off', label: '关闭' },
+      { id: 'on', label: '开启' },
+    ]}
+    onchange={(v) => void toggleImagesOut(v === 'on')}
+  />
   <!--
     ⚠ 这段**必须短**，而且**只能红一句**。
 
@@ -1042,8 +1048,6 @@
     整块不渲染——而没 key 正是用户来这一屏的原因。那条「没 key 就不列模型」
     的规则只适用于**模型清单**，不适用于**配置入口**。
   -->
-  <h2 class="cs-h2">模型</h2>
-
   {#if fail}
     <!--
       ⚠ 2026-10-18：错误文案与它的按钮**必须包在同一个 flex 行里**。
@@ -1085,23 +1089,7 @@
           <span class="cs-group-name" title={g.role}>{g.label}</span>
           <span class="cs-badge miss">{g.route.provider_label}</span>
         </div>
-        {#if g.shares_with}
-          <!-- ⚠ 必须**明说**。这一组没单独配 key 时它与另一组是同一格，
-               而用户改这一节的端点会连带改掉那一组——不说就是坑人。
-               ⚠ 2026-10-18：原文「这一组还没有自己的 key，当前与「回复模型」
-               是同一路。」后半句「同一路」是内部说法，用户读到只会问
-               「哪一路」；而**真正要紧的后果**（改这节会连带改另一组）
-               被压在前半句后面当补充说明。
-               ⇒ 直接说后果，一句话说完。
-               ⚠ 2026-10-19：对方的名字改成由后端下发（`g.shares_with`）。
-               共享**有方向**——只配了决策组时是回复组借决策组的格子，
-               把「回复模型」写死会在那一种配置下**指错组**。 -->
-          <p class="cs-note">当前与「{g.shares_with}」共用密钥</p>
-        {/if}
 
-        <!-- 厂商。**九项不是分段控件能装的**（380px 面板里一颗滑块放不下），
-             所以用一组同族的小按钮换行排列——仍是这一屏已有的那支笔。 -->
-        <p class="cs-label">服务商</p>
         <div class="cs-chips">
           {#each g.providers as p (p.id)}
             <button
@@ -1777,86 +1765,6 @@
    * 开/关由**字**说（「打开」/「关闭」），不由颜色说 ——
    * 红在这套色板里只给不可逆（app.css 文件头），而这一项恰恰**可逆**。
    */
-  .cs-btn-ink {
-    align-self: flex-start;
-    position: relative;
-    /* ⚠ 这个负外边距是为了抵消撕边带来的额外高度（`.cs-act` 同一手法）。
-     *   撕边 16 → 10px 后从 `-8px` 收到 `-5px`，别留着旧的，
-     *   否则这一行会比同行多出 6px 的空当。 */
-    margin: -5px 0;
-    padding: 7px 18px;
-    font-size: 12.5px;
-    color: var(--cs-ink);
-    /* 抬起 / 压回是 transform，得自己有 transition；
-     * `.cs-btn` 里那三条（background / color / opacity）在撕边之后已经
-     * 没有可过渡的对象了 —— 纸条不变色、不换底。 */
-    transition:
-      transform var(--cs-dur-fast) var(--cs-ease),
-      filter var(--cs-dur-fast) var(--cs-ease);
-    /* ⚠⚠ **撕边 16px → 10px**（2026-10-18）。
-     *
-     *   原注释说「写 16px 是因为撕口的纸芯最早只在内缩 ~5.5 CSS px 处
-     *   （`stripgen.py` 实测最浅一档），再薄就会啃进纸」。
-     *   那个 16 是**照抄 `.cs-act`（主面板动作行）来的**，
-     *   而主面板那一行的字是 20px 上下、内容盒 40px——16px 撕边占 40%。
-     *   设置页这一族内容盒只有 30px，**撕边占了 53%**：
-     *   输入框因此是 205 × 62（**高宽比 1 : 3.3**，出图确认读成一块
-     *   空荡荡的横板，不像能写字的地方），同屏按钮还因为 flex 压缩
-     *   分裂成 62 / 58.5 / 55.5 / 46 / 44 五种高度。
-     *
-     *   ⇒ 按内容盒重算：撕边 10px + 内容 26px = **46px**，
-     *     高宽比 205 : 46 = **1 : 4.5**。
-     *   `10` 与 `slice 32` 的换算关系不变（slice 量的是源图像素，
-     *   width 量的是画到边框盒多宽），**不需要重跑 `stripgen.py`**。
-     *   ⚠ 「纸芯内缩 5.5px」那条推导是相对 16px 说的（5.5/16 = 34%），
-     *   按同比例换算 10px 下是 3.4px；**这一格是出图看的，不是算出来的**，
-     *   若撕口开始啃进内容区就往回调。 */
-    border: 10px solid transparent;
-    border-image: url('/strip.png') 32 fill / 10px / 0 stretch;
-    /* 投影跟着 alpha 走：`box-shadow` 画的是边框盒，
-     * 撕口的透明区会漏出它的直边，在纸上就是一圈生硬的方框
-     * （票 44 实测：同一列 x=203 连续暗 185~205，邻列 198/227）。
-     *
-     * 2026-10-16 用户红框指出「顶部为何要有这条黑边」，实测同主面板：
-     * `drop-shadow(0 2px 3px …)` 的核覆盖 `[-1.5, +3.5]`，**越进元素内侧
-     * 0.5px**，那半份影子从半透明撕口底下透出来 ⇒ 上沿浮出一条直线。
-     * ⇒ 判据是 `dy ≥ blur/2`，不靠"看着还行"。 */
-    filter: drop-shadow(0 3px 6px rgb(24 18 10 / 0.2));
-  }
-
-  .cs-btn-ink:hover:not(:disabled) {
-    color: var(--cs-ink-2);
-    transform: translateY(-1px);
-    filter: drop-shadow(0 6px 11px rgb(24 18 10 / 0.28));
-  }
-
-  .cs-btn-ink:active:not(:disabled) {
-    transform: translateY(1px);
-    filter: drop-shadow(0 2px 4px rgb(24 18 10 / 0.14));
-  }
-
-  /* ⚠ 禁用态读成「一片没有落在纸上的纸」——收掉投影，
-   *   与主面板 `.cs-act:disabled` 同一条（那里记着为什么不能用虚线边框：
-   *   `border-image` 一生效，`border-style` 就画不出来）。
-   *   ⚠ 不能用透明底：WebView2 分层合成会把整层 `rgb(... / 低alpha)` 整层
-   *   不绘制（app.css `--cs-paper` 的注释，2026-10-07 实测），
-   *   那会让按钮**整个消失**。所以只动 filter。 */
-  .cs-btn-ink:disabled {
-    color: var(--cs-pencil-2);
-    filter: none;
-  }
-
-  /* key 卡片里的小按钮。**与 `.cs-btn-ink` 逐项同源**：同一张 `strip.png`、
-   * 同一套 slice / width、同一条「核不上沿」判据（见 `.cs-btn-ink` 那段的实测）。
-   *
-   * 2026-10-16 用户原话：「让你参考档位是指像现在打开按钮这样去做**风格统一的
-   * 按钮样式**，而不是拿之前的设计敷衍。」⇒ 这一族原来还是 `1px solid` 描边，
-   * 与刚改好的「打开」并排时就是两个时代的东西。
-   *
-   * 代价是**变高**：撕边上下各 16px，30px 的按钮变成约 61px。这是照着用户
-   * 指定的方向换材质必然的尺寸变化，不是顺手调出来的。
-   * ⚠ 2026-10-18：撕边 16 → 10、内容盒 30 → 26，总高 62 → **46**，
-   *   与 `.cs-btn-ink` / `.cs-input` 同高。三个值**必须一起改**。 */
   .cs-btn-mini {
     padding: 6px 11px;
     font-size: 11.5px;
