@@ -432,30 +432,6 @@
    * ⚠ 不能各存一份：设置页切了、主面板没跟，就是「同一个事实两个来源」，
    * 而用户在界面上看不出哪里不同步。
    */
-  let shape = $state<MarkShape>(markShape.current);
-  let shapeNote = $state('');
-
-  const SHAPE_OPTIONS = [
-    { id: 'tick' as const, label: '勾' },
-    { id: 'ring' as const, label: '圈' },
-  ];
-
-  async function setShape(next: MarkShape) {
-    shapeNote = '';
-    const r = await markShape.set(next);
-    if (!r.ok) {
-      shapeNote = `没存上：${r.note}`;
-    }
-    // 无论成败都读回镜像 —— 成功时它等于 next，失败时它等于程序认定的值。
-    shape = markShape.current;
-  }
-
-  /**
-   * 「关闭时」的行为。与主面板**共用 Rust 那一个 setting**。
-   *
-   * ⚠ Rust 侧会验证：托盘不存在时**拒收**「收进托盘」—— 那样关掉面板
-   * 它就藏起来了。所以这里把错误原样显示，不假装成功。
-   */
   async function setClose(next: 'exit' | 'tray') {
     closeNote = '';
     try {
@@ -573,7 +549,7 @@
         closeBehavior = 'exit';
       }
       // 标记形状也要读回来：界面显示的必须是程序认定的那个。
-      shape = await markShape.load();
+      await markShape.set('tick');
       // ⚠ **模型设置**不再单独读一条命令：它在 `get_settings` 那一屏里
       // （两组 + 端点 + 代理）。摆两个来源就等于同一个事实两处显示，
       // 而它们迟早不一致。
@@ -871,48 +847,6 @@
   <TierSwitch bind:tier onchange={changeTier} />
   {#if tierNote}
     <p class="cs-fail" role="alert">{tierNote}</p>
-  {/if}
-
-  <!-- ══ 外观 ══ -->
-  <h2 class="cs-h2">外观</h2>
-  <!--
-    ⚠ 这句文案 2026-10-14 从「顶边」改成「纸底」。
-
-    `6f10f9f` 把档位从顶边挪到纸底（盖章式，见设计规范 §10 第 1 条），
-    但这一直写着「顶边标出当前档位的那一笔」。**漂移的是界面上的字，
-    不是注释**——用户照着这句去找标记，会去纸的上沿找，而那里现在只有撕口。
-
-    教训同 `docs/设计规范.md` 那条「挪位置 ≠ 改形态」：挪位置时，
-    **所有描述旧位置的文案都要一起改**，否则定案改了、界面还在教旧位置。
-  -->
-  <!--
-    ⚠ 2026-10-15 删掉了这里那行「纸底标出当前档位的那一笔」。
-    理由：它是**说明**而不是**名称**，而且说明的是**就在它正下方 20px 处的那一笔**
-    ——标记是画出来的，看得见的东西不需要再写一遍。
-    这一节真正的名称是上面那个 `外观`。
-    留着的代价：它占了 `cs-label` 的位置（与「按窗口控制键时」这类名称同级），
-    于是「名称」和「说明」两种东西在排版上分不出来。
-  -->
-  <!--
-    勾 / 圈是**审美偏好**，所以交给用户选，不在这里替他们定。
-    两支笔在 `$lib/marks` 里本来就都生成好了，切换只是换一组 path，
-    笔性一致（同为「中心线 + 宽度剖面」算出的轮廓）。
-
-    ⚠ 这是**外观偏好**，不是发送档位：它落盘、跨会话保留。
-    档位走 Rust 的 `TierCell`，会话结束必须回落 `Manual`（硬约束第 5 条）。
-    两种生命周期不能混 —— 一个要在重启后记得，一个**必须**忘掉。
-
-    ⚠ 写失败时 `markShape.set` 会读回真实值，所以这里的绑定不会停在
-    一个程序其实没存的状态上（与「关闭时」同一策略）。
-  -->
-  <SegSlider
-    bind:value={shape}
-    label="标记形状"
-    options={SHAPE_OPTIONS}
-    onchange={(v) => void setShape(v as MarkShape)}
-  />
-  {#if shapeNote}
-    <p class="cs-note" role="status">{shapeNote}</p>
   {/if}
 
   <!-- ══ 窗口 ══ -->
@@ -1261,8 +1195,13 @@
               </div>
             {/if}
           </div>
-        {:else if g.models.length === 1}
-          <p class="cs-note">{g.model || g.models[0]}</p>
+        {:else if g.models.length === 1 || (g.models.length === 0 && g.model && g.route.provider !== 'custom' && g.route.provider !== 'ollama' && g.route.provider !== 'lmstudio')}
+          <div class="cs-picker">
+            <button type="button" class="cs-btn cs-picker-btn" disabled>
+              <span class="cs-picker-tag">模型</span>
+              <span class="cs-picker-val">{g.model || g.models[0]}</span>
+            </button>
+          </div>
         {:else}
           <div class="cs-form">
             <input
