@@ -48,7 +48,6 @@
   import { IS_DEMO as DEMO } from '$lib/runtime';
   import { markShape, type MarkShape } from '$lib/mark-shape.svelte';
   import type { BudgetView, Tier } from '$lib/types';
-  import { TICK_NESTED, TICK_VIEW } from '$lib/marks';
   import PencilDefs from '$lib/PencilDefs.svelte';
 
   /**
@@ -615,6 +614,33 @@
     },
   ];
 
+  let openPicker = $state<string | null>(null);
+
+  function togglePicker(key: string) {
+    openPicker = openPicker === key ? null : key;
+  }
+
+  function stepProvider(e: WheelEvent, g: GroupView) {
+    if (busy[g.id] || g.providers.length < 2) return;
+    e.preventDefault();
+    const idx = Math.max(
+      0,
+      g.providers.findIndex((p) => p.id === g.route.provider),
+    );
+    const dir = e.deltaY > 0 ? 1 : -1;
+    const next = g.providers[(idx + dir + g.providers.length) % g.providers.length];
+    if (next) void applyRoute(g, next.id);
+  }
+
+  function stepModel(e: WheelEvent, g: GroupView) {
+    if (busy[g.id] || g.models.length < 2) return;
+    e.preventDefault();
+    const idx = Math.max(0, g.models.indexOf(g.model));
+    const dir = e.deltaY > 0 ? 1 : -1;
+    const next = g.models[(idx + dir + g.models.length) % g.models.length];
+    if (next) void pickModel(g, next);
+  }
+
   let moreBelow = $state(false);
   let moreAbove = $state(false);
   let setThumb = $state({ top: 0, height: 0 });
@@ -747,34 +773,46 @@
       ⇒ **「看不见」是量法的锅，不是布局的锅。** 真要评第一屏的排版，
         用滚动截图，别再往夹具里塞一份副本。
     -->
-    {#each DEMO_GROUPS as g (g.name)}
+    {#each DEMO_GROUPS as g, gi (g.name)}
       <section class="cs-group">
-        <div class="cs-prov-head">
+        <div class="cs-group-head">
           <span class="cs-group-name">{g.name}</span>
           <span class="cs-badge {g.configured ? 'ok' : 'miss'}">
             {g.configured ? '已配置' : '未配置'}
           </span>
         </div>
-        <p class="cs-hint">{g.hint}</p>
-        <div class="cs-chips">
-          {#each g.providers as p, i (p)}
-            <!-- ⚠ 2026-10-18 修一处**夹具与真实不同构**：
-                 真实分支是 `class:primary={p.id === g.route.provider}`
-                 ⇒ **只有当前选中的那一颗**是 primary（红）。
-                 而这里**每颗都硬写 primary** ⇒ 出图评审看到「四颗全红」，
-                 那在真机上根本不存在。
-                 ⇒ 只让第一颗 primary。夹具自己的承诺就是「形状与真实分支
-                   同构」（见上面那段注释），这一条得守住。 -->
-            <button class="cs-btn cs-btn-mini" class:primary={i === 0} aria-pressed={i === 0}>
-              {p}{#if i === 0}<span class="cs-chip-ring" aria-hidden="true">
-                  <svg viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}" filter="url(#pencil)">
-                    {#each TICK_NESTED as layer (layer.d)}
-                      <path d={layer.d} fill-opacity={layer.o} />
-                    {/each}
-                  </svg>
-                </span>{/if}
-            </button>
-          {/each}
+        <div class="cs-picker">
+          <button
+            type="button"
+            class="cs-btn cs-picker-btn"
+            aria-expanded={openPicker === `demo:${gi}`}
+            onclick={() => togglePicker(`demo:${gi}`)}
+          >
+            <span class="cs-picker-tag">服务商</span>
+            <span class="cs-picker-val">{g.providers[0]}</span>
+            <span
+              class="cs-picker-arrow"
+              class:open={openPicker === `demo:${gi}`}
+              aria-hidden="true">▾</span
+            >
+          </button>
+          {#if openPicker === `demo:${gi}`}
+            <div class="cs-picker-menu" role="listbox">
+              {#each g.providers as p, i (p)}
+                <button
+                  type="button"
+                  class="cs-btn cs-picker-opt"
+                  class:active={i === 0}
+                  role="option"
+                  aria-selected={i === 0}
+                  onclick={() => (openPicker = null)}
+                >
+                  <span>{p}</span>
+                  {#if i === 0}<span class="cs-picker-tick" aria-hidden="true">✓</span>{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
         </div>
         {#if g.configured}
           <div class="cs-actions">
@@ -784,12 +822,6 @@
           </div>
         {:else}
           <div class="cs-form">
-            <!-- ⚠ placeholder 原先是「粘贴 key」——「key」是什么、
-               贴的是什么格式、贴进去会存到哪，这一屏没一处说。
-               现在把「API」写进去：与下面那行「存入 Windows 凭据管理器」
-               合起来才读得出「这是一把模型 API key，会存进系统凭据管理器」。
-               `aria-label` 与 placeholder 同义：**读屏用户拿不到 placeholder**
-               （它不是可访问名称），所以这一条必须写。 -->
             <input
               class="cs-input"
               type="password"
@@ -1078,53 +1110,68 @@
 
   {#if view}
     {#each view.groups as g (g.id)}
-      <!--
-        ⚠ `{@const}` 必须**紧贴** `{#each}` 块，不能隔着 `<section>`——
-          Svelte 报 `const_tag_invalid_placement`。所以它放在标签的最前面，
-          而不是跟着「这一组的 key」那段注释走。
-      -->
       {@const p = currentProvider(g)}
       <section class="cs-group">
         <div class="cs-group-head">
           <span class="cs-group-name" title={g.role}>{g.label}</span>
-          <span class="cs-badge miss">{g.route.provider_label}</span>
+          {#if p?.configured}
+            <span class="cs-badge ok" class:env={p.from_env}>
+              {p.masked}{p.from_env ? '（环境变量）' : ''}
+            </span>
+          {:else}
+            <span class="cs-badge miss">未配密钥</span>
+          {/if}
         </div>
 
-        <div class="cs-chips">
-          {#each g.providers as p (p.id)}
-            <button
-              class="cs-btn cs-btn-mini"
-              class:primary={p.id === g.route.provider}
-              aria-pressed={p.id === g.route.provider}
-              onclick={() => applyRoute(g, p.id)}
-              disabled={busy[g.id]}
+        <div class="cs-picker">
+          <button
+            type="button"
+            class="cs-btn cs-picker-btn"
+            aria-expanded={openPicker === `prov:${g.id}`}
+            onclick={() => togglePicker(`prov:${g.id}`)}
+            onwheel={(e) => stepProvider(e, g)}
+            disabled={busy[g.id]}
+            title="点击展开列表，或在框上滚轮切换服务商"
+          >
+            <span class="cs-picker-tag">服务商</span>
+            <span class="cs-picker-val">{g.route.provider_label}</span>
+            <span
+              class="cs-picker-arrow"
+              class:open={openPicker === `prov:${g.id}`}
+              aria-hidden="true">▾</span
             >
-              {p.label}{#if p.id === g.route.provider}<span class="cs-chip-ring" aria-hidden="true">
-                  <svg viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}" filter="url(#pencil)">
-                    {#each TICK_NESTED as layer (layer.d)}
-                      <path d={layer.d} fill-opacity={layer.o} />
-                    {/each}
-                  </svg>
-                </span>{/if}
-            </button>
-          {/each}
+          </button>
+          {#if openPicker === `prov:${g.id}`}
+            <div class="cs-picker-menu" role="listbox">
+              {#each g.providers as item (item.id)}
+                <button
+                  type="button"
+                  class="cs-btn cs-picker-opt"
+                  class:active={item.id === g.route.provider}
+                  role="option"
+                  aria-selected={item.id === g.route.provider}
+                  onclick={() => {
+                    openPicker = null;
+                    void applyRoute(g, item.id);
+                  }}
+                >
+                  <span>{item.label}</span>
+                  {#if item.id === g.route.provider}
+                    <span class="cs-picker-tick" aria-hidden="true">✓</span>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
         </div>
 
         {#if g.route.provider === 'custom'}
-          <!--
-            ⚠ **「OpenAI 兼容」是协议，不是供应商。** 绝大多数第三方服务
-            只兼容它，所以协议单独一选、地址自己填。
-            ⚠ 协议一改，端点文本框就在上面被 Rust 重写过一次——用户看得见
-            那一次改动，不会有一个「界面上看着是 A、实际发的是 B」的组合。
-          -->
-          <p class="cs-label">协议</p>
           <SegSlider
             value={g.route.protocol}
             options={view.protocols}
             label="协议"
             onchange={(v) => applyRoute(g, 'custom', v)}
           />
-          <p class="cs-label">端点地址</p>
           <div class="cs-form">
             <input
               class="cs-input"
@@ -1142,35 +1189,49 @@
               {busy[g.id] ? '写入中…' : '用它'}
             </button>
           </div>
-          <!--
-            ⚠ **这一句是隐私承诺，必须在这一屏而不是文档里。**
-            端点可换之后「请求会发给第三方模型」这句话已经不准确了——
-            它可能是任何一台机器。所以这里显示**真实的目标地址**。
-          -->
         {/if}
 
-        <!-- 模型名。清单只有一条时不给分段控件（一颗滑块只有一个选项，
-             它回答不了任何问题，看着却像个选择器）；清单为空时给输入框。 -->
-        <p class="cs-label" title={g.model_note}>模型名</p>
         {#if g.models.length > 1}
-          <div class="cs-chips">
-            {#each g.models as m (m)}
-              <button
-                class="cs-btn cs-btn-mini"
-                class:primary={m === g.model}
-                aria-pressed={m === g.model}
-                onclick={() => pickModel(g, m)}
-                disabled={busy[g.id]}
+          <div class="cs-picker">
+            <button
+              type="button"
+              class="cs-btn cs-picker-btn"
+              aria-expanded={openPicker === `model:${g.id}`}
+              onclick={() => togglePicker(`model:${g.id}`)}
+              onwheel={(e) => stepModel(e, g)}
+              disabled={busy[g.id]}
+              title="点击展开列表，或在框上滚轮切换模型"
+            >
+              <span class="cs-picker-tag">模型</span>
+              <span class="cs-picker-val">{g.model}</span>
+              <span
+                class="cs-picker-arrow"
+                class:open={openPicker === `model:${g.id}`}
+                aria-hidden="true">▾</span
               >
-                {m}{#if m === g.model}<span class="cs-chip-ring" aria-hidden="true">
-                    <svg viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}" filter="url(#pencil)">
-                      {#each TICK_NESTED as layer (layer.d)}
-                        <path d={layer.d} fill-opacity={layer.o} />
-                      {/each}
-                    </svg>
-                  </span>{/if}
-              </button>
-            {/each}
+            </button>
+            {#if openPicker === `model:${g.id}`}
+              <div class="cs-picker-menu" role="listbox">
+                {#each g.models as m (m)}
+                  <button
+                    type="button"
+                    class="cs-btn cs-picker-opt"
+                    class:active={m === g.model}
+                    role="option"
+                    aria-selected={m === g.model}
+                    onclick={() => {
+                      openPicker = null;
+                      void pickModel(g, m);
+                    }}
+                  >
+                    <span>{m}</span>
+                    {#if m === g.model}
+                      <span class="cs-picker-tick" aria-hidden="true">✓</span>
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            {/if}
           </div>
         {:else if g.models.length === 1}
           <p class="cs-note">{g.model || g.models[0]}</p>
@@ -1181,7 +1242,7 @@
               type="text"
               autocomplete="off"
               spellcheck="false"
-              placeholder="模型名要你自己填"
+              placeholder="填写模型名"
               bind:value={modelDrafts[g.id]}
             />
             <button
@@ -1192,28 +1253,13 @@
               用它
             </button>
           </div>
-          <p class="cs-hint">{g.model_note}</p>
         {/if}
 
-        <!-- 模型名没设成时的错误。**必须在这里显示**——见上面 `modelErr`
-             的注释：赋值留着而展示被删过一次，报错等于被吞掉。 -->
         {#if modelErr[g.id]}
           <p class="cs-fail" role="alert">{modelErr[g.id]}</p>
         {/if}
 
-        <!-- ══ 这一组的 key ══ -->
         {#if p}
-          <div class="cs-prov-head">
-            <span class="cs-prov-name">{p.label} 的 key</span>
-            {#if p.configured}
-              <span class="cs-badge ok" class:env={p.from_env}>
-                {p.masked}{p.from_env ? '（来自环境变量）' : ''}
-              </span>
-            {:else}
-              <span class="cs-badge miss">未配置</span>
-            {/if}
-          </div>
-
           {#if p.configured}
             <div class="cs-actions">
               <button
@@ -1223,8 +1269,6 @@
               >
                 换新 key
               </button>
-              <!-- 连通性测试。不调模型：走只读的 models 端点，不花钱。
-                   它测的是**当前这一路**，包括自己填的端点。 -->
               <button class="cs-btn cs-btn-mini" onclick={() => probe(g)} disabled={busy[g.id]}>
                 {busy[g.id] ? '测试中…' : '测连通'}
               </button>
@@ -1257,17 +1301,6 @@
               </div>
             {/if}
           {:else}
-            <!-- p.hint 是 Rust 给的**可执行**指引：存哪、变量名叫什么。
-                 不能是空字符串或「暂无」。 -->
-            <!-- ⚠ **未配置时输入框必须直接显示**，不能套
-                 `drafts[g.id] === REVEAL` 那道门（2026-10-15 修的真机死路，
-                 见 `.scratch/…/40-*.md`）。那道门本来只为「已配置时不把
-                 明文 key 摆在界面上」而设，而 `REVEAL` 只有「换新 key」
-                 按钮会去设——**而那个按钮在 `{#if p.configured}` 分支里**
-                 ⇒ 未配置时输入框永远出不来。
-
-                 后果不是「少个控件」：这是产品的第一步。
-                 未配置时界面上没有任何 key，**没有需要藏的东西**。 -->
             <div class="cs-form">
               <input
                 class="cs-input"
@@ -1395,7 +1428,7 @@
     );
     display: flex;
     flex-direction: column;
-    gap: 0.45rem;
+    gap: 0;
     padding: 0 14px 16px;
 
     /* ⚠ `margin-bottom` 的推导**在下面**（`padding` 之后、`line-height` 之前
@@ -1538,7 +1571,7 @@
      *   字号更容易被认出来，而 0.08em 在 4 字标题上是 ~4.4px，肉眼可见。 */
     font-size: 13.6px;
     letter-spacing: 0.08em;
-    margin: 1.35rem 0 0.28rem;
+    margin: 14px 0 4px;
     font-weight: 600;
     color: var(--cs-ink);
   }
@@ -1565,7 +1598,7 @@
    * 它下面紧跟第一个小节标题，两个 0.85rem 会让「设置」和「发送档位」
    * 看起来是**平级**的。 */
   .cs-set-head {
-    margin-bottom: 0.35rem;
+    margin-bottom: 2px;
   }
 
   .cs-set-title {
@@ -1604,21 +1637,6 @@
     font-weight: 600;
   }
 
-  .cs-hint {
-    margin: 0.25rem 0 0;
-    font-size: 11.5px;
-    line-height: 1.5;
-    color: var(--cs-pencil);
-    /* 指引可能有换行，要原样显示 */
-    white-space: pre-line;
-    overflow-wrap: anywhere;
-  }
-
-  /* 错误 + 它的重试按钮。**同一行、同一左边线**——
-   * 分成两行时那条按钮会被列向 flex 拉成整宽块（2026-10-18 实测 288px），
-   * 而同屏「打开」是 97px 自适应 ⇒ 同类动作两个宽度。
-   * ⚠ 错误文案**可换行**且通常不止一行，所以 `min-width: 0` 必需，
-   *   否则 flex 子项按内容宽度撑开，按钮会被挤出可视区。 */
   .cs-retry {
     display: flex;
     align-items: flex-start;
@@ -1934,13 +1952,11 @@
    * 那是「卡片」，是另一套材质语言，而且它把里面已经是撕边纸条的按钮
    * 又关进一个描边盒子里，等于同一个控件上了两层框。 */
   .cs-group {
+    margin-top: 14px;
     padding: 0;
-  }
-
-  /* 组间距要**看得见地分开**：它们是两份互不影响的配置，
-   * 挤在一起会被读成一张卡的上下两段。 */
-  .cs-group + .cs-group {
-    margin-top: 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
 
   .cs-group-head {
@@ -1948,143 +1964,116 @@
     align-items: baseline;
     justify-content: space-between;
     gap: 0.5rem;
+    margin-bottom: 2px;
   }
 
-  /* 分组标题。与 `.cs-h2` **同一档**（2026-10-18 跟着改的）。
-   *
-   * ⚠ 这里原来写 12.8px 并注释「与 `.cs-h2` 同值」——`.cs-h2` 改到 13.6px
-   *   加字距之后这句就假了，于是同一屏出现两种分节标题：
-   *   「主模型 / 备用模型」一种、「发送档位 / 外观 / 窗口」另一种。
-   *   两者在结构上是**同一级**，必须同值。
-   *   （原来它独自写 `0.8rem` 却配 700 —— 全屏唯一的第三档字重，
-   *   2026-10-16 已并入 600。） */
   .cs-group-name {
     font-size: 13.6px;
     font-weight: 600;
     letter-spacing: 0.08em;
   }
 
-  /* 厂商选择：九项在 380px 的面板里**换行排**，不做分段控件
-   * （票 43 原话「一颗滑块放不下」）。仍是 `.cs-btn-mini` 那一族，
-   * 所以选中态直接借用 `.primary`，不另造一颗药丸。 */
-  .cs-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.3rem;
-    margin-top: 0.3rem;
-  }
-
-  /* ⚠⚠ 厂商芯片的选中态：**一枚红铅笔勾**（2026-10-18，票 61）。
-   *
-   *   ⚠⚠ **上一版（2026-10-18 当天）是错的，已撤。** 那一版给选中那颗
-   *   加了一层 `12% tier-ink 混纸` 的底色，想跟 `SegSlider` 的药丸对齐。
-   *   用户的判词是「毛坯」「模型选中的阴影又是什么个意思」。
-   *   两条批评都成立，根因是**它把两件事混成了一件**：
-   *
-   *   ① `.cs-btn-mini` 全族本来就有 `drop-shadow(0 2px 4px …)` ——
-   *      那不是「选中态的阴影」，那是**材质语言**：这是一片贴在纸上的小纸片，
-   *      所以它有落影。选中与落影本来就不该有关系。
-   *   ② 我加的淡墨洗底**把落影顶出来了** ⇒ 读成「这枚按钮的阴影更重」，
-   *      而人真正要读的是「这家被选中了」。**状态被材质盖住了。**
-   *
-   *   ⇒ 现在的做法与主面板档位行**同一条语言**：
-   *     空着就是空着，**标记的位置本身就是编码**——
-   *     选中那颗右上角盖一枚圈，没选的什么都不画（`PaperPanel` 那段原话）。
-   *
-   *   ⚠ 为什么是**勾**而不是圈：主面板档位行在 Manual / Auto 上就是勾
-   *     （`mark-shape` 只在 big 档才给 ring），所以这里跟**最常出现的那一档**
-   *     同一支笔。票 57 判「勾没有能用的尺寸」是在 `SegSlider` 那个
-   *     56×34 药丸上判的（它要**盖住 12.48px 的小字**）；
-   *     而这里是**右上角一枚独立标记**、不压字，30×18 完全放得下。
-   *   ⚠ 标记必须挂 `filter="url(#pencil)"`，而那个滤镜**原来只在
-   *     `PaperPanel` 和两个 studio 页里**。设置屏没有 ⇒ `url(#id)`
-   *     找不到目标时 SVG 规范是**整个元素不渲染**，
-   *     症状是「勾整个不见了」而不是「没滤镜效果」。
-   *     ⇒ 现在统一从 `$lib/PencilDefs.svelte` 取（全仓库唯一一份）。
-   */
-  /* ⚠⚠⚠ **勾的位置不是「设计」出来的，也不是从主面板抄来的**（2026-10-18 真机订正）。
-   *
-   *   用户两次指认「勾选为何要放到文字最前面」——判对。票 63 把它改成
-   *   「量出来的主面板几何」，**真机照样错**，因为抄的是**一个样本的常量**。
-   *
-   *   ### 当时的推理（错在哪一步）
-   *   实测 `target/probe/main-tick-geom.mjs`（Chromium 380×560）：
-   *     字 45.5 宽 · 勾 54.4 宽 · 勾心比字心偏左 0.73em
-   *   ⇒ 写成 `3.66em / 2.22em / −0.73em` 三个常量，芯片与药丸共用。
-   *
-   *   ### 那个 −0.73em 不是关系
-   *   真机 + 量具复测（`target/probe/chip-tick-geom.mjs`）证明它是**常量**，
-   *   而「勾心该在哪」取决于**标签有多长**：
-   *
-   *     | 标签 | 字宽 | 勾心 − 字心 | 换算成字宽的倍数 |
-   *     |---|---|---|---|
-   *     | 只填入 | 37.5 | −12.9px | **−0.34** |
-   *     | 退出   | 25.0 | −12.7px | **−0.51** |
-   *     | 勾     | 12.5 | −12.9px | **−1.04** ← 勾整个落在字的左边 |
-   *
-   *   三行的 px 几乎一样（偏移是常量），倍数却从 0.34 跑到 1.04。
-   *   ⇒ 一字标签上那枚勾**根本没碰到那个字**，它读成「排在前面的勾选框」——
-   *     正是用户两次指认的那件事。**照抄一个样本 = 把巧合当规范。**
-   *
-   *   ### 真正的关系只有一条：勾心 = 字心
-   *   芯片的 `left: 50%` 就是字心（芯片宽度由文字决定、文字居中），
-   *   不需要再往左挪。药丸那一支同样，`SegSlider.svelte` 一起改。
-   *
-   *   ⚠ 尺寸也不用 em 了：`em` 各按自己继承到的字号解算，同屏两处
-   *     差 1.39 倍（芯片 42.1 vs 药丸 58.5）。统一走 `--cs-stamp-w`。
-   */
-  .cs-chip-ring {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    height: calc(var(--cs-stamp-w) * 34 / 56);
-    width: var(--cs-stamp-w);
-    transform: translate(-50%, -50%);
-    pointer-events: none;
-    overflow: visible;
-  }
-  .cs-chip-ring svg {
-    width: 100%;
-    height: 100%;
-    display: block;
-  }
-
-  /* 只有 fill、不设 fill-opacity 的兜底：透明度是**笔迹数据**的一部分
-     （`marks.js` 每层自带 `o`）。CSS 兜底会把三道叠画压成单层平涂，
-     圈会立刻变成一个生硬的矢量圆环——见 `PaperPanel` 的同款警告。 */
-  .cs-chip-ring path {
-    fill: var(--cs-pencil-red);
-  }
-
-  /* 选中那颗本来就没有底色（`primary` 只改字重），这条只负责让勾有定位父级。
-     ⚠ 不给 `padding-left`：勾是**盖章**，压在字上，不是排成勾选框那一列。
-     第一版给整族加 `padding-left: 30px` 是想「让四颗左对齐线不跳」，
-     而盖章不需要槽位——它本来就盖在字上，选中前后文字位置不动。 */
-  .cs-chips .cs-btn-mini {
+  .cs-picker {
     position: relative;
+    display: flex;
+    flex-direction: column;
   }
 
-  /* 供应商卡片那一支已随两组结构退场，只留仍在用的 head / name。
-   * `.cs-prov` 与 `.cs-prov + .cs-prov` 2026-10-15 删除：
-   * 新标记里不再有 `.cs-prov` 卡片（svelte-check 报 css_unused_selector）。 */
-  .cs-prov-head {
+  .cs-picker-btn {
+    width: 100%;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5rem;
+    gap: 8px;
+    padding: 5px 10px;
+    margin: -4px 0;
+    font-size: 12px;
+    border: 10px solid transparent;
+    border-image: url('/strip.png') 32 fill / 10px / 0 stretch;
+    filter: drop-shadow(0 2px 4px rgb(24 18 10 / 0.14));
+    text-align: left;
   }
 
-  .cs-prov-name {
+  .cs-picker-btn:hover:not(:disabled) {
+    filter: drop-shadow(0 4px 8px rgb(24 18 10 / 0.22));
+  }
+
+  .cs-picker-tag {
+    flex: none;
+    font-size: 11.5px;
+    color: var(--cs-pencil);
+  }
+
+  .cs-picker-val {
+    flex: 1 1 auto;
+    min-width: 0;
     font-size: 12.5px;
+    font-weight: 600;
+    color: var(--cs-ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+  }
+
+  .cs-picker-arrow {
+    flex: none;
+    font-size: 11px;
+    color: var(--cs-pencil);
+    transition: transform 140ms var(--cs-ease);
+  }
+
+  .cs-picker-arrow.open {
+    transform: rotate(180deg);
+  }
+
+  .cs-picker-menu {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 2px;
+    padding: 4px 6px;
+    max-height: 176px;
+    overflow-y: auto;
+    scrollbar-width: none;
+    border: 10px solid transparent;
+    border-image: url('/strip.png') 32 fill / 10px / 0 stretch;
+    filter: drop-shadow(0 6px 12px rgb(24 18 10 / 0.24));
+  }
+
+  .cs-picker-menu::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+
+  .cs-picker-opt {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 8px;
+    font-size: 12px;
+    color: var(--cs-pencil);
+    border-radius: 2px;
+    text-align: left;
+  }
+
+  .cs-picker-opt:hover {
+    color: var(--cs-ink);
+    background: color-mix(in srgb, var(--cs-ink) 6%, transparent);
+  }
+
+  .cs-picker-opt.active {
+    color: var(--cs-ink);
     font-weight: 600;
   }
 
-  /* 徽标是**状态**，不是句子 ⇒ 单独一档 10.4px，比正文还小一档。
-   *
-   * 圆角从 999px（药丸）改成 **2px**：药丸是 Web 控件语汇，
-   * 在这一屏里与撕边纸条、墨线、铅笔灰都不是一族。
-   * 2px 是「一张小纸片」的最小圆角——撕边的毛边本来就是方的，
-   * 药丸却把它整个圆掉，等于说「这不是纸」。 */
+  .cs-picker-tick {
+    color: var(--cs-pencil-red);
+    font-weight: 600;
+    font-size: 12.5px;
+  }
+
   .cs-badge {
     font-size: 10.4px;
     padding: 0.1rem 0.4rem;
