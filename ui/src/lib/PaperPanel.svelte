@@ -303,18 +303,6 @@
     low: '低',
   };
 
-  /** 三格阶梯信号条（▂▄▆）点亮几格（1 / 2 / 3）。 */
-  function confBars(row: Candidate, idx: number): 1 | 2 | 3 {
-    if (row.confidence === 'high' || (idx === 0 && row.probability >= 0.35)) return 3;
-    if (
-      row.confidence === 'mid' &&
-      (idx <= 1 || row.probability >= (allCandidates[1]?.probability ?? 0))
-    ) {
-      return 2;
-    }
-    return 1;
-  }
-
   /**
    * 动作区要列的备选，**每一项带上它在原始候选数组里的下标**（票 68，2026-10-19）。
    *
