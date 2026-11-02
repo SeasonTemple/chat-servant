@@ -515,6 +515,14 @@ impl Provider {
         self.protocol().is_openai_compatible()
     }
 
+    /// 该预设厂商是否位于境外（直连易受 DNS 污染、SNI 阻断或地区 IP 限制影响）。
+    pub fn needs_acceleration(self) -> bool {
+        matches!(
+            self,
+            Self::TypeSafe | Self::OpenRouter | Self::OpenAi | Self::Anthropic
+        )
+    }
+
     /// genai 适配器。等价于 `self.protocol().adapter()`，留在这一层是为了
     /// 读代码时不必先跳进 [`Protocol`]。
     pub fn adapter(self) -> AdapterKind {
@@ -1198,7 +1206,8 @@ impl HttpReasoner {
     /// 重建本身很便宜：`reqwest::Client::builder().build()` 只做连接池与
     /// TLS 配置，不发任何请求；而它只在用户真的改了代理时才发生。
     fn client(&self) -> Result<Client, String> {
-        let want = self.proxy.get();
+        let route = self.route.route();
+        let want = effective_proxy_for(&route, self.proxy.get());
         let mut g = self
             .clients
             .lock()
@@ -1461,8 +1470,110 @@ pub fn build_request(system: &str, user: &str, images: &[ImagePayload]) -> ChatR
     ])
 }
 
+/// 自动探测本机可用的代理（环境变量优先，其次探测本机常用代理端口如 Clash 7897/7890、v2rayN 10809/10808）。
+fn detect_local_proxy() -> Option<String> {
+    for var in [
+        "CHATSERVANT_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+    ] {
+        if let Ok(v) = std::env::var(var) {
+            let t = v.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    for (port, scheme) in [
+        (7897u16, "http"),
+        (7890, "http"),
+        (10809, "http"),
+        (10808, "socks5h"),
+    ] {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(25)).is_ok() {
+            return Some(format!("{scheme}://127.0.0.1:{port}"));
+        }
+    }
+    None
+}
+
+/// 对指定路由计算实际生效的代理：显式配置优先；若未配置且目标为非回环的境外端点，则自动探测本机代理。
+fn effective_proxy_for(route: &Route, configured: Option<String>) -> Option<String> {
+    if configured.is_some() {
+        return configured;
+    }
+    let url = route.base_url();
+    if url.contains("127.0.0.1") || url.contains("localhost") {
+        return None;
+    }
+    if route.provider().needs_acceleration() {
+        return detect_local_proxy();
+    }
+    None
+}
+
+/// DoH（DNS-over-HTTPS，阿里公共 DoH `223.5.5.5`）解析域名 IPv4 地址，在无代理时绕过本地 UDP 53 DNS 污染。
+async fn resolve_via_doh(host: &str) -> Option<std::net::IpAddr> {
+    let cli = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let url = format!("https://223.5.5.5/resolve?name={host}&type=1");
+    let resp = cli.get(&url).send().await.ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    let ans = v.get("Answer")?.as_array()?;
+    for item in ans {
+        if item.get("type").and_then(|t| t.as_u64()) == Some(1)
+            && let Some(data) = item.get("data").and_then(|d| d.as_str())
+            && let Ok(ip) = data.parse::<std::net::IpAddr>()
+        {
+            return Some(ip);
+        }
+    }
+    None
+}
+
 impl HttpReasoner {
+    /// 将 `TurnContext::messages`（`"我: …"` / `"对方: …"`）转换为 Jev 要求的 `state.chat` 结构。
+    fn build_jev_state(ctx: &TurnContext) -> serde_json::Value {
+        let mut msgs = Vec::with_capacity(ctx.messages.len());
+        let mut latest_from = "her";
+        for raw in &ctx.messages {
+            let (who, text) = if let Some(rest) =
+                raw.strip_prefix("我:").or_else(|| raw.strip_prefix("我："))
+            {
+                ("me", rest.trim())
+            } else if let Some(rest) = raw
+                .strip_prefix("对方:")
+                .or_else(|| raw.strip_prefix("对方："))
+            {
+                ("her", rest.trim())
+            } else {
+                ("her", raw.trim())
+            };
+            latest_from = who;
+            msgs.push(serde_json::json!({
+                "from": who,
+                "text": text,
+            }));
+        }
+        serde_json::json!({
+            "chat": {
+                "relationship": ctx.peer,
+                "messages": msgs,
+                "latest_from": latest_from,
+                "is_group": false,
+            }
+        })
+    }
+
     /// Jev 专用决策接口（TypeSafe `/v1/systemone` 或 OpenRouter `/api/alpha/decisions`）。
+    ///
+    /// 完整发送 5 道 System-1 结构化问题（`true_intent` / `she_needs` / `best_action` /
+    /// `literal_question` / `danger_level`），并将 `choice` / `noul` / `score` 响应映射为
+    /// 面向起草与界面可读的中文 [`Intent`]。
     fn judge_jev(&self, ctx: &TurnContext) -> Result<Intent, ReasonError> {
         let route = self.route.route();
         let model = self.route.get();
@@ -1476,14 +1587,19 @@ impl HttpReasoner {
             .lock()
             .map_err(|e| ReasonError::Judge(e.to_string()))?
             .clone();
-        let proxy = self.proxy.get();
+        let proxy = effective_proxy_for(&route, self.proxy.get());
         let payload = serde_json::json!({
             "model": model,
-            "state": {
-                "peer": ctx.peer,
-                "messages": ctx.messages,
-            },
+            "state": Self::build_jev_state(ctx),
             "questions": {
+                "literal_question": {
+                    "type": "noul",
+                    "instructions": "Is the other person's latest message meant purely literally, with no subtext?",
+                    "criteria": {
+                        "true": "Straightforward statement, question, or plan with no hidden test or sarcasm.",
+                        "false": "There is subtext: testing whether you care, sarcasm, implied complaint, or trap question."
+                    }
+                },
                 "true_intent": {
                     "type": "choice",
                     "instructions": "What is the other person's true intent in the latest message?",
@@ -1494,6 +1610,30 @@ impl HttpReasoner {
                         "seek_explanation": "Wants a factual explanation of why something happened.",
                         "casual_chat": "Light talk, banter, sharing, or friendly chat.",
                         "close_topic": "Peaceful wrap-up, thanks, or nothing more needed."
+                    }
+                },
+                "she_needs": {
+                    "type": "choice",
+                    "instructions": "What does the other person actually need from you right now?",
+                    "criteria": {
+                        "apology": "A sincere apology for hurt or a mistake.",
+                        "action": "A concrete action, time, commitment, or follow-through.",
+                        "explanation": "A clear explanation of what happened or why.",
+                        "care": "Proof you remember, listen, or care.",
+                        "nothing": "Nothing further needed; peaceful wrap-up or casual sharing."
+                    }
+                },
+                "best_action": {
+                    "type": "choice",
+                    "instructions": "What type of next action is best?",
+                    "criteria": {
+                        "check_history": "Look up prior chat history first before answering.",
+                        "apologize": "Apologize directly for the known issue.",
+                        "give_commitment": "Give a concrete time or commitment.",
+                        "explain": "Explain the facts and reason clearly.",
+                        "acknowledge": "Respond warmly and show understanding.",
+                        "say_less": "Keep the reply brief and low-key.",
+                        "make_plan": "Coordinate a concrete plan together."
                     }
                 },
                 "danger_level": {
@@ -1514,6 +1654,13 @@ impl HttpReasoner {
                 let px = reqwest::Proxy::all(p.clone())
                     .map_err(|e| redact(&format!("代理配置无效：{e}")))?;
                 b = b.proxy(px);
+            } else if let Ok(parsed) = reqwest::Url::parse(&url)
+                && let Some(host) = parsed.host_str()
+                && !matches!(host, "127.0.0.1" | "localhost")
+                && let Some(ip) = resolve_via_doh(host).await
+            {
+                let port = parsed.port_or_known_default().unwrap_or(443);
+                b = b.resolve(host, std::net::SocketAddr::new(ip, port));
             }
             let cli = b
                 .build()
@@ -1545,28 +1692,80 @@ impl HttpReasoner {
             "模型调用完成 (Jev)"
         );
         let v = res.map_err(ReasonError::Judge)?;
+        Ok(Self::parse_jev_answers(&v))
+    }
+
+    /// 解析 Jev 返回的 `answers` 字典（`choice` / `noul` / `score`）并转成中文 [`Intent`]。
+    fn parse_jev_answers(v: &serde_json::Value) -> Intent {
         let ans = v.get("answers");
-        let choice = ans
+        let choice_raw = ans
             .and_then(|a| a.get("true_intent"))
             .and_then(|x| x.get("choice"))
             .and_then(|x| x.as_str())
             .unwrap_or("casual_chat");
+        let mut intent_zh = match choice_raw {
+            "confirm_you_care" => "希望确认你在意",
+            "vent_anger" => "表达不满或情绪",
+            "request_action" => "希望你采取行动",
+            "seek_explanation" => "希望了解原因",
+            "casual_chat" => "轻松交流",
+            "close_topic" => "平和结束话题",
+            other => other,
+        }
+        .to_string();
+        if let Some(noul) = ans
+            .and_then(|a| a.get("literal_question"))
+            .and_then(|x| x.get("noul"))
+            .and_then(|x| x.as_f64())
+            && noul < 0.5
+        {
+            intent_zh.push_str("（有潜台词）");
+        }
+        let need_raw = ans
+            .and_then(|a| a.get("she_needs"))
+            .and_then(|x| x.get("choice"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("care");
+        let need_zh = match need_raw {
+            "apology" => "真诚道歉",
+            "action" => "具体行动或安排",
+            "explanation" => "清楚的解释",
+            "care" => "关注与在意",
+            "nothing" => "无需额外补充",
+            other => other,
+        }
+        .to_string();
+        let best_act = ans
+            .and_then(|a| a.get("best_action"))
+            .and_then(|x| x.get("choice"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("acknowledge");
+        let action_zh = if choice_raw == "close_topic" && need_raw == "nothing" {
+            "wait".to_string()
+        } else {
+            match best_act {
+                "check_history" => "先核对聊天记录",
+                "apologize" => "为已知问题道歉",
+                "give_commitment" => "给出具体承诺",
+                "explain" => "说明事实与原因",
+                "acknowledge" => "回应并表达理解",
+                "say_less" => "简短回应或留白",
+                "make_plan" => "商量具体安排",
+                other => other,
+            }
+            .to_string()
+        };
         let danger = ans
             .and_then(|a| a.get("danger_level"))
             .and_then(|x| x.get("score"))
             .and_then(|x| x.as_f64())
             .unwrap_or(0.0);
-        let action = if choice == "close_topic" {
-            "wait"
-        } else {
-            "reply"
-        };
-        Ok(Intent {
-            intent: choice.to_string(),
-            need: String::new(),
-            action: action.to_string(),
+        Intent {
+            intent: intent_zh,
+            need: need_zh,
+            action: action_zh,
             tension: ((danger / 9.0).clamp(0.0, 1.0)) as f32,
-        })
+        }
     }
 }
 
@@ -1794,11 +1993,12 @@ pub fn probe_route(
     timeout: Duration,
     proxy: Option<&str>,
 ) -> Result<(), String> {
+    let eff = effective_proxy_for(route, proxy.map(str::to_string));
     probe_at(
         &route.models_url(),
         &route.probe_headers(api_key),
         timeout,
-        proxy,
+        eff.as_deref(),
     )
 }
 
