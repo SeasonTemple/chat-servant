@@ -1644,13 +1644,13 @@
                     {#if markShape.current === 'ring'}
                       <svg
                         class="cs-pencil-mark"
-                        viewBox="0 0 {RING_VIEW.w} {RING_VIEW.h}"
-                        width="26"
-                        height="16"
+                        viewBox="0 0 {MARK_VIEW.w} {MARK_VIEW.h}"
+                        width="30"
+                        height="20"
                         aria-hidden="true"
                         filter="url(#pencil)"
                       >
-                        {#each RING_MARK as l (l.d)}<path d={l.d} fill-opacity={l.o} />{/each}
+                        {#each RING_LABEL_MARK as l (l.d)}<path d={l.d} fill-opacity={l.o} />{/each}
                       </svg>
                     {:else}
                       <svg
@@ -2992,7 +2992,8 @@
     width: 26px;
     height: 16px;
     flex: none;
-    font-family: 'Kaiti SC', 'STKaiti', 'KaiTi', var(--cs-font-draft);
+    font-family: 'STKaiti', 'KaiTi', 'FangSong', 'Georgia', serif;
+    filter: url(#pencil);
     font-style: italic;
     font-size: 14px;
     font-weight: 600;
