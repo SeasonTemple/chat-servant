@@ -192,6 +192,19 @@
 
   /** 设置主区开没开。**它与正文区互斥**，理由见模板里那条。 */
   let settingsOpen = $state(false);
+  let pinned = $state(false);
+
+  async function togglePin() {
+    const next = !pinned;
+    pinned = next;
+    if (!HAS_TAURI) return;
+    try {
+      pinned = await invoke<boolean>('set_always_on_top', { pinned: next });
+    } catch (e) {
+      pinned = !next;
+      console.error('切换置顶失败：', e);
+    }
+  }
 
   /**
    *  点档位。**先问 Rust，再画勾。**
@@ -1053,6 +1066,41 @@
             ⚠ **正文不套**，2026-10-14 实测否掉，见下面 CSS 那段。
         齿轮第一版偏散、读起来像太阳，把圆环从 r4 加到 4.6、齿尖收到 6.2 才压住。
       -->
+      <button
+        class="cs-glyph"
+        class:on={pinned}
+        type="button"
+        data-no-drag
+        onclick={() => void togglePin()}
+        title={pinned ? '取消置顶' : '置顶窗口'}
+        aria-label="置顶窗口"
+        aria-pressed={pinned}
+      >
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 20 20"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.55"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+          filter="url(#pencil)"
+        >
+          <path d="M6.8 3.6h6.4l-.9 4.5 2.1 2.2v1.2H5.6v-1.2l2.1-2.2-.9-4.5z" />
+          <path d="M10 11.5v5.3" />
+        </svg>
+        {#if pinned}
+          <span class="cs-glyph-ring" aria-hidden="true">
+            <svg viewBox="0 0 {RING_VIEW.w} {RING_VIEW.h}" filter="url(#pencil)">
+              {#each RING_MARK as layer (layer.d)}
+                <path d={layer.d} fill-opacity={layer.o} />
+              {/each}
+            </svg>
+          </span>
+        {/if}
+      </button>
       <button
         class="cs-glyph"
         class:on={settingsOpen}

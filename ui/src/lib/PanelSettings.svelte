@@ -694,7 +694,6 @@
   -->
   <header class="cs-set-head">
     <h1 class="cs-set-title">设置</h1>
-    <p class="cs-set-sub">改完立刻生效，不用重启面板。</p>
   </header>
 
   <!--
@@ -907,15 +906,12 @@
   {/if}
 
   <!-- ══ 上下文 ══ -->
-  <h2 class="cs-h2">上下文</h2>
+  <h2 class="cs-h2">上下文条数</h2>
   <!--
     ⚠ 2026-10-15 改成名称 + `title`。这一句回答的是「这一节在设什么」
     （那是**名称**），而「更早的压成摘要」是**理由**——理由不该和名称
     平级站在屏幕上。
   -->
-  <p class="cs-label" title="送进模型的最近多少条原文。更早的压成摘要，调大不会等比变贵。">
-    送进模型的最近原文条数
-  </p>
   <div class="cs-slider">
     <input
       type="range"
@@ -948,8 +944,7 @@
   {/if}
 
   <!-- ══ 图片 ══ -->
-  <h2 class="cs-h2">图片</h2>
-  <p class="cs-label">把对方发的图片发给模型</p>
+  <h2 class="cs-h2">图片识别</h2>
   <!--
     ⚠ **按钮写动作，不写状态。**
     原来关着的时候显示「关闭」—— 可按下去是**打开**。
@@ -967,7 +962,7 @@
       所以这一类缺口靠门禁抓不到，只能靠数。
   -->
   <button class="cs-btn cs-btn-ink" onclick={() => toggleImagesOut(!imagesOut)}>
-    {imagesOut ? '关掉' : '打开'}
+    {imagesOut ? '已开启（点击关闭）' : '已关闭（点击开启）'}
   </button>
   <!--
     ⚠ 这段**必须短**，而且**只能红一句**。
@@ -979,14 +974,15 @@
     错了什么后果 —— 三件都在，只是压在正常的铅笔色正文里。
     红色只留给那句「在你没预期的时候它会这么做」。
   -->
-  <p class="cs-note">对方发来的<strong>整块画面</strong>会发给第三方模型。</p>
   <!-- ⚠ 2026-10-18：原文「画面切分只在 1 张真实样本上验证过 —— 认错框，
        屏幕就出去了」。前半句是在交代**我们**的验证状态（用户拿它无法行动），
        后半句「认错框」是内部术语——用户读到「框」不会想到那是截图里
        被框出来的一块。
        ⇒ 换成用户能懂的**后果**。「该红」不变：那一条守的是上面
          L859-861 的定案（红只留给「在你没预期的时候它会这么做」）。 -->
-  <p class="cs-warn-on">截图可能认错 —— 认错一张就等于把整屏发了出去</p>
+  {#if imagesOut}
+    <p class="cs-warn-on">开启后会将画面中的图片区域发送给模型</p>
+  {/if}
   {#if imagesNote}
     <p class="cs-note" role="status">{imagesNote}</p>
   {/if}
@@ -1086,11 +1082,9 @@
       {@const p = currentProvider(g)}
       <section class="cs-group">
         <div class="cs-group-head">
-          <span class="cs-group-name">{g.label}</span>
+          <span class="cs-group-name" title={g.role}>{g.label}</span>
           <span class="cs-badge miss">{g.route.provider_label}</span>
         </div>
-        <p class="cs-hint" title="这一组干什么用的">{g.role}</p>
-
         {#if g.shares_with}
           <!-- ⚠ 必须**明说**。这一组没单独配 key 时它与另一组是同一格，
                而用户改这一节的端点会连带改掉那一组——不说就是坑人。
@@ -1102,12 +1096,12 @@
                ⚠ 2026-10-19：对方的名字改成由后端下发（`g.shares_with`）。
                共享**有方向**——只配了决策组时是回复组借决策组的格子，
                把「回复模型」写死会在那一种配置下**指错组**。 -->
-          <p class="cs-note cs-warn">没单独的 key，改这节会连带改掉「{g.shares_with}」。</p>
+          <p class="cs-note">当前与「{g.shares_with}」共用密钥</p>
         {/if}
 
         <!-- 厂商。**九项不是分段控件能装的**（380px 面板里一颗滑块放不下），
              所以用一组同族的小按钮换行排列——仍是这一屏已有的那支笔。 -->
-        <p class="cs-label">走哪一家</p>
+        <p class="cs-label">服务商</p>
         <div class="cs-chips">
           {#each g.providers as p (p.id)}
             <button
@@ -1165,24 +1159,6 @@
             端点可换之后「请求会发给第三方模型」这句话已经不准确了——
             它可能是任何一台机器。所以这里显示**真实的目标地址**。
           -->
-          <p class="cs-note">
-            <strong>聊天内容与图片会发到这个地址：</strong>{g.route.base_url}
-          </p>
-        {:else}
-          <p class="cs-note" title="这一组当前请求发去的地方">
-            请求发往 {g.route.base_url}
-          </p>
-        {/if}
-
-        {#if !g.route.measured}
-          <!-- 端点与模型名抄自文档而没在本机跑过。**必须说出来**：
-               症状是「设置成功、一调用就 404」，不说就变成玄学。 -->
-          <!-- ⚠ 2026-10-18：原文「这一家的端点与模型名抄自官方文档，未在本机
-               实测。」要紧的是**症状**（设置成功、一调用就 404），而原文把
-               「抄自官方文档、未在本机实测」放在最前面——那是在交代我们的
-               工作状态，用户拿它无法行动，反而看不见真正会发生什么。
-               ⇒ 把症状提到最前面。上面「不说就变成玄学」的判断不变。 -->
-          <p class="cs-note cs-warn">没在本机验证过：填错的话保存照样成功，一调用才报错。</p>
         {/if}
 
         <!-- 模型名。清单只有一条时不给分段控件（一颗滑块只有一个选项，
@@ -1280,7 +1256,7 @@
                   type="password"
                   autocomplete="off"
                   spellcheck="false"
-                  placeholder="粘贴 key"
+                  placeholder="粘贴 API Key（存入系统凭据库）"
                   bind:value={drafts[g.id]}
                 />
                 <button
@@ -1295,8 +1271,6 @@
           {:else}
             <!-- p.hint 是 Rust 给的**可执行**指引：存哪、变量名叫什么。
                  不能是空字符串或「暂无」。 -->
-            <p class="cs-hint">{p.hint}</p>
-
             <!-- ⚠ **未配置时输入框必须直接显示**，不能套
                  `drafts[g.id] === REVEAL` 那道门（2026-10-15 修的真机死路，
                  见 `.scratch/…/40-*.md`）。那道门本来只为「已配置时不把
@@ -1312,7 +1286,7 @@
                 type="password"
                 autocomplete="off"
                 spellcheck="false"
-                placeholder="粘贴 key"
+                placeholder="粘贴 API Key（存入系统凭据库）"
                 bind:value={drafts[g.id]}
               />
               <button
@@ -1348,7 +1322,6 @@
       ⚠ 地址里常有 `user:pass@`。**它会进日志**，所以 Rust 那边对它
       走的是与 key 同一条脱敏路径（只抹凭据段，host 与端口留着）。
     -->
-    <p class="cs-label" title="两组模型与「测连通」都走它。留空 = 直连。">出站代理</p>
     <div class="cs-form">
       <input
         class="cs-input"
@@ -1367,7 +1340,6 @@
          而 title 只在 hover 可见，等于占了一行常驻文字去重复一句看不见的
          内容；后半句才是这一屏为数不多的隐私承诺。
          ⇒ 去掉重复的前半句，把「留空 = 直连」这个后果提到正文。 -->
-    <p class="cs-note">留空就是直连。代理里的账号密码不会进日志。</p>
     {#if proxyNote}
       <p class="cs-note" role="status">{proxyNote}</p>
     {/if}
@@ -1614,13 +1586,6 @@
     font-weight: 600;
     line-height: 1.4;
     color: var(--cs-ink);
-  }
-
-  .cs-set-sub {
-    margin: 0.1rem 0 0;
-    font-size: 11.5px;
-    line-height: 1.5;
-    color: var(--cs-pencil);
   }
 
   .cs-label {

@@ -1271,6 +1271,17 @@ pub fn show_panel(app: AppHandle) -> Result<(), String> {
 /// - 2026-11-01：上一版修完还留着 `Confirm` 档与「菜单首行写着『小周 · 确认后发』」——
 ///   `Confirm` 2026-10-15 就砍了（只剩 `Manual` / `Auto` 两档），而托盘菜单的文字状态行也已删
 ///   （见 `build_tray_menu`），菜单里根本没有「首行文字」。
+/// 切换主面板窗口置顶（默认不置顶，由右上角图钉按钮按需开启/关闭）。
+#[tauri::command]
+pub fn set_always_on_top(app: AppHandle, pinned: bool) -> Result<bool, String> {
+    let Some(w) = app.get_webview_window("main") else {
+        return Err("主窗口不存在".into());
+    };
+    w.set_always_on_top(pinned)
+        .map_err(|e| format!("设置置顶失败：{e}"))?;
+    Ok(pinned)
+}
+
 #[tauri::command]
 pub fn quit_app(app: AppHandle) -> Result<(), String> {
     app.exit(0);

@@ -80,6 +80,36 @@ fn main() {
             commands::start(app.handle());
             // 建完循环再刷一次托盘 —— 循环一上来就知道档位和会话名了。
             commands::refresh_tray();
+            if let Some(win) = app.get_webview_window("main") {
+                std::thread::Builder::new()
+                    .name("cs-clickthrough".into())
+                    .spawn(move || {
+                        let mut ignoring = false;
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(40));
+                            let (Ok(cur), Ok(pos), Ok(scale)) = (
+                                win.cursor_position(),
+                                win.outer_position(),
+                                win.scale_factor(),
+                            ) else {
+                                continue;
+                            };
+                            let lx = (cur.x - f64::from(pos.x)) / scale;
+                            let ly = (cur.y - f64::from(pos.y)) / scale;
+                            let in_outer =
+                                (0.0..=380.0).contains(&lx) && (0.0..=560.0).contains(&ly);
+                            let on_paper =
+                                (16.0..=364.0).contains(&lx) && (4.0..=508.0).contains(&ly);
+                            let want_ignore = in_outer && !on_paper;
+                            if want_ignore != ignoring
+                                && win.set_ignore_cursor_events(want_ignore).is_ok()
+                            {
+                                ignoring = want_ignore;
+                            }
+                        }
+                    })
+                    .ok();
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -156,6 +186,7 @@ fn main() {
             commands::hide_panel,
             commands::show_panel,
             commands::drag_window_by,
+            commands::set_always_on_top,
             commands::quit_app,
         ])
         .run(tauri::generate_context!())

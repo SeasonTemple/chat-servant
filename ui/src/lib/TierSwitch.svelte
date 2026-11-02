@@ -27,8 +27,6 @@
   /** 给 `SegSlider` 的只有 id + label；hint 由下面的 `<p>` 单独渲染。 */
   const OPTIONS = TIERS.map((t) => ({ id: t.id, label: t.label }));
 
-  const active = $derived(TIERS.find((t) => t.id === tier) ?? TIERS[0]);
-
   /**
    * 切到**最高档**时的一次性警示闪。dep=tier 保证只在切档时闪，不在挂载时闪。
    *
@@ -66,7 +64,6 @@
     但它原来 0.6rem、右对齐、缩在右下角，像脚注 —— 而它讲的是**后果**。
     后果不该是脚注。跟正文一个字号档，跟正文一个左边线。
   -->
-  <p class="cs-hint">{active.hint}</p>
 </div>
 
 <style>
@@ -97,21 +94,5 @@
     border: 1px solid var(--cs-alarm);
     opacity: 0;
     pointer-events: none;
-  }
-
-  .cs-hint {
-    /* 后果说明用**正文档**（6.22 : 1），不是标注档。
-     * 它要读，读不清等于没说。 */
-    margin: 0.1rem 0 0;
-    font-size: 0.72rem;
-    line-height: 1.5;
-    color: var(--cs-pencil);
-    max-width: 34rem;
-    text-align: left;
-    /* 左边线：这是「后果」，不是脚注 */
-    padding-left: 0.55rem;
-    border-left: 2px solid var(--cs-rule);
-    /* 窄面板下提示语要能换行，不能横向溢出 */
-    overflow-wrap: anywhere;
   }
 </style>
