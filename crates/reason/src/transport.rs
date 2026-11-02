@@ -313,6 +313,7 @@ impl ThinkingEffort {
     }
 }
 
+/// 模型服务供应商（预设或自定义端点）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     /// **TypeSafe (Jev)**：专用 System-1 决策模型端点（`/v1/systemone`）。
