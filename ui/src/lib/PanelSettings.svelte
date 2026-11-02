@@ -46,7 +46,7 @@
   import TierSwitch from '$lib/TierSwitch.svelte';
   import SegSlider from '$lib/SegSlider.svelte';
   import { IS_DEMO as DEMO } from '$lib/runtime';
-  import { markShape } from '$lib/mark-shape.svelte';
+  import { markShape, type MarkShape } from '$lib/mark-shape.svelte';
   import type { BudgetView, Tier } from '$lib/types';
   import PencilDefs from '$lib/PencilDefs.svelte';
 
@@ -432,6 +432,23 @@
    * ⚠ 不能各存一份：设置页切了、主面板没跟，就是「同一个事实两个来源」，
    * 而用户在界面上看不出哪里不同步。
    */
+  let shape = $state<MarkShape>(markShape.current);
+  let shapeNote = $state('');
+
+  const SHAPE_OPTIONS = [
+    { id: 'tick' as const, label: '勾' },
+    { id: 'ring' as const, label: '圈' },
+  ];
+
+  async function setShape(next: MarkShape) {
+    shapeNote = '';
+    const r = await markShape.set(next);
+    if (!r.ok) {
+      shapeNote = `没存上：${r.note}`;
+    }
+    shape = markShape.current;
+  }
+
   async function setClose(next: 'exit' | 'tray') {
     closeNote = '';
     try {
@@ -549,7 +566,7 @@
         closeBehavior = 'exit';
       }
       // 标记形状也要读回来：界面显示的必须是程序认定的那个。
-      await markShape.set('tick');
+      shape = await markShape.load();
       // ⚠ **模型设置**不再单独读一条命令：它在 `get_settings` 那一屏里
       // （两组 + 端点 + 代理）。摆两个来源就等于同一个事实两处显示，
       // 而它们迟早不一致。
@@ -812,7 +829,9 @@
                   onclick={() => (openPicker = null)}
                 >
                   <span>{p}</span>
-                  {#if i === 0}<span class="cs-picker-tick" aria-hidden="true">✓</span>{/if}
+                  {#if i === 0}<span class="cs-picker-tick" aria-hidden="true"
+                      >{markShape.current === 'ring' ? '◯' : '✓'}</span
+                    >{/if}
                 </button>
               {/each}
             </div>
@@ -847,6 +866,18 @@
   <TierSwitch bind:tier onchange={changeTier} />
   {#if tierNote}
     <p class="cs-fail" role="alert">{tierNote}</p>
+  {/if}
+
+  <!-- ══ 外观 ══ -->
+  <h2 class="cs-h2">外观</h2>
+  <SegSlider
+    bind:value={shape}
+    label="标记形状"
+    options={SHAPE_OPTIONS}
+    onchange={(v) => void setShape(v as MarkShape)}
+  />
+  {#if shapeNote}
+    <p class="cs-note" role="status">{shapeNote}</p>
   {/if}
 
   <!-- ══ 窗口 ══ -->
@@ -1119,7 +1150,9 @@
                 >
                   <span>{item.label}</span>
                   {#if item.id === g.route.provider}
-                    <span class="cs-picker-tick" aria-hidden="true">✓</span>
+                    <span class="cs-picker-tick" aria-hidden="true"
+                      >{markShape.current === 'ring' ? '◯' : '✓'}</span
+                    >
                   {/if}
                 </button>
               {/each}
@@ -1188,7 +1221,9 @@
                   >
                     <span>{m}</span>
                     {#if m === g.model}
-                      <span class="cs-picker-tick" aria-hidden="true">✓</span>
+                      <span class="cs-picker-tick" aria-hidden="true"
+                        >{markShape.current === 'ring' ? '◯' : '✓'}</span
+                      >
                     {/if}
                   </button>
                 {/each}
@@ -1257,7 +1292,9 @@
                   >
                     <span>{ef.label}</span>
                     {#if ef.id === g.effort}
-                      <span class="cs-picker-tick" aria-hidden="true">✓</span>
+                      <span class="cs-picker-tick" aria-hidden="true"
+                        >{markShape.current === 'ring' ? '◯' : '✓'}</span
+                      >
                     {/if}
                   </button>
                 {/each}

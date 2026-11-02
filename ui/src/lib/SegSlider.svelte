@@ -40,7 +40,8 @@
   import type { Attachment } from 'svelte/attachments';
   import { slideTo } from './attach';
   import { DUR, prefersReducedMotion } from './motion';
-  import { TICK_NESTED, TICK_VIEW } from '$lib/marks';
+  import { MARK_VIEW, RING_LABEL_MARK, TICK_NESTED, TICK_VIEW } from '$lib/marks';
+  import { markShape } from '$lib/mark-shape.svelte';
   import PencilDefs from '$lib/PencilDefs.svelte';
   // ⚠⚠ **这里曾经 import `TICK_NESTED_BIG` / `TICK_VIEW` 并在药丸里画勾**，
   //   2026-10-18 删掉了。理由见 `.cs-pill` 的注释与本文件留档段，
@@ -204,11 +205,19 @@
       药丸本身仍由 GSAP 动 `left/width`，勾在药丸**内部**绝对定位，
       所以滑块走到哪，勾就跟到哪，不需要第二套状态。
     -->
-    <svg class="cs-pill-tick" viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}" filter="url(#pencil)">
-      {#each TICK_NESTED as layer (layer.d)}
-        <path d={layer.d} fill-opacity={layer.o} />
-      {/each}
-    </svg>
+    {#if markShape.current === 'ring'}
+      <svg class="cs-pill-tick" viewBox="0 0 {MARK_VIEW.w} {MARK_VIEW.h}" filter="url(#pencil)">
+        {#each RING_LABEL_MARK as layer (layer.d)}
+          <path d={layer.d} fill-opacity={layer.o} />
+        {/each}
+      </svg>
+    {:else}
+      <svg class="cs-pill-tick" viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}" filter="url(#pencil)">
+        {#each TICK_NESTED as layer (layer.d)}
+          <path d={layer.d} fill-opacity={layer.o} />
+        {/each}
+      </svg>
+    {/if}
   </div>
   {#each options as o (o.id)}
     <button

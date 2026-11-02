@@ -1641,103 +1641,41 @@
                 ⇒ 槽宽钉 `min-width: 27px`，**所有纸条的正文宽度一致**。
               -->
               <span class="cs-act-meta">
-                {#if row.id === activeId}
-                  <!--
-                    ⚠ `TICK_VIEW` 是 56×34，那是**档位选择器**那一行的尺寸——
-                    它独占一整行 72px 高。而这里纸条总高才 ~30px，
-                    原尺寸放进去会盖住整句话。
-                    viewBox 不变，轮廓数据一个字节没动。
-
-                    ⚠⚠⚠ **2026-10-25：尺寸从 20×12 放大到 26×16**（用户反馈 ③：
-                    「勾有点过小」）。
-                    ⇒ 放大后**笔迹**（不是外框）从 10.3×10.1px 变成 **13.5×14.3px**
-                      （实测：笔迹在 56×34 取景框里占 29.1×30.8 ⇒ 缩放 0.353 → 0.464）。
-                    ⇒ **和 studio 的 `actrow` 参考实现对齐**（那边本来就是 26×16）
-                      ——「同一个概念必须同一支笔、同一把尺」（SegSlider 的原话）。
-                    ⇒ **槽装得下**：槽宽 27px / 高 16px ⇒ 26×16 正好填满，
-                      **不改变任何纸条的正文宽度**（槽宽钉死 27px），
-                      **也不改变纸条高度**（槽高钉死 16px，记号在槽内居中）。
-
-                    ⚠⚠ **原来那条「20 而不是 26」的顾虑已经作废**：
-                    当时写的是「26px 的勾会让首选那行变高」——那是**还没有固定槽**
-                    的年代（2026-10-19）。现在槽高钉死 16px 且 `align-self: center`
-                    ⇒ 记号变大**只影响它自己**，不推任何东西。
-                    ⚠ 但这类「差一点点就翻行或溢出」的耦合最阴险：
-                    **改记号尺寸必须重新量 `.cs-pick` 的 rect，两个档都要量**
-                    （本轮量过：档位行 408.5 / 91.5，未变）。
-
-                    ⚠ 红铅笔滤镜是**笔的一部分**，不是效果。少了 `url(#pencil)`
-                    它就是矢量而不是铅笔（§3.2：五层嵌套 + 羽化是一套，
-                    单层平涂边缘一刀切）。
-                  -->
-                  <span class="cs-act-mark">
-                    <svg
-                      class="cs-pencil-mark"
-                      viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}"
-                      width="26"
-                      height="16"
-                      aria-hidden="true"
-                      filter="url(#pencil)"
-                    >
-                      {#each TICK_NESTED as l (l.d)}<path d={l.d} fill-opacity={l.o} />{/each}
-                    </svg>
-                  </span>
-                {:else if allCandidates.length > 1}
-                  <!--
-                    ⚠ 只有一条候选时不显示置信度：预设起草器恒给 100%，
-                    那是「没有第二个选择」的算术结果，不是置信度。
-                    而那唯一一条就是选中项 ⇒ 槽里是勾。
-
-                    ⚠ **这里不再显示百分数**（2026-10-25，用户定案）。
-                    改画一道**笔迹轻重**：落笔重 = 把握大。
-
-                    ## 为什么不再显示百分数
-
-                    用户原话：「可以考虑不提供百分比符号 而是以其他方式来表现置信程度？」
-                    ⇒ 要保的是「置信程度」这个信息，换掉的是「%」这个符号。
-
-                    ## 为什么不是「一个墨点，点的大小分三档」
-
-                    第一轮出图给了三套，用户否了那一套：「你这个墨滴能做到什么程度？
-                    **只是一个点没有价值**」。
-                    ⇒ 判据从「换一种符号」改成「**载体本身携带多少信息**」。
-                    ⇒ 定案：**一道短划，笔画轻重分三档**（同一道批注，轻按 / 重按）。
-
-                    ## 三档是哪三档、谁算的
-
-                    ⚠ **档位由 Rust 侧算**（`crates/core/src/confidence.rs` 的
-                    `ConfidenceTier::from_probability`）：≥0.5 高 / ≥0.2 中 / 其余低。
-                    界面**不自己按概率分档** ⇒ 阈值只有一份，不会两边对不上。
-
-                    ## 为什么用同一个取景框、同一个槽
-
-                    与那枚红勾**同框（`TICK_VIEW` 56×34）、同尺寸（26×16）、同槽**
-                    ⇒ 记号与置信度在同一列，纸条的正文宽度与高度完全不受影响。
-
-                    ## 无障碍
-
-                    笔迹是 `aria-hidden` 的图，读屏读不到 ⇒ 外层给一个
-                    `role="img"` + `aria-label`，把「置信度：高/中/低」说出来。
-                    ⚠ 换掉文本之前它是可以被读到的 ⇒ 这条不能丢。
-                  -->
-                  {@const lit = confBars(row, i)}
+                {#if allCandidates.length > 1}
+                  {@const score = Math.round(row.probability * 100)}
                   <span
                     class="cs-act-prob"
-                    role="img"
-                    aria-label="置信度：{CONF_LABEL[row.confidence]}（{lit}/3 格）"
+                    class:is-active={row.id === activeId}
+                    aria-label="置信度：{CONF_LABEL[row.confidence]}（{score}）"
                   >
-                    <svg
-                      class="cs-pencil-mark"
-                      viewBox="0 0 26 16"
-                      width="26"
-                      height="16"
-                      aria-hidden="true"
-                      filter="url(#pencil)"
-                    >
-                      <path d="M4 9.5h3.8v4.5H4z" fill-opacity={lit >= 1 ? 0.88 : 0.2} />
-                      <path d="M11.1 5.5h3.8v8.5h-3.8z" fill-opacity={lit >= 2 ? 0.88 : 0.2} />
-                      <path d="M18.2 1.5h3.8v12.5h-3.8z" fill-opacity={lit >= 3 ? 0.88 : 0.2} />
-                    </svg>
+                    {score}
+                  </span>
+                {/if}
+                {#if row.id === activeId}
+                  <span class="cs-act-mark">
+                    {#if markShape.current === 'ring'}
+                      <svg
+                        class="cs-pencil-mark"
+                        viewBox="0 0 {RING_VIEW.w} {RING_VIEW.h}"
+                        width="26"
+                        height="16"
+                        aria-hidden="true"
+                        filter="url(#pencil)"
+                      >
+                        {#each RING_MARK as l (l.d)}<path d={l.d} fill-opacity={l.o} />{/each}
+                      </svg>
+                    {:else}
+                      <svg
+                        class="cs-pencil-mark"
+                        viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}"
+                        width="26"
+                        height="16"
+                        aria-hidden="true"
+                        filter="url(#pencil)"
+                      >
+                        {#each TICK_NESTED as l (l.d)}<path d={l.d} fill-opacity={l.o} />{/each}
+                      </svg>
+                    {/if}
                   </span>
                 {/if}
               </span>
@@ -2888,8 +2826,11 @@
    *    ⇒ 这一点与旧版「绝对定位」要达到的目标**相同**，只是达成方式换了。
    */
   .cs-act-mark {
-    display: block;
-    flex: none;
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     pointer-events: none;
   }
 
@@ -3057,10 +2998,26 @@
    * （票 92 的原话：「长度不一致」）。
    * ⇒ 现在装的是**固定 26px 的图** ⇒ 槽宽恒定 ⇒ 正文宽度恒定。 */
   .cs-act-prob {
-    display: block;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 16px;
     flex: none;
+    font-family: 'Kaiti SC', 'STKaiti', 'KaiTi', var(--cs-font-draft);
+    font-style: italic;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: -0.02em;
     color: var(--cs-pencil);
+    transform: rotate(-3deg);
     pointer-events: none;
+    user-select: none;
+  }
+
+  .cs-act-prob.is-active {
+    opacity: 0.45;
   }
 
   /* 回执。成功走墨色、失败走红——红留给「没发成」这个必须看见的结果。 */
