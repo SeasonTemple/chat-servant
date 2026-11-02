@@ -1571,7 +1571,7 @@
      *   字号更容易被认出来，而 0.08em 在 4 字标题上是 ~4.4px，肉眼可见。 */
     font-size: 13.6px;
     letter-spacing: 0.08em;
-    margin: 14px 0 4px;
+    margin: 16px 0 6px;
     font-weight: 600;
     color: var(--cs-ink);
   }
@@ -1952,11 +1952,11 @@
    * 那是「卡片」，是另一套材质语言，而且它把里面已经是撕边纸条的按钮
    * 又关进一个描边盒子里，等于同一个控件上了两层框。 */
   .cs-group {
-    margin-top: 14px;
+    margin-top: 16px;
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
   }
 
   .cs-group-head {
@@ -2154,8 +2154,14 @@
   .cs-actions,
   .cs-form {
     display: flex;
+    align-items: center;
     gap: 0.35rem;
-    margin-top: 0.4rem;
+    margin-top: 0;
+  }
+
+  .cs-actions .cs-btn-mini,
+  .cs-form .cs-btn-mini {
+    margin: -4px 0;
   }
 
   /* ══ 输入槽：**内陷 + 弧边**（2026-10-16 第十轮定） ══
@@ -2217,6 +2223,8 @@
     font-family: ui-monospace, 'Cascadia Mono', monospace;
     color: var(--cs-ink);
     background: var(--cs-paper);
+    background-clip: padding-box;
+    margin: -4px 0;
     /* ⚠⚠ **从「无边框」改成撕边纸**（2026-10-18，用户原话：
      *   「输入框意义不明的要显示完整的边框」）。
      *
