@@ -278,8 +278,10 @@ pub enum ThinkingEffort {
 }
 
 impl ThinkingEffort {
+    /// 全部可选思考等级。
     pub const ALL: [Self; 4] = [Self::Off, Self::Low, Self::Medium, Self::High];
 
+    /// 配置与 IPC 用的稳定短名。
     pub fn key(self) -> &'static str {
         match self {
             Self::Off => "off",
@@ -289,6 +291,7 @@ impl ThinkingEffort {
         }
     }
 
+    /// 界面上显示的名称。
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "关闭/最低",
@@ -298,6 +301,7 @@ impl ThinkingEffort {
         }
     }
 
+    /// 由短名解析思考等级。
     pub fn from_key(key: &str) -> Option<Self> {
         match key.trim().to_ascii_lowercase().as_str() {
             "off" | "none" | "minimal" => Some(Self::Off),
