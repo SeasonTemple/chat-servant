@@ -3233,4 +3233,31 @@ mod tests {
         }
         assert_eq!(Protocol::from_key("nope"), None);
     }
+
+    #[test]
+    fn jev_state_and_answers_parse_into_readable_chinese_intent() {
+        let ctx = TurnContext::text(
+            vec!["对方: 你还记得今天什么日子吗".into(), "我: 记得呀".into()],
+            "小号".into(),
+        );
+        let st = HttpReasoner::build_jev_state(&ctx);
+        assert_eq!(st["chat"]["messages"][0]["from"], "her");
+        assert_eq!(st["chat"]["messages"][1]["from"], "me");
+        assert_eq!(st["chat"]["latest_from"], "me");
+
+        let resp = serde_json::json!({
+            "answers": {
+                "literal_question": { "type": "noul", "noul": 0.15 },
+                "true_intent": { "type": "choice", "choice": "confirm_you_care" },
+                "she_needs": { "type": "choice", "choice": "care" },
+                "best_action": { "type": "choice", "choice": "acknowledge" },
+                "danger_level": { "type": "score", "score": 4.5 }
+            }
+        });
+        let intent = HttpReasoner::parse_jev_answers(&resp);
+        assert_eq!(intent.intent, "希望确认你在意（有潜台词）");
+        assert_eq!(intent.need, "关注与在意");
+        assert_eq!(intent.action, "回应并表达理解");
+        assert!((intent.tension - 0.5).abs() < 1e-4);
+    }
 }
