@@ -2108,7 +2108,7 @@
 
   .cs-picker-opt:hover {
     color: var(--cs-ink);
-    background: color-mix(in srgb, var(--cs-ink) 6%, transparent);
+    background: color-mix(in srgb, var(--cs-ink) 6%, var(--cs-paper));
   }
 
   .cs-picker-opt.active {
