@@ -1398,7 +1398,8 @@
     top: 0;
     right: 32px;
     width: 2px;
-    background: var(--cs-pencil-2);
+    background: color-mix(in srgb, var(--cs-ink) 30%, var(--cs-paper));
+    filter: url(#pencil);
     border-radius: 2px;
     opacity: 0;
     pointer-events: none;
@@ -1407,7 +1408,7 @@
   }
 
   .cs-scroll-mark[data-scrolling='true'] {
-    opacity: 0.9;
+    opacity: 0.62;
   }
 
   .cs-set {

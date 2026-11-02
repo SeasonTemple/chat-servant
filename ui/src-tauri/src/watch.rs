@@ -1284,32 +1284,42 @@ fn absorb_round(
     display: &mut Vec<Message>,
     current: &[Message],
 ) -> Vec<Message> {
-    // ⚠ 必须**先**算：此刻 `seen` 还是「上一轮之后」的那一份。
-    //
-    // `seen` 是**账本**（保留重复），`display` 是**面板显示**（去重）。
-    // 两个都要，因为它们回答的是不同的问题：
-    //   · 账本答「这句话处理过几次」⇒ 新颖度（驱动推理）
-    //   · 面板答「界面上该显示哪一份」
-    let novel = chatservant_perceive::novel_messages(seen, current);
+    // 找出本画面里「已经在账本 seen 里出现过」的最底部那条消息的 y1。
+    // 微信是底部对齐列表：真正新到的消息一定出现在已见消息的下方（y1 >= max_known_y1 - 8）；
+    // 而发送消息后画面整体上滚时，视口顶部（如 y=216）刚露出来或因滚边产生 1 字 OCR 抖动的
+    // 历史旧消息，其 y1 远小于底部已见消息（如 216 << 560）。
+    // 那类顶部历史行虽然要记入 seen 防重，但绝不能追加到 display 末尾冒充「最新一句」，
+    // 更不能触发新一轮推理。
+    let max_known_y1 = if seen.is_empty() {
+        None
+    } else {
+        current
+            .iter()
+            .filter(|m| {
+                seen.iter()
+                    .any(|s| s.speaker == m.speaker && s.text == m.text)
+            })
+            .map(|m| m.rect.y1)
+            .max()
+    };
 
-    // 新的记进账本（**保留重复** —— 对方把同一句又说一遍，那也是新的一条）。
-    seen.extend(novel.iter().cloned());
-    // 账本有上限，但**给得很大**（512 条 ≈ 25 KB）。
-    //
-    // ⚠ 上限是残留的边界：**账本之外**的旧消息（用户往前翻出来的）
-    // 身份不在账本里 ⇒ 仍可能被当成新的。
-    //   512 条意味着「往前翻 512 条消息」才可能出界 —— 真实使用里翻不到。
-    //   真正的残留只剩「翻到**应用启动之前**的历史」（那一段应用压根没读过）。
+    let raw_novel = chatservant_perceive::novel_messages(seen, current);
+    seen.extend(raw_novel.iter().cloned());
     if seen.len() > SEEN_WINDOW {
         seen.drain(..seen.len() - SEEN_WINDOW);
     }
 
-    // `novel` 已经由 `novel_messages(seen, current)` 按多重集计数滤掉了旧消息，
-    // 这里面的每一条都是本轮真正新到的（包括对方隔了几句之后把同一句话又发了一遍）。
-    // 若再丢进 `merge_into_stream` 按 `DEDUP_TAIL` 集合去重，会把对方第二次发的同文消息
-    // 当重复删掉，导致面板引文卡在上一条旧消息（如「ガガーリン吉」）不更新。
-    for m in &novel {
-        display.push(m.clone());
+    let mut novel = Vec::with_capacity(raw_novel.len());
+    for m in raw_novel {
+        if let Some(ky1) = max_known_y1
+            && m.rect.y1 + 8 < ky1
+        {
+            // 位于已见消息上方的顶部旧消息：插在 display 头部，不篡改末尾最新引文，也不算新到消息
+            display.insert(0, m);
+        } else {
+            display.push(m.clone());
+            novel.push(m);
+        }
     }
     if display.len() > chatservant_perceive::MESSAGE_WINDOW {
         let drop_n = display.len() - chatservant_perceive::MESSAGE_WINDOW;
@@ -1785,6 +1795,8 @@ fn step(
     // 否则账本里先存成「对方说的」，新颖度会拿「我方那句话」去比对方 ⇒ 对不上。
     let mut messages = messages;
     relabel_our_own(&mut messages);
+    let seen_snap = s.seen.clone();
+    let msgs_snap = s.messages.clone();
     let novel = absorb_round(&mut s.seen, &mut s.messages, &messages);
 
     // 只有真的有**对方说的话**（且是新到的）才触发推理。
@@ -1880,6 +1892,8 @@ fn step(
         // 只存正文时 `Trimmed::render` 拼出来的是九行光秃秃的原文，模型
         // 分不出谁说的 ⇒ 顺着用户自己的话往下写。标签焊在写入口，摘要那一路
         // （也只吃字符串）和下面的兜底那一路就都自动带上了。
+        let hist_len_before = s.history.len();
+        let mine_len_before = s.mine.len();
         s.history.extend(novel.iter().map(history_line));
 
         // 口吻样本走**另一路**（`FEATURE.md` 的「单独一路」）。
@@ -1953,13 +1967,17 @@ fn step(
                 s.reason = "没有新消息".into();
             }
             Err(e) => {
-                // 推理失败**不推进水位线**——下一帧重试。
-                // 漏消息比多调一次外部 API 糟得多。
+                // ⚠ 推理失败必须回滚本轮写进 `s.seen` / `s.history` / `s.mine` 的记录，
+                //   并且不调 `watcher.commit`，直接返回 `Err` 让下一圈 tick 重新读并重试推理！
+                //   否则本轮消息已进 `s.seen`，下一圈 `novel` 为空、候选也为空，
+                //   面板就会永久卡在「对方说完了，这轮没起草」，自动回复彻底中断。
+                s.seen = seen_snap;
+                s.messages = msgs_snap;
+                s.history.truncate(hist_len_before);
+                s.mine.truncate(mine_len_before);
                 s.reason = format!("推理失败：{e}");
-                // ⚠ **失败原因也要进日志**（2026-10-23 补）。
-                //   面板上有这句话，日志里没有 ⇒ 线上排查只能靠看界面截图。
-                //   （采集那一侧的同类缺口当天已经补过，这里是推理这一侧。）
-                tracing::warn!(target: "chat_servant::watch", "推理失败：{e}");
+                tracing::warn!(target: "chat_servant::watch", "推理失败（下一圈自动重试）：{e}");
+                return Err(format!("推理失败，正在重试：{e}"));
             }
         }
     } else {

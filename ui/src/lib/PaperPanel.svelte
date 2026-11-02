@@ -2404,7 +2404,8 @@
      *   ⇒ 量得到、看不见。pencil-2 @0.9 合成 rgb(84,96,102) ⇒ 5.54:1
      *   （换到撕口那种偏暗纸 rgb(232,222,196) 上仍 4.84:1）。
      */
-    background: var(--cs-pencil-2);
+    background: color-mix(in srgb, var(--cs-ink) 30%, var(--cs-paper));
+    filter: url(#pencil);
     border-radius: 2px;
     opacity: 0;
     /* 它盖在候选纸条的撕口上，只负责显示：不许抢走悬停与点击。 */
@@ -2414,7 +2415,7 @@
   }
 
   .cs-scroll-mark[data-scrolling='true'] {
-    opacity: 0.9;
+    opacity: 0.62;
   }
 
   /* 藏掉原生滚动条（2026-11-01，第 2 阶段）。

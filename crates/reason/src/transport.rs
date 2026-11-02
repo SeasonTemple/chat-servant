@@ -1215,7 +1215,22 @@ impl HttpReasoner {
         let opts = route.protocol().chat_options();
         // **这里就是 async → sync 那道桥。** 对外（`Reasoner`）仍然是同步的。
         let t0 = std::time::Instant::now();
-        let res = self.rt.block_on(client.exec_chat(model, req, Some(&opts)));
+        let mut res = self
+            .rt
+            .block_on(client.exec_chat(model.clone(), req.clone(), Some(&opts)));
+        if let Err(ref e) = res {
+            // 连接池里闲置数秒的 keep-alive 连接被上游半关闭时，首次发送会报
+            // `error sending request for url`；清空缓存客户端重连一次即可恢复。
+            let msg = e.to_string();
+            if msg.contains("error sending request") || msg.contains("connection") {
+                if let Ok(mut g) = self.clients.lock() {
+                    *g = ClientSlot::default();
+                }
+                if let Ok(fresh) = self.client() {
+                    res = self.rt.block_on(fresh.exec_chat(model, req, Some(&opts)));
+                }
+            }
+        }
         let ms = t0.elapsed().as_millis();
         // ⚠ **每次调用都记耗时**（2026-10-23 加）。
         //
