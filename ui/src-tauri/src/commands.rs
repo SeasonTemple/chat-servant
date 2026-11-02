@@ -1533,6 +1533,8 @@ pub fn tier_can_send() -> bool {
 /// 这张表是**白名单**：`save_setting` / `forget_key` / `set_route` 都在
 /// 它上面挡未知值。放行的后果是「拼错的名字看起来存上了，其实没有」。
 pub const PROVIDERS: &[&str] = &[
+    "typesafe",
+    "openrouter",
     "openai",
     "anthropic",
     "minimax",
@@ -1634,6 +1636,12 @@ pub struct GroupView {
     pub model: String,
     /// 关于上面那个模型名的**实话**：只列实测能通的，还是名字要你自己填。
     pub model_note: String,
+    /// 当前思考等级（`off` / `low` / `medium` / `high`，默认 `off`）。
+    pub effort: String,
+    /// 当前思考等级显示名。
+    pub effort_label: String,
+    /// 可选思考等级列表。
+    pub efforts: Vec<ChoiceView>,
     /// 这一组与**哪一组**共用同一格（那组的显示名）。`null` = 各配各的。
     ///
     /// ⚠ 是**名字**而不是 bool：共享有方向（谁借用谁的），
@@ -1713,6 +1721,17 @@ pub fn set_model(group: String, model: String) -> Result<ModelView, String> {
     let g = parse_group(&group)?;
     with_cell(g, |c| c.set(&model))??;
     with_cell(g, |c| model_view(g, c))
+}
+
+/// 切换模型的思考等级（`off` / `low` / `medium` / `high`），立即生效。
+#[tauri::command]
+pub fn set_effort(group: String, effort: String) -> Result<GroupView, String> {
+    let g = parse_group(&group)?;
+    let eff = chatservant_reason::ThinkingEffort::from_key(&effort)
+        .ok_or_else(|| format!("未知的思考等级 {effort}"))?;
+    let models = with_state(|s| s.models.clone()).ok_or_else(state_not_ready)?;
+    models.cell(g).set_effort(eff);
+    Ok(group_view(g, &models))
 }
 
 /// 「没有真实传输」时那句话。**统一一处**，免得三处各写一遍、
@@ -1831,6 +1850,15 @@ fn group_view_with(g: ModelGroup, models: &ModelGroups, route: &Route, has_key: 
         models: models_list,
         model,
         model_note,
+        effort: c.effort().key().to_string(),
+        effort_label: c.effort().label().to_string(),
+        efforts: chatservant_reason::ThinkingEffort::ALL
+            .iter()
+            .map(|e| ChoiceView {
+                id: e.key().to_string(),
+                label: e.label().to_string(),
+            })
+            .collect(),
         shares_with: models.shares_with(g).map(|o| o.label().to_string()),
     }
 }

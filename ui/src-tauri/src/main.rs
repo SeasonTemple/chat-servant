@@ -164,6 +164,7 @@ fn main() {
             commands::forget_key,
             commands::probe_key,
             commands::set_model,
+            commands::set_effort,
             commands::set_route,
             commands::get_proxy,
             commands::set_proxy,

@@ -31,7 +31,8 @@ pub use model::{Candidate, DraftSet, Intent, ReasonError, Reasoner, StageCalls, 
 pub use peer::{same_peer, similarity};
 pub use seam::{Turn, turn};
 pub use transport::{
-    HttpReasoner, ModelCell, ModelGroup, Protocol, Provider, ProxyCell, Route, probe_route, redact,
+    HttpReasoner, ModelCell, ModelGroup, Protocol, Provider, ProxyCell, Route, ThinkingEffort,
+    probe_route, redact,
 };
 pub use vision::{Describer, ImagePayload, VisionBridge, VisionMode};
 pub use voice::{VOICE_MAX_CHARS, VOICE_MAX_SAMPLES, voice_samples};

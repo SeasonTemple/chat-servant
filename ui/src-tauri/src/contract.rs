@@ -105,7 +105,7 @@ pub mod commands {
     /// 别为了消掉这条 allow 去生产代码里硬凑一次引用——那是让门禁
     ///   反过来决定代码形状。
     #[allow(dead_code)]
-    pub const ALL: [&str; 33] = [
+    pub const ALL: [&str; 34] = [
         "probe_anchor",
         "latest_readout",
         "debug_pane",
@@ -117,6 +117,7 @@ pub mod commands {
         "forget_key",
         "probe_key",
         "set_model",
+        "set_effort",
         "set_route",
         "get_proxy",
         "set_proxy",

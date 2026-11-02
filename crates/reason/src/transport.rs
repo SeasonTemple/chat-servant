@@ -64,7 +64,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use genai::adapter::AdapterKind;
-use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ContentPart, MessageContent};
+use genai::chat::{
+    ChatMessage, ChatOptions, ChatRequest, ContentPart, MessageContent, ReasoningEffort,
+};
 use genai::resolver::{AuthData, Endpoint};
 use genai::{Client, ModelIden, ServiceTarget, WebConfig};
 
@@ -207,10 +209,26 @@ impl Protocol {
         if self.is_openai_compatible() {
             return o;
         }
-        // 只给 Anthropic 封顶。早先手写协议时也只有它带 `max_tokens`，
-        // 沿用同样的口径：这一家的**接口**要求必须给，别家给不给是可选的。
-        // 顺带把输出长度卡住——三段要的输出都是几十到几百字。
         o.with_max_tokens(256)
+    }
+
+    /// 带思考等级的出站参数。默认 `ThinkingEffort::Off`（关闭/最低）以减少思考长耗时。
+    pub fn chat_options_with_effort(self, effort: ThinkingEffort) -> ChatOptions {
+        let o = self.chat_options();
+        if self.is_openai_compatible() {
+            let re = match effort {
+                ThinkingEffort::Off | ThinkingEffort::Low => ReasoningEffort::Low,
+                ThinkingEffort::Medium => ReasoningEffort::Medium,
+                ThinkingEffort::High => ReasoningEffort::High,
+            };
+            return o.with_reasoning_effort(re);
+        }
+        match effort {
+            ThinkingEffort::Off => o,
+            ThinkingEffort::Low => o.with_reasoning_effort(ReasoningEffort::Low),
+            ThinkingEffort::Medium => o.with_reasoning_effort(ReasoningEffort::Medium),
+            ThinkingEffort::High => o.with_reasoning_effort(ReasoningEffort::High),
+        }
     }
 
     /// 探测端点需要的头。
@@ -242,8 +260,61 @@ impl Protocol {
 ///
 /// 抄错的代价是「设置成功、一调用就 404」，所以宁可短、宁可标出来，
 /// 也不要看起来很全。
+/// 模型的思考等级（2026-11-01 新增）。
+///
+/// 默认 `Off`（关闭/最低）：聊天副驾的判断与起草只需输出简短 JSON，
+/// 默认关闭/最低思考可大幅降低首字延迟与整轮耗时。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThinkingEffort {
+    /// 关闭或最低思考（默认，最快）。
+    #[default]
+    Off,
+    /// 低思考。
+    Low,
+    /// 中等思考。
+    Medium,
+    /// 高思考。
+    High,
+}
+
+impl ThinkingEffort {
+    pub const ALL: [Self; 4] = [Self::Off, Self::Low, Self::Medium, Self::High];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "关闭/最低",
+            Self::Low => "低",
+            Self::Medium => "中",
+            Self::High => "高",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "minimal" => Some(Self::Off),
+            "low" => Some(Self::Low),
+            "medium" | "mid" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
+    /// **TypeSafe (Jev)**：专用 System-1 决策模型端点（`/v1/systemone`）。
+    TypeSafe,
+    /// **OpenRouter**：支持 `typesafe/jev-1.13` 决策端点与通用 OpenAI 兼容模型。
+    OpenRouter,
     /// OpenAI：**OpenAI 兼容**协议。端点与 `gpt-4o-mini` **本机实测过**。
     OpenAi,
     /// Anthropic：**原生协议**，不是 OpenAI 兼容的。
@@ -310,7 +381,9 @@ pub enum Provider {
 impl Provider {
     /// 设置页按这个列表渲染「预设」。**不含 `Custom`**——
     /// 自定义不是一家供应商，它是「自己填」那个动作。
-    pub const PRESETS: [Self; 8] = [
+    pub const PRESETS: [Self; 10] = [
+        Self::TypeSafe,
+        Self::OpenRouter,
         Self::OpenAi,
         Self::Anthropic,
         Self::MiniMax,
@@ -328,6 +401,8 @@ impl Provider {
     /// （而不用枚举的 Debug，那是给开发者看的）。
     pub fn key(self) -> &'static str {
         match self {
+            Self::TypeSafe => "typesafe",
+            Self::OpenRouter => "openrouter",
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
             Self::MiniMax => "minimax",
@@ -343,6 +418,8 @@ impl Provider {
     /// 界面上显示的名字。`key` 是给配置与凭据目标用的稳定标识。
     pub fn label(self) -> &'static str {
         match self {
+            Self::TypeSafe => "TypeSafe (Jev)",
+            Self::OpenRouter => "OpenRouter (Jev)",
             Self::OpenAi => "OpenAI",
             Self::Anthropic => "Anthropic",
             Self::MiniMax => "MiniMax",
@@ -361,6 +438,8 @@ impl Provider {
     /// 命令行多处进来，静默兜一个默认值只会把错带到出网那一刻。
     pub fn from_key(key: &str) -> Option<Self> {
         match key.trim().to_ascii_lowercase().as_str() {
+            "typesafe" | "jev" => Some(Self::TypeSafe),
+            "openrouter" => Some(Self::OpenRouter),
             "openai" => Some(Self::OpenAi),
             "anthropic" => Some(Self::Anthropic),
             "minimax" => Some(Self::MiniMax),
@@ -398,6 +477,8 @@ impl Provider {
     /// 这种已经犯过的病。
     pub fn key_env_names(self) -> &'static [&'static str] {
         match self {
+            Self::TypeSafe => &["JEV_API_KEY", "TYPESAFE_API_KEY"],
+            Self::OpenRouter => &["OPENROUTER_API_KEY", "JEV_API_KEY"],
             Self::OpenAi => &["OPENAI_API_KEY"],
             Self::Anthropic => &["ANTHROPIC_API_KEY"],
             // `api.minimaxi.com` 走的是中国区端点，
@@ -444,6 +525,8 @@ impl Provider {
     /// 「哪些实测过、哪些抄自文档」的交代。
     pub fn preset_base_url(self) -> Option<&'static str> {
         Some(match self {
+            Self::TypeSafe => "https://api.typesafe.ai/v1/",
+            Self::OpenRouter => "https://openrouter.ai/api/v1/",
             Self::OpenAi => "https://api.openai.com/v1/",
             Self::Anthropic => "https://api.anthropic.com/v1/",
             // 中国区端点。genai 自带的 MiniMax 适配器指向 api.minimax.io，
@@ -479,6 +562,13 @@ impl Provider {
     /// 我们无从列举。空清单**不是没做完**，是「没有权威清单可抄」。
     pub fn models(self) -> &'static [&'static str] {
         match self {
+            Self::TypeSafe => &["jev-latest", "jev-1.13"],
+            Self::OpenRouter => &[
+                "typesafe/jev-1.13",
+                "~typesafe/jev-latest",
+                "deepseek/deepseek-chat-v3-0324",
+                "google/gemini-2.5-flash",
+            ],
             Self::OpenAi => &["gpt-4o-mini"],
             Self::Anthropic => &["claude-sonnet-5"],
             // ⚠ 2026-10-23：MiniMax 这一栏**整条换过**。
@@ -723,18 +813,32 @@ impl Route {
 /// 但口径按 [`Provider::measured`] 分两种，见 [`Provider::accepts_model`]：
 /// 没有核实过清单的那几家只挡空串，硬拒会让人一个模型都用不了。
 #[derive(Clone)]
-pub struct ModelCell(Arc<RwLock<(Route, String)>>);
+pub struct ModelCell(Arc<RwLock<(Route, String, ThinkingEffort)>>);
 
 impl ModelCell {
-    /// 建一格。**模型名取端点的默认**，空清单时留空（调用方挡住空名）。
+    /// 建一格。**模型名取端点的默认**，思考等级默认 `Off`（关闭/最低）。
     pub fn new(route: Route) -> Self {
         let m = route.default_model().to_string();
-        Self(Arc::new(RwLock::new((route, m))))
+        Self(Arc::new(RwLock::new((route, m, ThinkingEffort::Off))))
     }
 
     /// 建一格并指定模型名。**不校验**——给「按已存配置恢复」用。
     pub fn with_model(route: Route, model: &str) -> Self {
-        Self(Arc::new(RwLock::new((route, model.trim().to_string()))))
+        Self(Arc::new(RwLock::new((
+            route,
+            model.trim().to_string(),
+            ThinkingEffort::Off,
+        ))))
+    }
+
+    /// 当前思考等级。
+    pub fn effort(&self) -> ThinkingEffort {
+        self.0.read().expect("锁").2
+    }
+
+    /// 设置思考等级。
+    pub fn set_effort(&self, effort: ThinkingEffort) {
+        self.0.write().expect("锁").2 = effort;
     }
 
     /// 当前这一路（端点 + 协议 + 厂商）。
@@ -1212,23 +1316,33 @@ impl HttpReasoner {
             Stage::Judge => self.judge_calls.set(self.judge_calls.get() + 1),
             Stage::Draft => self.draft_calls.set(self.draft_calls.get() + 1),
         }
-        let opts = route.protocol().chat_options();
+        let effort = self.route.effort();
+        let opts = route.protocol().chat_options_with_effort(effort);
         // **这里就是 async → sync 那道桥。** 对外（`Reasoner`）仍然是同步的。
         let t0 = std::time::Instant::now();
         let mut res = self
             .rt
             .block_on(client.exec_chat(model.clone(), req.clone(), Some(&opts)));
         if let Err(ref e) = res {
-            // 连接池里闲置数秒的 keep-alive 连接被上游半关闭时，首次发送会报
-            // `error sending request for url`；清空缓存客户端重连一次即可恢复。
             let msg = e.to_string();
             if msg.contains("error sending request") || msg.contains("connection") {
                 if let Ok(mut g) = self.clients.lock() {
                     *g = ClientSlot::default();
                 }
                 if let Ok(fresh) = self.client() {
-                    res = self.rt.block_on(fresh.exec_chat(model, req, Some(&opts)));
+                    res =
+                        self.rt
+                            .block_on(fresh.exec_chat(model.clone(), req.clone(), Some(&opts)));
                 }
+            } else if msg.contains("reasoning")
+                || msg.contains("Unrecognized")
+                || msg.contains("unknown field")
+            {
+                // 部分非推理模型端点不接受 reasoning_effort 字段，自动退回基础参数重试
+                let base_opts = route.protocol().chat_options();
+                res = self
+                    .rt
+                    .block_on(client.exec_chat(model, req, Some(&base_opts)));
             }
         }
         let ms = t0.elapsed().as_millis();
@@ -1342,8 +1456,122 @@ pub fn build_request(system: &str, user: &str, images: &[ImagePayload]) -> ChatR
     ])
 }
 
+impl HttpReasoner {
+    /// Jev 专用决策接口（TypeSafe `/v1/systemone` 或 OpenRouter `/api/alpha/decisions`）。
+    fn judge_jev(&self, ctx: &TurnContext) -> Result<Intent, ReasonError> {
+        let route = self.route.route();
+        let model = self.route.get();
+        let url = if route.provider() == Provider::OpenRouter {
+            "https://openrouter.ai/api/alpha/decisions".to_string()
+        } else {
+            format!("{}systemone", route.base_url())
+        };
+        let key = self
+            .key
+            .lock()
+            .map_err(|e| ReasonError::Judge(e.to_string()))?
+            .clone();
+        let proxy = self.proxy.get();
+        let payload = serde_json::json!({
+            "model": model,
+            "state": {
+                "peer": ctx.peer,
+                "messages": ctx.messages,
+            },
+            "questions": {
+                "true_intent": {
+                    "type": "choice",
+                    "instructions": "What is the other person's true intent in the latest message?",
+                    "criteria": {
+                        "confirm_you_care": "Testing whether you remember or still care.",
+                        "vent_anger": "Angry or hurt and wants the feeling acknowledged.",
+                        "request_action": "Wants a concrete action, time, or answer now.",
+                        "seek_explanation": "Wants a factual explanation of why something happened.",
+                        "casual_chat": "Light talk, banter, sharing, or friendly chat.",
+                        "close_topic": "Peaceful wrap-up, thanks, or nothing more needed."
+                    }
+                },
+                "danger_level": {
+                    "type": "score",
+                    "instructions": "How close is this conversation to conflict (0=calm, 9=rupture)?",
+                    "criteria": ["0","1","2","3","4","5","6","7","8","9"]
+                }
+            }
+        });
+        self.calls.set(self.calls.get() + 1);
+        self.judge_calls.set(self.judge_calls.get() + 1);
+        let t0 = std::time::Instant::now();
+        let res: Result<serde_json::Value, String> = self.rt.block_on(async move {
+            let mut b = reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .connect_timeout(CONNECT_TIMEOUT);
+            if let Some(p) = &proxy {
+                let px = reqwest::Proxy::all(p.clone())
+                    .map_err(|e| redact(&format!("代理配置无效：{e}")))?;
+                b = b.proxy(px);
+            }
+            let cli = b
+                .build()
+                .map_err(|e| redact(&format!("HTTP 客户端构建失败：{e}")))?;
+            let resp = cli
+                .post(&url)
+                .header("Authorization", format!("Bearer {key}"))
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| redact(&format!("Jev 网络请求失败：{e}")))?;
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
+                return Err(redact(&format!(
+                    "Jev HTTP {}: {}",
+                    status.as_u16(),
+                    truncate(&body, 200)
+                )));
+            }
+            serde_json::from_str(&body).map_err(|e| format!("Jev 响应非合法 JSON：{e}"))
+        });
+        let ms = t0.elapsed().as_millis();
+        tracing::info!(
+            target: "chatservant_reason::transport",
+            stage = ?Stage::Judge,
+            ms,
+            ok = res.is_ok(),
+            "模型调用完成 (Jev)"
+        );
+        let v = res.map_err(ReasonError::Judge)?;
+        let ans = v.get("answers");
+        let choice = ans
+            .and_then(|a| a.get("true_intent"))
+            .and_then(|x| x.get("choice"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("casual_chat");
+        let danger = ans
+            .and_then(|a| a.get("danger_level"))
+            .and_then(|x| x.get("score"))
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0);
+        let action = if choice == "close_topic" {
+            "wait"
+        } else {
+            "reply"
+        };
+        Ok(Intent {
+            intent: choice.to_string(),
+            need: String::new(),
+            action: action.to_string(),
+            tension: ((danger / 9.0).clamp(0.0, 1.0)) as f32,
+        })
+    }
+}
+
 impl Reasoner for HttpReasoner {
     fn judge(&mut self, ctx: &TurnContext) -> Result<Intent, ReasonError> {
+        let prov = self.route.provider();
+        let model_name = self.route.get();
+        if prov == Provider::TypeSafe || model_name.to_ascii_lowercase().contains("jev") {
+            return self.judge_jev(ctx);
+        }
         let v = self
             .ask_json(SYS_JUDGE, &Self::render_ctx(ctx), Stage::Judge, &[])
             .map_err(|e| ReasonError::Judge(redact(&e)))?;

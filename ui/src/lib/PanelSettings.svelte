@@ -90,6 +90,9 @@
     models: string[];
     model: string;
     model_note: string;
+    effort: string;
+    effort_label: string;
+    efforts: ChoiceView[];
     /**
      * 与**哪一组**共用同一格 —— 值是**对方那一组的显示名**（Rust 侧给的）。
      *
@@ -639,6 +642,31 @@
     const dir = e.deltaY > 0 ? 1 : -1;
     const next = g.models[(idx + dir + g.models.length) % g.models.length];
     if (next) void pickModel(g, next);
+  }
+
+  async function applyEffort(g: GroupView, effort: string) {
+    busy[g.id] = true;
+    notes[g.id] = '';
+    try {
+      await invoke<GroupView>('set_effort', { group: g.id, effort });
+      await refresh();
+    } catch (e) {
+      notes[g.id] = String(e);
+    } finally {
+      busy[g.id] = false;
+    }
+  }
+
+  function stepEffort(e: WheelEvent, g: GroupView) {
+    if (busy[g.id] || !g.efforts || g.efforts.length < 2) return;
+    e.preventDefault();
+    const idx = Math.max(
+      0,
+      g.efforts.findIndex((x) => x.id === g.effort),
+    );
+    const dir = e.deltaY > 0 ? 1 : -1;
+    const next = g.efforts[(idx + dir + g.efforts.length) % g.efforts.length];
+    if (next) void applyEffort(g, next.id);
   }
 
   let moreBelow = $state(false);
@@ -1255,6 +1283,50 @@
           </div>
         {/if}
 
+        {#if g.efforts && g.efforts.length > 0}
+          <div class="cs-picker">
+            <button
+              type="button"
+              class="cs-btn cs-picker-btn"
+              aria-expanded={openPicker === `effort:${g.id}`}
+              onclick={() => togglePicker(`effort:${g.id}`)}
+              onwheel={(e) => stepEffort(e, g)}
+              disabled={busy[g.id]}
+              title="点击展开列表，或在框上滚轮切换思考等级"
+            >
+              <span class="cs-picker-tag">思考等级</span>
+              <span class="cs-picker-val">{g.effort_label}</span>
+              <span
+                class="cs-picker-arrow"
+                class:open={openPicker === `effort:${g.id}`}
+                aria-hidden="true">▾</span
+              >
+            </button>
+            {#if openPicker === `effort:${g.id}`}
+              <div class="cs-picker-menu" role="listbox">
+                {#each g.efforts as ef (ef.id)}
+                  <button
+                    type="button"
+                    class="cs-btn cs-picker-opt"
+                    class:active={ef.id === g.effort}
+                    role="option"
+                    aria-selected={ef.id === g.effort}
+                    onclick={() => {
+                      openPicker = null;
+                      void applyEffort(g, ef.id);
+                    }}
+                  >
+                    <span>{ef.label}</span>
+                    {#if ef.id === g.effort}
+                      <span class="cs-picker-tick" aria-hidden="true">✓</span>
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+
         {#if modelErr[g.id]}
           <p class="cs-fail" role="alert">{modelErr[g.id]}</p>
         {/if}
@@ -1288,7 +1360,7 @@
                   type="password"
                   autocomplete="off"
                   spellcheck="false"
-                  placeholder="粘贴 API Key（存入系统凭据库）"
+                  placeholder="粘贴 API Key"
                   bind:value={drafts[g.id]}
                 />
                 <button
@@ -1307,7 +1379,7 @@
                 type="password"
                 autocomplete="off"
                 spellcheck="false"
-                placeholder="粘贴 API Key（存入系统凭据库）"
+                placeholder="粘贴 API Key"
                 bind:value={drafts[g.id]}
               />
               <button
@@ -1349,7 +1421,7 @@
         type="text"
         autocomplete="off"
         spellcheck="false"
-        placeholder="http://127.0.0.1:7897（留空 = 直连）"
+        placeholder="http://127.0.0.1:7897（空=直连）"
         bind:value={proxyDraft}
       />
       <button class="cs-btn cs-btn-mini primary" onclick={saveProxy}
@@ -2217,8 +2289,8 @@
     min-height: 46px;
     /* ⚠ 左内缩比按钮多 6px：撕边吃掉一圈，文字要回到原来那个视觉位置。
      * 垂直内缩是 0 —— 靠 `line-height` 居中，padding 会把单行输入框撑歪。 */
-    padding: 0 12px;
-    font-size: 11.5px;
+    padding: 0 6px;
+    font-size: 11px;
     line-height: 26px;
     font-family: ui-monospace, 'Cascadia Mono', monospace;
     color: var(--cs-ink);
