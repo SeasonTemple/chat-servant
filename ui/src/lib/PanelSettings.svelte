@@ -602,6 +602,18 @@
     openPicker = openPicker === key ? null : key;
   }
 
+  function onWindowPointerDown(e: PointerEvent) {
+    if (!openPicker) return;
+    if ((e.target as HTMLElement | null)?.closest?.('.cs-picker')) return;
+    openPicker = null;
+  }
+
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (openPicker && e.key === 'Escape') {
+      e.preventDefault();
+      openPicker = null;
+    }
+  }
   function stepProvider(e: WheelEvent, g: GroupView) {
     if (busy[g.id] || g.providers.length < 2) return;
     e.preventDefault();
@@ -694,6 +706,7 @@
   自己声明 `flex: 1 1 auto; min-height: 0; overflow-y: auto` ——
   少了 `min-height: 0`，flex 子项不肯小于内容高度，整屏会被撑出面板外。
 -->
+<svelte:window onpointerdown={onWindowPointerDown} onkeydown={onWindowKeydown} />
 <PencilDefs />
 
 <span
@@ -1106,6 +1119,7 @@
           <button
             type="button"
             class="cs-btn cs-picker-btn"
+            aria-haspopup="listbox"
             aria-expanded={openPicker === `prov:${g.id}`}
             onclick={() => togglePicker(`prov:${g.id}`)}
             onwheel={(e) => stepProvider(e, g)}
@@ -1178,6 +1192,7 @@
             <button
               type="button"
               class="cs-btn cs-picker-btn"
+              aria-haspopup="listbox"
               aria-expanded={openPicker === `model:${g.id}`}
               onclick={() => togglePicker(`model:${g.id}`)}
               onwheel={(e) => stepModel(e, g)}
@@ -1250,6 +1265,7 @@
             <button
               type="button"
               class="cs-btn cs-picker-btn"
+              aria-haspopup="listbox"
               aria-expanded={openPicker === `effort:${g.id}`}
               onclick={() => togglePicker(`effort:${g.id}`)}
               onwheel={(e) => stepEffort(e, g)}

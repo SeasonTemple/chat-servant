@@ -105,11 +105,16 @@
    *   下面这两条重量时机仍然留着——药丸是量出来的，这件事本来就该有
    *   它们，只是不该被当成本票的解。
    */
+  let rootNode: HTMLElement | null = null;
+
   const reflow: Attachment<HTMLElement> = (node) => {
+    rootNode = node;
     // 读一次 `value` 把它挂进依赖图：换档时这个 attachment 也会重跑。
     void value;
     if (typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(() => move(value));
+    const ro = new ResizeObserver(() => {
+      move(value)(node);
+    });
     ro.observe(node);
     // 按钮是 `{#each}` 渲染的，attachment 跑的时候可能还没有子节点。
     //   补一帧再盯一次，否则第一屏量到的是「空槽」。
@@ -117,13 +122,16 @@
       for (const btn of node.querySelectorAll('.cs-seg-btn')) ro.observe(btn);
     });
     return () => {
+      if (rootNode === node) rootNode = null;
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
   };
 
   onMount(() => {
-    void document.fonts?.ready.then(() => move(value));
+    void document.fonts?.ready.then(() => {
+      if (rootNode) move(value)(rootNode);
+    });
   });
 
   function pick(id: string) {
@@ -146,6 +154,13 @@
    * `querySelector('[aria-checked=true]')` 拿元素再 `.focus()`。
    */
   function onKeydown(e: KeyboardEvent) {
+    // Home/End 是 APG 里的可选增强，但两行的控件上很顺手（必须在 step===0 早退之前判）
+    if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      pick(options[e.key === 'Home' ? 0 : options.length - 1].id);
+      focusChecked();
+      return;
+    }
     const step =
       e.key === 'ArrowRight' || e.key === 'ArrowDown'
         ? 1
@@ -153,13 +168,6 @@
           ? -1
           : 0;
     if (step === 0) return;
-    // Home/End 是 APG 里的可选增强，但两行的控件上很顺手
-    if (e.key === 'Home' || e.key === 'End') {
-      e.preventDefault();
-      pick(options[e.key === 'Home' ? 0 : options.length - 1].id);
-      focusChecked();
-      return;
-    }
     e.preventDefault();
     const i = options.findIndex((o) => o.id === value);
     const next = (i + step + options.length) % options.length;

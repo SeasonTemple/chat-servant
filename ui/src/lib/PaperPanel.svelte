@@ -269,6 +269,32 @@
     }
   }
 
+  /** 主面板档位行（`role="radiogroup"`）键盘方向键与 Home/End 导航（WAI-ARIA APG）。 */
+  function onTierKeydown(e: KeyboardEvent) {
+    const container = e.currentTarget as HTMLElement | null;
+    let nextIdx = -1;
+    if (e.key === 'Home') {
+      nextIdx = 0;
+    } else if (e.key === 'End') {
+      nextIdx = TIERS.length - 1;
+    } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      const cur = TIERS.findIndex((t) => t.key === tier);
+      nextIdx = (cur + 1) % TIERS.length;
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      const cur = TIERS.findIndex((t) => t.key === tier);
+      nextIdx = (cur - 1 + TIERS.length) % TIERS.length;
+    }
+    if (nextIdx < 0) return;
+    e.preventDefault();
+    const target = TIERS[nextIdx];
+    if (!target) return;
+    void chooseTier(target.key).then(() => {
+      queueMicrotask(() => {
+        container?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus();
+      });
+    });
+  }
+
   /* ── 正文数据 ──────────────────────────────────────────────────
    *
    *  Rust 是唯一事实来源：阶段由 `Phase` 的判别字段决定，界面**不自己从
@@ -1733,7 +1759,14 @@
         底部的坏处要认：面板高的时候它离正文远，扫视要往下走一趟。
         这与「它一年未必改一次」是一回事——远处的低频项可以接受。
       -->
-      <div class="cs-pick" data-no-drag role="radiogroup" aria-label="发送档位">
+      <div
+        class="cs-pick"
+        data-no-drag
+        role="radiogroup"
+        aria-label="发送档位"
+        onkeydown={onTierKeydown}
+        tabindex="-1"
+      >
         {#each TIERS as t, i (t.key)}
           <button
             type="button"
