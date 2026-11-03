@@ -533,46 +533,32 @@
       return;
     }
     void (async () => {
-      try {
-        apply(await invoke<RecentView>('get_recent_n'));
-      } catch {
-        // 读不到就用默认档，**不报错打断这一屏**。
-        // 滑块仍可拖——写了就可能有值，读不到只是看不到当前值。
-      }
-      try {
-        budget = await invoke<BudgetView>('get_token_budget');
-      } catch {
-        // 同上。预算读不到就整块不显示，别摆一个半死的滑块。
-      }
-      try {
-        imagesOut = await invoke<boolean>('get_images_out');
-      } catch {
-        // 读不到就当关着。**失败方向要偏保守**——总闸读不出来时
-        // 宁可当成关着，也不能当成开着。
-      }
-      try {
-        // 档位也要**读回来**：界面显示的必须是程序认定的那个，
-        // 不是用户上次点过的那个。写回 `$bindable` 让主面板跟着走。
-        tier = await invoke<Tier>('get_tier');
-      } catch {
-        tier = 'Manual';
-      }
-      try {
-        // 「关闭时」也要读回来。读不到就按 `exit` —— 那是**失败方向偏保守**
-        // 的那个：宁可用户以为它会退出（然后发现托盘还在），也不要
-        // 以为它会退出而它其实藏在后台。
-        closeBehavior = await invoke<'exit' | 'tray'>('get_close_behavior').catch(() => 'exit');
-      } catch {
-        closeBehavior = 'exit';
-      }
-      // 标记形状也要读回来：界面显示的必须是程序认定的那个。
-      shape = await markShape.load();
-      // ⚠ **模型设置**不再单独读一条命令：它在 `get_settings` 那一屏里
-      // （两组 + 端点 + 代理）。摆两个来源就等于同一个事实两处显示，
-      // 而它们迟早不一致。
-      await refresh();
+      const [recentRes, budgetRes, imagesRes, tierRes, closeRes, shapeRes] =
+        await Promise.allSettled([
+          invoke<RecentView>('get_recent_n'),
+          invoke<BudgetView>('get_token_budget'),
+          invoke<boolean>('get_images_out'),
+          invoke<Tier>('get_tier'),
+          invoke<'exit' | 'tray'>('get_close_behavior'),
+          markShape.load(),
+          refresh(),
+        ]);
+      if (recentRes.status === 'fulfilled') apply(recentRes.value);
+      if (budgetRes.status === 'fulfilled') budget = budgetRes.value;
+      if (imagesRes.status === 'fulfilled') imagesOut = imagesRes.value;
+      tier = tierRes.status === 'fulfilled' ? tierRes.value : 'Manual';
+      closeBehavior = closeRes.status === 'fulfilled' ? closeRes.value : 'exit';
+      if (shapeRes.status === 'fulfilled') shape = shapeRes.value;
     })();
   });
+
+  /** IME 安全的单行输入框回车提交：中文输入法组字确认回车（isComposing 或 keyCode 229）不误触提交。 */
+  function onInputEnter(e: KeyboardEvent, run: () => void) {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (e.isComposing || e.keyCode === 229) return;
+    run();
+  }
 
   /**
    * demo 夹具：模型配置两组（模板里 `{:else if DEMO}` 那段渲染它）。
@@ -1175,6 +1161,7 @@
               spellcheck="false"
               placeholder="https://…/v1/"
               bind:value={endpoints[g.id]}
+              onkeydown={(e) => onInputEnter(e, () => void applyRoute(g, 'custom'))}
             />
             <button
               class="cs-btn cs-btn-mini primary"
@@ -1246,6 +1233,7 @@
               spellcheck="false"
               placeholder="填写模型名"
               bind:value={modelDrafts[g.id]}
+              onkeydown={(e) => onInputEnter(e, () => void commitModelName(g))}
             />
             <button
               class="cs-btn cs-btn-mini primary"
@@ -1338,6 +1326,7 @@
                   spellcheck="false"
                   placeholder="粘贴 API Key"
                   bind:value={drafts[g.id]}
+                  onkeydown={(e) => onInputEnter(e, () => void save(g))}
                 />
                 <button
                   class="cs-btn cs-btn-mini primary"
@@ -1357,6 +1346,7 @@
                 spellcheck="false"
                 placeholder="粘贴 API Key"
                 bind:value={drafts[g.id]}
+                onkeydown={(e) => onInputEnter(e, () => void save(g))}
               />
               <button
                 class="cs-btn cs-btn-mini primary"
@@ -1399,6 +1389,7 @@
         spellcheck="false"
         placeholder="http://127.0.0.1:7897（空=直连）"
         bind:value={proxyDraft}
+        onkeydown={(e) => onInputEnter(e, () => void saveProxy())}
       />
       <button class="cs-btn cs-btn-mini primary" onclick={saveProxy}
         >{view.proxy.url ? '改用它' : '用它'}</button
@@ -1446,6 +1437,9 @@
     pointer-events: none;
     z-index: 2;
     transition: opacity 220ms var(--cs-ease);
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+    }
   }
 
   .cs-scroll-mark[data-scrolling='true'] {
@@ -1457,6 +1451,7 @@
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    contain: layout style;
     scrollbar-width: none;
     --fade-top: 0px;
     --fade-bottom: 0px;
@@ -2070,6 +2065,9 @@
     font-size: 11px;
     color: var(--cs-pencil);
     transition: transform 140ms var(--cs-ease);
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+    }
   }
 
   .cs-picker-arrow.open {

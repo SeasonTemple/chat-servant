@@ -1053,8 +1053,16 @@ struct ClientSlot {
     /// 建这份 client 时用的代理。`None` = 直连。
     proxy: Option<String>,
     client: Option<Client>,
+    /// Jev 专用 `reqwest::Client` 缓存：按 `(代理, 目标主机)` 复用连接池与 TLS 会话，
+    /// 避免每轮决策都重新做 DoH 解析与 TCP/TLS 握手。
+    jev_client: Option<JevSlot>,
 }
 
+struct JevSlot {
+    proxy: Option<String>,
+    host: String,
+    client: reqwest::Client,
+}
 /// 一轮推理用的模型配置。
 ///
 /// **对外仍然是同步的**——`Reasoner` trait 是同步的，三段编排、降级路径、
@@ -1224,10 +1232,8 @@ impl HttpReasoner {
             return Ok(c);
         }
         let client = self.build_client(want.clone())?;
-        *g = ClientSlot {
-            proxy: want,
-            client: Some(client.clone()),
-        };
+        g.proxy = want;
+        g.client = Some(client.clone());
         Ok(client)
     }
 
@@ -1477,6 +1483,8 @@ pub fn build_request(system: &str, user: &str, images: &[ImagePayload]) -> ChatR
 }
 
 /// 自动探测本机可用的代理（环境变量优先，其次探测本机常用代理端口如 Clash 7897/7890、v2rayN 10809/10808）。
+///
+/// 端口探测结果缓存 10 秒：避免每轮 judge + draft 都在主推理线程上连续同步发起 4 次 TCP 探测。
 fn detect_local_proxy() -> Option<String> {
     for var in [
         "CHATSERVANT_PROXY",
@@ -1491,6 +1499,21 @@ fn detect_local_proxy() -> Option<String> {
             }
         }
     }
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    struct ProbedProxy {
+        at: Instant,
+        proxy: Option<String>,
+    }
+    static CACHE: OnceLock<Mutex<Option<ProbedProxy>>> = OnceLock::new();
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(g) = cell.lock()
+        && let Some(ref entry) = *g
+        && entry.at.elapsed() < Duration::from_secs(10)
+    {
+        return entry.proxy.clone();
+    }
+    let mut found = None;
     for (port, scheme) in [
         (7897u16, "http"),
         (7890, "http"),
@@ -1499,12 +1522,18 @@ fn detect_local_proxy() -> Option<String> {
     ] {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(25)).is_ok() {
-            return Some(format!("{scheme}://127.0.0.1:{port}"));
+            found = Some(format!("{scheme}://127.0.0.1:{port}"));
+            break;
         }
     }
-    None
+    if let Ok(mut g) = cell.lock() {
+        *g = Some(ProbedProxy {
+            at: Instant::now(),
+            proxy: found.clone(),
+        });
+    }
+    found
 }
-
 /// 对指定路由计算实际生效的代理：显式配置优先；若未配置且目标为非回环的境外端点，则自动探测本机代理。
 fn effective_proxy_for(route: &Route, configured: Option<String>) -> Option<String> {
     if configured.is_some() {
@@ -1652,32 +1681,74 @@ impl HttpReasoner {
         self.calls.set(self.calls.get() + 1);
         self.judge_calls.set(self.judge_calls.get() + 1);
         let t0 = std::time::Instant::now();
-        let res: Result<serde_json::Value, String> = self.rt.block_on(async move {
-            let mut b = reqwest::Client::builder()
-                .timeout(REQUEST_TIMEOUT)
-                .connect_timeout(CONNECT_TIMEOUT);
-            if let Some(p) = &proxy {
-                let px = reqwest::Proxy::all(p.clone())
-                    .map_err(|e| redact(&format!("代理配置无效：{e}")))?;
-                b = b.proxy(px);
-            } else if let Ok(parsed) = reqwest::Url::parse(&url)
-                && let Some(host) = parsed.host_str()
-                && !matches!(host, "127.0.0.1" | "localhost")
-                && let Some(ip) = resolve_via_doh(host).await
-            {
-                let port = parsed.port_or_known_default().unwrap_or(443);
-                b = b.resolve(host, std::net::SocketAddr::new(ip, port));
-            }
-            let cli = b
-                .build()
-                .map_err(|e| redact(&format!("HTTP 客户端构建失败：{e}")))?;
-            let resp = cli
-                .post(&url)
-                .header("Authorization", format!("Bearer {key}"))
-                .json(&payload)
-                .send()
-                .await
-                .map_err(|e| redact(&format!("Jev 网络请求失败：{e}")))?;
+        let host_key = reqwest::Url::parse(&url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        let res: Result<serde_json::Value, String> = self.rt.block_on(async {
+            let get_or_build = |force_rebuild: bool| {
+                let proxy = proxy.clone();
+                let url = url.clone();
+                let host_key = host_key.clone();
+                async move {
+                    if !force_rebuild
+                        && let Ok(g) = self.clients.lock()
+                        && let Some(ref slot) = g.jev_client
+                        && slot.proxy == proxy
+                        && slot.host == host_key
+                    {
+                        return Ok::<reqwest::Client, String>(slot.client.clone());
+                    }
+                    let mut b = reqwest::Client::builder()
+                        .timeout(REQUEST_TIMEOUT)
+                        .connect_timeout(CONNECT_TIMEOUT);
+                    if let Some(p) = &proxy {
+                        let px = reqwest::Proxy::all(p.clone())
+                            .map_err(|e| redact(&format!("代理配置无效：{e}")))?;
+                        b = b.proxy(px);
+                    } else if let Ok(parsed) = reqwest::Url::parse(&url)
+                        && let Some(host) = parsed.host_str()
+                        && !matches!(host, "127.0.0.1" | "localhost")
+                        && let Some(ip) = resolve_via_doh(host).await
+                    {
+                        let port = parsed.port_or_known_default().unwrap_or(443);
+                        b = b.resolve(host, std::net::SocketAddr::new(ip, port));
+                    }
+                    let cli = b
+                        .build()
+                        .map_err(|e| redact(&format!("HTTP 客户端构建失败：{e}")))?;
+                    if let Ok(mut g) = self.clients.lock() {
+                        g.jev_client = Some(JevSlot {
+                            proxy,
+                            host: host_key,
+                            client: cli.clone(),
+                        });
+                    }
+                    Ok(cli)
+                }
+            };
+            let cli = get_or_build(false).await?;
+            let send_once = |c: reqwest::Client| {
+                let url = url.clone();
+                let key = key.clone();
+                let payload = payload.clone();
+                async move {
+                    c.post(&url)
+                        .header("Authorization", format!("Bearer {key}"))
+                        .json(&payload)
+                        .send()
+                        .await
+                }
+            };
+            let resp = match send_once(cli).await {
+                Ok(r) => r,
+                Err(_) => {
+                    let fresh = get_or_build(true).await?;
+                    send_once(fresh)
+                        .await
+                        .map_err(|e| redact(&format!("Jev 网络请求失败：{e}")))?
+                }
+            };
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             if !status.is_success() {

@@ -90,6 +90,21 @@
   let draggingWindow = false;
   let dragScreenX = 0;
   let dragScreenY = 0;
+  let pendingDx = 0;
+  let pendingDy = 0;
+  let dragRaf = 0;
+
+  function flushWindowDrag() {
+    dragRaf = 0;
+    const dx = pendingDx;
+    const dy = pendingDy;
+    pendingDx = 0;
+    pendingDy = 0;
+    if (dx === 0 && dy === 0) return;
+    void invoke('drag_window_by', { dx, dy }).catch(() => {
+      // 拖不动也不能把界面弄坏（演示态没有这条命令）。
+    });
+  }
 
   function startWindowDrag(e: PointerEvent) {
     if (e.button !== 0) return;
@@ -97,6 +112,8 @@
     draggingWindow = true;
     dragScreenX = e.screenX;
     dragScreenY = e.screenY;
+    pendingDx = 0;
+    pendingDy = 0;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     e.preventDefault();
   }
@@ -108,14 +125,20 @@
     if (dx === 0 && dy === 0) return;
     dragScreenX = e.screenX;
     dragScreenY = e.screenY;
-    void invoke('drag_window_by', { dx, dy }).catch(() => {
-      // 拖不动也不能把界面弄坏（演示态没有这条命令）。
-    });
+    pendingDx += dx;
+    pendingDy += dy;
+    if (dragRaf === 0) {
+      dragRaf = requestAnimationFrame(flushWindowDrag);
+    }
   }
 
   function endWindowDrag(e: PointerEvent) {
     if (!draggingWindow) return;
     draggingWindow = false;
+    if (dragRaf !== 0) {
+      cancelAnimationFrame(dragRaf);
+      flushWindowDrag();
+    }
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {
@@ -2136,6 +2159,7 @@
     flex: 0 1 auto;
     min-height: 0;
     overflow-y: auto;
+    contain: layout style;
     /* ⚠⚠ **scrollbar-gutter: stable 已撤**（2026-11-01，第 2 阶段）。
      *
      * 它原来在的理由：滚动条占的那 15px 会让正文宽从 233.3 掉到 218.3，
@@ -2386,6 +2410,9 @@
     pointer-events: none;
     z-index: 2;
     transition: opacity 220ms var(--cs-ease);
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+    }
   }
 
   .cs-scroll-mark[data-scrolling='true'] {
@@ -2656,6 +2683,9 @@
     transition:
       transform 85ms ease-out,
       filter 85ms ease-out;
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+    }
   }
 
   /* ── 悬停 / 聚焦：只加深纸条投影（不做形变，文字零变换不发糊；压角留给点击） ── */
@@ -3641,6 +3671,7 @@
      */
     min-height: 43px;
     overflow-y: auto;
+    contain: layout style;
     /* ⚠ **`padding: 8px 0`**：给正文位留**呼吸**（一行状态句上下各 8px）。
      * ⚠ 2026-10-24 订正：这条 padding 当初是**给撕边纸片让位**的
      *   （正文位住着第一条候选，而撕边位图最外侧有一圈透明，滚动容器会把它裁掉）。
