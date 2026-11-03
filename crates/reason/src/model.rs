@@ -278,7 +278,7 @@ pub enum ReasonError {
     /// 这不是失败——它是最常见的情况（绝大多数时间窗口都不动）。
     /// 调用方要**显式**处理它，别让它冒泡成界面上的错误：
     ///
-    /// ```ignore
+    /// ```text
     /// match reason::turn(&mut r, &ctx) {
     ///     Ok(t) => emit(t),
     ///     Err(ReasonError::NothingToDo) => {} // 静默期，什么都不做

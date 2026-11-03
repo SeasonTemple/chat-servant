@@ -132,12 +132,3 @@ Status 与自己的验收项矛盾。**冲突时以本表和验收项为准。**
 | `96-draft-candidates-anchored-to-my-own-lines.md` | 8/8 |
 | `98-longdraft-no-longer-stresses-the-draft-scroller.md` | 3/3 |
 | `99-close-behavior-was-written-but-never-read.md` | 5/5 |
-
-## 四、⚠ 脚本当场抓出来的漂移（Status 行自己写的数字与实点不符）
-
-| 票 | Status 写的 | 机器点的 |
-|---|---|---|
-| `92-all-candidates-are-strips.md` | 10/10 | 20/20 |
-
-> 这些不是脚本猜的，是 Status 行里的 `N/M` 与实际勾选数量对不上。
-> **按本表的数字读进度**，别按 Status 读。
