@@ -761,25 +761,44 @@ impl TierCell {
 /// 就是被锁的那个。如果没有重锁入口，用户在错误的会话上启动了应用之后
 /// **没有任何办法修正**，只能关掉重开——那不是设计，是放弃。
 #[derive(Clone)]
-pub struct Relock(Arc<std::sync::atomic::AtomicBool>);
+pub struct Relock {
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    wake: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
+}
 
 impl Relock {
     pub fn new() -> Self {
-        Self(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        Self {
+            flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            wake: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
+        }
     }
 
-    /// 请求重锁。下一轮读到头部时**以当时那块像素**为新基准。
+    /// 请求重锁并立即唤醒观察线程（零等待进入下一轮）。
     pub fn request(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.flag.store(true, Ordering::Relaxed);
+        self.wake.1.notify_all();
     }
 
     /// 读一次就清掉——**重锁是一次性的**，不该每轮都重新认人。
     pub fn take(&self) -> bool {
-        self.0.swap(false, Ordering::Relaxed)
+        self.flag.swap(false, Ordering::Relaxed)
+    }
+
+    /// 在观察循环末尾等待 `timeout`，若中途收到 `request()` 则立即提前醒来。
+    pub fn wait_timeout(&self, timeout: Duration) {
+        if self.pending() {
+            return;
+        }
+        let g = self.wake.0.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self
+            .wake
+            .1
+            .wait_timeout_while(g, timeout, |_| !self.pending());
     }
 
     pub fn pending(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.flag.load(Ordering::Relaxed)
     }
 }
 
@@ -881,19 +900,29 @@ impl TokenBudget {
 /// 循环句柄。`Drop` 时自动结束线程。
 pub struct Watcher {
     stop: Arc<AtomicBool>,
-    /// 上一份快照，命令层要读它。
-    latest: Arc<std::sync::Mutex<Option<Readout>>>,
+    /// 上一份快照与事件驱动唤醒条件变量，供 `cs-pump` 零轮询阻塞等待。
+    latest: Arc<(std::sync::Mutex<Option<Readout>>, std::sync::Condvar)>,
 }
 
 impl Drop for Watcher {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.latest.1.notify_all();
     }
 }
 
 impl Watcher {
     pub fn latest(&self) -> Option<Readout> {
-        self.latest.lock().ok().and_then(|g| g.clone())
+        self.latest
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    #[must_use]
+    pub fn notified_handle(&self) -> Arc<(std::sync::Mutex<Option<Readout>>, std::sync::Condvar)> {
+        self.latest.clone()
     }
 }
 
@@ -902,7 +931,7 @@ impl Watcher {
 /// **会立刻起一个新线程**。返回的 `Watcher` 被 drop 时线程自己会停。
 pub fn spawn(cfg: LoopConfig) -> Watcher {
     let stop = Arc::new(AtomicBool::new(false));
-    let latest = Arc::new(std::sync::Mutex::new(None));
+    let latest = Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
     let latest_bg = latest.clone();
     let stop_bg = stop.clone();
 
@@ -998,9 +1027,10 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                 // 只看 `ticks` 会把这一帧吃掉，首屏就还是 6~9s
                 // （见 [`crate::contract::Phase::key`] 的注释）。
                 let mut interim = |out: Readout| {
-                    if let Ok(mut g) = latest_bg.lock() {
-                        *g = Some(out);
-                    }
+                    let mut g = latest_bg.0.lock().unwrap_or_else(|e| e.into_inner());
+                    *g = Some(out);
+                    drop(g);
+                    latest_bg.1.notify_all();
                 };
                 match step(
                     &mut watcher,
@@ -1018,9 +1048,10 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         // 阶段由 Rust 判，不让界面去猜 `candidates` 空不空。
                         let phase = current_phase(&s);
                         let out = snapshot(&s, anchor, phase, ticks, last_calls, st, &s.reason);
-                        if let Ok(mut g) = latest_bg.lock() {
-                            *g = Some(out);
-                        }
+                        let mut g = latest_bg.0.lock().unwrap_or_else(|e| e.into_inner());
+                        *g = Some(out);
+                        drop(g);
+                        latest_bg.1.notify_all();
                         last_failed = false;
                     }
                     Ok(None) => {
@@ -1034,9 +1065,10 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         if let Some(phase) = phase_to_push(&s, false, last_failed) {
                             let st = reasoner.stage_calls();
                             let out = snapshot(&s, anchor, phase, ticks, last_calls, st, &s.reason);
-                            if let Ok(mut g) = latest_bg.lock() {
-                                *g = Some(out);
-                            }
+                            let mut g = latest_bg.0.lock().unwrap_or_else(|e| e.into_inner());
+                            *g = Some(out);
+                            drop(g);
+                            latest_bg.1.notify_all();
                         }
                         last_failed = false;
                     }
@@ -1056,15 +1088,16 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         };
                         let out =
                             snapshot(&s, anchor, phase, ticks, last_calls, st, "这一轮没跑通");
-                        if let Ok(mut g) = latest_bg.lock() {
-                            *g = Some(out);
-                        }
+                        let mut g = latest_bg.0.lock().unwrap_or_else(|e| e.into_inner());
+                        *g = Some(out);
+                        drop(g);
+                        latest_bg.1.notify_all();
                         // 失败后歇一拍，别把错误刷成瀑布
                         std::thread::sleep(Duration::from_millis(2500));
                         last_failed = true;
                     }
                 }
-                std::thread::sleep(TICK);
+                s.relock.wait_timeout(TICK);
                 tracing::debug!(
                     target: "chat_servant::watch",
                     "一轮 {ms}ms",

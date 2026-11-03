@@ -1043,7 +1043,15 @@ pub struct BucketCache {
     buckets: Mutex<Buckets>,
     /// 超过这个数就把最久没用的桶丢掉一半。
     max_buckets: usize,
+    /// 行级识别结果缓存 `(rec_width, fnv1a64_of_rec_input) -> (text, conf)`。
+    ///
+    /// ADR-0007 实测 `rec` 占每轮 OCR 耗时的 34%~57%（10~14 行逐行推理共 ~398ms）；
+    /// 当微信来新消息或微滚时，画面上 80%~90% 的旧气泡行像素完全未变（仅 y 坐标平移），
+    /// 命中此缓存可跳过重复的 ONNX `rec` 神经网络推理，直接将稳态增量 OCR 耗时砍半。
+    line_cache: Mutex<HashMap<(usize, u64), (String, f32)>>,
 }
+
+const LINE_CACHE_CAP: usize = 256;
 
 impl BucketCache {
     pub fn new(dir: PathBuf) -> Self {
@@ -1051,9 +1059,9 @@ impl BucketCache {
             dir,
             buckets: Mutex::new(HashMap::new()),
             max_buckets: 32,
+            line_cache: Mutex::new(HashMap::new()),
         }
     }
-
     /// rec 权重路径。
     ///
     /// ## 曾经按宽度拼文件名，那是个静默失效（2026-10-15 实测）
@@ -1117,8 +1125,28 @@ impl BucketCache {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    fn get_cached_line(&self, key: (usize, u64)) -> Option<(String, f32)> {
+        lock_recover(&self.line_cache).get(&key).cloned()
+    }
+
+    fn put_cached_line(&self, key: (usize, u64), val: (String, f32)) {
+        let mut g = lock_recover(&self.line_cache);
+        if g.len() >= LINE_CACHE_CAP {
+            g.clear();
+        }
+        g.insert(key, val);
+    }
 }
 
+fn hash_rec_input(buf: &[f32]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &v in buf {
+        h ^= u64::from(v.to_bits());
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
 /// det 的形状键。**两个分量都要**：少一个就会拿错形状的图，
 /// 而 `run` 拿到形状不匹配的输入只会报错，于是整轮回落 WinRT。
 ///
@@ -1482,8 +1510,15 @@ pub fn recognize_with(
         let mut decoded: Vec<OcrLine> = Vec::new();
         for b in group.drain(..) {
             let buf = rec_input(frame, b, w);
-            let (vals, shape) = ocr_pp::run(&plan, &[1, 3, REC_HEIGHT, w], &buf, "rec")?;
-            let (text, conf) = ctc_decode(&vals, &shape, chars);
+            let line_key = (w, hash_rec_input(&buf));
+            let (text, conf) = if let Some(hit) = cache.get_cached_line(line_key) {
+                hit
+            } else {
+                let (vals, shape) = ocr_pp::run(&plan, &[1, 3, REC_HEIGHT, w], &buf, "rec")?;
+                let decoded_line = ctc_decode(&vals, &shape, chars);
+                cache.put_cached_line(line_key, decoded_line.clone());
+                decoded_line
+            };
             if !text.trim().is_empty() {
                 // 词级矩形与行矩形同框：PP-OCR 的 rec 是**整框一个序列**，
                 // 本来就没有词级切分。要下游按词合并的话得先切，这里如实给一份。
@@ -3273,6 +3308,19 @@ mod tests {
         assert!(
             n >= 1,
             "清空后必须至少留下刚插的那一条，否则下一次调用拿不到自己刚建的缓存"
+        );
+    }
+
+    #[test]
+    fn unchanged_line_crops_hit_the_rec_line_cache() {
+        let cache = BucketCache::new(PathBuf::from("dummy"));
+        let sample = vec![0.25f32, -0.5, 0.75, 1.0];
+        let key = (320, hash_rec_input(&sample));
+        assert!(cache.get_cached_line(key).is_none());
+        cache.put_cached_line(key, ("测试行缓存".to_string(), 0.98));
+        assert_eq!(
+            cache.get_cached_line(key),
+            Some(("测试行缓存".to_string(), 0.98))
         );
     }
 }

@@ -115,7 +115,13 @@ fn write_clipboard(text: &str) -> Result<(), String> {
 
             match SetClipboardData(CF_UNICODE_TEXT, Some(handle_of(hmem))) {
                 // 成功时**内存所有权转移给系统**，绝不能再 Free
-                Ok(_) => Ok(()),
+                Ok(_) => {
+                    // 微软官方剪贴板隐私规范（Chrome Incognito / Edge / Espanso / 1Password 同款）：
+                    // 标记本次剪贴板写入为程序临时投递，禁止进 Win+V 剪贴板历史、禁止同步到云剪贴板、
+                    // 并提示第三方剪贴板监听器忽略本次写入。
+                    mark_clipboard_ephemeral();
+                    Ok(())
+                }
                 Err(e) => {
                     let _ = GlobalFree(Some(hmem));
                     Err(format!("写剪贴板失败：{e}"))
@@ -127,6 +133,45 @@ fn write_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
+/// 为当前已打开的剪贴板挂上微软官方的三个隐私/临时标记格式：
+/// - `ExcludeClipboardContentFromMonitorProcessing`（非零 4 字节）
+/// - `CanIncludeInClipboardHistory`（DWORD = 0）
+/// - `CanUploadToCloudClipboard`（DWORD = 0）
+///
+/// 失败不阻断主流程：这三个是辅助元数据，`CF_UNICODETEXT` 已经写入成功。
+unsafe fn mark_clipboard_ephemeral() {
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+    use windows::core::PCWSTR;
+
+    for (name, val) in [
+        ("ExcludeClipboardContentFromMonitorProcessing", 1u32),
+        ("CanIncludeInClipboardHistory", 0u32),
+        ("CanUploadToCloudClipboard", 0u32),
+    ] {
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: `wide` 以 NUL 结尾；仅在当前已打开的剪贴板上注册并设置 4 字节全局内存块。
+        let fmt = unsafe { RegisterClipboardFormatW(PCWSTR(wide.as_ptr())) };
+        if fmt == 0 {
+            continue;
+        }
+        // SAFETY: 分配 4 字节 GMEM_MOVEABLE 交由 SetClipboardData 接管所有权，失败则 GlobalFree。
+        unsafe {
+            let Ok(hmem) = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, 4) else {
+                continue;
+            };
+            let ptr = GlobalLock(hmem);
+            if ptr.is_null() {
+                let _ = GlobalFree(Some(hmem));
+                continue;
+            }
+            *(ptr as *mut u32) = val;
+            let _ = GlobalUnlock(hmem);
+            if SetClipboardData(fmt, Some(handle_of(hmem))).is_err() {
+                let _ = GlobalFree(Some(hmem));
+            }
+        }
+    }
+}
 /// 读回剪贴板的文本。
 fn read_clipboard() -> Result<String, String> {
     // 调用方已经持锁（`roundtrip` / `fill_input_box`）。
@@ -589,12 +634,36 @@ pub fn current_foreground_window() -> Option<HWND> {
     (!fg.0.is_null()).then_some(fg)
 }
 
-/// 距离系统最近一次全局键鼠输入过去了多少毫秒（`GetLastInputInfo`）。
+/// 检测用户此刻是否正按住任何鼠标键或修饰键（`Shift`/`Ctrl`/`Alt`/`Win`）。
 ///
-/// 供 `Auto` 档后台自动发送前做「键鼠活跃避让」：若用户此刻正在打字或操作鼠标，
-/// 暂缓本圈自动发送，等用户停手后再发，避免在用户打字中途抢走窗口焦点。
+/// `GetLastInputInfo` 只记录最后一次输入事件的时间戳：若用户正按住鼠标左键拖拽/选词
+/// 或按住 `Shift` 思考而超过 1.2s 未产生新事件，此时注入 `VK_RETURN` 会变成 `Shift+Enter`
+/// 或打断拖拽（参考 AutoHotkey `keyboard_mouse.cpp` 的修饰键安全守则）。
+#[must_use]
+pub fn any_key_or_mouse_button_held() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_CONTROL, VK_LBUTTON, VK_LWIN, VK_MBUTTON, VK_MENU, VK_RBUTTON,
+        VK_RWIN, VK_SHIFT,
+    };
+    for vk in [
+        VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN,
+    ] {
+        // SAFETY: `GetAsyncKeyState` 仅查询虚拟键当前物理按下状态，无内存安全前提。
+        let state = unsafe { GetAsyncKeyState(i32::from(vk.0)) };
+        if (state as u16 & 0x8000) != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// 距离系统最近一次全局键鼠输入过去了多少毫秒（`GetLastInputInfo`）；
+/// 若此刻正按住任意鼠标键或修饰键，直接返回 `Some(0)`（视为活跃输入中）。
 #[must_use]
 pub fn user_idle_ms() -> Option<u64> {
+    if any_key_or_mouse_button_held() {
+        return Some(0);
+    }
     use windows::Win32::System::SystemInformation::GetTickCount;
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     let mut info = LASTINPUTINFO {
@@ -633,6 +702,9 @@ pub fn fill_and_send(text: &str, target: HWND) -> DeliveryReceipt {
         return filled;
     }
 
+    // 参考 Espanso 的 pre_paste_delay / inject_delay：给 Qt 事件循环留 15ms 处理完 Ctrl+V 再发 Enter。
+    std::thread::sleep(Duration::from_millis(15));
+
     let res = match press_enter() {
         Ok(()) => DeliveryReceipt::PossiblySent,
         Err(e) => DeliveryReceipt::Failed(format!(
@@ -640,8 +712,10 @@ pub fn fill_and_send(text: &str, target: HWND) -> DeliveryReceipt {
         )),
     };
 
-    // 2. 留 15ms 让目标窗口消息队列消费完 Ctrl+V 与 VK_RETURN，随后还原用户剪贴板与原前台窗口焦点。
-    std::thread::sleep(Duration::from_millis(15));
+    // 参考 Espanso 的 restore_clipboard_delay（80ms）：
+    // SendInput 是异步入队的，目标 Qt 窗口在收到 WM_KEYDOWN(VK_V) 时才去读剪贴板；
+    // 等 80ms 确保目标窗口已完成粘贴与回车消费，再还原用户原剪贴板与原前台窗口焦点。
+    std::thread::sleep(Duration::from_millis(80));
     if let Some(old) = saved_clip {
         let _guard = lock_clipboard();
         let _ = write_clipboard(&old);

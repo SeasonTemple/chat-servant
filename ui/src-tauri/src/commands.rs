@@ -2300,6 +2300,7 @@ pub fn start(app: &AppHandle) {
     let relock = cfg.relock.clone();
     let session_mode = cfg.session_mode.clone();
     let watcher = crate::watch::spawn(cfg);
+    let latest_pair = watcher.notified_handle();
     if let Ok(mut g) = STATE.lock() {
         *g = Some(AppState {
             watcher,
@@ -2333,7 +2334,17 @@ pub fn start(app: &AppHandle) {
             // `phase` 覆盖「同一 ticks 里阶段变了」。
             let mut last: Option<(u64, &'static str)> = None;
             loop {
-                if let Some(out) = with_state(|s| s.watcher.latest()).flatten()
+                let next_out = {
+                    let g = latest_pair.0.lock().unwrap_or_else(|e| e.into_inner());
+                    let (g, _) = latest_pair
+                        .1
+                        .wait_timeout_while(g, std::time::Duration::from_secs(2), |opt| {
+                            opt.as_ref().map(|o| (o.ticks, o.phase.key())) == last
+                        })
+                        .unwrap_or_else(|e| e.into_inner());
+                    g.clone()
+                };
+                if let Some(out) = next_out
                     && last != Some((out.ticks, out.phase.key()))
                 {
                     last = Some((out.ticks, out.phase.key()));
@@ -2352,20 +2363,8 @@ pub fn start(app: &AppHandle) {
                         }
                     }
                     if peer_changed {
-                        // 托盘首行写的是「我到底在替谁说话」，
-                        // 会话换了就得跟着换。
-                        // 同模块内直接调——`commands::` 前缀在这里是
-                        // 2015 edition 的写法，2018 之后不解析（E0433）。
                         refresh_tray();
                     }
-                    // **不要吞掉 emit 的错误。**
-                    //
-                    // 早先这里写的是 `let _ = app2.emit(...)`，于是序列化失败
-                    // （字段里有 serde 编不出来的东西）时：日志照打「emit
-                    // readout tick=N」、Rust 侧一切正常，而界面**一个字都收不到**，
-                    // `latest_readout` 也走同一条序列化路径所以同样失败——
-                    // 表现就是「后端认出会话了，界面永远停在空白」，
-                    // 而日志里看不出任何异常。这正是**恒哑的错误处理**。
                     if let Err(e) = app2.emit(crate::contract::events::READOUT, &out) {
                         tracing::error!(
                             target: "chat_servant::pump",
@@ -2383,7 +2382,6 @@ pub fn start(app: &AppHandle) {
                         out.candidates().len()
                     );
                 }
-                std::thread::sleep(std::time::Duration::from_millis(40));
             }
         })
         .ok();
