@@ -86,6 +86,13 @@ fn main() {
                     .spawn(move || {
                         let mut ignoring = false;
                         loop {
+                            if !win.is_visible().unwrap_or(true) {
+                                if ignoring && win.set_ignore_cursor_events(false).is_ok() {
+                                    ignoring = false;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(250));
+                                continue;
+                            }
                             std::thread::sleep(std::time::Duration::from_millis(40));
                             let (Ok(cur), Ok(pos), Ok(scale)) = (
                                 win.cursor_position(),

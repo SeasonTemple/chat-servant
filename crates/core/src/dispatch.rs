@@ -91,16 +91,19 @@ impl DeliveryReceipt {
     /// 判据不是「发没发」，是「**重来一遍会不会变成两条**」：
     /// 输入框里已经有那段字了，再填一次就是追加成两份——
     /// 那正是 2026-10-09 `Confirm` 两段式发出去两条拼接消息的机制。
+    #[must_use]
     pub fn replay_safe(&self) -> bool {
         matches!(self, Self::NotSent | Self::Failed(_))
     }
 
     /// 要不要挡住自动重试。
+    #[must_use]
     pub fn blocks_automatic_retry(&self) -> bool {
         !self.replay_safe()
     }
 
     /// 界面上给人看的一句话。
+    #[must_use]
     pub fn explain(&self) -> &'static str {
         match self {
             Self::NotSent => "确定没发，可以重试",

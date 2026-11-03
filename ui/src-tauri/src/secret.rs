@@ -135,6 +135,8 @@ pub fn store(group: ModelGroup, provider: &str, secret: &str) -> Result<(), Stri
 
     // 写完立刻抹掉内存里的副本。凭据管理器的副本由系统负责加密，
     // 我们这份只是路过。
+    // SAFETY: `cred` 的 `TargetName`、`UserName` 均指向以 NUL 结尾的有效 UTF-16 缓冲区，
+    // `CredentialBlob` 指向长度为 `CredentialBlobSize` 的有效字节切片，生命周期覆盖本次调用。
     let r = unsafe { CredWriteW(&cred, 0) };
     blob.fill(0);
     r.map_err(|e| format!("写凭据管理器失败：{}", redact(&e.to_string())))
@@ -203,15 +205,21 @@ fn from_env(provider: &str) -> Option<String> {
 fn read_one(target: &str) -> Option<String> {
     let name: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
 
+    // SAFETY: `name` 是以 NUL 结尾的 UTF-16 缓冲区；`CredReadW` 成功后 `raw` 指向由系统分配的
+    // `CREDENTIALW`，当且仅当 `CredentialBlob` 非空且长度大于 0 时构造切片，并在返回前由 `CredFree` 释放。
     unsafe {
         let mut raw: *mut CREDENTIALW = std::ptr::null_mut();
         match CredReadW(PCWSTR(name.as_ptr()), CRED_TYPE_GENERIC, None, &mut raw) {
             Ok(()) if !raw.is_null() => {
                 let cred = &*raw;
-                let bytes = std::slice::from_raw_parts(
-                    cred.CredentialBlob,
-                    cred.CredentialBlobSize as usize,
-                );
+                let bytes = if cred.CredentialBlob.is_null() || cred.CredentialBlobSize == 0 {
+                    &[]
+                } else {
+                    std::slice::from_raw_parts(
+                        cred.CredentialBlob,
+                        cred.CredentialBlobSize as usize,
+                    )
+                };
                 // 凭据里的字节不是 UTF-8 结尾的，from_utf8_lossy 会带上替换字符。
                 // 这里手动按字节走，不留隐藏字符。
                 let s = String::from_utf8_lossy(bytes)
@@ -266,6 +274,7 @@ pub fn erase(group: ModelGroup, provider: &str) -> Result<(), String> {
 
 fn delete_one(target: &str) -> Result<(), String> {
     let name: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `name` 是以 NUL 结尾的有效 UTF-16 缓冲区，生命周期覆盖本次调用。
     unsafe { CredDeleteW(PCWSTR(name.as_ptr()), CRED_TYPE_GENERIC, None) }
         .map_err(|e| format!("删除凭据失败：{}", redact(&e.to_string())))
 }

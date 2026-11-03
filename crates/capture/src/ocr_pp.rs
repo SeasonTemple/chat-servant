@@ -646,7 +646,7 @@ fn the_onnxruntime_backend_can_load_and_run_the_v6_models() {
         sess.run(ort::inputs!["x" => t]).expect("det 推理失败");
         hot.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
-    hot.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    hot.sort_by(f64::total_cmp);
     eprintln!(
         "ort det 32x32：首遍 {cold:?}  热调用中位 {:.1} ms（{:?}）",
         hot[hot.len() / 2],

@@ -21,34 +21,40 @@ pub struct Rect {
 
 impl Rect {
     /// `const`：夹具的黄金基线要把它写进常量里。
+    #[must_use]
     pub const fn new(x0: i32, y0: i32, x1: i32, y1: i32) -> Self {
         Self { x0, y0, x1, y1 }
     }
 
     /// 宽。**饱和减法**——负尺寸（`x1 < x0`）读成 0 而不是绕回一大片。
+    #[must_use]
     pub fn width(self) -> i32 {
         self.x1.saturating_sub(self.x0).max(0)
     }
 
     /// 高。同 [`Rect::width`] 的饱和语义。
+    #[must_use]
     pub fn height(self) -> i32 {
         self.y1.saturating_sub(self.y0).max(0)
     }
 
     /// 面积。走 `i64`——4K 全屏 `1920*1080*4` 级别的乘法在 `i32` 里是安全的，
     /// 但夹具里有更大的合成图，别让面积成为溢出的来源。
+    #[must_use]
     pub fn area(self) -> i64 {
         i64::from(self.width()) * i64::from(self.height())
     }
 
     /// 换个高度，**保持上沿不变**。给「同一个上沿、但要更高那条带子」
     /// 的场景用（见 `watch.rs` 里读会话名那条）。
+    #[must_use]
     pub fn with_height(self, height: i32) -> Self {
         Rect::new(self.x0, self.y0, self.x1, self.y0 + height)
     }
 
     /// 空矩形。宽或高为 0 就算空——**不检查 x0/x1 的先后**，
     /// 因为退化矩形在 OCR 里是常态（气泡被裁掉一半）。
+    #[must_use]
     pub fn is_empty(self) -> bool {
         self.width() == 0 || self.height() == 0
     }
@@ -57,6 +63,7 @@ impl Rect {
     ///
     /// 完全落在原点之外的矩形返回 `None`：OCR 框整体跑到气泡左边或上边，
     /// 拿它算裁剪区只会得到一个无意义的负偏移。
+    #[must_use]
     pub fn translate_to(&self, origin_x: i32, origin_y: i32) -> Option<Rect> {
         let r = Rect::new(
             self.x0 - origin_x,
@@ -93,6 +100,7 @@ impl Frame {
     /// 缓冲区长度与尺寸不符时返回 `None`——捕获层拿到的原始缓冲区
     /// 有可能因为窗口中途改尺寸而与声明尺寸对不上，这种情况必须显式失败，
     /// 不能让读像素时越界。
+    #[must_use]
     pub fn from_rgb(width: u32, height: u32, rgb: Vec<u8>) -> Option<Self> {
         let expected = (width as usize)
             .checked_mul(height as usize)?
@@ -104,23 +112,27 @@ impl Frame {
     }
 
     /// 宽（像素）。
+    #[must_use]
     pub fn width(&self) -> u32 {
         self.width
     }
 
     /// 高（像素）。
+    #[must_use]
     pub fn height(&self) -> u32 {
         self.height
     }
 
     /// 原始 RGB 缓冲，行主序、3 字节/像素。**只读借用**——
     /// 这帧永不落盘，所以这里没有 `&mut` 版本是刻意的。
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.rgb
     }
 
     /// 取一个像素。越界返回 `None` 而不是 panic——
     /// OCR 框会给出退化坐标，调用方不该为此崩。
+    #[must_use]
     pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 3]> {
         if x >= self.width || y >= self.height {
             return None;
@@ -134,6 +146,7 @@ impl Frame {
     /// GPU 合成窗口用错误的捕获路径会稳定返回全黑帧，这是已知失败模式，
     /// 必须当成错误报出来，而不是把黑图当成"成功抓到了一帧"。
     /// 阈值取"任一通道 > 8"——容忍极轻的压缩/偏色噪声，但纯黑一定判黑。
+    #[must_use]
     pub fn is_black(&self) -> bool {
         self.rgb
             .chunks_exact(3)
@@ -141,6 +154,7 @@ impl Frame {
     }
 
     /// 截取一块并平移到新原点。越界会裁剪；完全落在外面返回 `None`。
+    #[must_use]
     pub fn crop(&self, r: Rect) -> Option<Self> {
         let r = Rect::new(
             r.x0.clamp(0, self.width as i32),
@@ -171,6 +185,7 @@ impl Frame {
     /// 最近邻只复制像素，放大前后字形完全一致，结论才站得住。
     ///
     /// `n <= 1` 原样返回自己。
+    #[must_use]
     pub fn upscaled_nearest(&self, n: u32) -> Option<Self> {
         if n <= 1 {
             return Some(self.clone());
@@ -209,6 +224,7 @@ impl Frame {
     /// ⇒ 换插值之前，先确认那条「测量用原始像素」的性质还在。
     ///
     /// `n <= 1` 原样返回自己。
+    #[must_use]
     pub fn upscaled_bilinear(&self, n: u32) -> Option<Self> {
         if n <= 1 {
             return Some(self.clone());

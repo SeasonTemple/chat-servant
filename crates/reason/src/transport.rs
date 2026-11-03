@@ -852,17 +852,17 @@ impl ModelCell {
 
     /// 当前思考等级。
     pub fn effort(&self) -> ThinkingEffort {
-        self.0.read().expect("锁").2
+        self.0.read().unwrap_or_else(|e| e.into_inner()).2
     }
 
     /// 设置思考等级。
     pub fn set_effort(&self, effort: ThinkingEffort) {
-        self.0.write().expect("锁").2 = effort;
+        self.0.write().unwrap_or_else(|e| e.into_inner()).2 = effort;
     }
 
     /// 当前这一路（端点 + 协议 + 厂商）。
     pub fn route(&self) -> Route {
-        self.0.read().expect("锁").0.clone()
+        self.0.read().unwrap_or_else(|e| e.into_inner()).0.clone()
     }
 
     /// 两格是不是**同一格**（同一个 `Arc`），而不是「内容碰巧一样」。
@@ -889,7 +889,7 @@ impl ModelCell {
 
     /// 当前选中的模型名。
     pub fn get(&self) -> String {
-        self.0.read().expect("锁").1.clone()
+        self.0.read().unwrap_or_else(|e| e.into_inner()).1.clone()
     }
 
     /// 改模型。**返回夹取/校验后的真实生效值**——
@@ -898,7 +898,7 @@ impl ModelCell {
     /// 不被接受就**返回错误、并且不改格子**。失败方向必须是「不变」。
     pub fn set(&self, model: &str) -> Result<String, String> {
         let m = model.trim();
-        let mut g = self.0.write().expect("锁");
+        let mut g = self.0.write().unwrap_or_else(|e| e.into_inner());
         if !g.0.accepts_model(m) {
             return Err(if g.0.models().is_empty() {
                 format!(
@@ -931,7 +931,7 @@ impl ModelCell {
     /// [`HttpReasoner::ask`] 会在发出请求**之前**就拒绝，不去换一个
     /// 更难懂的 404。
     pub fn set_route(&self, route: Route) -> Route {
-        let mut g = self.0.write().expect("锁");
+        let mut g = self.0.write().unwrap_or_else(|e| e.into_inner());
         if g.0.provider() != route.provider() || !route.accepts_model(&g.1) {
             g.1 = route.default_model().to_string();
         }
@@ -1004,7 +1004,7 @@ impl ProxyCell {
 
     /// 当前代理地址。`None` = 直连。
     pub fn get(&self) -> Option<String> {
-        self.0.read().expect("锁").clone()
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 写代理地址。**空串 = 不走代理。**
@@ -1018,7 +1018,7 @@ impl ProxyCell {
     pub fn set(&self, url: &str) -> Result<Option<String>, String> {
         let t = url.trim();
         if t.is_empty() {
-            *self.0.write().expect("锁") = None;
+            *self.0.write().unwrap_or_else(|e| e.into_inner()) = None;
             return Ok(None);
         }
         // **`Proxy::all` 自己不够严**（本机实测：它把「这不是地址」也收下，
@@ -1038,7 +1038,7 @@ impl ProxyCell {
         if let Err(e) = reqwest::Proxy::all(t) {
             return Err(redact(&format!("这个代理地址用不了：{e}")));
         }
-        *self.0.write().expect("锁") = Some(t.to_string());
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Some(t.to_string());
         Ok(self.get())
     }
 }
@@ -3364,5 +3364,33 @@ mod tests {
         assert!(!Provider::TypeSafe.accepts_model("jev-1.13"));
         assert!(Provider::TypeSafe.accepts_model("jev-latest"));
         assert!(Provider::TypeSafe.accepts_model("jev-preview"));
+    }
+
+    /// `ModelCell` 与 `ProxyCell` 跨观察线程与命令线程共享：任一侧持写锁 panic 使锁中毒后，
+    /// 后续读写仍须通过 `into_inner` 恢复，不能把单次 panic 放大成永久性的全进程崩溃。
+    #[test]
+    fn a_poisoned_model_or_proxy_cell_still_reads_and_writes() {
+        let cell = ModelCell::new(Route::preset(Provider::TypeSafe).unwrap());
+        let c2 = cell.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = c2.0.write().unwrap();
+            panic!("故意让 ModelCell 的写锁中毒");
+        })
+        .join();
+        assert_eq!(cell.get(), "jev-latest");
+        assert_eq!(cell.set("jev-preview").unwrap(), "jev-preview");
+
+        let proxy = ProxyCell::new();
+        let p2 = proxy.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = p2.0.write().unwrap();
+            panic!("故意让 ProxyCell 的写锁中毒");
+        })
+        .join();
+        assert_eq!(proxy.get(), None);
+        assert_eq!(
+            proxy.set("http://127.0.0.1:7897").unwrap().as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
     }
 }

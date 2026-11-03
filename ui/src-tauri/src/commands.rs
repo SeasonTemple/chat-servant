@@ -615,6 +615,7 @@ fn find_wechat() -> Option<windows::Win32::Foundation::HWND> {
     let surface = chatservant_capture::surface::WECHAT;
     let hit = chatservant_capture::find_chat_window(&surface).ok()?;
     let hwnd = windows::Win32::Foundation::HWND(hit.hwnd_raw as *mut core::ffi::c_void);
+    // SAFETY: `IsWindow` 仅向内核查询句柄在当前时刻是否为有效窗口，任意整数句柄均安全。
     unsafe { IsWindow(Some(hwnd)).as_bool().then_some(hwnd) }
 }
 

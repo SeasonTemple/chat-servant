@@ -66,6 +66,7 @@ impl ConfidenceTier {
     ///   若按「小于中界」处理，NaN 会静悄悄变成低档；这里显式写出来，
     ///   免得哪天有人改顺序时把它变成高。
     /// * 超出 0..=1 的值按数值本身比较（模型给 1.3 就当高）。
+    #[must_use]
     pub fn from_probability(p: f32) -> Self {
         if p.is_nan() {
             return Self::Low;
@@ -80,6 +81,7 @@ impl ConfidenceTier {
     }
 
     /// 档位的机器可读名（与序列化一致）。
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Low => "low",
