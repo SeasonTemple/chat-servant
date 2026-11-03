@@ -147,7 +147,7 @@ pub fn merge_into_stream(prev: &[Message], new: &[Message]) -> Vec<Message> {
         if seen.insert(m.id.clone()) {
             continue;
         }
-        let base = m.id.clone();
+        let base = message_id(m.speaker, &m.text);
         for n in 2u32.. {
             let cand = format!("{base}#{n}");
             if seen.insert(cand.clone()) {
@@ -531,5 +531,68 @@ mod session_gate {
             conversation_name(&attrs, HEADER_BAND_H).as_deref(),
             Some("小号")
         );
+    }
+
+    /// PBT 属性测试：对任意多轮消息流序列：
+    /// 1. 同一帧重复归并幂等（窗口内 `n <= DEDUP_TAIL`）：`merge_into_stream(&merged, &curr) == merged`；
+    /// 2. 账本记过本轮新增后，同一帧重算新增消息恒为空：`novel_messages(&ledger, &curr).is_empty()`；
+    /// 3. 归并结果长度恒 `<= MESSAGE_WINDOW`，且同流内每条消息的 `id` 严格唯一。
+    #[test]
+    fn pbt_merge_is_idempotent_on_same_frame_and_bounded_with_unique_ids() {
+        let pool = [
+            "早",
+            "在吗",
+            "今晚八点",
+            "好的",
+            "收到",
+            "哈哈",
+            "改天约",
+            "行",
+        ];
+        let mut seed: u64 = 0x3E26_6005_2026_1103;
+        let mut next_u64 = || -> u64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut history: Vec<Message> = Vec::new();
+        let mut ledger: Vec<Message> = Vec::new();
+        for round in 0..200 {
+            let overlap = (next_u64() as usize % 4).min(history.len());
+            let mut curr: Vec<Message> = history[history.len() - overlap..]
+                .iter()
+                .enumerate()
+                .map(|(idx, m)| msg_at(m.speaker, &m.text, (idx as i32) * 24))
+                .collect();
+            let add = (next_u64() % 3) as usize;
+            for i in 0..add {
+                let sp = if next_u64().is_multiple_of(2) {
+                    Speaker::Them
+                } else {
+                    Speaker::Me
+                };
+                let text = format!("{}-{round}-{i}", pool[(next_u64() as usize) % pool.len()]);
+                curr.push(msg_at(sp, &text, ((overlap + i) as i32) * 24));
+            }
+            let newly_arrived = novel_messages(&ledger, &curr);
+            ledger.extend(newly_arrived);
+            assert!(
+                novel_messages(&ledger, &curr).is_empty(),
+                "同一帧已入账后不该再冒出 novel_messages"
+            );
+
+            let merged = merge_into_stream(&history, &curr);
+            let merged_again = merge_into_stream(&merged, &curr);
+            assert_eq!(
+                merged, merged_again,
+                "同一帧重复 merge_into_stream 必须幂等"
+            );
+            assert!(merged.len() <= MESSAGE_WINDOW);
+            let unique_ids: std::collections::HashSet<&str> =
+                merged.iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(unique_ids.len(), merged.len(), "归并流内 ID 必须唯一");
+            history = merged;
+        }
     }
 }

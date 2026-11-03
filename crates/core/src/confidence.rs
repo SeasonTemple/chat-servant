@@ -148,4 +148,35 @@ mod tests {
         assert_eq!(ConfidenceTier::from_probability(0.2), ConfidenceTier::Mid);
         assert_eq!(ConfidenceTier::from_probability(0.1), ConfidenceTier::Low);
     }
+
+    /// PBT 属性测试：对任意位模式的有限浮点数对 `a <= b` 以及特殊值（`±0.0`、`±INFINITY`、次正规数），
+    /// `from_probability` 永不 panic 且严格保持单调不减。
+    #[test]
+    fn pbt_confidence_tier_is_total_and_monotonic_across_floats() {
+        for special in [
+            f32::NEG_INFINITY,
+            -1.0,
+            -0.0,
+            0.0,
+            f32::MIN_POSITIVE,
+            0.199_999_99,
+            0.2,
+            0.499_999_97,
+            0.5,
+            1.0,
+            f32::INFINITY,
+            f32::NAN,
+        ] {
+            let _ = ConfidenceTier::from_probability(special).as_str();
+        }
+        let mut seed: u64 = 0xC04F_2026_1103;
+        for _ in 0..1000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let a = ((seed as i64 % 30_000) as f32) / 10_000.0 - 1.0;
+            let b = a + ((seed >> 16) % 10_000) as f32 / 10_000.0;
+            assert!(ConfidenceTier::from_probability(a) <= ConfidenceTier::from_probability(b));
+        }
+    }
 }

@@ -453,4 +453,35 @@ mod tests {
             assert!(f.width >= 1 && f.height >= 1, "{w}×{h} 出来 {f:?}");
         }
     }
+
+    /// PBT 属性测试：对任意正尺寸 `(w, h)` 与单调递增的预算 `b1 <= b2`，
+    /// `fit` 满足预算硬上限（`tokens <= budget`）、永不放大（`width <= w && height <= h`）、
+    /// 以及预算单调性（预算更高时缩放比例与宽不减）。
+    #[test]
+    fn pbt_scale_fit_never_exceeds_budget_or_enlarges_and_is_monotonic() {
+        let mut seed: u64 = 0x5CA1_E002_2026_1103;
+        let mut next_u32 = |lo: u32, hi: u32| -> u32 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            lo + (seed as u32) % (hi - lo + 1)
+        };
+        for billing in [Billing::ANTHROPIC_PATCH, Billing::OPENAI_GPT4O_MINI] {
+            let base = billing.base();
+            for _ in 0..400 {
+                let w = next_u32(1, 4096);
+                let h = next_u32(1, 4096);
+                let b1 = next_u32(base + 10, base + 20_000);
+                let b2 = b1 + next_u32(0, 10_000);
+                if let (Ok(f1), Ok(f2)) = (fit(&billing, w, h, b1), fit(&billing, w, h, b2)) {
+                    assert!(f1.tokens <= b1);
+                    assert!(f2.tokens <= b2);
+                    assert!(f1.width >= 1 && f1.width <= w);
+                    assert!(f1.height >= 1 && f1.height <= h);
+                    assert!(f2.width >= f1.width);
+                    assert!(f2.height >= f1.height);
+                }
+            }
+        }
+    }
 }

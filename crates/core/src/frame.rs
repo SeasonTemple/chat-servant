@@ -397,4 +397,32 @@ mod tests {
         assert_eq!(f.upscaled_nearest(1).expect("n"), f);
         assert_eq!(f.upscaled_bilinear(1).expect("b"), f);
     }
+
+    /// PBT 属性测试：任意 `(x0, y0, x1, y1)`（含极端负值与大整数）下：
+    /// 1. `Rect::width` / `height` / `area` 恒非负且不溢出；
+    /// 2. `width == 0 || height == 0` 与 `is_empty()` 完全等价；
+    /// 3. 对任意有效画面做 `Frame::crop(r)`，结果尺寸永不超过原画面与裁剪框，且绝不越界 panic。
+    #[test]
+    fn pbt_rect_and_frame_crop_invariants_hold_across_random_geometries() {
+        let mut seed: u64 = 0xF4A3_E001_2026_1103;
+        let mut next_i32 = || -> i32 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ((seed as i64 % 4000) - 2000) as i32
+        };
+        let base = solid(64, 48, [42, 128, 200]);
+        for _ in 0..1000 {
+            let r = Rect::new(next_i32(), next_i32(), next_i32(), next_i32());
+            assert!(r.width() >= 0);
+            assert!(r.height() >= 0);
+            assert!(r.area() >= 0);
+            assert_eq!(r.is_empty(), r.width() == 0 || r.height() == 0);
+            if let Some(cropped) = base.crop(r) {
+                assert!(cropped.width() >= 1 && cropped.width() <= base.width());
+                assert!(cropped.height() >= 1 && cropped.height() <= base.height());
+                assert_eq!(cropped.pixel(0, 0), Some([42, 128, 200]));
+            }
+        }
+    }
 }

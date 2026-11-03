@@ -32,7 +32,6 @@ const WRAPPER_PAIRS: &[(&str, &str)] = &[
     ("【", "】"),
     ("〔", "〕"),
     ("［", "］"),
-    ("【", "】"),
     ("（", "）"),
     ("(", ")"),
     ("\"", "\""),
@@ -86,11 +85,26 @@ fn strip_numbering(s: &str) -> &str {
     let rest = rest
         .strip_prefix(". ")
         .or_else(|| rest.strip_prefix(") "))
+        .or_else(|| rest.strip_prefix("） "))
         .or_else(|| rest.strip_prefix(')'))
+        .or_else(|| rest.strip_prefix('）'))
         .or_else(|| rest.strip_prefix('、'))
-        .or_else(|| rest.strip_prefix('.'))
-        // 括号形式：`(3) 行` 的收尾括号
-        .or_else(|| rest.strip_prefix(')'));
+        .or_else(|| {
+            let after_dot = rest.strip_prefix('.')?;
+            // 避免把小数（如 `2.5小时`、`3.14`）或省略号（`1...`）误判成编号前缀；
+            // 但保留多级编号 `1.2. 真的`。
+            if after_dot.starts_with('.') {
+                return None;
+            }
+            if after_dot.as_bytes().first().is_some_and(u8::is_ascii_digit)
+                && !after_dot
+                    .trim_start_matches(|c: char| c.is_ascii_digit())
+                    .starts_with(". ")
+            {
+                return None;
+            }
+            Some(after_dot)
+        });
     match rest {
         Some(r) if !r.trim().is_empty() => r.trim_start(),
         _ => s,
@@ -121,15 +135,13 @@ pub fn clean(raw: &str) -> String {
         s = strip_numbering(s);
         s = strip_speaker(s);
         s = strip_wrappers(s);
+        s = strip_trailing_period(s);
         s = s.trim();
 
         if s == before {
             break;
         }
     }
-
-    s = strip_trailing_period(s);
-
     // 洗成空串 = 失败。**保留原文**比给一条空候选好得多。
     if s.is_empty() {
         return original.to_string();
@@ -321,5 +333,64 @@ mod tests {
     fn clean_all_preserves_order() {
         let got = clean_all(["1. 甲", "me: 乙", "丙"]);
         assert_eq!(got, vec!["甲", "乙", "丙"]);
+    }
+
+    /// PBT 属性测试：对任意嵌套包裹壳、说话人前缀、全/半角编号与句尾句号组合，
+    /// `clean` 满足：
+    /// 1. 严格不动点幂等性（`clean(&clean(&s)) == clean(&s)`）；
+    /// 2. 非空输入绝不被洗成空串（`!s.trim().is_empty() => !clean(&s).is_empty()`）；
+    /// 3. 小数（如 `2.5小时`、`1.5倍`）与全角括号编号（`（4） 好的`）各自正确处理。
+    #[test]
+    fn pbt_clean_is_idempotent_and_preserves_decimals_and_non_empty_inputs() {
+        assert_eq!(clean("2.5小时后到"), "2.5小时后到");
+        assert_eq!(clean("1.5倍速"), "1.5倍速");
+        assert_eq!(clean("（4） 好的"), "好的");
+        assert_eq!(clean("\"好的.\""), "好的");
+
+        let prefixes = [
+            "",
+            "1. ",
+            "2、",
+            "(3) ",
+            "（4） ",
+            "me: ",
+            "我：",
+            "assistant: ",
+        ];
+        let wrappers = [
+            ("", ""),
+            ("**", "**"),
+            ("「", "」"),
+            ("\"", "\""),
+            ("【", "】"),
+        ];
+        let cores = ["好的", "2.5小时", "行...", "3个人", "a", "me:", "1.", "**"];
+        let suffixes = ["", ".", "...", "。", "  "];
+
+        let mut seed: u64 = 0xC1EA_4003_2026_1103;
+        let mut next_usize = |n: usize| -> usize {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed as usize) % n
+        };
+        for case_idx in 0..800 {
+            let p1 = prefixes[next_usize(prefixes.len())];
+            let p2 = prefixes[next_usize(prefixes.len())];
+            let (w1a, w1b) = wrappers[next_usize(wrappers.len())];
+            let (w2a, w2b) = wrappers[next_usize(wrappers.len())];
+            let core = cores[next_usize(cores.len())];
+            let suf = suffixes[next_usize(suffixes.len())];
+            let raw = format!("{w1a}{p1}{w2a}{p2}{core}{suf}{w2b}{w1b}");
+            let once = clean(&raw);
+            let twice = clean(&once);
+            assert_eq!(
+                once, twice,
+                "PBT clean 非幂等 (case {case_idx}): raw={raw:?} once={once:?} twice={twice:?}"
+            );
+            if !raw.trim().is_empty() {
+                assert!(!once.is_empty(), "PBT 非空输入被洗空: raw={raw:?}");
+            }
+        }
     }
 }

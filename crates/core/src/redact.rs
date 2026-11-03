@@ -91,7 +91,7 @@ fn mask_url_credentials(text: &str) -> String {
             while seg_end < n
                 && !matches!(
                     bytes[seg_end],
-                    '/' | '?' | '#' | ' ' | '"' | '\'' | '\n' | '>' | ')'
+                    '/' | '?' | '#' | ' ' | '"' | '\'' | '\n' | '\r' | '>' | ')'
                 )
             {
                 seg_end += 1;
@@ -128,7 +128,10 @@ fn mask_url_credentials(text: &str) -> String {
         if let Some((_, val_start)) = matched {
             let mut val_end = val_start;
             while val_end < n
-                && !matches!(bytes[val_end], '&' | ' ' | '"' | '\'' | '\n' | '>' | ')')
+                && !matches!(
+                    bytes[val_end],
+                    '&' | '#' | ' ' | '"' | '\'' | '\n' | '\r' | '>' | ')'
+                )
             {
                 val_end += 1;
             }
@@ -211,5 +214,50 @@ mod tests {
         assert!(!safe.contains("u:p"), "用户名口令还在：{safe}");
         assert!(!safe.contains("T0KENVAL"), "查询 token 还在：{safe}");
         assert!(!safe.contains("sk-abc123def456"), "key 还在：{safe}");
+    }
+
+    /// PBT 属性测试：对任意伪随机生成的多语言文本（含中文、URL 用户名密码、敏感查询参数、sk- 令牌），
+    /// `shapes` 满足三大不变量：
+    /// 1. 零泄漏（No-Leak）：注入的所有敏感凭据片段在输出中彻底消失；
+    /// 2. 幂等性（Idempotence）：`shapes(&shapes(&s)) == shapes(&s)`；
+    /// 3. 锚点与结构保持：URL 的 `@host` 与 `#fragment` 不被误吞。
+    #[test]
+    fn pbt_redact_shapes_is_idempotent_and_never_leaks_injected_secrets() {
+        let mut seed: u64 = 0x5EED_CAFE_2026_1103;
+        let mut next_u64 = || -> u64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let alphabet: &[char] = &[
+            'a', 'b', 'z', '0', '9', '-', '_', '/', ':', '?', '&', '=', '#', '@', ' ', '\n', '好',
+            '的', '微', '信', '测', '试', '（', '）', '「', '」',
+        ];
+        for case_idx in 0..500 {
+            let len = (next_u64() % 48) as usize;
+            let mut prefix = String::new();
+            for _ in 0..len {
+                let ch = alphabet[(next_u64() as usize) % alphabet.len()];
+                prefix.push(ch);
+            }
+            let user_secret = format!("usr{case_idx}:pwSecret{case_idx}");
+            let query_secret = format!("tokSecretVal_{case_idx}");
+            let sk_secret = format!("sk-liveSecretKey{case_idx}XYZ");
+            let raw = format!(
+                "{prefix} https://{user_secret}@api.example.com/v1/chat?access_token={query_secret}#frag {sk_secret} 尾"
+            );
+            let once = shapes(&raw);
+            let twice = shapes(&once);
+            assert_eq!(once, twice, "PBT 幂等性破坏 (case {case_idx}): {raw:?}");
+            assert!(
+                !once.contains(&user_secret),
+                "PBT 泄露 URL 账号密码: {once}"
+            );
+            assert!(!once.contains(&query_secret), "PBT 泄露查询 token: {once}");
+            assert!(!once.contains(&sk_secret), "PBT 泄露 sk- 密钥: {once}");
+            assert!(once.contains("@api.example.com"), "PBT 误吞主机名: {once}");
+            assert!(once.contains("#frag"), "PBT 误吞 URL fragment: {once}");
+        }
     }
 }

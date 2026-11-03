@@ -158,4 +158,41 @@ mod tests {
             3
         );
     }
+
+    /// PBT 属性测试：对任意随机生成的中文/ASCII 会话名对 `(a, b)`：
+    /// 1. 对称性：`similarity(a, b) == similarity(b, a)` 且 `same_peer(a, b) == same_peer(b, a)`；
+    /// 2. 有界性：`0.0 <= similarity(a, b) <= 1.0`；
+    /// 3. 自反性：`similarity(a, a) == 1.0` 且 `same_peer(a, a) == true`。
+    #[test]
+    fn pbt_peer_similarity_and_same_peer_are_symmetric_bounded_and_reflexive() {
+        let chars: &[char] = &[
+            '小', '王', '李', '张', '三', '四', '分', '队', '群', 'A', 'B', '1', '2', ' ',
+        ];
+        let mut seed: u64 = 0x9EE2_5004_2026_1103;
+        let mut gen_name = || -> String {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let len = (seed % 8) as usize;
+            let mut s = String::new();
+            for _ in 0..len {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                s.push(chars[(seed as usize) % chars.len()]);
+            }
+            s
+        };
+        for _ in 0..600 {
+            let a = gen_name();
+            let b = gen_name();
+            let sab = similarity(&a, &b);
+            let sba = similarity(&b, &a);
+            assert!((sab - sba).abs() < 1e-6, "非对称: {a:?} vs {b:?}");
+            assert!((0.0..=1.0).contains(&sab), "越界: {sab}");
+            assert_eq!(same_peer(&a, &b), same_peer(&b, &a));
+            assert!((similarity(&a, &a) - 1.0).abs() < 1e-6);
+            assert!(same_peer(&a, &a));
+        }
+    }
 }
