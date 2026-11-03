@@ -1922,8 +1922,11 @@ pub fn set_route(
     // 早先这里要求 `models` 存在（= 已经有 key），
     // 于是全新安装时**选不了厂商**——而 key 只能存给默认那家，
     // 于是**只有 OpenAI 用户能完成首次配置**（见 `.scratch/…/70-*.md`）。
-    let models = with_state(|s| s.models.clone()).ok_or_else(state_not_ready)?;
-    let applied = apply_route(&models, g, route);
+    let (models, applied) = with_state(|s| {
+        let applied = apply_route(&mut s.models, g, route);
+        (s.models.clone(), applied)
+    })
+    .ok_or_else(state_not_ready)?;
     // 回包是**读回来的真实状态**（含另一组是不是与我同路），
     // 而不是把传进去的三项原样弹回去——界面必须显示程序认定的那个。
     let mut view = group_view(g, &models);
@@ -1940,7 +1943,16 @@ pub fn set_route(
 /// 于是 key 只能存给默认那家（见 `.scratch/…/70-*.md`）。
 ///
 /// 返回**改完之后**这一格上的真值（换厂商时模型名会被重置成新那家的默认）。
-fn apply_route(groups: &ModelGroups, g: ModelGroup, route: Route) -> Route {
+fn apply_route(groups: &mut ModelGroups, g: ModelGroup, route: Route) -> Route {
+    if groups.decision.same_cell(&groups.llm) && groups.cell(g).route() != route {
+        let cell = chatservant_reason::ModelCell::new(route);
+        let applied = cell.route();
+        match g {
+            ModelGroup::Decision => groups.decision = cell,
+            ModelGroup::Llm => groups.llm = cell,
+        }
+        return applied;
+    }
     groups.cell(g).set_route(route)
 }
 
@@ -2446,35 +2458,69 @@ fn build_loop_config() -> (LoopConfig, ModelGroups, chatservant_reason::ProxyCel
 fn startup_groups() -> ModelGroups {
     use chatservant_reason::ModelCell;
 
-    // 谁有 key 就用谁。**默认先试 OpenAI**——设置页上它是第一个选项。
-    let order: [Provider; 3] = [Provider::OpenAi, Provider::Anthropic, Provider::MiniMax];
-    let route_of = |g: ModelGroup| -> Route {
-        for provider in order {
+    // 决策组优先试专用决策端点 TypeSafe (Jev)，回复组只试生成式语言模型。
+    // 同组内凭据管理器里显式存过的组级 key（KeySource::Group）优先于环境变量兜底。
+    const DECISION_ORDER: &[Provider] = &[
+        Provider::TypeSafe,
+        Provider::OpenRouter,
+        Provider::OpenAi,
+        Provider::Anthropic,
+        Provider::MiniMax,
+        Provider::DeepSeek,
+        Provider::Qwen,
+        Provider::Zhipu,
+    ];
+    const LLM_ORDER: &[Provider] = &[
+        Provider::OpenAi,
+        Provider::Anthropic,
+        Provider::MiniMax,
+        Provider::DeepSeek,
+        Provider::Qwen,
+        Provider::Zhipu,
+        Provider::OpenRouter,
+    ];
+    let route_of = |g: ModelGroup, order: &[Provider]| -> (Route, bool) {
+        for &provider in order {
+            if secret::source(g, provider.key()) == secret::KeySource::Group
+                && let Ok(route) = Route::preset(provider)
+            {
+                return (route, true);
+            }
+        }
+        for &provider in order {
             if secret::load(g, provider.key()).is_some()
                 && let Ok(route) = Route::preset(provider)
             {
-                return route;
+                return (route, true);
             }
         }
-        Route::preset(Provider::OpenAi).expect("OpenAI 有预设端点")
+        (
+            Route::preset(Provider::OpenAi).expect("OpenAI 有预设端点"),
+            false,
+        )
     };
-    let decision_route = route_of(ModelGroup::Decision);
-    let llm_route = route_of(ModelGroup::Llm);
-    let decision_own =
-        secret::load(ModelGroup::Decision, decision_route.provider().key()).is_some();
-    let llm_own = secret::load(ModelGroup::Llm, llm_route.provider().key()).is_some();
+    let (decision_route, decision_own) = route_of(ModelGroup::Decision, DECISION_ORDER);
+    let (llm_route, llm_own) = route_of(ModelGroup::Llm, LLM_ORDER);
     match (decision_own, llm_own) {
         // 各配各的 ⇒ 两格
         (true, true) => ModelGroups {
             decision: ModelCell::new(decision_route),
             llm: ModelCell::new(llm_route),
         },
-        // 只配了决策组 ⇒ 回复组借它那一格
+        // 只配了决策组：若决策组是专用 System-1 端点 TypeSafe（无 /v1/chat/completions），
+        // 回复组不借用它，避免起草段打到不存在的聊天端点 404；否则回复组沿用决策组那一格。
         (true, false) => {
-            let c = ModelCell::new(decision_route);
-            ModelGroups {
-                decision: c.clone(),
-                llm: c,
+            let c = ModelCell::new(decision_route.clone());
+            if decision_route.provider() == Provider::TypeSafe {
+                ModelGroups {
+                    decision: c,
+                    llm: ModelCell::new(llm_route),
+                }
+            } else {
+                ModelGroups {
+                    decision: c.clone(),
+                    llm: c,
+                }
             }
         }
         // 只配了回复组 ⇒ 决策组借它那一格
@@ -3260,12 +3306,13 @@ mod config_without_transport_tests {
     /// 而传输要 key 才存在 ⇒ 早先这一步在全新安装时直接被挡住。
     #[test]
     fn the_provider_can_be_switched_before_any_key_exists() {
-        let groups = ModelGroups::default_openai();
-        // 前置：这一格此刻是 OpenAI 预设。
+        let mut groups = ModelGroups::default_openai();
+        // 前置：这一格此刻是 OpenAI 预设，且两组初始共用同一格。
         assert_eq!(groups.cell(ModelGroup::Llm).provider(), P::OpenAi);
+        assert!(groups.decision.same_cell(&groups.llm));
 
         let applied = apply_route(
-            &groups,
+            &mut groups,
             ModelGroup::Llm,
             Route::preset(P::MiniMax).expect("MiniMax 有预设端点"),
         );
@@ -3275,6 +3322,12 @@ mod config_without_transport_tests {
             P::MiniMax,
             "这一格真的换了"
         );
+        assert_eq!(
+            groups.cell(ModelGroup::Decision).provider(),
+            P::OpenAi,
+            "改回复组不许把原本共用格子的决策组一起带跑"
+        );
+        assert!(!groups.decision.same_cell(&groups.llm));
     }
 
     /// **模型清单按「这一路有没有 key」给，不是按「程序有没有传输」。**

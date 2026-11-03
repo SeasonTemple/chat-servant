@@ -575,7 +575,10 @@ impl Provider {
     /// 我们无从列举。空清单**不是没做完**，是「没有权威清单可抄」。
     pub fn models(self) -> &'static [&'static str] {
         match self {
-            Self::TypeSafe => &["jev-latest", "jev-1.13"],
+            // ⚠ 2026-11-03 本机真调 `https://api.typesafe.ai/v1/models` 与 `/v1/systemone`：
+            //   上游返回的可用模型是 `jev-latest`（指向 `jev-1.14.0`）与 `jev-preview`，
+            //   而旧名 `jev-1.13` 在直连端点上已返回 HTTP 400 (`Unknown model: jev-1.13`)。
+            Self::TypeSafe => &["jev-latest", "jev-preview"],
             Self::OpenRouter => &[
                 "typesafe/jev-1.13",
                 "~typesafe/jev-latest",
@@ -624,7 +627,10 @@ impl Provider {
     /// 界面用它决定要不要标「未核实」；[`Provider::accepts_model`] 用它
     /// 决定要不要**拒收清单外的名字**。
     pub fn measured(self) -> bool {
-        matches!(self, Self::OpenAi | Self::Anthropic | Self::MiniMax)
+        matches!(
+            self,
+            Self::TypeSafe | Self::OpenAi | Self::Anthropic | Self::MiniMax
+        )
     }
 
     /// 默认模型 = 清单里的第一个。**空清单返回空串**——
@@ -3259,5 +3265,33 @@ mod tests {
         assert_eq!(intent.need, "关注与在意");
         assert_eq!(intent.action, "回应并表达理解");
         assert!((intent.tension - 0.5).abs() < 1e-4);
+
+        let up = upstream(vec![Reply(200, resp.to_string())]);
+        let cell =
+            ModelCell::new(Route::custom(Protocol::OpenAiCompatible, up.base_url()).unwrap());
+        cell.set("jev-latest").expect("自定义端点可设 jev 模型");
+        let mut r =
+            HttpReasoner::with_config(cell, KEY.into(), ProxyCell::new()).expect("起运行时");
+        let got = r.judge(&ctx).expect("经回环端口走 /v1/systemone 成功");
+        assert_eq!(up.seen().len(), 1);
+        assert_eq!(up.seen()[0].path, "/v1/systemone");
+        assert_eq!(got, intent);
+        assert_eq!(r.stage_calls().judge, 1);
+    }
+
+    /// 2026-11-03 实测：`api.typesafe.ai/v1/systemone` 已下线 `jev-1.13`（报 HTTP 400 Unknown model），
+    /// 直连清单只列实测返回 200 的 `jev-latest` 与 `jev-preview`。
+    #[test]
+    fn the_dead_typesafe_model_name_is_not_offered() {
+        let list = Provider::TypeSafe.models();
+        assert!(
+            !list.contains(&"jev-1.13"),
+            "jev-1.13 在 TypeSafe 直连端点已返回 400 Unknown model：{list:?}"
+        );
+        assert_eq!(Provider::TypeSafe.default_model(), "jev-latest");
+        assert!(Provider::TypeSafe.measured());
+        assert!(!Provider::TypeSafe.accepts_model("jev-1.13"));
+        assert!(Provider::TypeSafe.accepts_model("jev-latest"));
+        assert!(Provider::TypeSafe.accepts_model("jev-preview"));
     }
 }
