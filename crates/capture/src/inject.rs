@@ -580,20 +580,76 @@ pub fn press_enter() -> Result<(), String> {
 /// 不是 `PossiblySent`。2026-10-15 之前用的是后者，而那正是假警报的源头：
 /// 一个「可能已经发出去了」被当成「装填成功、可以继续」的内部信号，
 /// 于是同一句撒谎既出现在界面上，又成了发送路径的前置条件。
+/// 读取当前系统前台窗口句柄（若为空则返回 `None`）。
+#[must_use]
+pub fn current_foreground_window() -> Option<HWND> {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    // SAFETY: `GetForegroundWindow` 无参数、无指针解引用，仅返回当前前台窗口句柄。
+    let fg = unsafe { GetForegroundWindow() };
+    (!fg.0.is_null()).then_some(fg)
+}
+
+/// 距离系统最近一次全局键鼠输入过去了多少毫秒（`GetLastInputInfo`）。
+///
+/// 供 `Auto` 档后台自动发送前做「键鼠活跃避让」：若用户此刻正在打字或操作鼠标，
+/// 暂缓本圈自动发送，等用户停手后再发，避免在用户打字中途抢走窗口焦点。
+#[must_use]
+pub fn user_idle_ms() -> Option<u64> {
+    use windows::Win32::System::SystemInformation::GetTickCount;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    // SAFETY: `info` 为栈上正确初始化了 `cbSize` 的结构体，`GetLastInputInfo` 与 `GetTickCount` 均无悬垂引用风险。
+    unsafe {
+        if !GetLastInputInfo(&mut info).as_bool() {
+            return None;
+        }
+        let now = GetTickCount();
+        Some(u64::from(now.wrapping_sub(info.dwTime)))
+    }
+}
+
 pub fn fill_and_send(text: &str, target: HWND) -> DeliveryReceipt {
+    // 1. 记录发送前的前台窗口与剪贴板原有文本，以便发送完成后无感归还。
+    let prev_fg = current_foreground_window().filter(|&fg| fg != target);
+    let saved_clip = {
+        let _guard = lock_clipboard();
+        read_clipboard().ok().filter(|old| old != text)
+    };
+
     let filled = fill_input_box(text, target);
     // 填充失败就**到此为止**——绝不在没填进去的时候按回车，
     // 那会把输入框里原有的内容（用户自己打了一半的话）发出去。
     if !matches!(filled, DeliveryReceipt::Filled) {
+        if let Some(old) = saved_clip {
+            let _guard = lock_clipboard();
+            let _ = write_clipboard(&old);
+        }
+        if let Some(fg) = prev_fg {
+            let _ = focus(fg);
+        }
         return filled;
     }
 
-    match press_enter() {
+    let res = match press_enter() {
         Ok(()) => DeliveryReceipt::PossiblySent,
         Err(e) => DeliveryReceipt::Failed(format!(
             "回车发送失败（内容已填入输入框，你可以手动发）：{e}"
         )),
+    };
+
+    // 2. 留 15ms 让目标窗口消息队列消费完 Ctrl+V 与 VK_RETURN，随后还原用户剪贴板与原前台窗口焦点。
+    std::thread::sleep(Duration::from_millis(15));
+    if let Some(old) = saved_clip {
+        let _guard = lock_clipboard();
+        let _ = write_clipboard(&old);
     }
+    if let Some(fg) = prev_fg {
+        let _ = focus(fg);
+    }
+    res
 }
 
 /// 鼠标当前位置。**只读**，用于在调试视图里证明「指针没动过」。
@@ -724,5 +780,13 @@ mod tests {
     #[test]
     fn cursor_position_is_readable() {
         assert!(cursor_pos().is_some(), "读不到鼠标位置");
+    }
+
+    #[test]
+    fn user_idle_ms_is_readable() {
+        assert!(
+            user_idle_ms().is_some(),
+            "GetLastInputInfo 应当能读出系统空闲毫秒数"
+        );
     }
 }

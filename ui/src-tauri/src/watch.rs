@@ -46,7 +46,7 @@ use crate::contract::Phase;
 
 /// 循环的节奏。**慢一点没关系**——静默期本来就不该做事，
 /// 而画面变化通常伴随人的操作，1 秒的延迟人感知不到。
-pub const TICK: Duration = Duration::from_millis(1000);
+pub const TICK: Duration = Duration::from_millis(350);
 
 /// 上一轮的带框数据。调试画布读它。
 static LAST_BOXES: std::sync::Mutex<Option<crate::debug::DebugPane>> = std::sync::Mutex::new(None);
@@ -397,6 +397,8 @@ pub struct LoopConfig {
     pub provider: Provider,
     /// 「重新锁定当前会话」的一次性请求。命令层与循环共用。
     pub relock: Relock,
+    /// 会话切换策略（锁定当前会话 / 自动跟随当前会话）。
+    pub session_mode: SessionModeCell,
     /// 两组模型配置。**循环自己要用**——
     /// 传输变了要按**当前**格子重建（改了 key / 换了厂商要立刻生效）。
     pub groups: crate::commands::ModelGroups,
@@ -531,6 +533,25 @@ struct Scratch {
     last_hwnd: Option<isize>,
     /// `Auto` 档自动发送的护栏状态。见 [`AutoGate`]。
     auto_gate: AutoGate,
+    /// 会话切换策略（锁定当前 / 自动跟随）。
+    session_mode: SessionModeCell,
+    /// 多会话分桶记忆（最多保留最近 16 个会话的独立上下文、已见账本与候选），
+    /// 切到别的会话再切回时直接从桶中恢复，既不跨会话串味，也不丢失已聊历史。
+    buckets: Vec<SessionBucket>,
+}
+
+const MAX_SESSION_BUCKETS: usize = 16;
+
+#[derive(Clone)]
+struct SessionBucket {
+    print: chatservant_perceive::identity::HeaderPrint,
+    locked_name: String,
+    history: Vec<String>,
+    mine: Vec<String>,
+    messages: Vec<Message>,
+    seen: Vec<Message>,
+    candidates: Vec<DraftCandidate>,
+    reason: String,
 }
 
 /// `Auto` 档的自动发送护栏。**2026-10-15 新增。**
@@ -640,6 +661,8 @@ impl Scratch {
             source: FrameSource::Live,
             last_hwnd: None,
             auto_gate: AutoGate::default(),
+            session_mode: SessionModeCell::default_lock(),
+            buckets: Vec::new(),
         }
     }
 }
@@ -765,7 +788,57 @@ impl Default for Relock {
         Self::new()
     }
 }
+/// 会话切换策略：锁定单个会话（`Lock`，默认保守值）或自动跟随微信当前激活会话（`Follow`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionMode {
+    #[default]
+    Lock = 0,
+    Follow = 1,
+}
 
+impl SessionMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lock => "lock",
+            Self::Follow => "follow",
+        }
+    }
+
+    #[must_use]
+    pub fn from_key(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "follow" => Self::Follow,
+            _ => Self::Lock,
+        }
+    }
+}
+
+/// 跨命令层与观察循环共享的会话切换模式原子单元。
+#[derive(Clone)]
+pub struct SessionModeCell(Arc<std::sync::atomic::AtomicU8>);
+
+impl SessionModeCell {
+    #[must_use]
+    pub fn default_lock() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicU8::new(
+            SessionMode::Lock as u8,
+        )))
+    }
+
+    #[must_use]
+    pub fn get(&self) -> SessionMode {
+        match self.0.load(Ordering::Relaxed) {
+            1 => SessionMode::Follow,
+            _ => SessionMode::Lock,
+        }
+    }
+
+    pub fn set(&self, mode: SessionMode) -> SessionMode {
+        self.0.store(mode as u8, Ordering::Relaxed);
+        mode
+    }
+}
 /// 预算下界。低于 64 token 连一张缩略图都放不下，那不是「更省」。
 pub const BUDGET_MIN: u32 = 64;
 /// 预算的**绝对**上界，取各家供应商里能接受最大的那个。
@@ -847,6 +920,7 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
             s.token_budget = cfg.token_budget.clone();
             s.provider = cfg.provider;
             s.relock = cfg.relock.clone();
+            s.session_mode = cfg.session_mode.clone();
             s.source = cfg.source.clone();
             // 重建传输要用的两样：**同一个**格子与**同一个**代理格。
             let groups = cfg.groups.clone();
@@ -1513,6 +1587,17 @@ fn try_auto_send_pending(s: &mut Scratch) -> bool {
         }
         return false;
     }
+    if matches!(s.source, FrameSource::Live)
+        && let Some(idle_ms) = chatservant_capture::inject::user_idle_ms()
+        && idle_ms < 1200
+    {
+        tracing::debug!(
+            target: "chat_servant::watch",
+            idle_ms,
+            "用户正在操作键鼠（idle < 1200ms），暂缓本圈自动发送"
+        );
+        return false;
+    }
     let Some(top) = s.candidates.first().cloned() else {
         return false;
     };
@@ -1623,23 +1708,34 @@ fn step(
             s.seen.len(),
             s.messages.len()
         );
+        stash_current_bucket(s);
         apply_relock(s);
         watcher.rewind();
     }
-    let peer_ok = match (&s.locked_print, &discovered) {
-        // 还没锁过：拿**第一帧读到的**当基准，并把名字报给用户看。
-        // 这意味着「启动时开着的那个会话」就是被锁的那个。
-        //   所以界面上必须显示这个名字——用户要能一眼看出锁错了没有。
+    let mut just_switched = false;
+    let peer_ok = match (&s.locked_print.clone(), &discovered) {
+        // 还没锁过（或刚重锁）：拿当前读到的头部建锁，若分桶里有该会话旧记忆则直接恢复。
         (None, Some((p, _))) => {
-            s.locked_print = Some(p.clone());
-            // 建锁这一刻认出来的名字才是「锁的是谁」。
-            s.locked_name = s.peer.clone();
+            just_switched = restore_or_bind_bucket(s, p);
             true
         }
         // 锁过但这帧认不出 → **关**。认不出不等于「是同一个」。
         // `(None, None)` 也落到这里：连基准都还没有，更不能动手。
         (_, None) => false,
-        (Some(a), Some((b, _))) => a.is_same(b),
+        (Some(a), Some((b, _))) => {
+            if a.is_same(b) {
+                true
+            } else if s.session_mode.get() == SessionMode::Follow {
+                stash_current_bucket(s);
+                apply_relock(s);
+                let _ = restore_or_bind_bucket(s, b);
+                watcher.rewind();
+                just_switched = true;
+                true
+            } else {
+                false
+            }
+        }
     };
     if !peer_ok {
         // 连引擎的上一帧参照系一起退，否则切回锁定会话时
@@ -1672,7 +1768,7 @@ fn step(
         // 而「这一帧 0 像素 / 0 次 OCR」正是它唯一可信的证据。
         record_cost(last_boxes, 0, None, pane_area(anchor.chat), 0);
         let auto_fired = try_auto_send_pending(s);
-        return Ok(if just_opened || auto_fired {
+        return Ok(if just_opened || just_switched || auto_fired {
             Some(anchor)
         } else {
             None
@@ -2068,6 +2164,60 @@ fn apply_relock(s: &mut Scratch) {
     s.seen.clear();
 }
 
+/// 将当前已锁定会话的上下文、已见账本与候选存入 `s.buckets`（按像素指纹去重更新，上限 16 个桶）。
+fn stash_current_bucket(s: &mut Scratch) {
+    let Some(ref print) = s.locked_print else {
+        return;
+    };
+    if s.history.is_empty() && s.messages.is_empty() && s.seen.is_empty() {
+        return;
+    }
+    if let Some(idx) = s.buckets.iter().position(|b| b.print.is_same(print)) {
+        s.buckets.remove(idx);
+    }
+    if s.buckets.len() >= MAX_SESSION_BUCKETS {
+        s.buckets.remove(0);
+    }
+    s.buckets.push(SessionBucket {
+        print: print.clone(),
+        locked_name: s.locked_name.clone(),
+        history: s.history.clone(),
+        mine: s.mine.clone(),
+        messages: s.messages.clone(),
+        seen: s.seen.clone(),
+        candidates: s.candidates.clone(),
+        reason: s.reason.clone(),
+    });
+}
+
+/// 绑定到新会话头部指纹 `p`：若 `s.buckets` 中已有该会话的分桶记忆则原样恢复并返回 `true`。
+fn restore_or_bind_bucket(
+    s: &mut Scratch,
+    p: &chatservant_perceive::identity::HeaderPrint,
+) -> bool {
+    s.locked_print = Some(p.clone());
+    s.parked_on_other = false;
+    s.gate_open = true;
+    if let Some(idx) = s.buckets.iter().position(|b| b.print.is_same(p)) {
+        let bucket = s.buckets.remove(idx);
+        s.locked_name = if s.peer.is_empty() {
+            bucket.locked_name
+        } else {
+            s.peer.clone()
+        };
+        s.history = bucket.history;
+        s.mine = bucket.mine;
+        s.messages = bucket.messages;
+        s.seen = bucket.seen;
+        s.candidates = bucket.candidates;
+        s.reason = bucket.reason;
+        crate::commands::sync_candidates(&s.candidates);
+        true
+    } else {
+        s.locked_name = s.peer.clone();
+        false
+    }
+}
 /// **闸关着的时候，把面板收拾干净。** 返回「是不是刚刚才关的」。
 ///
 /// 抽成独立函数是为了能直接测它——它原来内联在 `step` 里，而 `step` 要
@@ -2448,10 +2598,10 @@ mod tests {
     use super::{
         AUTO_COOLDOWN, AutoGate, BUDGET_MAX, BUDGET_MIN, CallCounts, DraftCandidate, ImagesOut,
         Message, NoSummary, PaneAnchor, Phase, Readout, RecentN, Relock, SEEN_WINDOW, SESSION,
-        Scratch, Speaker, TierCell, TokenBudget, absorb_round, apply_gate_closed, apply_relock,
-        collect_images, current_phase, gate_opened, header_print, history_line,
-        merged_pair_suspect, park_on_other_conversation, phase_to_push, read_round,
-        relabel_our_own, should_draft_now, snapshot,
+        Scratch, SessionMode, SessionModeCell, Speaker, TierCell, TokenBudget, absorb_round,
+        apply_gate_closed, apply_relock, collect_images, current_phase, gate_opened, header_print,
+        history_line, merged_pair_suspect, park_on_other_conversation, phase_to_push, read_round,
+        relabel_our_own, restore_or_bind_bucket, should_draft_now, snapshot, stash_current_bucket,
     };
     use chatservant_capture::Frame;
     use chatservant_capture::ocr::{OcrError, OcrLine, OcrText};
@@ -5309,5 +5459,51 @@ mod tests {
             !prod.contains("fn peer_name_from_header"),
             "本文件里又长出了一份读会话名的实现——必须只有 perceive 那一份"
         );
+    }
+
+    #[test]
+    fn session_buckets_isolate_and_restore_conversations_across_switches() {
+        let mut s = Scratch::new(RecentN::new(12));
+        let pa = print_of(1);
+        let pb = print_of(2);
+
+        // 1. 绑定会话 A 并累积历史与已见账本
+        assert!(!restore_or_bind_bucket(&mut s, &pa));
+        s.locked_name = "会话A".into();
+        s.history.push("对方: A的第一句".into());
+        s.mine.push("我对A说的话".into());
+        s.seen.push(Message {
+            id: "Them:A的第一句".into(),
+            speaker: Speaker::Them,
+            text: "A的第一句".into(),
+            rect: chatservant_core::frame::Rect::new(0, 0, 10, 10),
+            evidence: String::new(),
+        });
+
+        // 2. 切换到会话 B（先将 A 存入分桶，再清空并绑定 B）
+        stash_current_bucket(&mut s);
+        apply_relock(&mut s);
+        assert!(!restore_or_bind_bucket(&mut s, &pb));
+        assert!(s.history.is_empty(), "切到新会话 B 时不应带入 A 的历史");
+        assert!(s.mine.is_empty(), "切到新会话 B 时不应带入 A 的口吻");
+        s.locked_name = "会话B".into();
+        s.history.push("对方: B的第一句".into());
+
+        // 3. 从会话 B 切回会话 A：B 进桶，A 从桶中完整恢复
+        stash_current_bucket(&mut s);
+        apply_relock(&mut s);
+        assert!(
+            restore_or_bind_bucket(&mut s, &pa),
+            "切回已见过的会话 A 应命中分桶"
+        );
+        assert_eq!(s.history, vec!["对方: A的第一句"]);
+        assert_eq!(s.mine, vec!["我对A说的话"]);
+        assert_eq!(s.seen.len(), 1);
+
+        // 4. 验证 SessionModeCell 的读写往返
+        let cell = SessionModeCell::default_lock();
+        assert_eq!(cell.get(), SessionMode::Lock);
+        assert_eq!(cell.set(SessionMode::Follow), SessionMode::Follow);
+        assert_eq!(cell.get().as_str(), "follow");
     }
 }

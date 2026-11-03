@@ -74,6 +74,8 @@ struct AppState {
     tier: crate::watch::TierCell,
     /// 「重新锁定当前会话」的请求。与循环共用同一个格子。
     relock: crate::watch::Relock,
+    /// 会话切换模式（锁定当前 / 自动跟随）。
+    session_mode: crate::watch::SessionModeCell,
     /// **防重状态：「这条候选本轮是不是已经发过了」。** 见 [`Arming`]。
     armed: Arming,
     /// 程序**锁定并正在处理**的会话名。托盘的状态行读它。
@@ -2190,6 +2192,25 @@ pub fn relock_session() -> Result<(), String> {
     with_state(|s| s.relock.request()).ok_or_else(|| "观察循环还没起来".to_string())
 }
 
+/// 读取当前会话切换模式（`"lock"` 或 `"follow"`）。
+#[tauri::command]
+pub fn get_session_mode() -> String {
+    with_state(|s| s.session_mode.get().as_str().to_string()).unwrap_or_else(|| "lock".into())
+}
+
+/// 设置会话切换模式（`"lock"` = 锁定单个会话，`"follow"` = 自动跟随当前微信会话）。
+#[tauri::command]
+pub fn set_session_mode(mode: String) -> String {
+    let m = crate::watch::SessionMode::from_key(&mode);
+    with_state(|s| {
+        let applied = s.session_mode.set(m);
+        if applied == crate::watch::SessionMode::Follow {
+            s.relock.request();
+        }
+        applied.as_str().to_string()
+    })
+    .unwrap_or_else(|| "lock".into())
+}
 /// 读预算。
 #[tauri::command]
 pub fn get_token_budget() -> Result<BudgetView, String> {
@@ -2277,7 +2298,7 @@ pub fn start(app: &AppHandle) {
     let images_out = cfg.images_out.clone();
     let tier = cfg.tier.clone();
     let relock = cfg.relock.clone();
-
+    let session_mode = cfg.session_mode.clone();
     let watcher = crate::watch::spawn(cfg);
     if let Ok(mut g) = STATE.lock() {
         *g = Some(AppState {
@@ -2290,6 +2311,7 @@ pub fn start(app: &AppHandle) {
             proxy,
             tier,
             relock,
+            session_mode,
             armed: Arming::default(),
             peer: String::new(),
         });
@@ -2361,7 +2383,7 @@ pub fn start(app: &AppHandle) {
                         out.candidates().len()
                     );
                 }
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                std::thread::sleep(std::time::Duration::from_millis(40));
             }
         })
         .ok();
@@ -2435,6 +2457,7 @@ fn build_loop_config() -> (LoopConfig, ModelGroups, chatservant_reason::ProxyCel
             images_out: crate::watch::ImagesOut::off(),
             tier: crate::watch::TierCell::default_manual(),
             relock: crate::watch::Relock::new(),
+            session_mode: crate::watch::SessionModeCell::default_lock(),
             provider,
             groups: groups.clone(),
             proxy: proxy.clone(),

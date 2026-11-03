@@ -426,6 +426,29 @@
     }
   }
 
+  type SessionMode = 'lock' | 'follow';
+  let sessionMode = $state<SessionMode>('lock');
+  let sessionModeNote = $state('');
+
+  const SESSION_MODE_OPTIONS = [
+    { id: 'lock' as const, label: '锁定当前' },
+    { id: 'follow' as const, label: '自动跟随' },
+  ];
+
+  async function setSessionMode(next: SessionMode) {
+    sessionModeNote = '';
+    try {
+      const applied = await invoke<string>('set_session_mode', { mode: next });
+      sessionMode = applied === 'follow' ? 'follow' : 'lock';
+      sessionModeNote =
+        sessionMode === 'follow'
+          ? '微信切换聊天窗口时自动切到对应会话分桶，各会话历史独立隔离。'
+          : '只处理锁定的那一个会话；微信切到其它窗口时暂停，需手动点「改为锁定此会话」。';
+    } catch (e) {
+      sessionModeNote = String(e);
+    }
+  }
+
   /**
    * 「标记形状」。与主面板**共用 `$lib/mark-shape.svelte` 那一份**。
    *
@@ -533,12 +556,13 @@
       return;
     }
     void (async () => {
-      const [recentRes, budgetRes, imagesRes, tierRes, closeRes, shapeRes] =
+      const [recentRes, budgetRes, imagesRes, tierRes, modeRes, closeRes, shapeRes] =
         await Promise.allSettled([
           invoke<RecentView>('get_recent_n'),
           invoke<BudgetView>('get_token_budget'),
           invoke<boolean>('get_images_out'),
           invoke<Tier>('get_tier'),
+          invoke<string>('get_session_mode'),
           invoke<'exit' | 'tray'>('get_close_behavior'),
           markShape.load(),
           refresh(),
@@ -547,6 +571,8 @@
       if (budgetRes.status === 'fulfilled') budget = budgetRes.value;
       if (imagesRes.status === 'fulfilled') imagesOut = imagesRes.value;
       tier = tierRes.status === 'fulfilled' ? tierRes.value : 'Manual';
+      sessionMode =
+        modeRes.status === 'fulfilled' && modeRes.value === 'follow' ? 'follow' : 'lock';
       closeBehavior = closeRes.status === 'fulfilled' ? closeRes.value : 'exit';
       if (shapeRes.status === 'fulfilled') shape = shapeRes.value;
     })();
@@ -865,6 +891,17 @@
   <TierSwitch bind:tier onchange={changeTier} />
   {#if tierNote}
     <p class="cs-fail" role="alert">{tierNote}</p>
+  {/if}
+
+  <h2 class="cs-h2">会话切换</h2>
+  <SegSlider
+    bind:value={sessionMode}
+    label="会话切换模式"
+    options={SESSION_MODE_OPTIONS}
+    onchange={(v) => void setSessionMode(v as SessionMode)}
+  />
+  {#if sessionModeNote}
+    <p class="cs-note" role="status">{sessionModeNote}</p>
   {/if}
 
   <!-- ══ 外观 ══ -->

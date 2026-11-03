@@ -184,6 +184,8 @@ fn main() {
             commands::get_tier,
             commands::set_tier,
             commands::relock_session,
+            commands::get_session_mode,
+            commands::set_session_mode,
             // 窗口生命周期。见 commands.rs 里那一节的说明——
             // 早先这个程序**没有任何办法停掉**。
             commands::get_close_behavior,
