@@ -8,7 +8,7 @@
 
 **A copilot pinned to your own WeChat chat window — it reads the newest message, classifies the intent, drafts candidate replies, and fills them into the input box at the tier you chose.**
 
-**Fills in by default and never sends. Frames never touch disk; keys never reach a log.**
+**Fill-only by default; sending is a tier you raise yourself. Frames never touch disk; keys never reach a log.**
 
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL_1.1-orange.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-black.svg)](https://www.rust-lang.org/)
@@ -54,8 +54,11 @@ These are product requirements, not implementation details.
 - **Keys are read from Windows Credential Manager or the environment, nowhere
   else** — never from a config file, never from a command line, never into a
   log, never into the frontend bundle. Every outbound string is redacted.
-- **Golden-test fixtures come from real conversations**, so they are not in this
-  repository. The tests that use them **skip** when the fixture is absent.
+- **Golden-test fixtures come from real conversations**, so they stay out of this
+  repository. Tests needing them are marked `#[ignore]` (local-only): a plain
+  `cargo test --workspace` does not run them, yet they show up as `N ignored` in
+  the summary, so "not verified" stays machine-readable. Run them locally with
+  `cargo test --workspace -- --include-ignored`; a missing fixture then fails hard.
 
 ## Three switches, each defaulting to the safe side
 
@@ -63,7 +66,7 @@ These are product requirements, not implementation details.
 | --- | --- | --- |
 | Sending tier | **fill in only** | Text lands in the input box at the cursor. Sending requires you to raise the tier yourself. |
 | Images outbound | **off** | Whether an image region from them is cropped, encoded, and sent to a model. |
-| Session identity gate | locked on first frame | The app only acts on the one locked conversation. Re-lock by hand if it grabs the wrong one. |
+| Session identity gate | locked on first frame | The app only acts on the one locked conversation. Re-lock from the **tray menu** (the panel has no such button). |
 
 The tier and the image gate are **held in Rust** (`TierCell` / `ImagesOut`).
 The UI can only request a change — "will this message actually go out" is never
@@ -102,7 +105,10 @@ Keys are read from exactly two places, and nowhere else:
 Set it from the settings screen; it goes into the credential manager. "Test
 connection" hits the read-only `/v1/models` — **zero token cost**.
 
-Supported providers: `openai`, `anthropic`.
+Supported providers come in two kinds: **presets** (e.g. `openai`, `anthropic`,
+`minimax`, `deepseek`; the full list is `Provider::PRESETS` in
+`crates/reason/src/transport.rs`, which changes, so no count is pinned here) and
+**`custom`**: bring your own endpoint for any OpenAI-compatible or Anthropic service.
 
 ## Developer probes
 
@@ -116,7 +122,8 @@ cargo xtask probe frame     # grab a frame into target/probe/ and eyeball pixels
 cargo xtask read            # grab and OCR immediately, print what it read
 cargo xtask perceive --file <png>   # perception: per-line classification + merge
 cargo xtask measure         # calibration: bubble fill, ink, contrast
-cargo xtask e2e             # end-to-end (dry-run by default)
+cargo xtask media <png>     # media regions: detect an image, then run the encode path
+cargo xtask e2e             # end-to-end (dry-run by default; --inject really fills the box)
 cargo xtask secret-scan     # any key left in the repository
 ```
 
@@ -126,10 +133,11 @@ out most "is the app broken?" confusion. Failures name the actual cause
 
 ## The gate
 
-Nine steps, all green, before a commit lands:
+Every step must be green before a commit lands. The step count comes from the
+timing table `gate.ps1` prints, so it is never pinned here:
 
 ```powershell
-pwsh -NoProfile -File scripts\gate.ps1
+pwsh -NoProfile -File scripts/gate.ps1
 ```
 
 Encoding scan · `cargo fmt` · `cargo clippy -D warnings` · `cargo test` ·

@@ -43,7 +43,7 @@
 - **截图不落盘。** 帧只驻留内存——不写盘、不进日志、不上传。唯一的例外是显式
   调试命令 `cargo xtask probe`，它写到 `target/probe/`，并且会告诉你它写了。
 - **不碰钱。** 转账、红包、收款相关元素在界面上和起草提示词里都禁掉了；
-  起草提示词这一半由 `the_draft_prompt_still_forbids_money_topics` 守着（2026-10-19 补）。
+  起草提示词这一半由 `the_draft_prompt_still_forbids_money_topics` 这条测试守着。
 - **key 只从 Windows 凭据管理器或环境变量读**，配置文件、命令行、日志、前端
   bundle 里一律没有。所有对外文本一律脱敏。
 - **黄金测试夹具来自真实会话**，因此不入本仓库。依赖它们的测试标了 `#[ignore]`（本机专属）
@@ -94,9 +94,9 @@ key **只去两处**，配置文件、日志、命令行、前端 bundle 里一�
 在设置页里填，存进凭据管理器。填完可以点「测连通」——它打的是只读的
 `/v1/models`，**不产生任何 token 费用**。
 
-支持的 provider 分两类：**八个预设** `openai` / `anthropic` / `minimax` / `deepseek` / `qwen` /
-`zhipu` / `ollama` / `lmstudio`（见 `crates/reason/src/transport.rs` 的 `Provider::PRESETS`，8 项），
-外加 **`custom`**——任何只兼容 OpenAI 或 Anthropic 那两种协议的服务都能自己填端点接进来。
+支持的 provider 分两类：**预设**（如 `openai` / `anthropic` / `minimax` / `deepseek` 等，
+完整清单以 `crates/reason/src/transport.rs` 的 `Provider::PRESETS` 为准——它会变，别写死个数）
+与 **`custom`**：自己填端点，兼容 OpenAI 或 Anthropic 其中一种协议的服务都能接进来。
 
 ## 开发者探针
 
