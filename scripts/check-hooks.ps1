@@ -72,7 +72,9 @@ if ($tracked.Count -eq 0) {
 #   第一版正则只匹配行末那一个 ⇒ 两个合法图片全被报成「不在白名单」，
 #   报了个**假红**。⚠ 那是量具坏了，不是事实坏了——
 #   「量具失效」与「事实真的不对」在屏幕上原本长得一模一样。
-$entry = 'ui/[\w./-]+(?:/\*|\.(?:png|jpg|jpeg|bmp|webp|gif))'
+# ⚠ 前缀不只 ui/：hero banner 是 docs/assets/ 下的设计资产（2026-11-05）。
+#   白名单逐条点名是有意的摩擦，前缀也只在确有资产时才扩，不放行任意目录。
+$entry = '(?:ui|docs)/[\w./-]+(?:/\*|\.(?:png|jpg|jpeg|bmp|webp|gif))'
 $entries = [regex]::Matches($hook, "(?m)^\s+($entry(?:\|$entry)*)\s*\)") |
   ForEach-Object { $_.Groups[1].Value -split '\|' } |
   Sort-Object -Unique

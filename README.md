@@ -1,179 +1,172 @@
 <div align="center">
 
+<img src="docs/assets/hero-banner.webp" alt="chat-servant：贴在聊天窗口旁的半透明副驾面板" width="100%" />
+
+
+
 # chat-servant
 
-**A copilot pinned to your own WeChat chat window — it reads the newest message, classifies the intent, drafts candidate replies, and fills them into the input box at the tier you chose.**
+**挂在你自己那个微信聊天窗口旁边的副驾：读到对方最新消息 → 判意图 → 给候选回复 → 按你选的档位填回输入框。**
 
-**默认只填入，不发送。截图不落盘，key 不进日志。**
+**它不理解对话，只观察和转述。截图不落盘，key 不进日志，默认档位是「只填入、不发送」。**
 
-[![License: BSL 1.1](https://img.shields.io/badge/license-BSL_1.1-orange.svg)](LICENSE)
+[![许可: BSL 1.1](https://img.shields.io/badge/license-BSL_1.1-orange.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-black.svg)](https://www.rust-lang.org/)
-[![Windows](https://img.shields.io/badge/platform-Windows%2010%2B-0078D4.svg)](https://learn.microsoft.com/windows/)
+[![仅 Windows](https://img.shields.io/badge/platform-Windows%2010%2B-0078D4.svg)](https://learn.microsoft.com/windows/)
 [![CI](https://github.com/SeasonTemple/chat-servant/actions/workflows/ci.yml/badge.svg)](https://github.com/SeasonTemple/chat-servant/actions/workflows/ci.yml)
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [Privacy](#privacy-boundaries) · [Getting started](#getting-started) · [Probes](#developer-probes) · [Gate](#the-gate) · [Contributing](CONTRIBUTING.md)
+[简体中文](README.md) · [English](README.en.md) · [隐私边界](#隐私边界) · [跑起来](#跑起来) · [探针](#开发者探针) · [门禁](#门禁) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
 ---
 
-## Why it is shaped this way
+## 为什么是这么个形状
 
-Talking to a busy group chat at work is a context-switch problem, not a
-reading problem. chat-servant sits next to the window you already have open,
-does the reading, and hands you a draft.
+工作群消息多的时候，累的不是「读」，是「切上下文」。chat-servant 就挂在你
+本来就开着的那个窗口旁边，把读的活干了，把草稿递给你。
 
-Three decisions do all the work:
+真正起作用的是三条决定：
 
-- **It does not understand the conversation. It observes and transcribes.** No
-  database access, no hooking, no decryption. One capture path: window-level
-  WGC frames plus local OCR.
-- **Sending is tiered, and the lowest tier is the default.** The app fills the
-  input box and stops. Whether anything actually leaves your machine is a
-  question the Rust side answers, not the UI.
-- **Silence costs nothing.** No new message from them means no model call. Ten
-  quiet minutes is ten minutes of zero tokens.
+- **它不理解对话，只观察和转述。** 不读数据库、不 hook、不解密。捕获只有一条
+  路：窗口级 WGC 帧 + 本地 OCR。
+- **发送是分档的，且默认档最低。** 它把文本填进输入框就停住。到底有没有东西
+  离开你的机器，由 Rust 侧回答，不由界面回答。
+- **安静不要钱。** 对方没有新消息就不调模型。十分钟没人说话就是十分钟零 token。
 
-## Privacy boundaries
+## 隐私边界
 
-These are product requirements, not implementation details.
+这些是产品要求，不是实现细节。
 
-- **You only read conversations you can already read**, on your own device.
-  It does not act on anyone else's behalf.
-- **No hooking, no injection.** It never reads the other party's database,
-  never decrypts, never touches their process memory.
-- **Frames never touch disk.** They live in memory — not written, not logged,
-  not uploaded. The single exception is the explicit debug command
-  `cargo xtask probe`, which writes to `target/probe/` and tells you it did.
-- **It never touches money.** Transfer, red-packet and payment elements are out
-  of scope, in the UI and in the drafting prompt.
-- **Keys are read from Windows Credential Manager or the environment, nowhere
-  else** — never from a config file, never from a command line, never into a
-  log, never into the frontend bundle. Every outbound string is redacted.
-- **Golden-test fixtures come from real conversations**, so they are not in this
-  repository. The tests that use them **skip** when the fixture is absent.
+- **只读你自己设备上、你有权查看的对话。** 不代替任何人查看别人的聊天。
+- **不 hook、不注入。** 不读对方数据库、不解密、不碰对方进程内存。
+- **截图不落盘。** 帧只驻留内存——不写盘、不进日志、不上传。唯一的例外是显式
+  调试命令 `cargo xtask probe`，它写到 `target/probe/`，并且会告诉你它写了。
+- **不碰钱。** 转账、红包、收款相关元素在界面上和起草提示词里都禁掉了；
+  起草提示词这一半由 `the_draft_prompt_still_forbids_money_topics` 守着（2026-10-19 补）。
+- **key 只从 Windows 凭据管理器或环境变量读**，配置文件、命令行、日志、前端
+  bundle 里一律没有。所有对外文本一律脱敏。
+- **黄金测试夹具来自真实会话**，因此不入本仓库。依赖它们的测试标了 `#[ignore]`（本机专属）
+  ⇒ 常规 `cargo test --workspace` **根本不跑它们**，而它们仍出现在汇总行的 `N ignored` 里
+  ——「没验」是机器可读的，别把「全绿」读成「黄金基线验过了」。本机真跑用
+  `cargo test --workspace -- --include-ignored`。
 
-## Three switches, each defaulting to the safe side
+## 三个开关，每个都默认在安全的一侧
 
-| Switch | Default | What it governs |
+| 开关 | 默认 | 管什么 |
 | --- | --- | --- |
-| Sending tier | **fill in only** | Text lands in the input box at the cursor. Sending requires you to raise the tier yourself. |
-| Images outbound | **off** | Whether an image region from them is cropped, encoded, and sent to a model. |
-| Session identity gate | locked on first frame | The app only acts on the one locked conversation. Re-lock by hand if it grabs the wrong one. |
+| 发送档位 | **只填入** | 填进输入框停在光标处。要发送得你自己升档。 |
+| 图片外发 | **关** | 对方发来的图片区域会不会被裁出、编码、发给模型。 |
+| 会话身份闸 | 第一帧自动锁定 | 程序只对锁定的那一个会话动手；锁错了走**托盘菜单 →「锁定当前会话」**（面板上没有这枚按钮）。 |
 
-The tier and the image gate are **held in Rust** (`TierCell` / `ImagesOut`).
-The UI can only request a change — "will this message actually go out" is never
-settled by the interface.
+档位与外发总闸**都由 Rust 侧持有**（`TierCell` / `ImagesOut`），前端只负责请求改
+——「这条消息会不会真的发出去」不交给界面说了算。
 
-## Getting started
+## 跑起来
 
-**Windows 10 1803+ only** (Windows Graphics Capture). Windows 11 works better.
+**只支持 Windows 10 1803+**（需要 WGC）。Windows 11 更稳。
 
-```powershell
-# Frontend deps — the tauri CLI is already a devDependency
-cd ui; pnpm install; cd ..
+```bash
+# 装前端依赖（tauri CLI 已经是 devDependency，不用另外 cargo install）
+cd ui && pnpm install && cd ..
 
-# Dev mode (HMR; the frontend is served from devUrl)
-cd ui; pnpm tauri dev
+# 开发模式（带热更新，前端走 devUrl）
+cd ui && pnpm tauri dev
 
-# Installers (msi + nsis)
-cd ui; pnpm tauri build
+# 出安装包（msi + nsis）
+cd ui && pnpm tauri build
 ```
 
-The app starts a resident observation loop that grabs a frame per second.
+首次运行会起一个常驻观察循环（`cs-watch` 线程），每秒抓一帧微信窗口。
 
-### It runs with no API key
+### 没有 API key 也能跑
 
-Capture, OCR, anchoring and the candidate cards all work without one — the
-drafts simply come from an explicitly labelled preset transport, and each one is
-marked as such so it can never be mistaken for model output.
+观察、OCR、锚定、候选卡片全部正常，只是候选内容来自明确标注的预置传输——每条
+都带「预置」字样，不可能被当成模型输出。
 
-### Configuring a key
+### 配置 key
 
-Keys are read from exactly two places, and nowhere else:
+key **只去两处**，配置文件、日志、命令行、前端 bundle 里一律没有：
 
-1. **Windows Credential Manager**, target `chat-servant/<provider>`;
-2. environment variable `<PROVIDER>_API_KEY`.
+1. **Windows 凭据管理器**，目标名 `chat-servant/<provider>`；
+2. 环境变量 `<PROVIDER>_API_KEY`。
 
-Set it from the settings screen; it goes into the credential manager. "Test
-connection" hits the read-only `/v1/models` — **zero token cost**.
+在设置页里填，存进凭据管理器。填完可以点「测连通」——它打的是只读的
+`/v1/models`，**不产生任何 token 费用**。
 
-Supported providers: `openai`, `anthropic`.
+支持的 provider 分两类：**八个预设** `openai` / `anthropic` / `minimax` / `deepseek` / `qwen` /
+`zhipu` / `ollama` / `lmstudio`（见 `crates/reason/src/transport.rs` 的 `Provider::PRESETS`，8 项），
+外加 **`custom`**——任何只兼容 OpenAI 或 Anthropic 那两种协议的服务都能自己填端点接进来。
 
-## Developer probes
+## 开发者探针
 
-When something misbehaves, probe it — do not guess. All read-only except
-`probe frame`.
+诊断问题先跑探针，不要猜。全部**只读**，不写盘（`probe frame` 除外）。
 
-```powershell
-cargo xtask caps            # does this machine support WGC at all
-cargo xtask occluded        # is the window covered right now
-cargo xtask probe frame     # grab a frame into target/probe/ and eyeball pixels
-cargo xtask read            # grab and OCR immediately, print what it read
-cargo xtask perceive --file <png>   # perception: per-line classification + merge
-cargo xtask measure         # calibration: bubble fill, ink, contrast
-cargo xtask e2e             # end-to-end (dry-run by default)
-cargo xtask secret-scan     # any key left in the repository
+```bash
+cargo xtask caps            # 这台机器到底支不支持 WGC
+cargo xtask occluded        # 窗口现在被别的东西盖住了吗
+cargo xtask probe frame     # 抓一帧写 target/probe/，肉眼核对像素
+cargo xtask read            # 抓一帧并立刻本地 OCR，打印读到的文字
+cargo xtask perceive --file <png>   # 感知层：逐行归类 + 归并成消息
+cargo xtask measure         # 标定：气泡底色、墨色、对比度
+cargo xtask media <png>     # 媒体区域：检出「这里有一张图」，并走一遍编码链路
+cargo xtask e2e             # 端到端（默认 dry-run，加 --inject 才真的填输入框）
+cargo xtask secret-scan     # 仓库里有没有残留 key
 ```
 
-**Run `caps` and `occluded` first** when "it doesn't do anything" — they rule
-out most "is the app broken?" confusion. Failures name the actual cause
-(occluded / minimized / not visible) instead of just "capture failed".
+**「为什么不动」时先跑 `caps` 和 `occluded`**——这两条能排掉绝大多数
+「程序是不是坏了」的困惑。抓不到时错误信息会直接说清原因（被盖住 / 已最小化 /
+不可见），不会只丢一句「抓帧失败」。
 
-## The gate
+## 门禁
 
-Nine steps, all green, before a commit lands:
+提交前跑这一条，**每一步都绿**才算完（步数以 `gate.ps1` 自己打的耗时表为准，别写死）：
 
-```powershell
-pwsh -NoProfile -File scripts\gate.ps1
+```bash
+pwsh -NoProfile -File scripts/gate.ps1
 ```
 
-Encoding scan · `cargo fmt` · `cargo clippy -D warnings` · `cargo test` ·
-secret-scan · `cargo deny check` · `svelte-check` · lint + svelte-autofixer ·
-`vite build`. `.github/workflows/ci.yml` mirrors it step for step — and
-`scripts/check-gate-parity.ps1` is what makes that claim true: it derives the
-step list from `gate.ps1` and fails if `ci.yml` misses any of them.
+编码扫描 / `cargo fmt` / `cargo clippy -D warnings` / `cargo test` / secret-scan /
+`cargo deny check` / `svelte-check` / lint + svelte-autofixer / `vite build`。
+`.github/workflows/ci.yml` 与它逐条对应——这句话由
+`scripts/check-gate-parity.ps1` 守着：它从 `gate.ps1` 反推步名清单，
+CI 少跑一步就红。
 
-> Read the `GATE: ALL GREEN` / `GATE: FAILED` line, not just the exit code.
+> **看它打印的那一行**（`GATE: ALL GREEN` / `GATE: FAILED`），不要只看退出码。
 
-## Architecture
+## 结构
 
-| Crate | Role |
+| crate | 职责 |
 | --- | --- |
-| `crates/core` | Domain types and pure logic. `#![forbid(unsafe_code)]` |
-| `crates/capture` | Window discovery + Windows Graphics Capture + OCR |
-| `crates/perceive` | Classifies OCR boxes into speakers, behind the session gate |
-| `crates/reason` | **The only stage allowed to reach the network** |
-| `xtask` | Developer probes |
-| `ui/` | SvelteKit 5 frontend · `ui/src-tauri/` Tauri 2 shell |
+| `crates/core` | 域类型与纯逻辑。`#![forbid(unsafe_code)]` |
+| `crates/capture` | 窗口发现 + Windows Graphics Capture + OCR |
+| `crates/perceive` | 把 OCR 框归类成对话人 / 噪声 + 会话身份闸 |
+| `crates/reason` | **唯一允许出网做模型调用的阶段** |
+| `xtask` | 开发者探针 |
+| `ui/` | SvelteKit 5 前端 · `ui/src-tauri/` Tauri 2 外壳 |
 
-Rust is the single source of truth: the frontend renders what the backend
-sends and holds no second copy of session state.
+Rust 侧是单一事实来源：前端只渲染后端发过去的东西，不自己存第二份会话状态。
 
-## Docs
+## 文档
 
-- [`CONTEXT.md`](CONTEXT.md) — domain terms and boundaries. **Read before coding.**
-- [`docs/adr/`](docs/adr/) — decision records, including what was rejected
-- [`docs/release-notes/`](docs/release-notes/) — curated bilingual release notes
-- [`AGENTS.md`](AGENTS.md) — working agreements for agents
-- [`.scratch/`](.scratch/) — tickets
+- [`CONTEXT.md`](CONTEXT.md) —— 域术语与系统边界，**改代码前先读**
+- [`docs/adr/`](docs/adr/) —— 决策记录（含否掉了什么）
+- [`docs/release-notes/`](docs/release-notes/) —— 双语发布说明
+- [`AGENTS.md`](AGENTS.md) —— 给 agent 的工作约定
+- [`.scratch/`](.scratch/) —— 票据
 
-## License
+## 许可
 
-[Business Source License 1.1](LICENSE) © SeasonTemple — source is visible and
-free to copy, modify, and redistribute, and free for non-production use;
-production use requires a commercial license from the licensor, which **is not
-currently offered**. On the Change Date (**2029-10-12**) the work becomes
-available under Apache-2.0.
+[Business Source License 1.1](LICENSE) © SeasonTemple —— 源码可见，可自由复制、
+修改与再分发，**非生产用途免费**；生产使用需要 licensor 的商业授权，
+而该授权**目前尚未开放**。到变更日（**2029-10-12**）之后本作品转为
+Apache-2.0。
 
-The `Additional Use Grant` in [`LICENSE`](LICENSE) is narrower than "non-commercial
-only": evaluation, personal use, internal use within an organization, and
-modification are always permitted. What it withholds is offering the work to
-third parties on a hosted or embedded basis as a product or service whose
-primary function is the same as, or substantially overlaps with, this project
-— read the grant's wording before relying on a summary of it.
+[`LICENSE`](LICENSE) 里的 `Additional Use Grant` 比「仅限非商业」要窄一些：
+评估、个人使用、组织内部使用与修改**始终被允许**。它扣下的是「把本作品
+作为第三方可访问的托管或嵌入式产品/服务提供，且其主要功能与本项目相同或
+实质重叠」这一项——**依赖摘要不如读原文**。
 
-⚠ **There is no purchase channel yet.** Nothing in this repository grants a
-commercial license; `LICENSE` names the licensor, not a contact. If you need
-production rights, that is an open question to settle with the licensor before
-you build on this.
+⚠ **目前没有购买通道。** 本仓库不授予任何商业授权，`LICENSE` 只写了 licensor 是谁、
+没有留联系方式。如果你需要生产使用权，这是一件要与 licensor 先谈清楚的事，
+而不是默认已经有了。

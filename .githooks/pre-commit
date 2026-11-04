@@ -87,7 +87,7 @@ for f in $staged; do
   # ⇒ 新增合法图片要显式改这一行，这是**有意的摩擦**。
   case "$f" in
     ui/src-tauri/icons/*) continue ;;
-    ui/static/probe-sheet.png|ui/static/strip.png) continue ;;
+    ui/static/probe-sheet.png|ui/static/strip.png|docs/assets/hero-banner.webp) continue ;;
   esac
 
   case "$f" in

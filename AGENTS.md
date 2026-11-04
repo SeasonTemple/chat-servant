@@ -47,7 +47,7 @@ Rust 核心 + Tauri 2 外壳 + Svelte 5 前端，先打通微信单聊。
    而本文却声称有——本条文档曾经是假的）。
    ⚠ 守卫是 `crates/reason/src/transport.rs` 的
    `the_draft_prompt_still_forbids_money_topics`：它逐词断言禁词还在，
-   **删了就红**。加/改禁词请同步改本文与 `README.zh-CN.md`。
+   **删了就红**。加/改禁词请同步改本文与 `README.md`。
 5. **发送是分档的，且默认档最低。** 只有两档：`Manual`（仅填入）→ `Auto`
    （自动发送）。**2026-10-15 砍掉的是 `Confirm`（二次确认后发送）**——
    决定与理由见 `docs/设计规范.md` §10 第 3b 条，不要凭空加回来。
