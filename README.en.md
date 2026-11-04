@@ -1,191 +1,147 @@
 <div align="center">
 
-<img src="docs/assets/hero-banner.webp" alt="chat-servant hero banner: a translucent copilot panel beside a mint-green accent" width="100%" />
+<img src="docs/assets/hero-banner.webp" alt="chat-servant (YanShi) hero banner: warm torn cotton paper slips with a vermilion check mark" width="100%" />
 
+# chat-servant · YanShi
 
+**A desktop WeChat single-chat assistant — captures the chat window via WGC, runs local offline OCR, evaluates conversational intent, drafts candidate replies, and fills or dispatches them according to your selected tier.**
 
-# chat-servant
-
-**A copilot pinned to your own WeChat chat window — it reads the newest message, classifies the intent, drafts candidate replies, and fills them into the input box at the tier you chose.**
-
-**Fill-only by default; sending is a tier you raise yourself. Frames never touch disk; keys never reach a log.**
+**Frames stay in memory and never touch disk · API keys live only in the OS credential store · Fill-only (`Manual`) by default**
 
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL_1.1-orange.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-black.svg)](https://www.rust-lang.org/)
 [![Windows](https://img.shields.io/badge/platform-Windows%2010%2B-0078D4.svg)](https://learn.microsoft.com/windows/)
 [![CI](https://github.com/SeasonTemple/chat-servant/actions/workflows/ci.yml/badge.svg)](https://github.com/SeasonTemple/chat-servant/actions/workflows/ci.yml)
 
-[Chinese](README.md) · [English](README.en.md) · [Privacy](#privacy-boundaries) · [Getting started](#getting-started) · [Probes](#developer-probes) · [Gate](#the-gate) · [Contributing](CONTRIBUTING.md)
+[Chinese](README.md) · [English](README.en.md) · [Privacy](#privacy-and-security-boundaries) · [Getting started](#getting-started) · [Probes](#developer-probes) · [Gate](#quality-gate) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
 ---
 
-## Why it is shaped this way
+## Core Design
 
-Talking to a busy group chat at work is a context-switch problem, not a
-reading problem. chat-servant sits next to the window you already have open,
-does the reading, and hands you a draft.
+**chat-servant (`YanShi`)** docks beside your active WeChat window as a tactile torn-paper note panel. It reads incoming messages, analyzes conversational intent, and hands you candidate reply drafts to eliminate context-switching overhead. Three architectural principles govern its behavior:
 
-Three decisions do all the work:
+- **Non-intrusive visual capture**: No database reading, no process hooking, no memory inspection, and no storage decryption. The sole input path is window-level Windows Graphics Capture (WGC) paired with local offline OCR (PP-OCRv6).
+- **Tiered dispatch held in Rust**: Sending is divided into two explicit tiers — `Manual` (fill into the input box only) and `Auto` (automatic send) — defaulting to `Manual`. Both the sending tier and the outbound image switch are owned by the Rust backend; the UI only renders state and forwards user requests.
+- **Zero calls during silence**: Model inference triggers only when the perception pipeline detects a new message from the other party. Quiet periods incur zero network requests and zero token cost.
 
-- **It does not understand the conversation. It observes and transcribes.** No
-  database access, no hooking, no decryption. One capture path: window-level
-  WGC frames plus local OCR.
-- **Sending is tiered, and the lowest tier is the default.** The app fills the
-  input box and stops. Whether anything actually leaves your machine is a
-  question the Rust side answers, not the UI.
-- **Silence costs nothing.** No new message from them means no model call. Ten
-  quiet minutes is ten minutes of zero tokens.
+## Privacy and Security Boundaries
 
-## Privacy boundaries
+These constraints are enforced as product invariants backed by compile-time attributes and automated tests:
 
-These are product requirements, not implementation details.
+- **Visible local conversations only**: The application only observes chat windows already open and viewable by you on your own device.
+- **Zero process intrusion**: No code injection, no API hooks, no database decryption, and no access to target process memory.
+- **Frames never touch disk**: Captured window frames reside strictly in memory — never written to disk, logged, or uploaded. The sole exception is the explicit developer command `cargo xtask probe frame`, which writes a single frame to `target/probe/` (gitignored) and prints a notice to the terminal.
+- **No financial actions**: UI interactions and the drafting system prompt strictly block **transfer, red-packet, collection, and payment** topics, refusing to draft money-related replies (guarded by the unit test `the_draft_prompt_still_forbids_money_topics`).
+- **Credential isolation and redaction**: API keys are read exclusively from Windows Credential Manager or environment variables — never stored in config files, command-line arguments, logs, or frontend bundles. All outbound logs and error strings are redacted.
+- **Isolated real-chat golden fixtures**: Pixel-level golden test fixtures derived from real conversations are excluded via `.gitignore`. Tests requiring them are marked `#[ignore]` (local-only): a standard `cargo test --workspace` reports them as `N ignored` in the summary so skipped verification remains machine-readable. Run them locally with `cargo test --workspace -- --include-ignored`.
 
-- **You only read conversations you can already read**, on your own device.
-  It does not act on anyone else's behalf.
-- **No hooking, no injection.** It never reads the other party's database,
-  never decrypts, never touches their process memory.
-- **Frames never touch disk.** They live in memory — not written, not logged,
-  not uploaded. The single exception is the explicit debug command
-  `cargo xtask probe`, which writes to `target/probe/` and tells you it did.
-- **It never touches money.** Transfer, red-packet and payment elements are out
-  of scope, in the UI and in the drafting prompt.
-- **Keys are read from Windows Credential Manager or the environment, nowhere
-  else** — never from a config file, never from a command line, never into a
-  log, never into the frontend bundle. Every outbound string is redacted.
-- **Golden-test fixtures come from real conversations**, so they stay out of this
-  repository. Tests needing them are marked `#[ignore]` (local-only): a plain
-  `cargo test --workspace` does not run them, yet they show up as `N ignored` in
-  the summary, so "not verified" stays machine-readable. Run them locally with
-  `cargo test --workspace -- --include-ignored`; a missing fixture then fails hard.
+## Safety Controls
 
-## Three switches, each defaulting to the safe side
+All outbound and session-binding switches default to their most conservative state:
 
-| Switch | Default | What it governs |
+| Control | Default | Behavior |
 | --- | --- | --- |
-| Sending tier | **fill in only** | Text lands in the input box at the cursor. Sending requires you to raise the tier yourself. |
-| Images outbound | **off** | Whether an image region from them is cropped, encoded, and sent to a model. |
-| Session identity gate | locked on first frame | The app only acts on the one locked conversation. Re-lock from the **tray menu** (the panel has no such button). |
+| Sending tier | **Fill only (`Manual`)** | Places the selected draft into the chat input box at the cursor. Sending requires explicitly raising the tier to `Auto`, which resets to `Manual` when the session ends. |
+| Images outbound | **Off** | Controls whether incoming image regions are cropped, encoded, and sent to a multimodal model. |
+| Session identity gate | **Locked on first frame** | Identifies the target conversation via a header pixel fingerprint (`HeaderPrint`) and maintains up to 16 isolated session buckets. Re-lock from the **system tray menu**, or switch between `Lock Current` and `Auto Follow` in Settings. |
 
-The tier and the image gate are **held in Rust** (`TierCell` / `ImagesOut`).
-The UI can only request a change — "will this message actually go out" is never
-settled by the interface.
+Both the sending tier (`TierCell`) and the outbound image switch (`ImagesOut`) are held in Rust as the single source of truth; the frontend never maintains an independent copy.
 
-## Getting started
+## Getting Started
 
-**Windows 10 1803+ only** (Windows Graphics Capture). Windows 11 works better.
+**System requirements**: Windows 10 version 1803 or later (for Windows Graphics Capture). Windows 11 is recommended.
 
 ```powershell
-# Frontend deps — the tauri CLI is already a devDependency
+# 1. Install frontend dependencies (tauri CLI is included as a devDependency)
 cd ui; pnpm install; cd ..
 
-# Dev mode (HMR; the frontend is served from devUrl)
+# 2. Start development mode (with HMR)
 cd ui; pnpm tauri dev
 
-# Installers (msi + nsis)
+# 3. Build installers (msi + nsis)
 cd ui; pnpm tauri build
 ```
 
-The app starts a resident observation loop that grabs a frame per second.
+Once launched, the resident background thread (`cs-watch`) monitors the target WeChat window and perceives new messages via local offline OCR with line-level caching.
 
-### It runs with no API key
+### Running Without an API Key
 
-Capture, OCR, anchoring and the candidate cards all work without one — the
-drafts simply come from an explicitly labelled preset transport, and each one is
-marked as such so it can never be mistaken for model output.
+Window capture, local OCR, bubble anchoring, and candidate paper strips work out of the box without an API key. Candidate replies are served by a built-in preset transport and explicitly labeled as preset drafts so you can verify the local pipeline before connecting a model provider.
 
-### Configuring a key
+### Configuring Providers and API Keys
 
-Keys are read from exactly two places, and nowhere else:
+API keys are read from two locations only:
 
-1. **Windows Credential Manager**, target `chat-servant/<provider>`;
-2. environment variable `<PROVIDER>_API_KEY`.
+1. **Windows Credential Manager**, under target `chat-servant/<provider>`;
+2. **Environment variables**, named `<PROVIDER>_API_KEY`.
 
-Set it from the settings screen; it goes into the credential manager. "Test
-connection" hits the read-only `/v1/models` — **zero token cost**.
+Keys entered in the Settings screen are stored directly in Windows Credential Manager. Clicking "Test connection" queries the read-only `/v1/models` endpoint at **zero token cost**.
 
-Supported providers come in two kinds: **presets** (e.g. `openai`, `anthropic`,
-`minimax`, `deepseek`; the full list is `Provider::PRESETS` in
-`crates/reason/src/transport.rs`, which changes, so no count is pinned here) and
-**`custom`**: bring your own endpoint for any OpenAI-compatible or Anthropic service.
+Supported providers fall into two categories:
 
-## Developer probes
+- **Built-in presets**: Includes `openai`, `anthropic`, `minimax`, `deepseek`, and dedicated Jev decision endpoints (see `Provider::PRESETS` in `crates/reason/src/transport.rs` for the authoritative list);
+- **Custom endpoint (`custom`)**: Connects to any OpenAI-compatible or Anthropic-compatible service URL.
 
-When something misbehaves, probe it — do not guess. All read-only except
-`probe frame`.
+## Developer Probes
+
+Use the built-in `xtask` diagnostic probes to inspect capture, OCR, and perception stages without guessing. All probes are read-only in memory except `probe frame`:
 
 ```powershell
-cargo xtask caps            # does this machine support WGC at all
-cargo xtask occluded        # is the window covered right now
-cargo xtask probe frame     # grab a frame into target/probe/ and eyeball pixels
-cargo xtask read            # grab and OCR immediately, print what it read
-cargo xtask perceive --file <png>   # perception: per-line classification + merge
-cargo xtask measure         # calibration: bubble fill, ink, contrast
-cargo xtask media <png>     # media regions: detect an image, then run the encode path
-cargo xtask e2e             # end-to-end (dry-run by default; --inject really fills the box)
-cargo xtask secret-scan     # any key left in the repository
+cargo xtask caps                    # Check whether this machine supports Windows Graphics Capture (WGC)
+cargo xtask occluded                # Check whether the target window is covered, minimized, or invisible
+cargo xtask probe frame             # Capture a single frame into target/probe/ for visual inspection
+cargo xtask read                    # Capture a frame and run local OCR immediately
+cargo xtask perceive --file <png>   # Run perception: per-line speaker classification and message merge
+cargo xtask measure                 # Calibrate bubble fill, ink color, and contrast ratios
+cargo xtask media <png>             # Detect image regions and verify the crop/encode path
+cargo xtask e2e                     # Run end-to-end pipeline (dry-run by default; --inject fills the input box)
+cargo xtask secret-scan             # Scan the repository for accidentally committed secrets
 ```
 
-**Run `caps` and `occluded` first** when "it doesn't do anything" — they rule
-out most "is the app broken?" confusion. Failures name the actual cause
-(occluded / minimized / not visible) instead of just "capture failed".
+Run `cargo xtask caps` and `cargo xtask occluded` first if the panel appears idle — capture errors report the exact cause (occluded, minimized, or not visible).
 
-## The gate
+## Quality Gate
 
-Every step must be green before a commit lands. The step count comes from the
-timing table `gate.ps1` prints, so it is never pinned here:
+Run the full quality gate before committing to ensure every check passes:
 
 ```powershell
 pwsh -NoProfile -File scripts/gate.ps1
 ```
 
-Encoding scan · `cargo fmt` · `cargo clippy -D warnings` · `cargo test` ·
-secret-scan · `cargo deny check` · `svelte-check` · lint + svelte-autofixer ·
-`vite build`. `.github/workflows/ci.yml` mirrors it step for step — and
-`scripts/check-gate-parity.ps1` is what makes that claim true: it derives the
-step list from `gate.ps1` and fails if `ci.yml` misses any of them.
+The gate executes encoding and control-character scans, `cargo fmt`, `cargo clippy -D warnings`, `cargo test`, `secret-scan`, `cargo deny check`, `svelte-check`, frontend linting + `svelte-autofixer`, and `vite build`. `.github/workflows/ci.yml` mirrors `gate.ps1` step for step, enforced by `scripts/check-gate-parity.ps1`.
 
-> Read the `GATE: ALL GREEN` / `GATE: FAILED` line, not just the exit code.
+> Verify the final `GATE: ALL GREEN` / `GATE: FAILED` banner printed by the script rather than relying on the process exit code alone.
 
 ## Architecture
 
-| Crate | Role |
+| Module / Directory | Responsibility |
 | --- | --- |
-| `crates/core` | Domain types and pure logic. `#![forbid(unsafe_code)]` |
-| `crates/capture` | Window discovery + Windows Graphics Capture + OCR |
-| `crates/perceive` | Classifies OCR boxes into speakers, behind the session gate |
-| `crates/reason` | **The only stage allowed to reach the network** |
-| `xtask` | Developer probes |
-| `ui/` | SvelteKit 5 frontend · `ui/src-tauri/` Tauri 2 shell |
+| `crates/core` | Domain types, pure logic, and state machines (`#![forbid(unsafe_code)]`) |
+| `crates/capture` | Window discovery, Windows Graphics Capture, and local offline OCR |
+| `crates/perceive` | Speaker attribution, noise filtering, and session identity gate (`#![forbid(unsafe_code)]`) |
+| `crates/reason` | Intent evaluation and candidate drafting — **the only stage allowed to access the network** (`#![forbid(unsafe_code)]`) |
+| `xtask` | Developer diagnostic probes and automation utilities |
+| `ui/` · `ui/src-tauri/` | SvelteKit 5 torn-paper frontend and Tauri 2 desktop shell (IPC commands, system tray, watch loop) |
 
-Rust is the single source of truth: the frontend renders what the backend
-sends and holds no second copy of session state.
+Rust is the single source of truth: all session state, sending tiers, and outbound switches live in the Rust core, while the frontend renders state and forwards user actions.
 
-## Docs
+## Documentation
 
-- [`CONTEXT.md`](CONTEXT.md) — domain terms and boundaries. **Read before coding.**
-- [`docs/adr/`](docs/adr/) — decision records, including what was rejected
-- [`docs/release-notes/`](docs/release-notes/) — curated bilingual release notes
-- [`AGENTS.md`](AGENTS.md) — working agreements for agents
-- [`.scratch/`](.scratch/) — tickets
+- [`CONTEXT.md`](CONTEXT.md) — Domain glossary and system boundaries (**read before modifying code**)
+- [`docs/adr/`](docs/adr/) — Architecture Decision Records, including rejected alternatives
+- [`docs/release-notes/`](docs/release-notes/) — Bilingual release notes
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — Contribution workflow and maintenance pitfalls
+- [`AGENTS.md`](AGENTS.md) — Working agreements and engineering discipline for agents
 
 ## License
 
-[Business Source License 1.1](LICENSE) © SeasonTemple — source is visible and
-free to copy, modify, and redistribute, and free for non-production use;
-production use requires a commercial license from the licensor, which **is not
-currently offered**. On the Change Date (**2029-10-12**) the work becomes
-available under Apache-2.0.
+Licensed under the [Business Source License 1.1 (BSL-1.1)](LICENSE) © SeasonTemple:
 
-The `Additional Use Grant` in [`LICENSE`](LICENSE) is narrower than "non-commercial
-only": evaluation, personal use, internal use within an organization, and
-modification are always permitted. What it withholds is offering the work to
-third parties on a hosted or embedded basis as a product or service whose
-primary function is the same as, or substantially overlaps with, this project
-— read the grant's wording before relying on a summary of it.
+- **Source visibility and baseline rights**: Free to copy, modify, and redistribute, and **free for non-production use**;
+- **Additional Use Grant**: Evaluation, personal use, internal use within an organization, and modification are **always permitted**. Production use is restricted only when offering the work to third parties on a hosted or embedded basis as a product or service whose primary function is the same as, or substantially overlaps with, this project (refer to the exact wording in [`LICENSE`](LICENSE));
+- **Change Date**: On **2029-10-12**, the license automatically converts to **Apache-2.0**.
 
-⚠ **There is no purchase channel yet.** Nothing in this repository grants a
-commercial license; `LICENSE` names the licensor, not a contact. If you need
-production rights, that is an open question to settle with the licensor before
-you build on this.
+> **Commercial licensing**: No commercial purchase channel is currently open, and nothing in this repository grants production rights for restricted hosted/embedded offerings. Contact the licensor beforehand if your use case requires a commercial license.

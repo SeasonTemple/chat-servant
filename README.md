@@ -1,172 +1,148 @@
 <div align="center">
 
-<img src="docs/assets/hero-banner.webp" alt="chat-servant：贴在聊天窗口旁的半透明副驾面板" width="100%" />
+<img src="docs/assets/hero-banner.webp" alt="言侍 · chat-servant：暖黄撕边棉纸便笺与朱砂批注勾号" width="100%" />
 
+# 言侍 · chat-servant
 
+**桌面微信单聊辅助工具：通过窗口级捕获与本地离线 OCR 读取最新消息，分析对话意图并起草候选回复，按所选档位填入输入框或自动发送。**
 
-# chat-servant
-
-**挂在你自己那个微信聊天窗口旁边的副驾：读到对方最新消息 → 判意图 → 给候选回复 → 按你选的档位填回输入框。**
-
-**它不理解对话，只观察和转述。截图不落盘，key 不进日志，默认档位是「只填入、不发送」。**
+**截图常驻内存不落盘 · API 密钥仅存系统凭据库 · 默认仅填入不自动发送**
 
 [![许可: BSL 1.1](https://img.shields.io/badge/license-BSL_1.1-orange.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-black.svg)](https://www.rust-lang.org/)
 [![仅 Windows](https://img.shields.io/badge/platform-Windows%2010%2B-0078D4.svg)](https://learn.microsoft.com/windows/)
 [![CI](https://github.com/SeasonTemple/chat-servant/actions/workflows/ci.yml/badge.svg)](https://github.com/SeasonTemple/chat-servant/actions/workflows/ci.yml)
 
-[简体中文](README.md) · [English](README.en.md) · [隐私边界](#隐私边界) · [跑起来](#跑起来) · [探针](#开发者探针) · [门禁](#门禁) · [参与贡献](CONTRIBUTING.md)
+[简体中文](README.md) · [English](README.en.md) · [隐私与安全边界](#隐私与安全边界) · [快速开始](#快速开始) · [诊断探针](#开发者诊断探针) · [质量门禁](#质量门禁) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
 ---
 
-## 为什么是这么个形状
+## 核心设计
 
-工作群消息多的时候，累的不是「读」，是「切上下文」。chat-servant 就挂在你
-本来就开着的那个窗口旁边，把读的活干了，把草稿递给你。
+**言侍（`chat-servant`）** 作为独立便笺面板停靠在微信聊天窗口旁，自动完成消息识别、意图判断与回复起草，减少高频沟通中的上下文切换。系统设计遵循以下三项基本原则：
 
-真正起作用的是三条决定：
+- **非侵入式视觉采集**：不读取聊天数据库、不挂载进程钩子（Hook）、不解密本地存储。唯一的数据来源是 Windows Graphics Capture（WGC）窗口级画面捕获与本地离线 OCR（PP-OCRv6）。
+- **分档发送与后端权威控制**：发送行为分为 `Manual`（仅填入输入框）与 `Auto`（自动发送）两档，默认处于最低档 `Manual`。发送档位与外发开关均由 Rust 后端统一持有，前端仅负责渲染状态与转发用户指令。
+- **静默期零调用**：仅在感知层确认出现对方新消息时才触发模型推理；会话静默期间不发起任何网络请求，不产生 Token 消耗。
 
-- **它不理解对话，只观察和转述。** 不读数据库、不 hook、不解密。捕获只有一条
-  路：窗口级 WGC 帧 + 本地 OCR。
-- **发送是分档的，且默认档最低。** 它把文本填进输入框就停住。到底有没有东西
-  离开你的机器，由 Rust 侧回答，不由界面回答。
-- **安静不要钱。** 对方没有新消息就不调模型。十分钟没人说话就是十分钟零 token。
+## 隐私与安全边界
 
-## 隐私边界
+以下约束属于产品级硬性边界，并由编译期检查或自动化测试强制执行：
 
-这些是产品要求，不是实现细节。
+- **仅限本机可见会话**：仅读取当前设备上用户本人已打开且有权查看的聊天窗口，不代管或采集他人会话。
+- **零进程侵入**：不注入代码、不挂载钩子、不读取或解密对方客户端数据库、不访问目标进程内存。
+- **画面帧不落盘**：捕获的窗口帧仅驻留内存，不写入磁盘、不计入日志、不上传云端。唯一例外是开发者显式执行调试命令 `cargo xtask probe frame` 时，会将单帧输出至本地 `target/probe/`（已被 `.gitignore` 排除）并在终端明确提示。
+- **规避资金操作**：界面交互与起草系统提示词均严格屏蔽**转账、红包、收款、付款、支付**相关内容，拒绝代写任何涉钱回复（由单元测试 `the_draft_prompt_still_forbids_money_topics` 强制校验）。
+- **凭据隔离与脱敏**：API 密钥仅从 Windows 凭据管理器或系统环境变量读取，绝不写入配置文件、命令行参数、日志或前端打包产物；所有对外日志与报错文本均经过脱敏处理。
+- **真实语料与夹具隔离**：源自真实会话的像素级黄金测试夹具均通过 `.gitignore` 排除在公开仓库之外。依赖本地夹具的测试标记为 `#[ignore]`，常规 `cargo test --workspace` 会在汇总行中以 `N ignored` 显式标示未执行项；本机具备夹具时可通过 `cargo test --workspace -- --include-ignored` 完整运行。
 
-- **只读你自己设备上、你有权查看的对话。** 不代替任何人查看别人的聊天。
-- **不 hook、不注入。** 不读对方数据库、不解密、不碰对方进程内存。
-- **截图不落盘。** 帧只驻留内存——不写盘、不进日志、不上传。唯一的例外是显式
-  调试命令 `cargo xtask probe`，它写到 `target/probe/`，并且会告诉你它写了。
-- **不碰钱。** 转账、红包、收款相关元素在界面上和起草提示词里都禁掉了；
-  起草提示词这一半由 `the_draft_prompt_still_forbids_money_topics` 这条测试守着。
-- **key 只从 Windows 凭据管理器或环境变量读**，配置文件、命令行、日志、前端
-  bundle 里一律没有。所有对外文本一律脱敏。
-- **黄金测试夹具来自真实会话**，因此不入本仓库。依赖它们的测试标了 `#[ignore]`（本机专属）
-  ⇒ 常规 `cargo test --workspace` **根本不跑它们**，而它们仍出现在汇总行的 `N ignored` 里
-  ——「没验」是机器可读的，别把「全绿」读成「黄金基线验过了」。本机真跑用
-  `cargo test --workspace -- --include-ignored`。
+## 安全控制开关
 
-## 三个开关，每个都默认在安全的一侧
+核心外发与会话控制项默认均置于最保守档位：
 
-| 开关 | 默认 | 管什么 |
+| 控制项 | 默认状态 | 作用说明 |
 | --- | --- | --- |
-| 发送档位 | **只填入** | 填进输入框停在光标处。要发送得你自己升档。 |
-| 图片外发 | **关** | 对方发来的图片区域会不会被裁出、编码、发给模型。 |
-| 会话身份闸 | 第一帧自动锁定 | 程序只对锁定的那一个会话动手；锁错了走**托盘菜单 →「锁定当前会话」**（面板上没有这枚按钮）。 |
+| 发送档位 | **仅填入（`Manual`）** | 将候选回复填入聊天输入框并停留在光标处；需用户显式升档至 `Auto` 才会自动发送，且会话结束自动回落至 `Manual`。 |
+| 图片外发 | **关闭** | 控制是否将对方消息中的图片区域裁剪、编码并发送至多模态模型。 |
+| 会话身份闸 | **首帧自动锁定** | 基于会话标题栏像素指纹（`HeaderPrint`）识别目标会话，按指纹隔离维护最多 16 个会话分桶；可通过系统托盘菜单「锁定当前会话」重新绑定，或在设置中切换「锁定当前 / 自动跟随」模式。 |
 
-档位与外发总闸**都由 Rust 侧持有**（`TierCell` / `ImagesOut`），前端只负责请求改
-——「这条消息会不会真的发出去」不交给界面说了算。
+发送档位（`TierCell`）与图片外发总闸（`ImagesOut`）均由 Rust 后端持有，前端不维护独立副本，确保外发边界不受界面层状态影响。
 
-## 跑起来
+## 快速开始
 
-**只支持 Windows 10 1803+**（需要 WGC）。Windows 11 更稳。
+**系统要求**：Windows 10 1803 及以上版本（依赖 Windows Graphics Capture API），推荐使用 Windows 11。
 
 ```bash
-# 装前端依赖（tauri CLI 已经是 devDependency，不用另外 cargo install）
+# 1. 安装前端依赖（tauri CLI 已作为 devDependency 内置，无需额外 cargo install）
 cd ui && pnpm install && cd ..
 
-# 开发模式（带热更新，前端走 devUrl）
+# 2. 启动开发模式（支持前端热更新）
 cd ui && pnpm tauri dev
 
-# 出安装包（msi + nsis）
+# 3. 构建安装包（生成 msi 与 nsis 安装程序）
 cd ui && pnpm tauri build
 ```
 
-首次运行会起一个常驻观察循环（`cs-watch` 线程），每秒抓一帧微信窗口。
+启动后，后端常驻观察线程（`cs-watch`）会监听目标微信窗口，结合本地离线 OCR 与增量行级缓存实时感知新消息。
 
-### 没有 API key 也能跑
+### 无密钥体验模式
 
-观察、OCR、锚定、候选卡片全部正常，只是候选内容来自明确标注的预置传输——每条
-都带「预置」字样，不可能被当成模型输出。
+未配置 API 密钥时，窗口捕获、本地 OCR、气泡锚定与候选纸条交互均可完整运行。此时候选回复由内置的预置传输层提供，每条候选均带有明确的「预置」标识，便于在接入在线模型前验证本地全链路。
 
-### 配置 key
+### 配置模型与 API 密钥
 
-key **只去两处**，配置文件、日志、命令行、前端 bundle 里一律没有：
+API 密钥仅从以下两处读取：
 
-1. **Windows 凭据管理器**，目标名 `chat-servant/<provider>`；
-2. 环境变量 `<PROVIDER>_API_KEY`。
+1. **Windows 凭据管理器**：凭据目标名为 `chat-servant/<provider>`；
+2. **系统环境变量**：变量名为 `<PROVIDER>_API_KEY`。
 
-在设置页里填，存进凭据管理器。填完可以点「测连通」——它打的是只读的
-`/v1/models`，**不产生任何 token 费用**。
+可在应用设置界面直接录入密钥并保存至 Windows 凭据管理器。保存后可点击「测连通」调用只读的 `/v1/models` 接口验证连通性，该检查**不产生任何 Token 费用**。
 
-支持的 provider 分两类：**预设**（如 `openai` / `anthropic` / `minimax` / `deepseek` 等，
-完整清单以 `crates/reason/src/transport.rs` 的 `Provider::PRESETS` 为准——它会变，别写死个数）
-与 **`custom`**：自己填端点，兼容 OpenAI 或 Anthropic 其中一种协议的服务都能接进来。
+支持两类模型服务商接入：
 
-## 开发者探针
+- **内置预设（Presets）**：涵盖 `openai`、`anthropic`、`minimax`、`deepseek` 及 Jev 专用决策端点等（完整预设列表以 `crates/reason/src/transport.rs` 中的 `Provider::PRESETS` 为准）；
+- **自定义端点（`custom`）**：支持填入任意兼容 OpenAI 或 Anthropic 协议的服务端地址。
 
-诊断问题先跑探针，不要猜。全部**只读**，不写盘（`probe frame` 除外）。
+## 开发者诊断探针
+
+项目内置一组 `xtask` 命令行探针，用于逐层诊断窗口捕获、OCR 与感知链路。除 `probe frame` 外，所有探针均为纯内存只读操作：
 
 ```bash
-cargo xtask caps            # 这台机器到底支不支持 WGC
-cargo xtask occluded        # 窗口现在被别的东西盖住了吗
-cargo xtask probe frame     # 抓一帧写 target/probe/，肉眼核对像素
-cargo xtask read            # 抓一帧并立刻本地 OCR，打印读到的文字
-cargo xtask perceive --file <png>   # 感知层：逐行归类 + 归并成消息
-cargo xtask measure         # 标定：气泡底色、墨色、对比度
-cargo xtask media <png>     # 媒体区域：检出「这里有一张图」，并走一遍编码链路
-cargo xtask e2e             # 端到端（默认 dry-run，加 --inject 才真的填输入框）
-cargo xtask secret-scan     # 仓库里有没有残留 key
+cargo xtask caps                    # 检查当前系统是否支持 Windows Graphics Capture (WGC)
+cargo xtask occluded                # 检测目标微信窗口是否被遮挡、最小化或不可见
+cargo xtask probe frame             # 捕获单帧并保存至 target/probe/ 供人工核对像素
+cargo xtask read                    # 捕获单帧并立即执行本地 OCR，输出识别文本
+cargo xtask perceive --file <png>   # 运行感知层：逐行归类发言方并归并为结构化消息
+cargo xtask measure                 # 测量并标定聊天气泡底色、文字墨色与对比度
+cargo xtask media <png>             # 检测图片消息区域并验证图像裁剪与编码链路
+cargo xtask e2e                     # 运行端到端全链路测试（默认 dry-run，附加 --inject 才写入输入框）
+cargo xtask secret-scan             # 扫描仓库中是否存在疑似泄露的密钥或凭据
 ```
 
-**「为什么不动」时先跑 `caps` 和 `occluded`**——这两条能排掉绝大多数
-「程序是不是坏了」的困惑。抓不到时错误信息会直接说清原因（被盖住 / 已最小化 /
-不可见），不会只丢一句「抓帧失败」。
+若遇到面板无响应或未更新，建议优先执行 `cargo xtask caps` 与 `cargo xtask occluded`。捕获异常会直接返回具体原因（如窗口被遮挡、已最小化或不可见），便于快速排查环境问题。
 
-## 门禁
+## 质量门禁
 
-提交前跑这一条，**每一步都绿**才算完（步数以 `gate.ps1` 自己打的耗时表为准，别写死）：
+提交代码前请运行完整本地门禁脚本，确保所有检查项全部通过：
 
 ```bash
 pwsh -NoProfile -File scripts/gate.ps1
 ```
 
-编码扫描 / `cargo fmt` / `cargo clippy -D warnings` / `cargo test` / secret-scan /
-`cargo deny check` / `svelte-check` / lint + svelte-autofixer / `vite build`。
-`.github/workflows/ci.yml` 与它逐条对应——这句话由
-`scripts/check-gate-parity.ps1` 守着：它从 `gate.ps1` 反推步名清单，
-CI 少跑一步就红。
+门禁涵盖字符编码与控制符扫描、`cargo fmt`、`cargo clippy -D warnings`、`cargo test`、密钥扫描、`cargo deny check`、`svelte-check`、前端 Lint + `svelte-autofixer` 以及 `vite build`。`.github/workflows/ci.yml` 与本地门禁步骤保持严格对齐，并由 `scripts/check-gate-parity.ps1` 自动校验步骤一致性。
 
-> **看它打印的那一行**（`GATE: ALL GREEN` / `GATE: FAILED`），不要只看退出码。
+> 请以终端末尾输出的 `GATE: ALL GREEN` / `GATE: FAILED` 横幅（而非单纯依赖进程退出码）作为门禁通过的最终判据。
 
-## 结构
+## 项目结构
 
-| crate | 职责 |
+| 模块 / 目录 | 职责说明 |
 | --- | --- |
-| `crates/core` | 域类型与纯逻辑。`#![forbid(unsafe_code)]` |
-| `crates/capture` | 窗口发现 + Windows Graphics Capture + OCR |
-| `crates/perceive` | 把 OCR 框归类成对话人 / 噪声 + 会话身份闸 |
-| `crates/reason` | **唯一允许出网做模型调用的阶段** |
-| `xtask` | 开发者探针 |
-| `ui/` | SvelteKit 5 前端 · `ui/src-tauri/` Tauri 2 外壳 |
+| `crates/core` | 核心域类型、纯逻辑与状态机（启用 `#![forbid(unsafe_code)]`） |
+| `crates/capture` | 窗口发现、Windows Graphics Capture 画面捕获与本地离线 OCR |
+| `crates/perceive` | OCR 文本框发言方归类、噪声过滤与会话身份闸（`#![forbid(unsafe_code)]`） |
+| `crates/reason` | 意图判断与候选回复生成——**唯一允许发起网络模型调用的阶段**（`#![forbid(unsafe_code)]`） |
+| `xtask` | 开发者命令行诊断探针与自动化辅助工具 |
+| `ui/` · `ui/src-tauri/` | SvelteKit 5 纸面前端与 Tauri 2 桌面外壳（IPC 命令、系统托盘、观察循环） |
 
-Rust 侧是单一事实来源：前端只渲染后端发过去的东西，不自己存第二份会话状态。
+架构遵循后端单一事实来源（Single Source of Truth）原则：所有会话状态、发送档位与外发控制均由 Rust 核心维护，前端仅负责视图渲染与交互事件转发。
 
-## 文档
+## 相关文档
 
-- [`CONTEXT.md`](CONTEXT.md) —— 域术语与系统边界，**改代码前先读**
-- [`docs/adr/`](docs/adr/) —— 决策记录（含否掉了什么）
-- [`docs/release-notes/`](docs/release-notes/) —— 双语发布说明
-- [`AGENTS.md`](AGENTS.md) —— 给 agent 的工作约定
-- [`.scratch/`](.scratch/) —— 票据
+- [`CONTEXT.md`](CONTEXT.md) —— 核心域术语表与系统边界定义（修改代码前必读）
+- [`docs/设计规范.md`](docs/设计规范.md) —— 纸面面板视觉与交互设计规范
+- [`docs/adr/`](docs/adr/) —— 架构决策记录（含已否决方案与选型依据）
+- [`docs/release-notes/`](docs/release-notes/) —— 中英双语版本发布说明
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) —— 贡献指南与常见维护陷阱
+- [`AGENTS.md`](AGENTS.md) —— 面向协作 Agent 的工程纪律与工作流约定
 
-## 许可
+## 许可证
 
-[Business Source License 1.1](LICENSE) © SeasonTemple —— 源码可见，可自由复制、
-修改与再分发，**非生产用途免费**；生产使用需要 licensor 的商业授权，
-而该授权**目前尚未开放**。到变更日（**2029-10-12**）之后本作品转为
-Apache-2.0。
+本项目基于 [Business Source License 1.1 (BSL-1.1)](LICENSE) © SeasonTemple 发布：
 
-[`LICENSE`](LICENSE) 里的 `Additional Use Grant` 比「仅限非商业」要窄一些：
-评估、个人使用、组织内部使用与修改**始终被允许**。它扣下的是「把本作品
-作为第三方可访问的托管或嵌入式产品/服务提供，且其主要功能与本项目相同或
-实质重叠」这一项——**依赖摘要不如读原文**。
+- **源码可见与基本权利**：允许自由复制、修改与再分发，**非生产环境使用免费**；
+- **附加使用授权（Additional Use Grant）**：试用评估、个人使用、组织内部使用及二次修改**始终允许**。受限范围仅限「将本作品作为面向第三方可访问的托管或嵌入式产品/服务提供，且其主要功能与本项目相同或实质重叠」（具体法律条款请以 [`LICENSE`](LICENSE) 原文为准）；
+- **开源转换日（Change Date）**：自 **2029-10-12** 起，本项目许可证将自动转换为 **Apache-2.0**。
 
-⚠ **目前没有购买通道。** 本仓库不授予任何商业授权，`LICENSE` 只写了 licensor 是谁、
-没有留联系方式。如果你需要生产使用权，这是一件要与 licensor 先谈清楚的事，
-而不是默认已经有了。
+> **关于商业授权**：本仓库当前未开放商业授权购买通道，亦不默认授予上述受限场景下的生产使用权。如需商业生产授权，需事先与权利人（Licensor）另行协商。
