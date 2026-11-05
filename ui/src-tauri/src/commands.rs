@@ -1471,10 +1471,10 @@ pub fn build_tray_menu(app: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>,
         // —— 一行灰的、点不动的文字 + 一条分隔线。它是 Windows 托盘的老套路，
         // 不是设计，而且白占一行高度。档位信号改由**托盘图标的红点**
         // 和 **tooltip** 承担，见 `tray_icon` / `tray_tooltip`。
-        .item(&MenuItemBuilder::with_id("show", "显示面板").build(app)?)
-        .item(&MenuItemBuilder::with_id("relock", "锁定当前会话").build(app)?)
-        .item(&MenuItemBuilder::with_id("settings", "打开设置").build(app)?)
-        .item(&MenuItemBuilder::with_id("debug", "识别画布").build(app)?)
+        .item(&MenuItemBuilder::with_id("show", "面板").build(app)?)
+        .item(&MenuItemBuilder::with_id("relock", "重锁").build(app)?)
+        .item(&MenuItemBuilder::with_id("settings", "设置").build(app)?)
+        .item(&MenuItemBuilder::with_id("debug", "画布").build(app)?)
         .separator()
         // **「退出」上没有加速键，这是量出来的，不是忘了**（2026-10-10 实测）。
         //
