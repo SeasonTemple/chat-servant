@@ -640,27 +640,6 @@
       openPicker = null;
     }
   }
-  function stepProvider(e: WheelEvent, g: GroupView) {
-    if (busy[g.id] || g.providers.length < 2) return;
-    e.preventDefault();
-    const idx = Math.max(
-      0,
-      g.providers.findIndex((p) => p.id === g.route.provider),
-    );
-    const dir = e.deltaY > 0 ? 1 : -1;
-    const next = g.providers[(idx + dir + g.providers.length) % g.providers.length];
-    if (next) void applyRoute(g, next.id);
-  }
-
-  function stepModel(e: WheelEvent, g: GroupView) {
-    if (busy[g.id] || g.models.length < 2) return;
-    e.preventDefault();
-    const idx = Math.max(0, g.models.indexOf(g.model));
-    const dir = e.deltaY > 0 ? 1 : -1;
-    const next = g.models[(idx + dir + g.models.length) % g.models.length];
-    if (next) void pickModel(g, next);
-  }
-
   async function applyEffort(g: GroupView, effort: string) {
     busy[g.id] = true;
     notes[g.id] = '';
@@ -672,18 +651,6 @@
     } finally {
       busy[g.id] = false;
     }
-  }
-
-  function stepEffort(e: WheelEvent, g: GroupView) {
-    if (busy[g.id] || !g.efforts || g.efforts.length < 2) return;
-    e.preventDefault();
-    const idx = Math.max(
-      0,
-      g.efforts.findIndex((x) => x.id === g.effort),
-    );
-    const dir = e.deltaY > 0 ? 1 : -1;
-    const next = g.efforts[(idx + dir + g.efforts.length) % g.efforts.length];
-    if (next) void applyEffort(g, next.id);
   }
 
   let moreBelow = $state(false);
@@ -1159,9 +1126,8 @@
             aria-haspopup="listbox"
             aria-expanded={openPicker === `prov:${g.id}`}
             onclick={() => togglePicker(`prov:${g.id}`)}
-            onwheel={(e) => stepProvider(e, g)}
             disabled={busy[g.id]}
-            title="点击展开列表，或在框上滚轮切换服务商"
+            title="点击展开服务商列表"
           >
             <span class="cs-picker-tag">服务商</span>
             <span class="cs-picker-val">{g.route.provider_label}</span>
@@ -1232,9 +1198,8 @@
               aria-haspopup="listbox"
               aria-expanded={openPicker === `model:${g.id}`}
               onclick={() => togglePicker(`model:${g.id}`)}
-              onwheel={(e) => stepModel(e, g)}
               disabled={busy[g.id]}
-              title="点击展开列表，或在框上滚轮切换模型"
+              title="点击展开模型列表"
             >
               <span class="cs-picker-tag">模型</span>
               <span class="cs-picker-val">{g.model}</span>
@@ -1305,9 +1270,8 @@
               aria-haspopup="listbox"
               aria-expanded={openPicker === `effort:${g.id}`}
               onclick={() => togglePicker(`effort:${g.id}`)}
-              onwheel={(e) => stepEffort(e, g)}
               disabled={busy[g.id]}
-              title="点击展开列表，或在框上滚轮切换思考等级"
+              title="点击展开思考等级列表"
             >
               <span class="cs-picker-tag">思考等级</span>
               <span class="cs-picker-val">{g.effort_label}</span>

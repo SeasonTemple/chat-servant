@@ -62,7 +62,7 @@ fn main() {
                     .iter()
                     .find(|w| w.label == "main")
                     .map(|w| w.title.clone())
-                    .unwrap_or_else(|| "副驾".to_string());
+                    .unwrap_or_else(|| "言侍".to_string());
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.set_title(&format!("{base} · 夹具模式"));
                 }

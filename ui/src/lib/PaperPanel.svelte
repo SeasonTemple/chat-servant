@@ -307,9 +307,10 @@
   let readout = $state<ReadoutPayload | null>(null);
   let peer = $state('');
 
-  const lastFromThem = $derived(
-    readout?.messages.filter((m) => m.speaker === 'Them').at(-1) ?? null,
-  );
+  const lastFromThem = $derived.by(() => {
+    const last = readout?.messages.at(-1);
+    return last?.speaker === 'Them' ? last : null;
+  });
   const drafted = $derived(readout?.phase === 'drafted' ? (readout.candidates[0] ?? null) : null);
 
   /**
@@ -1340,7 +1341,7 @@
         {#if peer}
           <span class="cs-peer">{peer}</span>
         {:else}
-          <span class="cs-peer-unknown">没认出这是谁的对话</span>
+          <span class="cs-peer-unknown">未识别会话</span>
         {/if}
         {#if lastFromThem}
           <span class="cs-where-quote" title={lastFromThem.text}>{lastFromThem.text}</span>
@@ -1351,86 +1352,28 @@
       正文行。**只有墨色**：`--cs-mark` 在真实纸底上只有 3.00 : 1，掉出 AA，
       正文小字用它就是不合规（app.css 的注释记着这条是怎么翻的）。
     -->
-      <div
-        class="cs-draft"
-        {@attach markOverflowDraft}
-        data-more={moreBelowDraft}
-        data-more-above={moreAboveDraft}
-      >
-        {#if drafted}
-          <!--
-            ⚠⚠ **正文位不再显示候选**（票 92，2026-10-24）。
-
-            原来这里渲染**第一条候选**（票 68，2026-10-19，为了消除
-            「同一句话出现两遍」而把第一条挪进来）⇒ 代价是它成了
-            **另一套形制**：大字号仿宋、无概率列、勾浮在右上角、横向还更窄
-            ⇒ 用户原话：「为什么和下面的两个候选样式不同？百分比置信度没有、
-            勾选的位置奇怪，长度不一致」。
-
-            ⇒ **正解**：动作区列**全部**候选（每一条都是同一种纸条，
-            推荐那条靠**那枚手绘勾**区分）⇒ 正文位退成**状态句**。
-            ⇒ 同一句话**仍然只出现一次** ⇒ 票 68 的缺陷不回。
-
-            ⚠⚠ **2026-10-25 订正措辞**（用户反馈 ③）：
-            上一轮把「起草好了，挑一条用。」收成「起草好了。」——
-            收短的方向对（**「挑一条用」是多余的**，三张纸条就在下面，
-            那句话是**把同一件事说第二遍**），但**没说清楚下面是什么**。
-            ⚠ 2026-10-25 用户再判一次：「为什么不写：**候选如下**？」
-            ⇒ 正文位这句**改成「候选如下」**，且**不要句号**。
-            ⇒ 它仍属**状态句**一族：只说「面板现在给你什么」，
-            **不下指令**（不说「挑一条用」/「按这个」）。
-            ⇒ **槽位高度不动**（见 `.cs-draft` 的 `min-height`）：
-            句子改短**不改变**正文位的高度 ⇒ 候选组不会跳位。
-          -->
-          <p class="cs-draft-text cs-draft-status">候选如下</p>
-        {:else if readout?.phase === 'drafting'}
-          <!--
-          这句是 Rust 的 `Phase::status_hint()`，**不在这里写死**。
-          判据 12：空状态必须给明确的下一步——「正在写……」只说了现状，
-          Rust 那句连着说了「通常几秒」，用户才知道该等。夹具没带这个字段时
-          才退回短句，那只是演示数据的缺口，不是口径。
-        -->
-          <p class="cs-draft-text cs-draft-pending">
-            {readout.status_hint ?? '正在写……'}
-          </p>
-        {:else if readout?.phase === 'failed'}
-          <p class="cs-draft-text cs-draft-failed">{readout.error}</p>
-        {:else if readout?.status_hint}
-          <!--
-            ⚠ 这一支守的是「闸关着」那条路径（2026-10-14 真机实测出来的假话）：
-            用户在微信里切到另一个会话，闸关上、面板被清空，正文却显示
-            「对方说完话，这里才落笔。」——**而那个会话对方明明说过话**。
-            界面分不出「对方真没说话」与「已停泊、没在读这个会话」，
-            两者的 `messages` 都是空数组。
-
-            ⇒ 判据放在 Rust 那边（`watch.rs` 的
-            `a_closed_gate_replaces_the_waiting_line_with_an_honest_one`），
-            文案也是 Rust 出的 `status_hint`；**这里只渲染，不自己写死**。
-            放在 `lastFromThem` 那一支**之前**：闸一关就压过「对方说完了」。
-
-            ⚠⚠ `readout?` 的问号**不能省**：`readout` 初值是 `null`，
-            而这一支排在 `readout?.phase === 'failed'` **之后**，
-            前几支都用了可选链。2026-10-14 首次写这里时漏了它，
-            `pnpm build` 与 `svelte-autofixer` **全过**，
-            而真浏览器里整个面板崩成白屏：
-            `TypeError: Cannot read properties of null (reading 'status_hint')`。
-            ⇒ 判据工具全绿 ≠ 界面能渲染；这一支必须用可选链。
-          -->
-          <p class="cs-draft-text cs-draft-idle">{readout.status_hint}</p>
-        {:else if lastFromThem}
-          <!--
-            ⚠ 这一支原先不存在，于是 `noprep` 那一态在说假话（2026-10-14 截图自查）：
-            归属行刚显示对方最后一句「行，不急」，正文却写着「对方说完话，这里才落笔」——
-            **对方已经说完了**，这句话与上一行直接打架。
-            票 30 的真机状态正是这一支：会话名认不出来 ⇒ 没有候选，
-            而面板把「没起草」说成「还没轮到」，用户会一直等一个不会来的落笔。
-            ⇒ 只陈述事实，不猜原因（为什么没起草由归属行那句「没认出这是谁的对话」说）。
-          -->
-          <p class="cs-draft-text cs-draft-idle">对方说完了，这轮没起草</p>
-        {:else}
-          <p class="cs-draft-text cs-draft-idle">对方说完话，这里才落笔。</p>
-        {/if}
-      </div>
+      {#if !drafted}
+        <div
+          class="cs-draft"
+          {@attach markOverflowDraft}
+          data-more={moreBelowDraft}
+          data-more-above={moreAboveDraft}
+        >
+          {#if readout?.phase === 'drafting'}
+            <p class="cs-draft-text cs-draft-pending">
+              {readout.status_hint ?? '正在写……'}
+            </p>
+          {:else if readout?.phase === 'failed'}
+            <p class="cs-draft-text cs-draft-failed">{readout.error}</p>
+          {:else if readout?.status_hint}
+            <p class="cs-draft-text cs-draft-idle">{readout.status_hint}</p>
+          {:else if lastFromThem}
+            <p class="cs-draft-text cs-draft-idle">对方说完了，这轮没起草</p>
+          {:else}
+            <p class="cs-draft-text cs-draft-idle">对方说完话，这里才落笔</p>
+          {/if}
+        </div>
+      {/if}
 
       <!--
         动作行。**2026-10-15 落地**——此前 `dispatch` 是
@@ -1472,21 +1415,6 @@
           data-more={moreBelow}
           data-more-above={moreAbove}
         >
-          <!--
-            不可逆前置说明 —— 规范 §4.2b 定它在**按钮上方**。
-
-            ⚠ 只在 `Auto` 档出现。`Manual` 档按下去只是填进输入框，
-            在那里写「按下去就发出去了」是**假的**——
-            而一个在可逆路径上喊不可逆的提示，会让人对真不可逆的那次
-            也当噪音划过去。
-
-            ⚠ 这段话是**当前档位**的如实描述，不是新的判断。
-            「该不该发」仍然只在 `commands::dispatch` 里判一次。
-          -->
-          {#if tier === 'Auto'}
-            <p class="cs-act-warn">「自动发送」档：按下去就发出去了，收不回来。</p>
-          {/if}
-
           <!--
             ⚠⚠ **动作区列的是**全部**候选**（2026-10-24，票 92 续）。
 
@@ -1693,20 +1621,20 @@
                     {#if markShape.current === 'ring'}
                       <svg
                         class="cs-pencil-mark"
-                        viewBox="0 0 {MARK_VIEW.w} {MARK_VIEW.h}"
+                        viewBox="13 0 40 40"
                         width="30"
-                        height="20"
+                        height="30"
                         aria-hidden="true"
                         filter="url(#pencil)"
                       >
-                        {#each RING_LABEL_MARK as l (l.d)}<path d={l.d} fill-opacity={l.o} />{/each}
+                        {#each RING_MARK as l (l.d)}<path d={l.d} fill-opacity={l.o} />{/each}
                       </svg>
                     {:else}
                       <svg
                         class="cs-pencil-mark"
                         viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}"
-                        width="26"
-                        height="16"
+                        width="44"
+                        height="28"
                         aria-hidden="true"
                         filter="url(#pencil)"
                       >
@@ -1718,6 +1646,22 @@
               </span>
             </button>
           {/each}
+        </div>
+      {:else if readout?.gate_open === false}
+        <div class="cs-actions" data-no-drag>
+          <button
+            type="button"
+            class="cs-act cs-act-lead"
+            disabled={readout.relock_pending}
+            onclick={() => {
+              invoke('relock_session').catch((e) => console.error('重新锁定失败：', e));
+            }}
+            aria-label="改为锁定此会话：{peer || '当前会话'}"
+          >
+            <span class="cs-act-text">
+              {readout.relock_pending ? '正在切换锁定……' : '改为锁定此会话'}
+            </span>
+          </button>
         </div>
       {/if}
 
@@ -1789,6 +1733,7 @@
                   data-shape={markShape.current}
                   data-ring={markSize}
                   viewBox="0 0 {ACTIVE_VIEW.w} {ACTIVE_VIEW.h}"
+                  preserveAspectRatio="none"
                   width={ACTIVE_VIEW.w}
                   height={ACTIVE_VIEW.h}
                   aria-hidden="true"
@@ -2330,7 +2275,8 @@
      * ⇒ 空间不够时：能放下就精确放下（不留缝、也不溢出）；
      *   放不下（候选太多）才溢出滚动 —— 那是票 44 早就定好的路。
      */
-    flex: 1 1 auto;
+    flex: 0 1 auto;
+    min-height: 74px;
     /* ⚠⚠⚠ **`align-items: center` 才是把字放进长出来的那段纸里的那个开关**
      *   —— **不是** `align-content`。
      *
@@ -2470,17 +2416,6 @@
     height: 0;
   }
 
-  /* 不可逆前置说明（规范 §4.2b：它在按钮上方）。
-   * ⚠ 它在 forced-colors 下是**唯一**还能说出「这一组按下去不可逆」
-   *   的通道——高对比度接管背景色之后，红批那道竖笔会退化成墨线。 */
-  .cs-act-warn {
-    margin: 0 0 2px;
-    font-size: 12px;
-    line-height: 1.4;
-    /* 红只给不可逆，而这一句就是不可逆本身。 */
-    color: var(--cs-pencil-red);
-  }
-
   /* ── 候选行 = 一片从这张纸上撕下来的纸（票 44）────────────────────
    *
    * ⚠⚠ **撕边必须是面板自己的那一种，不能是描边。**
@@ -2541,7 +2476,7 @@
     position: relative;
     display: flex;
     align-items: baseline;
-    gap: 6px;
+    gap: 4px;
     appearance: none;
     /* ⚠⚠⚠ **`margin: -8px` —— 撕边最外沿本来就该溢出布局框**（票 44 最终解法）。
      *
@@ -2586,7 +2521,7 @@
      * ⚠ **改这个值之前必须回去重量具**（`ui/static/budget.html`），
      *   两个档都量。上面每个数字都是量出来的，不是推演。
      */
-    margin: -8px 0;
+    margin: -7px 0;
     /* ⚠ 内边距的量由**撕口内侧那段纸芯白**决定，不由「够不够放字」决定。
      *   撕口从外沿 0 爬到实心要 6~13 CSS px（实测），那 16px 的 border 里
      *   已经含有约 4~8px 的白纸。padding 再给 1px，字就骑在渐变的中段上，
@@ -2602,7 +2537,7 @@
      *   ⇒ 让位的方式必须是「勾探进已有留白」，不是「给它开一格」。
      *   10px 与右边对称：三条纸的正文左缘对齐（它们是一组），
      *   勾在那 10px + 撕边纸白里往左探一点。 */
-    padding: 3px 10px;
+    padding: 4px 6px;
     border-style: solid;
     border-width: 16px;
     border-color: transparent;
@@ -2878,7 +2813,9 @@
    */
   .cs-act-mark {
     position: absolute;
-    inset: 0;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2938,12 +2875,13 @@
     /* ⚠⚠ **这一行就是 2026-10-25 那次改动的全部**（见上面的订正）。 */
     align-self: center;
     flex: none;
-    min-width: 27px;
+    min-width: 24px;
     height: 16px;
   }
 
   .cs-pencil-mark {
     display: block;
+    flex: none;
     color: inherit;
     fill: currentColor;
   }
@@ -2985,9 +2923,11 @@
    *  ⇒ 这是一笔「用留白换字号」的交易，**不是免费的**。
    */
   .cs-act-text {
+    flex: 1;
+    min-width: 0;
     font-size: 14px;
     font-weight: 400;
-    line-height: 1.5;
+    line-height: 1.45;
     color: var(--cs-pencil);
   }
 
@@ -3069,7 +3009,7 @@
   }
 
   .cs-act-prob.is-active {
-    opacity: 0.45;
+    opacity: 0.26;
   }
 
   /* 回执。成功走墨色、失败走红——红留给「没发成」这个必须看见的结果。 */
@@ -3318,14 +3258,11 @@
   }
 
   .cs-tick[data-shape='ring'][data-ring='big'] {
-    /* 84 宽 ⇒ 笔心 x = 42。原先写 -43 是按 84 估的，渲染宽 60 时偏左 13px。 */
-    --tick-w: 84px;
-    --tick-h: 52px;
-    /* 字心 y 15.5 − 笔心 y 26 = −10.5。渲染宽高都对了之后这条自然对齐。 */
-    top: calc(14.4px * var(--tk, 1) - 25.4px * var(--ms) * var(--tk, 1));
-    margin-left: calc(-42px * var(--ms) * var(--tk, 1) - var(--mx) * var(--tk, 1));
+    --tick-w: 78px;
+    --tick-h: 64px;
+    top: calc(14.4px * var(--tk, 1) - 31.2px * var(--ms) * var(--tk, 1));
+    margin-left: calc(-39px * var(--ms) * var(--tk, 1) - var(--mx) * var(--tk, 1));
   }
-
   /*  只有 fill，不设 fill-opacity——每层的透明度是**笔迹数据的一部分**，
    *  由生成器算出来。CSS 一旦兜底就会把嵌套的五级全覆盖掉，
    *  羽化立刻塌回单层平涂。 */
@@ -3489,7 +3426,7 @@
      *   选它是因为档位行是**安全相关的唯一显示**（看不见就回不了退），
      *   而候选区溢出有渐隐 + 滚动兜着。
      */
-    padding: 0 0 40px;
+    padding: 4px 0 36px;
     display: flex;
     flex-direction: column;
     /* ⚠⚠ **18 → 14px**（2026-10-25，用户反馈：「怎么还有滚动条了？
@@ -3520,34 +3457,17 @@
 
   .cs-where {
     margin: 0;
-    font-size: 14px;
+    font-size: 16px;
     line-height: 1.45;
-    color: var(--cs-pencil);
-  }
-
-  .cs-peer {
-    /* 机器认出来的名字。**铅笔灰**，跟正文那支墨笔分开——
-       墨 = 你写下的，铅笔 = 机器认出来的（app.css 的分工）。 */
-    font-weight: 600;
     color: var(--cs-pencil-2);
   }
 
-  /*  认不出会话名时的占位（票 30）。
-   *
-   *  用 `--cs-ink` 而不是 `--cs-mark`：标注档只有 3.00 : 1，够不上 12px
-   *  正文（app.css 里写明了它只配给 ≥18.66px 粗体）。这里要的是一个
-   *  「读得清、且一眼区别于正常会话名」的状态——18.05 : 1 的墨色加粗够。
-   *  ⚠ 刻意**不用红**：红在本项目只给不可逆，而「认不出」是可恢复的提醒。
-   *  HC 下 `--cs-ink` 已被接管成 `CanvasText`，自动跟着走。
-   *
-   * ⚠ **要带上 `letter-spacing: 0.18em`**（2026-10-14 八态图看出来）：
-   * 正常会话名 `.cs-peer` 在默认的 `tracked` 下靠**疏排 + 加粗**读成标题，
-   * 而这一类是独立选择器、不吃 `tracked` 那条规则的 `letter-spacing`。
-   * 漏了它 ⇒ 认不出那一态在版式上比正常态**少一个层级手段**，两张图并排
-   * 一眼就能看出疏排没有。层级既然不再靠字重，疏排就得两边都在。 */
+  .cs-peer,
   .cs-peer-unknown {
+    display: block;
+    font-size: 17px;
     font-weight: 600;
-    letter-spacing: 0.18em;
+    letter-spacing: 0.14em;
     color: var(--cs-ink);
   }
 
@@ -3561,22 +3481,11 @@
     -webkit-line-clamp: 3;
     line-clamp: 3;
     overflow: hidden;
-    margin-top: 3px;
-    /* ⚠ 引文是对方原话，属于内容层；2026-11-01 由 15px 升到 18px，
-     * 解决 2K 屏实看费劲。名字保留为较小的标签，层级由字号 + 颜色区分。
-     * ⚠ 用墨色而不是铅笔灰：墨 = 引人读的那一层（app.css 的分工），
-     *   铅笔灰留给机器给的标签。
-     *
-     * ⚠ 层级现在靠**字号 + 颜色**扛；字重两者都是 600。
-     *
-     * ⚠ **600，不是 400**（2026-10-14，票 24 实测定案，见设计规范 §4.3）：
-     *   仿宋字面细，降字重会让笔画断到 1px 以下。那条实测在 12px 下量的，
-     *   18px 只会更实 ⇒ 字重不跟着字号动。
-     * ⚠ 同样**不要写 500**：本机雅黑没有 500 字重，渲出来等于 400。 */
-    color: var(--cs-ink);
+    margin-top: 8px;
+    color: var(--cs-pencil-2);
     font-family: FangSong, STFangsong, '仿宋', serif;
     font-size: 18px;
-    font-weight: 600;
+    font-weight: 400;
   }
 
   /*  正文。**仿宋** 21px / 行高 1.5（§4.2a 定案，2026-10-14 由楷体改）。
@@ -3702,14 +3611,14 @@
      *      显式 `min-height: 43px`（覆盖了 flex 默认的 `min-height: auto`）+ `overflow-y: auto`，
      *      内容再高也只吃列内剩余的 334.3px 并在自己框里滚，推不动 `flex: none` 的 `.cs-pick`（top 恒为 451.7）。
      */
-    min-height: 43px;
+    min-height: 45px;
     overflow-y: auto;
     contain: layout style;
-    /* ⚠ **`padding: 8px 0`**：给正文位留**呼吸**（一行状态句上下各 8px）。
+    /* ⚠ **`padding: 8px 0`**：给正文位留**呼吸**。
      * ⚠ 2026-10-24 订正：这条 padding 当初是**给撕边纸片让位**的
      *   （正文位住着第一条候选，而撕边位图最外侧有一圈透明，滚动容器会把它裁掉）。
      *   ⇒ 正文位**不再住纸片**（票 92 续）⇒ 让位的理由没了，
-     *   留着 8px 现在只是呼吸留白。
+     *   留着现在只是呼吸留白。
      * ⇒ 撕边纸片全在 `.cs-actions` 里 ⇒ 那边那条 8px 才是给撕口让位的。
      */
     padding: 8px 0;
@@ -3767,9 +3676,9 @@
   .cs-draft-text {
     margin: 0;
     font-family: FangSong, STFangsong, '仿宋', serif;
-    font-size: 18px;
+    font-size: 19px;
     line-height: 1.5;
-    color: var(--cs-ink);
+    color: var(--cs-pencil);
     letter-spacing: 0.01em;
     animation: cs-draft-fade 160ms var(--cs-ease);
     /* ⚠ 2026-10-24 订正：正文位**不再显示那句要发出去的话**（票 92 续）
@@ -3847,19 +3756,8 @@
     color: var(--cs-ink);
   }
   .cs-sheet[data-peer-look='tracked'] .cs-peer {
-    /* ⚠ 2026-10-14：从 400 改成 **600 + 保留 0.18em 疏排**。
-     *
-     *  票 24 实测（11px 纯色底，`analysetype.py`）：`tracked` 原先的
-     *  **400 + 疏排**下，名字的 **≤1px 细笔画 = 77.8%**——和引文（79.6%）、
-     *  档位名（77.2%）一样读不出。疏排只改**字距**、不改**笔画粗细**，
-     *  扛得住"层级"却扛不住"小字细笔画"。
-     *  加到 600 后降到 **13.7%**，三行齐刷刷过线。
-     *
-     *  ⇒ 层级仍由**疏排 + 颜色**扛（见 `.cs-peer` 的 pencil-2 6.13:1 vs
-     *  引文 pencil 5.10:1），字重这层从"唯一手段"退成"辅助"。
-     *  500 在本机雅黑不存在、渲成 400，所以只能跳 600。 */
     font-weight: 600;
-    letter-spacing: 0.18em;
+    letter-spacing: 0.14em;
   }
   .cs-sheet[data-peer-look='kai'] .cs-peer {
     font-weight: 400;
@@ -3898,8 +3796,7 @@
   }
 
   .cs-draft-pending,
-  .cs-draft-idle,
-  .cs-draft-status {
+  .cs-draft-idle {
     /* 状态句一律铅笔灰：正文位现在**只放状态句**（票 92 续）⇒
        「有墨」不再意味着「这里有一句正文」，而是「这里有一句要告诉你的话」。
        ⚠ 字号在这一族里**不动**（四支共用 `.cs-draft-text` 的 18px，2026-11-01 由 15px 升）：

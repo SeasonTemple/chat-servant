@@ -135,6 +135,8 @@ export type ReadoutPayload = Phase & {
   peer?: string;
   /** 会话名闸开没开。关着时不该有任何候选，界面也不该假装在写。 */
   gate_open?: boolean;
+  /** 是否正在等待下一圈执行「重新锁定当前会话」（`watch::Readout::relock_pending`）。 */
+  relock_pending?: boolean;
   /**
    * 这一轮为什么这么判。带来源戳（`source.stamp`），误判要看得见。
    * 与每条 `Message.evidence` 同一条纪律：判据不可见 = 缺陷不可查。

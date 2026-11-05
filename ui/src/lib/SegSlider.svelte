@@ -40,7 +40,7 @@
   import type { Attachment } from 'svelte/attachments';
   import { slideTo } from './attach';
   import { DUR, prefersReducedMotion } from './motion';
-  import { MARK_VIEW, RING_LABEL_MARK, TICK_NESTED, TICK_VIEW } from '$lib/marks';
+  import { MARK_VIEW, RING_LABEL_MARK_BIG, TICK_NESTED, TICK_VIEW } from '$lib/marks';
   import { markShape } from '$lib/mark-shape.svelte';
   import PencilDefs from '$lib/PencilDefs.svelte';
   // ⚠⚠ **这里曾经 import `TICK_NESTED_BIG` / `TICK_VIEW` 并在药丸里画勾**，
@@ -214,8 +214,13 @@
       所以滑块走到哪，勾就跟到哪，不需要第二套状态。
     -->
     {#if markShape.current === 'ring'}
-      <svg class="cs-pill-tick" viewBox="0 0 {MARK_VIEW.w} {MARK_VIEW.h}" filter="url(#pencil)">
-        {#each RING_LABEL_MARK as layer (layer.d)}
+      <svg
+        class="cs-pill-tick cs-pill-ring"
+        viewBox="0 1 {MARK_VIEW.w} 28"
+        preserveAspectRatio="none"
+        filter="url(#pencil)"
+      >
+        {#each RING_LABEL_MARK_BIG as layer (layer.d)}
           <path d={layer.d} fill-opacity={layer.o} />
         {/each}
       </svg>
@@ -378,6 +383,10 @@
     overflow: visible;
   }
 
+  .cs-pill-ring {
+    width: 46px;
+    height: 28px;
+  }
   .cs-pill-tick path {
     fill: var(--cs-pencil-red);
   }

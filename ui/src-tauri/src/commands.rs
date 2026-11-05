@@ -1324,7 +1324,7 @@ pub fn tray_tooltip() -> String {
 }
 
 /// 应用名。tooltip 与窗口标题共用。
-const APP_NAME: &str = "副驾 · chat-servant";
+const APP_NAME: &str = "言侍";
 
 /// 托盘图标。`live` 为真时右下角盖一颗红点。
 ///
@@ -2647,6 +2647,10 @@ fn key_for(g: ModelGroup, groups: &ModelGroups, route: &Route) -> Option<String>
 pub(crate) fn transport_fingerprint() -> Option<u64> {
     let groups = with_state(|s| s.models.clone())?;
     Some(fingerprint_of_groups(&groups))
+}
+
+pub(crate) fn current_groups() -> Option<ModelGroups> {
+    with_state(|s| s.models.clone())
 }
 
 /// 按**当前格子与凭据**算出的传输指纹。

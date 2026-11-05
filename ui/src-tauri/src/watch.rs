@@ -951,8 +951,8 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
             s.relock = cfg.relock.clone();
             s.session_mode = cfg.session_mode.clone();
             s.source = cfg.source.clone();
-            // 重建传输要用的两样：**同一个**格子与**同一个**代理格。
-            let groups = cfg.groups.clone();
+            // 重建传输要用的两样：从全局状态同步最新格子（`apply_route` 拆格会换新 `ModelCell`）与同一个代理格。
+            let mut groups = cfg.groups.clone();
             let proxy = cfg.proxy.clone();
             // 当前这条传输的指纹。**变了就重建**——
             // 这就是「设置改动下一次生成立即生效，不用重启」那条的落点。
@@ -1010,12 +1010,17 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                 let fp = crate::commands::transport_fingerprint().unwrap_or(transport_fp);
                 if fp != transport_fp {
                     transport_fp = fp;
+                    if let Some(latest_groups) = crate::commands::current_groups() {
+                        groups = latest_groups;
+                    }
                     let (new_reasoner, ready) = crate::commands::build_reasoner(&groups, &proxy);
                     reasoner = new_reasoner;
                     // 计费那一档跟着**回复组**走（图片外发跟着起草走）。
                     s.provider = groups.llm.provider();
                     tracing::info!(
                         transport_ready = ready,
+                        decision = %groups.decision.provider().key(),
+                        llm = %groups.llm.provider().key(),
                         "传输已按当前设置重建（key 或厂商变了）"
                     );
                 }
@@ -1601,8 +1606,11 @@ fn phase_to_push(s: &Scratch, changed: bool, last_failed: bool) -> Option<Phase>
 fn gate_opened(s: &mut Scratch) -> bool {
     let just_opened = s.prev_gate_open == Some(false);
     s.prev_gate_open = Some(true);
-    // 面板不再是停泊态：锁定会话的消息可以显示了。
+    // 面板不再是停泊态：锁定会话的消息与候选可以显示了。
     s.parked_on_other = false;
+    if just_opened {
+        crate::commands::sync_candidates(&s.candidates);
+    }
     just_opened
 }
 
@@ -1756,7 +1764,15 @@ fn step(
         // `(None, None)` 也落到这里：连基准都还没有，更不能动手。
         (_, None) => false,
         (Some(a), Some((b, _))) => {
-            if a.is_same(b) {
+            // 像素指纹通过时，若两边都已认出非空会话名且名字不同，仍判定为不同会话（防同字数指纹碰撞）。
+            let same_name =
+                s.locked_name.is_empty() || s.peer.is_empty() || s.locked_name == s.peer;
+            if a.is_same(b) && same_name {
+                if !s.locked_name.is_empty() && s.peer != s.locked_name {
+                    s.peer = s.locked_name.clone();
+                } else if s.locked_name.is_empty() && !s.peer.is_empty() {
+                    s.locked_name = s.peer.clone();
+                }
                 true
             } else if s.session_mode.get() == SessionMode::Follow {
                 stash_current_bucket(s);
@@ -2032,7 +2048,11 @@ fn step(
         // 早先这里只推 `.text`，`speaker` 整个被丢掉——于是上层根本没有
         // 任何办法知道哪句是我说的，这条路在实现层面就不存在。
         // 同上：只收**新到的**我方消息。
-        s.mine.extend(chatservant_reason::voice::my_side(&novel));
+        s.mine.extend(
+            chatservant_reason::voice::my_side(&novel)
+                .into_iter()
+                .filter(|t| !crate::commands::sent_by_us(t)),
+        );
 
         // 裁剪。**摘要只在这里发生，且按块**（见 RESUMMARIZE_CHUNK）——
         // 这就是「惰性」的落点：不是每次都算，是攒够一块才算。
@@ -2205,7 +2225,12 @@ fn stash_current_bucket(s: &mut Scratch) {
     if s.history.is_empty() && s.messages.is_empty() && s.seen.is_empty() {
         return;
     }
-    if let Some(idx) = s.buckets.iter().position(|b| b.print.is_same(print)) {
+    if let Some(idx) = s.buckets.iter().position(|b| {
+        b.print.is_same(print)
+            && (b.locked_name.is_empty()
+                || s.locked_name.is_empty()
+                || b.locked_name == s.locked_name)
+    }) {
         s.buckets.remove(idx);
     }
     if s.buckets.len() >= MAX_SESSION_BUCKETS {
@@ -2231,7 +2256,10 @@ fn restore_or_bind_bucket(
     s.locked_print = Some(p.clone());
     s.parked_on_other = false;
     s.gate_open = true;
-    if let Some(idx) = s.buckets.iter().position(|b| b.print.is_same(p)) {
+    if let Some(idx) = s.buckets.iter().position(|b| {
+        b.print.is_same(p)
+            && (b.locked_name.is_empty() || s.peer.is_empty() || b.locked_name == s.peer)
+    }) {
         let bucket = s.buckets.remove(idx);
         s.locked_name = if s.peer.is_empty() {
             bucket.locked_name
@@ -2308,15 +2336,11 @@ struct GateOutcome {
 /// 切回来时原样恢复（`s.messages` 没被清过，见 [`apply_gate_closed`]）。
 fn blank_messages(phase: Phase) -> Phase {
     match phase {
-        Phase::Read { .. } => Phase::Read {
+        Phase::Read { .. } | Phase::Drafted { .. } => Phase::Read {
             messages: Vec::new(),
         },
         Phase::Drafting { .. } => Phase::Drafting {
             messages: Vec::new(),
-        },
-        Phase::Drafted { candidates, .. } => Phase::Drafted {
-            messages: Vec::new(),
-            candidates,
         },
         Phase::Failed { error, .. } => Phase::Failed {
             messages: Vec::new(),
@@ -2329,7 +2353,7 @@ fn apply_gate_closed(
     s: &mut Scratch,
     print: Option<&chatservant_perceive::identity::HeaderPrint>,
 ) -> GateOutcome {
-    s.candidates.clear();
+    crate::commands::sync_candidates(&[]);
     s.reason = match (&s.locked_print, print) {
         (Some(_), None) => format!(
             "没读出当前会话的头部，无法确认还是不是「{}」——本轮不动手",
@@ -2567,6 +2591,11 @@ fn refresh_peer(
     if let (Some(rect), Some(print)) = (head, print) {
         if let Some(name) = chatservant_perceive::read_peer_name(frame, print, rect, anchor.chat) {
             s.peer = name;
+        } else if let Some(ref locked) = s.locked_print
+            && locked.is_same(print)
+            && !s.locked_name.is_empty()
+        {
+            s.peer = s.locked_name.clone();
         }
     }
 }
@@ -4115,7 +4144,11 @@ mod tests {
             "锁定会话的历史被清掉了：{:?}",
             s.messages
         );
-        assert!(s.candidates.is_empty(), "候选也必须一起清");
+        assert_eq!(
+            s.candidates.len(),
+            1,
+            "锁定会话的候选在状态里也必须留着，切回时原样恢复"
+        );
         assert!(
             s.reason.contains("锁定的是「A」"),
             "面板要说明为什么不动手，实际：{}",
@@ -4123,7 +4156,7 @@ mod tests {
         );
 
         // ⚠⚠ **但推给界面的那份必须是空的**：屏幕上那块是别人的会话，
-        //   面板却挂着锁定会话的对话 = 停泊面板说假话（票 32）。
+        //   面板却挂着锁定会话的对话或候选 = 停泊面板说假话（票 32）。
         let out = snapshot(
             &s,
             None,
@@ -4138,7 +4171,11 @@ mod tests {
             "停泊期间推给界面的消息列表必须为空，实际：{:?}",
             out.phase.messages()
         );
-
+        assert!(
+            out.phase.candidates().is_empty(),
+            "停泊期间推给界面的候选列表必须为空，实际：{:?}",
+            out.phase.candidates()
+        );
         // **历史不能跟着清**：它是锁定会话的推理上下文，不是面板显示。
         //   清它等于把当前会话攒下的上下文也扔了。
         s.history.push("A 里的历史".into());
@@ -4418,9 +4455,9 @@ mod tests {
             parked.phase.messages()
         );
         assert!(
-            s.candidates.is_empty(),
-            "闸关着还挂着候选：{:?}",
-            s.candidates
+            parked.phase.candidates().is_empty(),
+            "闸关着却还向界面推候选：{:?}",
+            parked.phase.candidates()
         );
         assert_eq!(
             s.messages.len(),

@@ -211,21 +211,36 @@ impl HeaderPrint {
         if self.ink == 0 || other.ink == 0 || self.mask.len() != other.mask.len() {
             return 0.0;
         }
-        let (w, h) = (self.w, self.h);
+        let (w, h) = (self.w as isize, self.h as isize);
+        let a = &self.mask;
         let b = &other.mask;
-        let mut hit = 0u32;
-        for y in 0..h {
-            for x in 0..w {
-                if self.mask[y * w + x] != 1 {
-                    continue;
+        let r = SHIFT_TOLERANCE as isize;
+        let mut best_hit = 0u32;
+        // 吸收整块标题栏 ±1px 的刚体平移（锚点抖动时整行一起偏，不是每个墨像素各自朝八个方向乱跑）。
+        // 早先逐像素独立调 3×3 邻域 `near()` 等效于对 B 做 3×3 形态学膨胀，会把任意两个同字数
+        // （如都是三个汉字）的名字在 45×11 字块内膨胀成近乎实心块，导致不同三字联系人相似度 > 0.90。
+        for dy in -r..=r {
+            let y0 = (-dy).max(0);
+            let y1 = (h - dy).min(h);
+            for dx in -r..=r {
+                let x0 = (-dx).max(0);
+                let x1 = (w - dx).min(w);
+                let mut hit = 0u32;
+                for y in y0..y1 {
+                    let row_a = (y as usize) * (w as usize);
+                    let row_b = ((y + dy) as usize) * (w as usize);
+                    for x in x0..x1 {
+                        if a[row_a + x as usize] == 1 && b[row_b + (x + dx) as usize] == 1 {
+                            hit += 1;
+                        }
+                    }
                 }
-                // 同一格，或上下左右斜角有一格墨就算命中。
-                if near(b, w, h, x, y) {
-                    hit += 1;
+                if hit > best_hit {
+                    best_hit = hit;
                 }
             }
         }
-        (2.0 * hit as f64 / (self.ink + other.ink) as f64) as f32
+        (2.0 * f64::from(best_hit) / f64::from(self.ink + other.ink)) as f32
     }
 
     /// 两块区域是不是「同一个会话」。**阈值以下判为换人了。**
@@ -549,23 +564,6 @@ fn mode(hist: &[u32; 256]) -> Option<u8> {
         }
     }
     (best > 0).then_some(at as u8)
-}
-
-/// `(x,y)` 自身或周围 [`SHIFT_TOLERANCE`] 像素内有没有墨。
-fn near(mask: &[u8], w: usize, h: usize, x: usize, y: usize) -> bool {
-    let r = SHIFT_TOLERANCE;
-    let y0 = y.saturating_sub(r);
-    let y1 = (y + r).min(h - 1);
-    let x0 = x.saturating_sub(r);
-    let x1 = (x + r).min(w - 1);
-    for ny in y0..=y1 {
-        for nx in x0..=x1 {
-            if mask[ny * w + nx] == 1 {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// 小于这个像素数的区域不配当身份。太小的块连字都装不下。
@@ -1276,6 +1274,49 @@ mod tests {
             a.title_right(),
             b.title_right(),
             "同一会话、只挪了 3px，右边界却变了——裁出来的带子宽度会逐帧抖"
+        );
+    }
+
+    /// **两个同样是三个汉字、但笔画分布不同的联系人，绝不能因 ±1px 容错被判成同一个会话。**
+    ///
+    /// 2026-11-05 真机复现：两个不同的三字联系人都在 `x = 22..64, y = 0..11` 的同一块字框内，
+    /// 每个字格内笔画间隔约 2px。旧版 `similarity` 对每个像素独立查 3×3 邻域 `near()`，
+    /// 等效于把对方字块做 3×3 膨胀填满字格，使得两个完全不同的三字名字 Dice 高达 0.92+（> 0.90），
+    /// 导致切到新联系人时头部 OCR 已更新为新名字，会话身份闸却误判为「仍是上一会话」，
+    /// 把上一会话的消息流留在面板上并混入新会话。
+    #[test]
+    fn two_different_three_character_names_do_not_collide() {
+        let make_three_char = |phase: u32| {
+            frame_of(
+                |x, y| {
+                    let y = y as i32;
+                    let top = CHAT_Y0 + 18;
+                    if y >= top && y < top + 11 {
+                        for sx in [22u32, 36, 50] {
+                            let Some(cx) = x.checked_sub(sx).filter(|v| *v < 11) else {
+                                continue;
+                            };
+                            let cy = (y - top) as u32;
+                            // 模拟汉字在 11×11 字格内相隔 2px 的横竖笔画网格，两个名字笔画相位错开 1px
+                            let on = (cx + phase).is_multiple_of(3)
+                                || (cy + phase * 2).is_multiple_of(3);
+                            if on {
+                                return [225, 225, 229];
+                            }
+                        }
+                    }
+                    [30, 30, 31]
+                },
+                W,
+                H,
+            )
+        };
+        let (a, _) = HeaderPrint::discover(&make_three_char(0), chat_rect(), 300).unwrap();
+        let (b, _) = HeaderPrint::discover(&make_three_char(1), chat_rect(), 300).unwrap();
+        assert!(
+            !a.is_same(&b),
+            "两个笔画不同的三字联系人被误判成同一会话（similarity = {} >= 0.90）",
+            a.similarity(&b)
         );
     }
 }

@@ -115,7 +115,9 @@ pub fn render(samples: &[String]) -> String {
     if samples.is_empty() {
         return String::new();
     }
-    let mut s = String::from("[我自己平时的说话风格 · 照着这个语气写]\n");
+    let mut s = String::from(
+        "[我自己平时的说话风格 · 仅参考句长与自然度，切勿机械复读或照搬单条样本里的句尾词/口癖]\n",
+    );
     for line in samples {
         s.push_str(line);
         s.push('\n');
