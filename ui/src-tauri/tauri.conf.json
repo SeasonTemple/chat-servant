@@ -41,6 +41,24 @@
         "visible": false,
         "focus": false,
         "dragDropEnabled": false
+      },
+      {
+        "label": "tray",
+        "title": "言侍菜单",
+        "url": "/tray",
+        "width": 134,
+        "height": 204,
+        "minWidth": 134,
+        "minHeight": 204,
+        "resizable": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "visible": false,
+        "focus": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {

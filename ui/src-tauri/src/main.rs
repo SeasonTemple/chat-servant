@@ -120,6 +120,10 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::Focused(false)) && window.label() == "tray" {
+                let _ = window.hide();
+                return;
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // **默认行为是错的**：Tauri 收到关闭请求会退出整个应用。
                 // 而这个程序是 alwaysOnTop + skipTaskbar + 无边框——
@@ -134,10 +138,8 @@ fn main() {
                 let app = window.app_handle().clone();
                 let label = window.label().to_string();
                 match label.as_str() {
-                    // 识别画布：本来就有标题栏，关掉就关掉。
-                    "debug" => {}
                     // 主面板：按偏好分岔。
-                    _ => {
+                    "main" => {
                         let action = commands::close_action(&app);
                         // 落点必须进日志：这条分支在票 99 之前无条件 `hide_panel`，
                         // 于是「选了退出却关不掉」在日志里一个字都没有。
@@ -155,6 +157,13 @@ fn main() {
                             let _ = commands::hide_panel(app);
                             api.prevent_close();
                         }
+                    }
+                    // 识别画布：本来就有标题栏，关掉就关掉。
+                    "debug" => {}
+                    // 托盘纸面菜单：收起窗口而不销毁，下次右键直接原位弹出。
+                    _ => {
+                        let _ = window.hide();
+                        api.prevent_close();
                     }
                 }
             }
@@ -244,9 +253,8 @@ fn build_tray(app: &tauri::AppHandle) {
         }
     };
 
-    let built = TrayIconBuilder::with_id(commands::TRAY_ID)
+    let mut builder = TrayIconBuilder::with_id(commands::TRAY_ID)
         .icon(icon)
-        .menu(&menu)
         .tooltip(commands::tray_tooltip())
         // 菜单默认**只在右键**出现。左键不接管的话，用户点了图标
         // 什么都不会发生 —— 那个图标看着就是坏的。
@@ -273,25 +281,39 @@ fn build_tray(app: &tauri::AppHandle) {
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
-                button: MouseButton::Left,
+                button,
                 button_state: MouseButtonState::Up,
+                position,
                 ..
             } = event
             {
                 let app = tray.app_handle().clone();
-                let visible = app
-                    .get_webview_window("main")
-                    .and_then(|w| w.is_visible().ok())
-                    .unwrap_or(false);
-                if visible {
-                    let _ = commands::hide_panel(app);
-                } else {
-                    let _ = commands::show_panel(app);
+                match button {
+                    MouseButton::Left => {
+                        if let Some(tw) = app.get_webview_window("tray") {
+                            let _ = tw.hide();
+                        }
+                        let visible = app
+                            .get_webview_window("main")
+                            .and_then(|w| w.is_visible().ok())
+                            .unwrap_or(false);
+                        if visible {
+                            let _ = commands::hide_panel(app);
+                        } else {
+                            let _ = commands::show_panel(app);
+                        }
+                    }
+                    MouseButton::Right => {
+                        show_tray_menu(&app, position);
+                    }
+                    _ => {}
                 }
             }
-        })
-        .build(app);
-
+        });
+    if app.get_webview_window("tray").is_none() {
+        builder = builder.menu(&menu);
+    }
+    let built = builder.build(app);
     if let Err(e) = built {
         // 建不出来**不 panic**。程序照常跑，只是没有托盘 ——
         // 而此时设置里的「收进托盘」会被 `tray_available` 拒掉，
@@ -307,6 +329,45 @@ fn build_tray(app: &tauri::AppHandle) {
         commands::set_tray_ready(true);
         tracing::info!("托盘图标已就绪");
     }
+}
+
+/// 在托盘右键点击处弹出 118px 撕边棉纸菜单窗口（替代 Win32 原生 `#32768` 菜单）。
+fn show_tray_menu(app: &tauri::AppHandle, cursor: tauri::PhysicalPosition<f64>) {
+    let Some(w) = app.get_webview_window("tray") else {
+        return;
+    };
+    let scale = w.scale_factor().unwrap_or(1.0);
+    let pw = (134.0 * scale).round() as i32;
+    let ph = (204.0 * scale).round() as i32;
+    let gap = (6.0 * scale).round() as i32;
+    let cx = cursor.x.round() as i32;
+    let cy = cursor.y.round() as i32;
+
+    let mut x = cx - pw / 2;
+    let mut y = if cy > ph + gap {
+        cy - ph - gap
+    } else {
+        cy + gap
+    };
+
+    if let Ok(Some(mon)) = w.current_monitor() {
+        let mpos = mon.position();
+        let msize = mon.size();
+        let min_x = mpos.x + gap;
+        let max_x = mpos.x + (msize.width as i32) - pw - gap;
+        let min_y = mpos.y + gap;
+        let max_y = mpos.y + (msize.height as i32) - ph - gap;
+        if max_x >= min_x {
+            x = x.clamp(min_x, max_x);
+        }
+        if max_y >= min_y {
+            y = y.clamp(min_y, max_y);
+        }
+    }
+
+    let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+    let _ = w.show();
+    let _ = w.set_focus();
 }
 
 /// 装上日志 subscriber。

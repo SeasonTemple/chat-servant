@@ -923,6 +923,9 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn open_debug(app: AppHandle) -> Result<(), String> {
+    if let Some(tw) = app.get_webview_window("tray") {
+        let _ = tw.hide();
+    }
     show_window(&app, "debug")
 }
 
@@ -1250,6 +1253,9 @@ pub fn drag_window_by(app: AppHandle, dx: f64, dy: f64) -> Result<(), String> {
 /// 显示主面板（托盘菜单 →「显示面板」）。
 #[tauri::command]
 pub fn show_panel(app: AppHandle) -> Result<(), String> {
+    if let Some(tw) = app.get_webview_window("tray") {
+        let _ = tw.hide();
+    }
     let Some(w) = app.get_webview_window("main") else {
         return Err("主窗口不存在".into());
     };
@@ -1310,7 +1316,9 @@ pub fn refresh_tray() {
     }
     let tip = tray_tooltip();
     let _ = tray.set_tooltip(Some(&tip));
-    if let Ok(menu) = build_tray_menu(app) {
+    if app.get_webview_window("tray").is_none()
+        && let Ok(menu) = build_tray_menu(app)
+    {
         let _ = tray.set_menu(Some(menu));
     }
 }
