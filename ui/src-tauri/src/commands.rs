@@ -484,16 +484,32 @@ fn tier_name(d: Dispatch) -> String {
     .to_string()
 }
 
-/// 找微信主窗口的 `HWND`。找不到就**如实报找不到**。
-///
-/// `WindowHit::hwnd_raw` 故意是 `isize`（跨 crate 只传不透明整数），
-/// 这里按句柄反过来查窗口——`IsWindow` 是唯一可靠的验法：
-/// 句柄被复用时它立刻返回 false。
+/// 观察循环最近一次成功抓帧的目标窗口句柄（主窗口或独立小窗）。
+static ACTIVE_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// 记录当前观察循环锁定的微信窗口句柄，确保投递落向同一扇窗口。
+pub fn set_active_hwnd(hwnd_raw: isize) {
+    ACTIVE_HWND.store(hwnd_raw, Ordering::Relaxed);
+}
+
+/// 找当前活跃微信聊天窗口的 `HWND`（优先使用观察循环锁定的窗口，支持独立小窗）。
 fn find_wechat() -> Option<windows::Win32::Foundation::HWND> {
     use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
+    let active = ACTIVE_HWND.load(Ordering::Relaxed);
+    if active != 0 {
+        let hwnd = windows::Win32::Foundation::HWND(active as *mut core::ffi::c_void);
+        // SAFETY: `IsWindow` 仅向内核查询句柄在当前时刻是否为有效窗口，任意整数句柄均安全。
+        if unsafe { IsWindow(Some(hwnd)).as_bool() } {
+            return Some(hwnd);
+        }
+    }
+
     let surface = chatservant_capture::surface::WECHAT;
-    let hit = chatservant_capture::find_chat_window(&surface).ok()?;
+    let cands = chatservant_capture::enumerate_for(&surface).ok()?;
+    let hit = chatservant_capture::window::ordered_chat_candidates(&surface, &cands)
+        .into_iter()
+        .next()?;
     let hwnd = windows::Win32::Foundation::HWND(hit.hwnd_raw as *mut core::ffi::c_void);
     // SAFETY: `IsWindow` 仅向内核查询句柄在当前时刻是否为有效窗口，任意整数句柄均安全。
     unsafe { IsWindow(Some(hwnd)).as_bool().then_some(hwnd) }

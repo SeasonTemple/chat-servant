@@ -317,7 +317,25 @@ impl FrameSource {
     }
 }
 
-/// 读一帧。现场模式做完整的可读性检查；夹具模式只读文件。
+/// 抓指定窗口句柄的一帧并做可读性检查。
+fn capture_hwnd_frame(hwnd_raw: isize) -> Result<chatservant_capture::Frame, String> {
+    if let Some(why) = chatservant_capture::region::why_wgc_unreadable(hwnd_raw) {
+        return Err(why);
+    }
+    let frame =
+        capture_one_frame(hwnd_raw).map_err(
+            |e| match chatservant_capture::region::why_unreadable(hwnd_raw) {
+                Some(why) => format!("抓帧失败：{e}。{why}"),
+                None => format!("抓帧失败：{e}"),
+            },
+        )?;
+    if frame.is_black() {
+        return Err("抓到全黑帧——GPU 合成窗口的已知失败模式".into());
+    }
+    Ok(frame)
+}
+
+/// 读一帧。现场模式按 Z-Order 优先尝试前台独立小窗或主窗口；夹具模式只读文件。
 fn load_frame(
     src: &FrameSource,
     last_hwnd: &mut Option<isize>,
@@ -327,26 +345,37 @@ fn load_frame(
             .map_err(|e| format!("读夹具 {} 失败：{e}", path.display()));
     }
 
-    let hit = find_chat_window(&WECHAT).map_err(|e| {
-        tracing::debug!(error = %e, "找窗口失败");
+    let cands = chatservant_capture::window::enumerate_for(&WECHAT).map_err(|e| {
+        tracing::debug!(error = %e, "枚举微信窗口失败");
         "未检测到微信窗口".to_string()
     })?;
-    *last_hwnd = Some(hit.hwnd_raw);
-
-    if let Some(why) = chatservant_capture::region::why_wgc_unreadable(hit.hwnd_raw) {
-        return Err(why);
+    let ordered = chatservant_capture::window::ordered_chat_candidates(&WECHAT, &cands);
+    if ordered.is_empty() {
+        let _ = find_chat_window(&WECHAT).map_err(|e| {
+            tracing::debug!(error = %e, "找窗口失败");
+        });
+        return Err("未检测到微信窗口".to_string());
     }
 
-    let frame = capture_one_frame(hit.hwnd_raw).map_err(|e| {
-        match chatservant_capture::region::why_unreadable(hit.hwnd_raw) {
-            Some(why) => format!("抓帧失败：{e}。{why}"),
-            None => format!("抓帧失败：{e}"),
+    let mut last_err = String::from("未检测到微信窗口");
+    for (idx, hit) in ordered.iter().enumerate() {
+        match capture_hwnd_frame(hit.hwnd_raw) {
+            Ok(frame) => {
+                let is_main = Some(hit.title.as_str()) == WECHAT.main_title;
+                if !is_main
+                    && idx + 1 < ordered.len()
+                    && chatservant_capture::anchor::derive(&frame).is_err()
+                {
+                    continue;
+                }
+                *last_hwnd = Some(hit.hwnd_raw);
+                crate::commands::set_active_hwnd(hit.hwnd_raw);
+                return Ok(frame);
+            }
+            Err(e) => last_err = e,
         }
-    })?;
-    if frame.is_black() {
-        return Err("抓到全黑帧——GPU 合成窗口的已知失败模式".into());
     }
-    Ok(frame)
+    Err(last_err)
 }
 
 /// 循环的配置。组装真实传输需要 key，所以从这里进。

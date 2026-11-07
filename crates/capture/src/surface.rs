@@ -41,7 +41,17 @@ pub const WECHAT: ChatSurface = ChatSurface {
     label: "微信",
     exes: &["weixin.exe", "wechat.exe"],
     main_title: Some("微信"),
-    skip_titles: &[],
+    skip_titles: &[
+        "图片查看",
+        "朋友圈",
+        "视频号",
+        "搜一搜",
+        "看一看",
+        "小程序",
+        "设置",
+        "收藏",
+        "聊天记录",
+    ],
 };
 
 /// 当前支持的全部软件。接入新软件往这里加。

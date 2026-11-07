@@ -209,6 +209,36 @@ pub fn select_main(surface: &ChatSurface, candidates: &[WindowHit]) -> Option<Wi
         .map(|c| (*c).clone())
 }
 
+/// 按 Z-Order（从前到后）返回可作为聊天会话源的候选窗口序列（含主窗口与独立小窗）。
+///
+/// - 标题等于 `main_title` 的窗口中只保留面积最大的那一扇真主窗；
+/// - 标题不等于 `main_title`、非空、不在 `skip_titles` 中且面积 `>= 90_000`（`300x300`）
+///   的同进程窗口作为独立聊天小窗候选，按它们在 `EnumWindows` 中的前后层级排列。
+pub fn ordered_chat_candidates(surface: &ChatSurface, candidates: &[WindowHit]) -> Vec<WindowHit> {
+    let main_key = select_main(surface, candidates).map(|h| (h.hwnd_raw, h.title, h.area));
+    let mut out = Vec::new();
+    for c in candidates {
+        if !surface.matches_exe(&c.exe) {
+            continue;
+        }
+        if main_key.as_ref().is_some_and(|(hwnd, title, area)| {
+            c.hwnd_raw == *hwnd && c.title == *title && c.area == *area
+        }) {
+            out.push(c.clone());
+            continue;
+        }
+        let t = c.title.trim();
+        if !t.is_empty()
+            && Some(t) != surface.main_title
+            && !surface.skip_titles.contains(&t)
+            && c.area >= 90_000
+        {
+            out.push(c.clone());
+        }
+    }
+    out
+}
+
 /// 找到 `surface` 的主窗口。找不到时把候选列进错误里。
 pub fn find_chat_window(surface: &ChatSurface) -> Result<WindowHit, WindowError> {
     let candidates = enumerate_for(surface)?;
@@ -335,5 +365,18 @@ mod tests {
             let picked = select_main(&WECHAT, &cands).expect("应当选中");
             assert_eq!(picked.area, 1_057_500, "同标题里应当取面积最大的");
         }
+    }
+
+    #[test]
+    fn ordered_candidates_preserve_z_order_between_standalone_and_main() {
+        let standalone = hit("weixin.exe", "示例好友", 480_000);
+        let viewer = hit("weixin.exe", "图片查看", 9_000_000);
+        let main = hit("weixin.exe", "微信", 1_057_500);
+        let cands = vec![viewer, standalone.clone(), main.clone()];
+        let ordered = ordered_chat_candidates(&WECHAT, &cands);
+        assert_eq!(
+            ordered.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+            vec!["示例好友", "微信"]
+        );
     }
 }
