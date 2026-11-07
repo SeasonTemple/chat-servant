@@ -452,7 +452,34 @@ pub fn det_boxes(prob: &[f32], pw: usize, ph: usize, src_w: usize, src_h: usize)
         .chain(std::iter::repeat_n(false, n.saturating_sub(prob.len())))
         .collect();
 
-    // 连通域标记。显式栈而不是递归——概率图可以很大，递归会爆栈。
+    let comps = connected_components(&mask, pw, ph);
+
+    let mut boxes: Vec<Rect> = comps
+        .iter()
+        .filter(|(area, _, _, _, _)| *area >= DET_MIN_AREA)
+        .filter_map(|(_, mnx, mny, mxx, mxy)| {
+            unclip_component(*mnx, *mny, *mxx, *mxy, pw, ph, src_w, src_h)
+        })
+        .filter(|r| r.width() > 0 && r.height() > 0)
+        .collect();
+    // 这里**不**按 [`DET_MAX_BOXES`] 截断（2026-10-15 移走）。
+    // 截断必须发生在 [`merge_into_lines`] **之后**，理由见那条常量的说明：
+    // 在合并前截断，预算花的是**单字框**，一行十四个字就把 64 用光了，
+    // 真正该保留的整行反而被裁掉。实测真帧上 64 个框里混着整行与碎片，
+    // 一行文字被切成 12 个 12px 的框，逐行看全是「单字框」。
+    //
+    // 排序保持稳定的语义：读出来自上而下、自左而右。
+    boxes.sort_by_key(|b| (b.y0, b.x0));
+    boxes
+}
+
+// 连通域标记。显式栈而不是递归——概率图可以很大，递归会爆栈。
+fn connected_components(
+    mask: &[bool],
+    pw: usize,
+    ph: usize,
+) -> Vec<(usize, usize, usize, usize, usize)> {
+    let n = pw * ph;
     let mut labels = vec![0u32; n];
     let mut next = 1u32;
     let mut comps: Vec<(usize, usize, usize, usize, usize)> = Vec::new(); // (area, min_x, min_y, max_x, max_y)
@@ -489,83 +516,78 @@ pub fn det_boxes(prob: &[f32], pw: usize, ph: usize, src_w: usize, src_h: usize)
         }
         comps.push((area, mnx, mny, mxx, mxy));
     }
+    comps
+}
 
-    let mut boxes: Vec<Rect> = comps
-        .iter()
-        .filter(|(area, _, _, _, _)| *area >= DET_MIN_AREA)
-        .filter_map(|(_, mnx, mny, mxx, mxy)| {
-            let (w, h) = (mxx - mnx + 1, mxy - mny + 1);
-            if w < DET_MIN_W || h < DET_MIN_H {
-                return None;
-            }
-            // DB 的 `unclip`：把框**各向均匀**外扩 `d = 面积 × ratio / 周长`。
-            //
-            // ⚠ 2026-10-18 修，本仓第三个 OCR bug，也是最要命的那个。
-            // 早先用的是**旧版 PaddleOCR 的各向异性公式**
-            // `dx = w·r/√(wh)`、`dy = h·r/√(wh)`——纵向几乎不扩、横向猛扩。
-            // 参照实现 rapidocr 用的是 pyclipper 的多边形偏移：
-            //
-            // ```python
-            // distance = poly.area * unclip_ratio / poly.length
-            // offset.Execute(distance)        # 各方向都是 distance
-            // ```
-            //
-            // 差别有多大（概率图上 w=298、h=10 的一行）：
-            //
-            // | | 外扩量 | 框高（源图） |
-            // |---|---|---|
-            // | 旧公式 `h·1.5/√(wh)` | 纵 0.27 / 横 8.2 | **8** |
-            // | 多边形偏移 `area·1.6/perim` | 各向 7.74 | **18.9** |
-            //
-            // ⇒ 旧公式把字**削掉上下两半**，只把左右撑得很宽。
-            // rec 拿到的是半截字，真帧 CER 34%；把框纵向撑到两倍即回到 2.35%。
-            // 而 det 概率图两边一致（前景占比 1.42% vs 1.39%），
-            // 所以这不是检测不准，**纯粹是后处理的外扩公式不对**。
-            //
-            // 缺了 unclip 本身也不对：框会紧贴二值化阈值留下的笔画核心，
-            // 抗锯齿被削掉的那一圈永远补不回来。
-            let area_px = (w * h) as f64;
-            let perim = 2.0 * (w + h) as f64;
-            let d = area_px * DET_UNCLIP_RATIO as f64 / perim;
-            // 反缩放回原图坐标。用四舍五入而不是截断：截断会让最右/最下
-            // 的那一列像素永远落在框外。
-            //
-            // 概率图 → 原图，**一次换算把两段缩放串起来**：
-            //   原图 ──缩放到 det_w/det_h──▶ det 空间 ──模型内部下采样到 pw/ph──▶ 概率图
-            // 所以比例是 `src / prob`，**不是** `det / prob`。
-            //
-            // ⚠ 2026-10-18 订正：早先这里写的是 `det_w / pw`（＝1.0），理由是
-            // 「[`det_input`] 是原样拷贝，概率图与原图左上角逐像素对齐」。
-            // 而那条拷贝本身就是错的（它只补边、从不缩放），
-            // 于是这个写死的 1.0 **在替一个真正的 bug 打补丁**：
-            // 帧被塞进更大的画布却没缩放，det 在原生分辨率的小字上工作。
-            // [`det_input`] 修成真缩放之后，本式回到它被改之前的写法——
-            // 那次「修复」是在错误的成因上打的补丁。
-            let sx = src_w as f64 / pw as f64;
-            let sy = src_h as f64 / ph as f64;
-            let x0 = (((*mnx as f64) - d) * sx).round() as i32;
-            let y0 = (((*mny as f64) - d) * sy).round() as i32;
-            let x1 = (((*mxx as f64 + 1.0) + d) * sx).round() as i32;
-            let y1 = (((*mxy as f64 + 1.0) + d) * sy).round() as i32;
-            Some(Rect {
-                x0,
-                y0,
-                x1: x1.clamp(0, src_w as i32),
-                y1: y1.clamp(0, src_h as i32),
-            })
-        })
-        .filter(|r| r.width() > 0 && r.height() > 0)
-        .collect();
-
-    // 这里**不**按 [`DET_MAX_BOXES`] 截断（2026-10-15 移走）。
-    // 截断必须发生在 [`merge_into_lines`] **之后**，理由见那条常量的说明：
-    // 在合并前截断，预算花的是**单字框**，一行十四个字就把 64 用光了，
-    // 真正该保留的整行反而被裁掉。实测真帧上 64 个框里混着整行与碎片，
-    // 一行文字被切成 12 个 12px 的框，逐行看全是「单字框」。
+// DB 的 `unclip`：把框各向均匀外扩 `d = 面积 × ratio / 周长`，再反缩放回原图。
+#[allow(clippy::too_many_arguments)]
+fn unclip_component(
+    mnx: usize,
+    mny: usize,
+    mxx: usize,
+    mxy: usize,
+    pw: usize,
+    ph: usize,
+    src_w: usize,
+    src_h: usize,
+) -> Option<Rect> {
+    let (w, h) = (mxx - mnx + 1, mxy - mny + 1);
+    if w < DET_MIN_W || h < DET_MIN_H {
+        return None;
+    }
+    // ⚠ 2026-10-18 修，本仓第三个 OCR bug，也是最要命的那个。
+    // 早先用的是**旧版 PaddleOCR 的各向异性公式**
+    // `dx = w·r/√(wh)`、`dy = h·r/√(wh)`——纵向几乎不扩、横向猛扩。
+    // 参照实现 rapidocr 用的是 pyclipper 的多边形偏移：
     //
-    // 排序保持稳定的语义：读出来自上而下、自左而右。
-    boxes.sort_by_key(|b| (b.y0, b.x0));
-    boxes
+    // ```python
+    // distance = poly.area * unclip_ratio / poly.length
+    // offset.Execute(distance)        # 各方向都是 distance
+    // ```
+    //
+    // 差别有多大（概率图上 w=298、h=10 的一行）：
+    //
+    // | | 外扩量 | 框高（源图） |
+    // |---|---|---|
+    // | 旧公式 `h·1.5/√(wh)` | 纵 0.27 / 横 8.2 | **8** |
+    // | 多边形偏移 `area·1.6/perim` | 各向 7.74 | **18.9** |
+    //
+    // ⇒ 旧公式把字**削掉上下两半**，只把左右撑得很宽。
+    // rec 拿到的是半截字，真帧 CER 34%；把框纵向撑到两倍即回到 2.35%。
+    // 而 det 概率图两边一致（前景占比 1.42% vs 1.39%），
+    // 所以这不是检测不准，**纯粹是后处理的外扩公式不对**。
+    //
+    // 缺了 unclip 本身也不对：框会紧贴二值化阈值留下的笔画核心，
+    // 抗锯齿被削掉的那一圈永远补不回来。
+    let area_px = (w * h) as f64;
+    let perim = 2.0 * (w + h) as f64;
+    let d = area_px * DET_UNCLIP_RATIO as f64 / perim;
+    // 反缩放回原图坐标。用四舍五入而不是截断：截断会让最右/最下
+    // 的那一列像素永远落在框外。
+    //
+    // 概率图 → 原图，**一次换算把两段缩放串起来**：
+    //   原图 ──缩放到 det_w/det_h──▶ det 空间 ──模型内部下采样到 pw/ph──▶ 概率图
+    // 所以比例是 `src / prob`，**不是** `det / prob`。
+    //
+    // ⚠ 2026-10-18 订正：早先这里写的是 `det_w / pw`（＝1.0），理由是
+    // 「[`det_input`] 是原样拷贝，概率图与原图左上角逐像素对齐」。
+    // 而那条拷贝本身就是错的（它只补边、从不缩放），
+    // 于是这个写死的 1.0 **在替一个真正的 bug 打补丁**：
+    // 帧被塞进更大的画布却没缩放，det 在原生分辨率的小字上工作。
+    // [`det_input`] 修成真缩放之后，本式回到它被改之前的写法——
+    // 那次「修复」是在错误的成因上打的补丁。
+    let sx = src_w as f64 / pw as f64;
+    let sy = src_h as f64 / ph as f64;
+    let x0 = ((mnx as f64 - d) * sx).round() as i32;
+    let y0 = ((mny as f64 - d) * sy).round() as i32;
+    let x1 = ((mxx as f64 + 1.0 + d) * sx).round() as i32;
+    let y1 = ((mxy as f64 + 1.0 + d) * sy).round() as i32;
+    Some(Rect {
+        x0,
+        y0,
+        x1: x1.clamp(0, src_w as i32),
+        y1: y1.clamp(0, src_h as i32),
+    })
 }
 
 /// 把 det 的框按行合并（同一行相邻的框拼成一行）。
@@ -1500,9 +1522,28 @@ pub fn recognize_with(
     }
 
     // ── rec（按宽度分桶，同宽的框共用一张编译好的图）──
+    let mut lines = recognize_boxes(frame, chars, cache, &boxes)?;
+    lines.sort_by_key(|l| (l.rect.y0, l.rect.x0));
+
+    // `OcrLine::words` 不是空的：下游（`perceive`）按词级矩形做行内合并，
+    // 塞空 vec 会让那条路径静默什么都不做。
+    let text = lines
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(OcrText { text, lines })
+}
+
+fn recognize_boxes(
+    frame: &Frame,
+    chars: &[String],
+    cache: &BucketCache,
+    boxes: &[Rect],
+) -> Result<Vec<OcrLine>, PpError> {
     let mut lines: Vec<OcrLine> = Vec::new();
     let mut by_w: HashMap<usize, Vec<Rect>> = HashMap::new();
-    for b in &boxes {
+    for b in boxes {
         by_w.entry(rec_input_width(*b)).or_default().push(*b);
     }
     for (w, mut group) in by_w {
@@ -1532,16 +1573,7 @@ pub fn recognize_with(
         }
         lines.extend(decoded);
     }
-    lines.sort_by_key(|l| (l.rect.y0, l.rect.x0));
-
-    // `OcrLine::words` 不是空的：下游（`perceive`）按词级矩形做行内合并，
-    // 塞空 vec 会让那条路径静默什么都不做。
-    let text = lines
-        .iter()
-        .map(|l| l.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok(OcrText { text, lines })
+    Ok(lines)
 }
 
 /// 把 PP-OCR 的错误并进 [`OcrError`]，让调用方不必认识 PP-OCR。

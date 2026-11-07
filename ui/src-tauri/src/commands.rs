@@ -195,53 +195,6 @@ fn with_state<R>(f: impl FnOnce(&mut AppState) -> R) -> Option<R> {
     g.as_mut().map(f)
 }
 
-/// `probe_anchor` 的返回。前端只渲染，不自己算几何。
-#[derive(Serialize)]
-pub struct AnchorProbe {
-    pub ok: bool,
-    pub anchor: String,
-    /// 推不出来时的真实原因。**不假装成功**。
-    pub detail: String,
-}
-
-#[tauri::command]
-pub fn probe_anchor() -> AnchorProbe {
-    let Some(out) = with_state(|s| s.watcher.latest()).flatten() else {
-        return AnchorProbe {
-            ok: false,
-            anchor: String::new(),
-            detail: "观察循环还没跑出第一帧".into(),
-        };
-    };
-    if let Some(e) = out.error() {
-        return AnchorProbe {
-            ok: false,
-            anchor: String::new(),
-            detail: e.to_string(),
-        };
-    }
-    match out.anchor {
-        Some(a) => AnchorProbe {
-            ok: true,
-            anchor: format!(
-                "({},{})-({},{})",
-                a.chat.x0, a.chat.y0, a.chat.x1, a.chat.y1
-            ),
-            detail: format!(
-                "第 {} 圈｜{}｜OCR 累计 {} 次",
-                out.ticks,
-                out.counts.explain(),
-                out.ocr_calls
-            ),
-        },
-        None => AnchorProbe {
-            ok: false,
-            anchor: String::new(),
-            detail: format!("第 {} 圈：静默期，没有新消息", out.ticks),
-        },
-    }
-}
-
 /// 取最近一轮的完整快照。**前端刷新时用它对齐**，不轮询——用户手动触发。
 #[tauri::command]
 pub fn latest_readout() -> Option<Readout> {
@@ -290,21 +243,51 @@ pub struct DispatchReply {
     pub next_hint: Option<String>,
 }
 
+fn already_sent_this_round(candidate_id: &str, ticks: Option<u64>) -> Result<bool, DispatchReply> {
+    let Ok(mut g) = STATE.lock() else {
+        return Err(DispatchReply {
+            outcome: "Failed",
+            detail: "内部状态锁中毒".into(),
+            next_hint: None,
+        });
+    };
+    Ok(match (g.as_mut(), ticks) {
+        (Some(s), Some(t)) => s.armed.arm(candidate_id, t),
+        _ => false,
+    })
+}
+
+fn prepare_auto_dispatch(
+    candidate_id: &str,
+    tier: Dispatch,
+    act: Action,
+    ticks: Option<u64>,
+) -> Result<windows::Win32::Foundation::HWND, DispatchReply> {
+    match already_sent_this_round(candidate_id, ticks) {
+        Ok(true) => {
+            return Err(DispatchReply {
+                outcome: "NotSent",
+                detail: "这条候选本轮已经发送过了，没有重复发。".into(),
+                next_hint: None,
+            });
+        }
+        Err(reply) => return Err(reply),
+        Ok(false) => {}
+    }
+    debug_assert!(
+        sends_for_real(tier, act),
+        "走到自动发送分支却不是「Auto 档 + confirm 动作」"
+    );
+    find_wechat().ok_or_else(|| DispatchReply {
+        outcome: "Failed",
+        detail: "找不到微信窗口（已退出？换了进程名？）".into(),
+        next_hint: None,
+    })
+}
+
 #[tauri::command]
 pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
-    // **这里曾经收一个 `app: AppHandle`，只为 `app.emit(ARMED, …)`。**
-    //   2026-10-15 砍掉两段式之后那次 emit 就没有存在理由了（`armed`
-    //   的语义从「已装填」变成「本轮已发过」，而前端至今没有监听者——
-    //   见 `contract.rs` 的 `KNOWN_UNLISTENED`）。留着它就是留一个
-    //   只为不存在的功能存在的参数，`-D warnings` 会先把它喊出来。
-    //
-    // **动作先解析，再谈别的。**（票 26）
-    //
-    // `action` 从 IPC 过来是 `String`，任何字符串都能到这一行。以前这里是
-    // `action == "confirm"` 的字符串比较——拼错、传空、传中文，全都悄悄
-    // 落进最底下那条「只填入」的分支：**界面上写着一个看不懂的动作，
-    // 程序却替你按了最温和的那一下。** 现在它在进业务逻辑之前就失败，
-    // 而且失败的话是能直接给人看的。
+    // 动作先解析，再进入业务逻辑（票 26）。
     let act = match Action::parse(&action) {
         Ok(a) => a,
         Err(why) => {
@@ -316,13 +299,7 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
         }
     };
 
-    // **夹具模式下绝不投递。**
-    //
-    // 夹具模式是给「没有微信可用时改界面」用的，可它拿到的是**真微信的帧**。
-    // 这时候按「确认发送」会把内容打进**一个真的对话里**——
-    // 而这个人并没有要求发这条消息。
-    //
-    // 「我以为我在测试」不构成免责理由：不可逆动作的前提是**用户确实要它**。
+    // 夹具模式下绝不投递到任何真会话。
     let fixture_mode = std::env::var("CHATSERVANT_FIXTURE")
         .map(|p| !p.trim().is_empty())
         .unwrap_or(false);
@@ -331,9 +308,7 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
         return fixture_skipped_reply();
     }
 
-    // **档位从 Rust 自己的格子读，不看前端传什么。**
-    // 早先的签名收一个 `tier: String` 并直接采信——那等于把「这条消息
-    // 会不会真的发出去」交给一个前端可以随便改的字符串。
+    // 档位从 Rust 自己的格子读，不看前端传什么。
     let tier = with_state(|s| s.tier.get())
         .ok_or_else(|| "观察循环还没起来".to_string())
         .unwrap_or(Dispatch::Manual);
@@ -341,97 +316,21 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
     let mut d = Dispatcher::new();
     d.set_tier(tier);
 
-    // `Auto` 档：**点一下就填入并发送，没有第二次确认**（2026-10-15 决定，
-    // 砍掉的是 `Confirm`）。所以这里**没有装填分支**；`Arming` 在 `Auto` 档上
-    // 不再表示「人已装填过一次，等他再点」，而只挡「同一条被重复发」。
+    // Auto 档点一下即发送；Arming 只挡本轮重复发送。
     let ticks = with_state(|s| s.watcher.latest())
         .flatten()
         .map(|o| o.ticks);
     if tier == Dispatch::Auto && act == Action::Confirm {
-        let already = {
-            let Ok(mut g) = STATE.lock() else {
-                return DispatchReply {
-                    outcome: "Failed",
-                    detail: "内部状态锁中毒".into(),
-                    next_hint: None,
-                };
-            };
-            match g.as_mut() {
-                Some(s) => match ticks {
-                    Some(t) => s.armed.arm(&candidate_id, t),
-                    // 拿不到当前这轮（循环还没跑出快照）→ 不发。
-                    // 宁可让他等一轮，也不要在没有基准的情况下放行发送。
-                    None => false,
-                },
-                None => false,
-            }
+        let hwnd = match prepare_auto_dispatch(&candidate_id, tier, act, ticks) {
+            Ok(hwnd) => hwnd,
+            Err(reply) => return reply,
         };
-        if already {
-            // 防重：同一条候选、同一轮里已经发过一次 ⇒ 不许再发一遍。
-            // 重复发送撤不回来，所以这里直接拒绝而不是「再发一次看看」。
-            return DispatchReply {
-                outcome: "NotSent",
-                detail: "这条候选本轮已经发送过了，没有重复发。".into(),
-                next_hint: None,
-            };
-        }
-        //**这是整个代码库里唯一会把消息真的发出去的地方。**
-        // `sends_for_real` 把条件穷举成一句话；`debug_assert` 让
-        // 「哪天有人改了上面的分支条件」当场炸，而不是等发错一条消息。
-        debug_assert!(
-            sends_for_real(tier, act),
-            "走到自动发送分支却不是「Auto 档 + confirm 动作」"
-        );
-        let Some(hwnd) = find_wechat() else {
-            return DispatchReply {
-                outcome: "Failed",
-                detail: "找不到微信窗口（已退出？换了进程名？）".into(),
-                next_hint: None,
-            };
-        };
-        // 填入 + 发送**一步做完**。
-        //
-        // 这里必须用 `deliver_send`（填了再按回车），**不能**用老的
-        // `send_only`（只按回车、不写字）——那个路径成立的前提是
-        // 「上一步已经装填过了」，而 `Auto` 档**没有上一步**。
-        // 用错会得到「回执说发成功了，输入框里其实什么都没有」。
         let receipt = deliver_send(hwnd, &candidate_id);
-        // ⚠⚠ **这里必须留日志**（2026-10-24 补）。
-        //
-        // 这是**整个代码库里唯一会把消息真的按回车发出去**的地方，
-        // 而发出去的东西**撤不回来** ⇒ 事后若有人问「刚才那条发出去了吗」，
-        // **日志是唯一的证据**。
-        //
-        // 2026-10-24 真机实测的缺口：用户在 Auto 档点了一条候选，
-        // 面板上出现了回执「可能已经发出去了——不再自动重放，请自己看一眼
-        // 聊天窗口」⇒ 那**确实**走到了这里（按了回车），
-        // 而**日志里一个字都没有** ⇒ 只能靠人回忆。
-        //
-        // ⚠ 只打**回执文案**：`DeliveryReceipt::explain()` 里没有候选正文、
-        //   也没有聊天内容 ⇒ 不违反「截图不落盘 / 聊天内容不进日志」。
         tracing::info!(
             target: "chat_servant_app::commands",
             "Auto 档投递回执：{}",
             receipt.explain()
         );
-        //**这里原来紧跟着一句 `armed.disarm()`，2026-10-18 删掉了。**
-        //
-        // `arm` 在**发送被尝试之前**就把 `candidate_id` 记进了本轮
-        //（就是上面算 `already` 那一段）。发完立刻清掉，等于自己把刚写下的
-        // 记录擦掉：同一轮里再点同一条，`arm` 看到空表 ⇒ 放行 ⇒
-        // **同一条真消息发了第二遍**。而这个函数自己给用户的回执写着
-        // 「这条候选本轮已经发送过了，没有重复发」——说的和做的不一致。
-        //
-        // 它那句注释「这一轮的防重记录已经用掉了，换候选要重新 arm」
-        // 是**两段式时代的遗物**：那时 `Arming` 记的是「已装填」，
-        // 用完即弃是对的；2026-10-15 砍掉 `Confirm` 之后 `sent` 的语义
-        // 变成「本轮已发过」，用完即弃就从「防重」变成了「自废武功」。
-        //
-        // 换候选本来也不需要清：`sent` 存的是**一整个列表**，
-        // `arm(c1)` 只看 c1 在不在里面（`dedupe_survives_switching_to_another_candidate`）。
-        // 该作废的地方是**改档**（`apply_tier`）与**换轮**（`arm` 自己比 ticks）。
-        //
-        // 守卫：`send_path_guard_tests::sending_does_not_clear_the_record_it_just_wrote`。
         let next = d.next(receipt.clone(), 0);
         return DispatchReply {
             outcome: outcome_name(&receipt),
@@ -440,41 +339,20 @@ pub fn dispatch(candidate_id: String, action: String) -> DispatchReply {
         };
     }
 
-    // 改档就清掉防重记录：上一档的记录不能带到下一档。
-    // 放在这里而不是 `set_tier` 里：`set_tier` 是命令层的入口，
-    // 而这里保证「**任何一次投递动作**之前，防重状态都是干净的」。
+    // 改档或 Manual 投递前清掉防重记录：上一档的记录不能带到下一档。
     if let Ok(mut g) = STATE.lock()
         && let Some(s) = g.as_mut()
     {
         s.armed.disarm();
     }
 
-    // 走到这里只有一种可能：**tier == Manual**。
-    //
-    // `Auto` 在上面那个分支里已经 return 了（填入并发送）。
-    // 所以这一行的 `send` 恒为 `false`，而且**恒为 false 是对的**。
-    //
-    //别把它「简化」成 `deliver(&candidate_id)` 或加个可变参数——
-    // 这个 `false` 是硬约束第 5 条的落点之一。两档之下，
-    // **整个代码库里按下回车的地方只剩一处**：`inject::fill_and_send`
-    // 末尾的 `press_enter`，而它**只被 `deliver_send` 调**——
-    // 也就是只被上面那个 `Auto` 分支调。少一个条件就多一条
-    // 「不问就发出去」的路。
-    //
-    // 2026-10-15 之前这里写的是 `inject::send_only`。那个函数已经删了，
-    // 因为砍掉两段式之后它失去了存在理由：它的全部价值是「上一步装填过了，
-    // 这一步只补一个回车」，而 `Auto` 档没有上一步。它只剩注释不改，
-    // 下一个读的人会以为它是当前路径。
+    // 走到这里只有 tier == Manual，send 恒为 false（硬约束第 5 条）。
     let receipt = deliver(&candidate_id, false);
-    // 同上：**投递动作必须留痕**（Manual 档是「只填入、没发」，
-    // 但用户按过一次候选就是按过 ⇒ 事后要能查）。
     tracing::info!(
         target: "chat_servant_app::commands",
         "Manual 档投递回执：{}",
         receipt.explain()
     );
-
-    // 让档位守则跑一遍，把下一步该做什么告诉前端。
     let next = d.next(receipt.clone(), 0);
     DispatchReply {
         outcome: outcome_name(&receipt),
@@ -2295,6 +2173,67 @@ pub fn probe_key(group: String) -> Result<bool, String> {
 /// 有 key 就组装**真实传输**（genai 的 `HttpReasoner`）；
 /// 没 key 就用**明确标注的预置传输**——界面上每条候选都带「预置」字样，
 /// 不能让用户以为模型接通了。
+type LatestPair = std::sync::Arc<(Mutex<Option<Readout>>, std::sync::Condvar)>;
+
+fn publish_readout(app: &AppHandle, out: Readout) {
+    let mut peer_changed = false;
+    if let Ok(mut g) = STATE.lock()
+        && let Some(s) = g.as_mut()
+    {
+        s.candidates = out.candidates().to_vec();
+        if s.peer != out.peer {
+            s.peer = out.peer.clone();
+            peer_changed = true;
+        }
+    }
+    if peer_changed {
+        refresh_tray();
+    }
+    if let Err(e) = app.emit(crate::contract::events::READOUT, &out) {
+        tracing::error!(
+            target: "chat_servant::pump",
+            "readout 推不到界面：{e}（tick={}）",
+            out.ticks
+        );
+    }
+    tracing::info!(
+        target: "chat_servant::pump",
+        "emit readout tick={} phase={} peer={:?} messages={} candidates={}",
+        out.ticks,
+        out.phase.key(),
+        out.peer,
+        out.messages().len(),
+        out.candidates().len()
+    );
+}
+
+fn spawn_readout_pump(app: AppHandle, latest_pair: LatestPair) {
+    std::thread::Builder::new()
+        .name("cs-pump".into())
+        .spawn(move || {
+            let mut last: Option<(u64, &'static str)> = None;
+            loop {
+                let next_out = {
+                    let g = latest_pair.0.lock().unwrap_or_else(|e| e.into_inner());
+                    let (g, _) = latest_pair
+                        .1
+                        .wait_timeout_while(g, std::time::Duration::from_secs(2), |opt| {
+                            opt.as_ref().map(|o| (o.ticks, o.phase.key())) == last
+                        })
+                        .unwrap_or_else(|e| e.into_inner());
+                    g.clone()
+                };
+                if let Some(out) = next_out
+                    && last != Some((out.ticks, out.phase.key()))
+                {
+                    last = Some((out.ticks, out.phase.key()));
+                    publish_readout(&app, out);
+                }
+            }
+        })
+        .ok();
+}
+
 pub fn start(app: &AppHandle) {
     let (cfg, models, proxy) = build_loop_config();
     let transport_ready = cfg.transport_ready;
@@ -2326,73 +2265,7 @@ pub fn start(app: &AppHandle) {
         });
     }
 
-    // 快照 → Tauri 事件。UI 只监听，不轮询。
-    let app2 = app.clone();
-    std::thread::Builder::new()
-        .name("cs-pump".into())
-        .spawn(move || {
-            // 去重指纹是 **(ticks, 阶段)**，不是单独的 ticks。
-            //
-            // 少一半会出事：观察循环一轮里会推**两帧**——先「读到消息、
-            // 正在起草」，再「起草完成」。这两帧的 `ticks` 相同，
-            // 只比 `ticks` 的话第二帧（真正有候选的那帧）会被当成重复吃掉，
-            // 界面永远停在「正在起草」。
-            //
-            // 两半缺一不可：`ticks` 覆盖「同一阶段内容变了」，
-            // `phase` 覆盖「同一 ticks 里阶段变了」。
-            let mut last: Option<(u64, &'static str)> = None;
-            loop {
-                let next_out = {
-                    let g = latest_pair.0.lock().unwrap_or_else(|e| e.into_inner());
-                    let (g, _) = latest_pair
-                        .1
-                        .wait_timeout_while(g, std::time::Duration::from_secs(2), |opt| {
-                            opt.as_ref().map(|o| (o.ticks, o.phase.key())) == last
-                        })
-                        .unwrap_or_else(|e| e.into_inner());
-                    g.clone()
-                };
-                if let Some(out) = next_out
-                    && last != Some((out.ticks, out.phase.key()))
-                {
-                    last = Some((out.ticks, out.phase.key()));
-
-                    // **先把锁释放，再刷托盘。**
-                    // `refresh_tray` 要读 `STATE` 拿档位和会话名，
-                    // 在锁里调它就是自己等自己 —— 直接死锁。
-                    let mut peer_changed = false;
-                    if let Ok(mut g) = STATE.lock()
-                        && let Some(s) = g.as_mut()
-                    {
-                        s.candidates = out.candidates().to_vec();
-                        if s.peer != out.peer {
-                            s.peer = out.peer.clone();
-                            peer_changed = true;
-                        }
-                    }
-                    if peer_changed {
-                        refresh_tray();
-                    }
-                    if let Err(e) = app2.emit(crate::contract::events::READOUT, &out) {
-                        tracing::error!(
-                            target: "chat_servant::pump",
-                            "readout 推不到界面：{e}（tick={}）",
-                            out.ticks
-                        );
-                    }
-                    tracing::info!(
-                        target: "chat_servant::pump",
-                        "emit readout tick={} phase={} peer={:?} messages={} candidates={}",
-                        out.ticks,
-                        out.phase.key(),
-                        out.peer,
-                        out.messages().len(),
-                        out.candidates().len()
-                    );
-                }
-            }
-        })
-        .ok();
+    spawn_readout_pump(app.clone(), latest_pair);
 
     if transport_ready {
         tracing::info!("观察循环已启动（真实模型传输）");
@@ -4299,13 +4172,9 @@ mod tla_and_bdd_verification {
             );
         }
 
-        fn next_states(&self) -> Vec<Self> {
-            let candidates = ["c0", "c1"];
-            let peers = ["PeerA", "PeerB"];
-            let mut out = Vec::new();
-
+        fn push_click_transitions(&self, out: &mut Vec<Self>) {
             // Action 1 & 2: UserClickManual(c) / UserClickAuto(c) —— 调生产函数 sends_for_real + Arming::arm
-            for c in candidates {
+            for c in ["c0", "c1"] {
                 let tier = if self.tier_is_auto {
                     Dispatch::Auto
                 } else {
@@ -4334,7 +4203,9 @@ mod tla_and_bdd_verification {
                 }
                 out.push(next);
             }
+        }
 
+        fn push_tier_and_session_transitions(&self, out: &mut Vec<Self>) {
             // Action 3: UserSetTier(next_tier) —— 调生产函数 apply_tier（仅在档位真变时 disarm 并推进 epoch）
             for next_tier in Dispatch::ALL {
                 let mut next = self.clone();
@@ -4374,7 +4245,9 @@ mod tla_and_bdd_verification {
                 next.armed.clear();
                 out.push(next);
             }
+        }
 
+        fn push_screen_and_message_transitions(&self, out: &mut Vec<Self>) {
             // Action 5: OcrSelfEchoArrives(c) —— 自己发出的话回显在屏幕，不触发起草
             for &c in &self.sent_registry {
                 let _ = c;
@@ -4391,7 +4264,7 @@ mod tla_and_bdd_verification {
             }
 
             // Action 7: SwitchScreen(p) —— 切走或切回微信会话
-            for p in peers {
+            for p in ["PeerA", "PeerB"] {
                 let mut next = self.clone();
                 next.screen_peer = p;
                 next.panel_messages = if p == next.locked_peer { 1 } else { 0 };
@@ -4410,7 +4283,13 @@ mod tla_and_bdd_verification {
                 next.armed.clear();
                 out.push(next);
             }
+        }
 
+        fn next_states(&self) -> Vec<Self> {
+            let mut out = Vec::new();
+            self.push_click_transitions(&mut out);
+            self.push_tier_and_session_transitions(&mut out);
+            self.push_screen_and_message_transitions(&mut out);
             out
         }
     }

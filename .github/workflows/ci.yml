@@ -191,6 +191,10 @@ jobs:
         shell: pwsh
         run: python -m pip install --disable-pip-version-check -r requirements-ocr.txt
 
+      - name: "Gate 7b-2b | complexity check"
+        shell: pwsh
+        run: ./scripts/check-complexity.ps1
+
       # ## 7b-3：先查 cache，没命中才联网
       #
       # ⚠⚠ **不要每次 PR 都从网络下 30 MB。** 权重来自 **modelscope.cn**

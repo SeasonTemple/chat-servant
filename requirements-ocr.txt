@@ -24,3 +24,4 @@
 # 这个文件必须钉版本、且那个 job 必须开 pip 缓存。
 rapidocr==3.10.0
 omegaconf==2.4.0
+lizard==1.25.1

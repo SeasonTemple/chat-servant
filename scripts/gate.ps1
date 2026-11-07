@@ -166,6 +166,7 @@ $script:laneOf = @{
   'version consistency'    = 'cheap'
   'opaque backgrounds'     = 'cheap'
   'forensics hook guard'   = 'cheap'
+  'complexity check'       = 'cheap'
   # ── cargo 轨：共用 target/ 构建锁，只能串行 ──
   'cargo fmt --all --check'  = 'rust'
   'cargo clippy -D warnings' = 'rust'
@@ -544,6 +545,7 @@ Step "opaque backgrounds" -Action { & pwsh -NoProfile -File "$PSScriptRoot\check
 # 2026-10-18 实测 `grep -n 'githooks' scripts/gate.ps1` 零命中，
 # 它整个消失或被改坏，门禁一声不吭（同「守卫本身没有守卫」那一族）。
 Step "forensics hook guard" -Action { & pwsh -NoProfile -File "$PSScriptRoot\check-hooks.ps1" 2>&1 | Select-Object -Last 15 }
+Step "complexity check" -Action { & pwsh -NoProfile -File "$PSScriptRoot\check-complexity.ps1" 2>&1 | Select-Object -Last 20 }
 
 # ---- 以下按轨分派 ----
 

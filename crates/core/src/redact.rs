@@ -72,6 +72,49 @@ fn mask_url_credentials(text: &str) -> String {
     let n = bytes.len();
     let mut i = 0;
 
+    while i < n {
+        if bytes[i] == ':' && i + 2 < n && bytes[i + 1] == '/' && bytes[i + 2] == '/' {
+            i = mask_url_authority(&bytes, i, &mut out);
+            continue;
+        }
+        if let Some(val_start) = sensitive_param_value_start(&bytes, i) {
+            let mut val_end = val_start;
+            while val_end < n && !is_url_value_delimiter(bytes[val_end]) {
+                val_end += 1;
+            }
+            out.extend(bytes[i..val_start].iter());
+            out.push_str(MASK);
+            i = val_end;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+fn mask_url_authority(bytes: &[char], scheme: usize, out: &mut String) -> usize {
+    let authority_start = scheme + 3;
+    let mut authority_end = authority_start;
+    while authority_end < bytes.len() && !is_url_authority_delimiter(bytes[authority_end]) {
+        authority_end += 1;
+    }
+    if let Some(at_rel) = bytes[authority_start..authority_end]
+        .iter()
+        .rposition(|c| *c == '@')
+    {
+        let credential_end = authority_start + at_rel;
+        out.extend(bytes[scheme..authority_start].iter());
+        // 凭据段要跳过而不是推进去，否则 MASK 后仍然留着原文。
+        out.push_str(MASK);
+        out.push('@');
+        return credential_end + 1;
+    }
+    out.extend(bytes[scheme..authority_end].iter());
+    authority_end
+}
+
+fn sensitive_param_value_start(bytes: &[char], start: usize) -> Option<usize> {
     // 查询参数里那几个「名字里带 token/key/secret」的参数
     const SENSITIVE_PARAMS: [&str; 6] = [
         "api_key",
@@ -81,70 +124,25 @@ fn mask_url_credentials(text: &str) -> String {
         "secret",
         "password",
     ];
+    SENSITIVE_PARAMS.iter().find_map(|param| {
+        let len = param.chars().count();
+        // 必须紧跟 '='，否则 `tokenizer` 之类会被误伤
+        (start + len < bytes.len()
+            && bytes[start..start + len].iter().collect::<String>() == *param
+            && bytes[start + len] == '=')
+            .then_some(start + len + 1)
+    })
+}
 
-    while i < n {
-        // ① 用户名密码段：形如 scheme://<creds>@host
-        if bytes[i] == ':' && i + 2 < n && bytes[i + 1] == '/' && bytes[i + 2] == '/' {
-            let scheme_start = i + 3;
-            // 段结束于 '/'、'?'、'#' 或任何分隔符
-            let mut seg_end = scheme_start;
-            while seg_end < n
-                && !matches!(
-                    bytes[seg_end],
-                    '/' | '?' | '#' | ' ' | '"' | '\'' | '\n' | '\r' | '>' | ')'
-                )
-            {
-                seg_end += 1;
-            }
-            // 这一段里最后一个 '@' 之前就是凭据
-            if let Some(at_rel) = bytes[scheme_start..seg_end].iter().rposition(|c| *c == '@') {
-                let cred_end = scheme_start + at_rel;
-                out.extend(bytes[i..scheme_start].iter());
-                // **凭据段要跳过而不是推进去**。写反的话 MASK 会被插在
-                // 凭据**后面**，看起来像掩了码、其实原文还在——测试当场抓到。
-                out.push_str(MASK);
-                out.push('@');
-                i = cred_end + 1;
-                continue;
-            }
-            out.extend(bytes[i..seg_end].iter());
-            i = seg_end;
-            continue;
-        }
+fn is_url_authority_delimiter(c: char) -> bool {
+    matches!(
+        c,
+        '/' | '?' | '#' | ' ' | '"' | '\'' | '\n' | '\r' | '>' | ')'
+    )
+}
 
-        // ② 查询参数
-        let mut matched: Option<(usize, usize)> = None;
-        for p in SENSITIVE_PARAMS {
-            let pl = p.chars().count();
-            if i + pl < n && bytes[i..i + pl].iter().collect::<String>() == p {
-                let next = bytes[i + pl];
-                // 必须紧跟 '='，否则 `tokenizer` 之类会被误伤
-                if next == '=' {
-                    matched = Some((p.chars().count(), i + pl + 1));
-                    break;
-                }
-            }
-        }
-        if let Some((_, val_start)) = matched {
-            let mut val_end = val_start;
-            while val_end < n
-                && !matches!(
-                    bytes[val_end],
-                    '&' | '#' | ' ' | '"' | '\'' | '\n' | '\r' | '>' | ')'
-                )
-            {
-                val_end += 1;
-            }
-            out.extend(bytes[i..val_start].iter());
-            out.push_str(MASK);
-            i = val_end;
-            continue;
-        }
-
-        out.push(bytes[i]);
-        i += 1;
-    }
-    out
+fn is_url_value_delimiter(c: char) -> bool {
+    matches!(c, '&' | '#' | ' ' | '"' | '\'' | '\n' | '\r' | '>' | ')')
 }
 
 #[cfg(test)]

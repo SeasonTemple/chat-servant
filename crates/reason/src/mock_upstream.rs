@@ -162,6 +162,26 @@ fn accept_before(listener: &TcpListener, deadline: Instant) -> Option<std::net::
 ///   相关的后果（见 `MockUpstream::new` 里的注释）。
 ///   `Ok(0)` 才是真的没戏了：对端关了，那不是抖动。
 fn read_request(stream: &mut std::net::TcpStream, deadline: Instant) -> Option<Seen> {
+    let mut buf = read_request_head(stream, deadline)?;
+    let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0);
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+    let mut lines = head.lines();
+    let start = lines.next()?;
+    let mut parts = start.split_whitespace();
+    let method = parts.next()?.to_string();
+    let path = parts.next()?.to_string();
+    let (headers, len) = parse_request_headers(lines);
+    let body = read_request_body(stream, deadline, buf.split_off(head_end + 4), len);
+
+    Some(Seen {
+        method,
+        path,
+        headers,
+        body: String::from_utf8_lossy(&body).to_string(),
+    })
+}
+
+fn read_request_head(stream: &mut std::net::TcpStream, deadline: Instant) -> Option<Vec<u8>> {
     let mut buf: Vec<u8> = Vec::new();
     let mut byte = [0u8; 1];
     // 请求头到空行为止。逐字节读是因为 HTTP/1.1 的头没有长度前缀，
@@ -183,14 +203,10 @@ fn read_request(stream: &mut std::net::TcpStream, deadline: Instant) -> Option<S
             return None;
         }
     }
-    let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0);
-    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
-    let mut lines = head.lines();
-    let start = lines.next()?;
-    let mut parts = start.split_whitespace();
-    let method = parts.next()?.to_string();
-    let path = parts.next()?.to_string();
+    Some(buf)
+}
 
+fn parse_request_headers(lines: std::str::Lines<'_>) -> (Vec<(String, String)>, usize) {
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut len = 0usize;
     for line in lines {
@@ -204,8 +220,15 @@ fn read_request(stream: &mut std::net::TcpStream, deadline: Instant) -> Option<S
         }
         headers.push((k, v));
     }
+    (headers, len)
+}
 
-    let mut body = buf[head_end + 4..].to_vec();
+fn read_request_body(
+    stream: &mut std::net::TcpStream,
+    deadline: Instant,
+    mut body: Vec<u8>,
+    len: usize,
+) -> Vec<u8> {
     while body.len() < len {
         if Instant::now() >= deadline {
             break;
@@ -221,13 +244,7 @@ fn read_request(stream: &mut std::net::TcpStream, deadline: Instant) -> Option<S
     // 读不满就照实记下短的。**不要**猜内容——记一个截断的体，
     // 至少让断言打印出来的东西是人能看懂的。
     body.truncate(len);
-
-    Some(Seen {
-        method,
-        path,
-        headers,
-        body: String::from_utf8_lossy(&body).to_string(),
-    })
+    body
 }
 
 /// 组一个 HTTP/1.1 响应。

@@ -76,11 +76,29 @@ pub struct Separator {
 const SAMPLE_STEP: u32 = 4;
 
 /// 取证一帧。纯读，不改任何像素。
+/// 取证一帧。纯读，不改任何像素。
 pub fn analyze(frame: &Frame) -> Diagnostics {
     let (w, h) = (frame.width(), frame.height());
     let step = SAMPLE_STEP.max(1);
+    let top_colors = sampled_top_colors(frame, w, h, step);
 
-    // --- 直方图：面板底色是全图最常见的颜色 ---
+    // 右边是聊天区，联系人列表在左边，两者底色不同。
+    let panel_bg = dominant_in_band(frame, w / 2, w, 0, h, step).unwrap_or(0);
+    let columns = analyze_columns(frame, w, h, step, panel_bg);
+    let rows = analyze_rows(frame, w, h, step, &columns);
+
+    Diagnostics {
+        width: w,
+        height: h,
+        top_colors,
+        step,
+        columns,
+        rows,
+    }
+}
+
+// 面板底色是全图最常见的颜色。
+fn sampled_top_colors(frame: &Frame, w: u32, h: u32, step: u32) -> Vec<(u32, usize, f64)> {
     let mut hist: HashMap<u32, usize> = HashMap::new();
     let mut y = 0u32;
     while y < h {
@@ -100,12 +118,11 @@ pub fn analyze(frame: &Frame) -> Diagnostics {
         .collect();
     top_colors.sort_by_key(|a| std::cmp::Reverse(a.1));
     top_colors.truncate(8);
+    top_colors
+}
 
-    // --- 面板底色：右半边最常见的颜色 ---
-    // 右边是聊天区，联系人列表在左边，两者底色不同。
-    let panel_bg = dominant_in_band(frame, w / 2, w, 0, h, step).unwrap_or(0);
-
-    // --- 列占比：聊天区底色在每列的纵向覆盖率 ---
+// 聊天区底色在每列的纵向覆盖率。
+fn analyze_columns(frame: &Frame, w: u32, h: u32, step: u32, panel_bg: u32) -> ColumnProfile {
     let (y_lo, y_hi) = (h / 4, h * 3 / 4);
     let cols = (w as usize).div_ceil(step as usize);
     let mut dominance = vec![0f32; cols];
@@ -141,15 +158,24 @@ pub fn analyze(frame: &Frame) -> Diagnostics {
             biggest_jump_at = Some(c);
         }
     }
+    ColumnProfile {
+        dominance,
+        panel_bg,
+        first_dense,
+        last_dense,
+        biggest_jump_at,
+        biggest_jump_delta,
+    }
+}
 
-    // --- 行：底色占比 + 候选分隔线 ---
-    // 只在面板的横向范围内统计，否则联系人列表的分割线会混进来。
-    let (x_lo, x_hi) = match (first_dense, last_dense) {
+// 只在面板的横向范围内统计，否则联系人列表的分割线会混进来。
+fn analyze_rows(frame: &Frame, w: u32, h: u32, step: u32, columns: &ColumnProfile) -> RowProfile {
+    let (x_lo, x_hi) = match (columns.first_dense, columns.last_dense) {
         (Some(a), Some(b)) if b > a => (a as u32 * step, (b as u32 + 1) * step),
         _ => (w / 2, w),
     };
     let rows = (h as usize).div_ceil(step as usize);
-    let mut dominance_r = vec![0f32; rows];
+    let mut dominance = vec![0f32; rows];
     let mut separators = Vec::new();
     let mut r = 0usize;
     while r < rows {
@@ -161,14 +187,14 @@ pub fn analyze(frame: &Frame) -> Diagnostics {
             if let Some(p) = frame.pixel(x, y) {
                 *row_hist.entry(quantize(p)).or_insert(0) += 1;
                 sampled += 1;
-                if quantize(p) == panel_bg {
-                    dominance_r[r] += 1.0;
+                if quantize(p) == columns.panel_bg {
+                    dominance[r] += 1.0;
                 }
             }
             x += step;
         }
         if sampled > 0 {
-            dominance_r[r] /= sampled as f32;
+            dominance[r] /= sampled as f32;
             // flatness = 众数占比 - 次众数占比。越小越"平"。
             let mut counts: Vec<usize> = row_hist.values().copied().collect();
             counts.sort_unstable_by(|a, b| b.cmp(a));
@@ -180,30 +206,15 @@ pub fn analyze(frame: &Frame) -> Diagnostics {
                 .max_by_key(|&(_, &n)| n)
                 .map(|(&q, _)| q)
                 .unwrap_or(0);
-            if flatness < 0.15 && color != panel_bg {
+            if flatness < 0.15 && color != columns.panel_bg {
                 separators.push(Separator { y, flatness, color });
             }
         }
         r += 1;
     }
-
-    Diagnostics {
-        width: w,
-        height: h,
-        top_colors,
-        step,
-        columns: ColumnProfile {
-            dominance,
-            panel_bg,
-            first_dense,
-            last_dense,
-            biggest_jump_at,
-            biggest_jump_delta,
-        },
-        rows: RowProfile {
-            dominance: dominance_r,
-            separators,
-        },
+    RowProfile {
+        dominance,
+        separators,
     }
 }
 
@@ -293,9 +304,28 @@ pub fn render(d: &Diagnostics) -> String {
         ));
     }
 
-    // 低占比的连续行 = 一整条"非面板底色"横带。头部栏、输入框都在这里。
-    // 早先用「整行单色」判据是错的：这两条带里都有文字，顶众数与次众数
-    // 的差不会小，于是一条都检不出来。看行底色占比才看得见。
+    render_low_background_bands(d, &mut s);
+
+    s.push_str("\n== 候选横向分隔线（整行单色且非面板底色）==\n");
+    if d.rows.separators.is_empty() {
+        s.push_str("  （没有）\n");
+    } else {
+        s.push_str(&format!("  共 {} 条：\n", d.rows.separators.len()));
+        for sep in d.rows.separators.iter().take(24) {
+            let c = unquantize(sep.color);
+            s.push_str(&format!(
+                "  y={:>4}  平坦度={:.3}  rgb({:>3},{:>3},{:>3})\n",
+                sep.y, sep.flatness, c[0], c[1], c[2]
+            ));
+        }
+    }
+    s
+}
+
+// 低占比的连续行 = 一整条"非面板底色"横带。头部栏、输入框都在这里。
+// 早先用「整行单色」判据是错的：这两条带里都有文字，顶众数与次众数
+// 的差不会小，于是一条都检不出来。看行底色占比才看得见。
+fn render_low_background_bands(d: &Diagnostics, s: &mut String) {
     let mut bands: Vec<(u32, u32)> = Vec::new();
     let mut cur: Option<(u32, u32)> = None;
     for (r, &v) in d.rows.dominance.iter().enumerate() {
@@ -318,19 +348,4 @@ pub fn render(d: &Diagnostics) -> String {
     for (y0, y1) in bands.iter().take(16) {
         s.push_str(&format!("  y {:>4} .. {:>4}   高 {:>3}\n", y0, y1, y1 - y0));
     }
-
-    s.push_str("\n== 候选横向分隔线（整行单色且非面板底色）==\n");
-    if d.rows.separators.is_empty() {
-        s.push_str("  （没有）\n");
-    } else {
-        s.push_str(&format!("  共 {} 条：\n", d.rows.separators.len()));
-        for sep in d.rows.separators.iter().take(24) {
-            let c = unquantize(sep.color);
-            s.push_str(&format!(
-                "  y={:>4}  平坦度={:.3}  rgb({:>3},{:>3},{:>3})\n",
-                sep.y, sep.flatness, c[0], c[1], c[2]
-            ));
-        }
-    }
-    s
 }

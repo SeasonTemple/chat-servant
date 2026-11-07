@@ -67,6 +67,7 @@ $witness = [ordered]@{
   'license consistency'   = 'check-license.ps1'
   'opaque backgrounds'    = 'check-opaque-bg.ps1'
   'forensics hook guard'  = 'check-hooks.ps1'
+  'complexity check'      = 'check-complexity.ps1'
 }
 
 foreach ($p in @($gatePath, $ciPath)) {

@@ -422,23 +422,31 @@ fn the_synthetic_corpus_keeps_its_characters() {
             .collect::<Vec<_>>()
     );
 
-    let mut total_edits = 0usize;
-    let mut total_chars = 0usize;
-    let mut exact_lines = 0usize;
-    let mut recalled_lines = 0usize;
-    let mut counted_lines = 0usize;
-    let mut geom_miss = 0usize;
-    let mut examples: Vec<String> = Vec::new();
+    let stats = evaluate_picked(&picked, &dir);
+    report_corpus_accuracy(stats, full);
+}
 
-    // ⚠ 自证注入（S4 已验完，此处已恢复）：Y_SHIFT = 0。
-    // 原注入：把识别框的 y 整体推出答案带 ⇒ 几何漏检 100%。
+#[derive(Default)]
+struct CorpusStats {
+    total_edits: usize,
+    total_chars: usize,
+    exact_lines: usize,
+    recalled_lines: usize,
+    counted_lines: usize,
+    geom_miss: usize,
+    examples: Vec<String>,
+}
 
-    for im in &picked {
+// ⚠ 自证注入（S4 已验完，此处已恢复）：Y_SHIFT = 0。
+// 原注入：把识别框的 y 整体推出答案带 ⇒ 几何漏检 100%。
+fn evaluate_picked(picked: &[&TruthImage], dir: &Path) -> CorpusStats {
+    let mut stats = CorpusStats::default();
+    for im in picked {
         let png = repo_root().join(&im.path);
         let frame = load_frame(&png);
 
         // ⚠ 回落在这里必须炸，见本测试的 doc comment。
-        let ocr = recognize_in(&dir, &frame).unwrap_or_else(|| {
+        let ocr = recognize_in(dir, &frame).unwrap_or_else(|| {
             panic!(
                 "{}：PP-OCR 回落了（recognize_in 返回 None）。\
                  ⚠ 回落只打 WARN、退出码仍是 0，不主动炸就等于全绿。",
@@ -457,64 +465,75 @@ fn the_synthetic_corpus_keeps_its_characters() {
             .collect();
 
         for gl in &im.lines {
-            let g = normalize(&gl.text);
-            if g.is_empty() {
-                // 归一化后为空的标准答案不该进分母——留着会让分母虚高、CER 假性变好。
-                // 与 `bench_lib.score` 同一处理。
-                continue;
-            }
-            let band = Rect {
-                x0: gl.band[0],
-                y0: gl.band[1],
-                x1: gl.band[2],
-                y1: gl.band[3],
-            };
-            let j = judge(&g, band, &hyps);
-            total_edits += j.edits;
-            total_chars += g.chars().count();
-            counted_lines += 1;
-            if j.edits == 0 {
-                exact_lines += 1;
-            }
-            if j.sim >= MISS_SIM {
-                recalled_lines += 1;
-            }
-            if j.geom_missed {
-                geom_miss += 1;
-            }
-            if j.edits > 0 && examples.len() < MAX_EXAMPLES {
-                let note = if j.geom_missed {
-                    "几何漏检：引擎没提出这一行".to_string()
-                } else {
-                    first_diff(&g, &j.hyp)
-                };
-                examples.push(format!(
-                    "  [{}] 真值 {:?}\n      识别 {:?}（编辑 {}）—— {}",
-                    im.id, gl.text, j.hyp, j.edits, note
-                ));
-            }
+            evaluate_truth_line(im, gl, &hyps, &mut stats);
         }
     }
+    stats
+}
 
-    let cer = total_edits as f64 / total_chars as f64;
-    let exact_rate = exact_lines as f64 / counted_lines as f64;
-    let recall = recalled_lines as f64 / counted_lines as f64;
-    let geom_rate = geom_miss as f64 / counted_lines as f64;
+fn evaluate_truth_line(im: &TruthImage, gl: &TruthLine, hyps: &[Hyp], stats: &mut CorpusStats) {
+    let g = normalize(&gl.text);
+    if g.is_empty() {
+        // 归一化后为空的标准答案不该进分母——留着会让分母虚高、CER 假性变好。
+        // 与 `bench_lib.score` 同一处理。
+        return;
+    }
+    let band = Rect {
+        x0: gl.band[0],
+        y0: gl.band[1],
+        x1: gl.band[2],
+        y1: gl.band[3],
+    };
+    let j = judge(&g, band, hyps);
+    stats.total_edits += j.edits;
+    stats.total_chars += g.chars().count();
+    stats.counted_lines += 1;
+    if j.edits == 0 {
+        stats.exact_lines += 1;
+    }
+    if j.sim >= MISS_SIM {
+        stats.recalled_lines += 1;
+    }
+    if j.geom_missed {
+        stats.geom_miss += 1;
+    }
+    if j.edits > 0 && stats.examples.len() < MAX_EXAMPLES {
+        let note = if j.geom_missed {
+            "几何漏检：引擎没提出这一行".to_string()
+        } else {
+            first_diff(&g, &j.hyp)
+        };
+        stats.examples.push(format!(
+            "  [{}] 真值 {:?}\n      识别 {:?}（编辑 {}）—— {}",
+            im.id, gl.text, j.hyp, j.edits, note
+        ));
+    }
+}
+
+fn report_corpus_accuracy(stats: CorpusStats, full: bool) {
+    let cer = stats.total_edits as f64 / stats.total_chars as f64;
+    let exact_rate = stats.exact_lines as f64 / stats.counted_lines as f64;
+    let recall = stats.recalled_lines as f64 / stats.counted_lines as f64;
+    let geom_rate = stats.geom_miss as f64 / stats.counted_lines as f64;
+    let scope = if full {
+        "全量 60 张"
+    } else {
+        "默认子集"
+    };
 
     eprintln!(
-        "合成语料字准（{}）：行 {counted_lines}，字符 {total_chars}，\
-         编辑 {total_edits}，**CER {:.2}%**，召回 {:.0}%，逐行全对 {:.0}%，几何漏检 {:.0}%",
-        if full {
-            "全量 60 张"
-        } else {
-            "默认子集"
-        },
+        "合成语料字准（{}）：行 {}，字符 {}，\
+         编辑 {}，**CER {:.2}%**，召回 {:.0}%，逐行全对 {:.0}%，几何漏检 {:.0}%",
+        scope,
+        stats.counted_lines,
+        stats.total_chars,
+        stats.total_edits,
         cer * 100.0,
         recall * 100.0,
         exact_rate * 100.0,
         geom_rate * 100.0,
     );
-    for e in &examples {
+    for e in &stats.examples {
         eprintln!("{e}");
     }
 
@@ -528,9 +547,11 @@ fn the_synthetic_corpus_keeps_its_characters() {
     let mut violations: Vec<String> = Vec::new();
     if cer > CER_CEILING {
         violations.push(format!(
-            "· CER {:.2}% 超过线 {:.2}%（行 {counted_lines} / 字符 {total_chars}）",
+            "· CER {:.2}% 超过线 {:.2}%（行 {} / 字符 {}）",
             cer * 100.0,
             CER_CEILING * 100.0,
+            stats.counted_lines,
+            stats.total_chars,
         ));
     }
     if exact_rate < EXACT_FLOOR {
@@ -551,10 +572,11 @@ fn the_synthetic_corpus_keeps_its_characters() {
     }
     if geom_rate > GEOM_MISS_CEILING {
         violations.push(format!(
-            "· 几何漏检 {:.0}% 超过线 {:.0}% —— 引擎有 {geom_miss} 行根本没提出框。\
+            "· 几何漏检 {:.0}% 超过线 {:.0}% —— 引擎有 {} 行根本没提出框。\
              ⚠ 这与字准是两回事：字准要调 rec/后处理，漏检要调 det 阈值",
             geom_rate * 100.0,
             GEOM_MISS_CEILING * 100.0,
+            stats.geom_miss,
         ));
     }
 
@@ -564,14 +586,10 @@ fn the_synthetic_corpus_keeps_its_characters() {
          ⚠ 读数见上。**先确认不是回落**——回落只打 WARN、退出码仍是 0；\
          真回落时 `recognize_in` 是 None、跑字之前就 panic 了。\n\
          错例（最多 {MAX_EXAMPLES} 行）：\n{}",
-        if full {
-            "全量 60 张"
-        } else {
-            "默认子集"
-        },
+        scope,
         violations.len(),
         violations.join("\n"),
-        examples.join("\n"),
+        stats.examples.join("\n"),
     );
 }
 

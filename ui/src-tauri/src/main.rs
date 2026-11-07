@@ -9,116 +9,99 @@ mod watch;
 
 use tauri::{Emitter, Manager, WindowEvent};
 
+fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    configure_models_dir(app);
+    mark_fixture_window(app);
+    commands::set_app_handle(app.handle().clone());
+    build_tray(app.handle());
+    commands::start(app.handle());
+    commands::refresh_tray();
+    if let Some(win) = app.get_webview_window("main") {
+        spawn_clickthrough(win);
+    }
+    Ok(())
+}
+
+fn configure_models_dir(app: &tauri::App) {
+    let Ok(dir) = app.path().resource_dir() else {
+        return;
+    };
+    let models = dir.join(BUNDLED_MODELS_DIR);
+    chatservant_capture::ocr_pp::set_models_dir(&models);
+    if !models
+        .join(chatservant_capture::ocr_pp_pipeline::KEYS_FILE)
+        .is_file()
+    {
+        tracing::info!(
+            dir = %models.display(),
+            "装包里没有 PP-OCR 权重；选到 PP-OCR 时会退回 Windows OCR"
+        );
+    }
+}
+
+fn mark_fixture_window(app: &tauri::App) {
+    let fixture_mode = std::env::var("CHATSERVANT_FIXTURE")
+        .map(|p| !p.trim().is_empty())
+        .unwrap_or(false);
+    if !fixture_mode {
+        return;
+    }
+    let base = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .map(|w| w.title.clone())
+        .unwrap_or_else(|| "言侍".to_string());
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_title(&format!("{base} · 夹具模式"));
+    }
+    tracing::info!("夹具模式：窗口标题已标注「· 夹具模式」；投递一律拒投");
+}
+
+fn spawn_clickthrough(win: tauri::WebviewWindow) {
+    std::thread::Builder::new()
+        .name("cs-clickthrough".into())
+        .spawn(move || {
+            let mut ignoring = false;
+            loop {
+                if !win.is_visible().unwrap_or(true) {
+                    if ignoring && win.set_ignore_cursor_events(false).is_ok() {
+                        ignoring = false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    continue;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                update_clickthrough(&win, &mut ignoring);
+            }
+        })
+        .ok();
+}
+
+fn update_clickthrough(win: &tauri::WebviewWindow, ignoring: &mut bool) {
+    let (Ok(cur), Ok(pos), Ok(scale)) = (
+        win.cursor_position(),
+        win.outer_position(),
+        win.scale_factor(),
+    ) else {
+        return;
+    };
+    let lx = (cur.x - f64::from(pos.x)) / scale;
+    let ly = (cur.y - f64::from(pos.y)) / scale;
+    let in_outer = (0.0..=380.0).contains(&lx) && (0.0..=560.0).contains(&ly);
+    let on_paper = (16.0..=364.0).contains(&lx) && (4.0..=508.0).contains(&ly);
+    let want_ignore = in_outer && !on_paper;
+    if want_ignore != *ignoring && win.set_ignore_cursor_events(want_ignore).is_ok() {
+        *ignoring = want_ignore;
+    }
+}
+
 fn main() {
     init_tracing();
     tauri::Builder::default()
-        .setup(|app| {
-            // PP-OCR 的权重目录**先定下来**，因为它决定后面所有 OCR 能不能跑。
-            //
-            // 只有 Tauri 知道资源目录在哪儿（`resource_dir()`），
-            // 而 `chatservant_capture` 不依赖 Tauri——所以在这儿告知它，
-            // 而不是让 capture 自己猜「exe 旁边还是上一级」。
-            //
-            // ⚠ 装包里**没有**权重时不要当成错误：那条路会退回
-            //   `Windows.Media.Ocr`，功能不受影响（见 ADR-0002）。
-            //   所以这里只记一条日志，不 panic。
-            if let Ok(dir) = app.path().resource_dir() {
-                let models = dir.join(BUNDLED_MODELS_DIR);
-                chatservant_capture::ocr_pp::set_models_dir(&models);
-                if !models
-                    .join(chatservant_capture::ocr_pp_pipeline::KEYS_FILE)
-                    .is_file()
-                {
-                    // 只说**事实**（这里没有权重），不说**后果**。
-                    // 早先这里写死「走 Windows.Media.Ocr」——那是默认引擎
-                    // 恰好为 WinRT 时的后果；一旦翻了默认，这句话就开始撒谎，
-                    // 而撒谎的告警比没有告警更坏：人会照着它去找一个不存在的原因。
-                    tracing::info!(
-                        dir = %models.display(),
-                        "装包里没有 PP-OCR 权重；选到 PP-OCR 时会退回 Windows OCR"
-                    );
-                }
-            }
-            // ⚠⚠ **夹具模式在窗口标题上标出来**（2026-10-25，用户反馈
-            // 「这些无意义的文字不要再摆了」）。
-            //
-            // 夹具模式（`CHATSERVANT_FIXTURE`）下，Rust 会**拒投**
-            // （`outcome = "FixtureSkipped"`，见 `commands::dispatch`），
-            // 而前端**不在面板上摆那句话**（`DISPATCH_SILENT`）。
-            // ⇒ 开发者怎么知道「我点的这一下根本没发出去」？
-            //   ⇒ 标在**窗口标题**上：标题是操作系统那一层，
-            //   不占面板的任何一个像素 ⇒ 面板是产品面，标题是开发态。
-            //
-            // ⚠ 标题从**配置**里取再拼，不硬编码「副驾」——
-            //   硬编码就会在改 `tauri.conf.json` 之后悄悄对不上。
-            let fixture_mode = std::env::var("CHATSERVANT_FIXTURE")
-                .map(|p| !p.trim().is_empty())
-                .unwrap_or(false);
-            if fixture_mode {
-                let base = app
-                    .config()
-                    .app
-                    .windows
-                    .iter()
-                    .find(|w| w.label == "main")
-                    .map(|w| w.title.clone())
-                    .unwrap_or_else(|| "言侍".to_string());
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.set_title(&format!("{base} · 夹具模式"));
-                }
-                tracing::info!("夹具模式：窗口标题已标注「· 夹具模式」；投递一律拒投");
-            }
-            // 托盘**先建**，因为「关闭时 = 收进托盘」这一档要验证托盘存在。
-            // 顺序反了的话，设置页可能在托盘建好之前就把那一档存进去了，
-            // 于是「收起」这个动作没有落点。
-            // **handle 必须最先记下来。** 托盘刷新和「档位变了要刷托盘」
-            // 都从全局取它，晚一步的话第一次刷新就会静默失败。
-            commands::set_app_handle(app.handle().clone());
-            build_tray(app.handle());
-            // 观察循环**在这里起**。它自己的线程里跑
-            // （WGC 会话对象不是 Send，不能跨线程 move）。
-            commands::start(app.handle());
-            // 建完循环再刷一次托盘 —— 循环一上来就知道档位和会话名了。
-            commands::refresh_tray();
-            if let Some(win) = app.get_webview_window("main") {
-                std::thread::Builder::new()
-                    .name("cs-clickthrough".into())
-                    .spawn(move || {
-                        let mut ignoring = false;
-                        loop {
-                            if !win.is_visible().unwrap_or(true) {
-                                if ignoring && win.set_ignore_cursor_events(false).is_ok() {
-                                    ignoring = false;
-                                }
-                                std::thread::sleep(std::time::Duration::from_millis(250));
-                                continue;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(40));
-                            let (Ok(cur), Ok(pos), Ok(scale)) = (
-                                win.cursor_position(),
-                                win.outer_position(),
-                                win.scale_factor(),
-                            ) else {
-                                continue;
-                            };
-                            let lx = (cur.x - f64::from(pos.x)) / scale;
-                            let ly = (cur.y - f64::from(pos.y)) / scale;
-                            let in_outer =
-                                (0.0..=380.0).contains(&lx) && (0.0..=560.0).contains(&ly);
-                            let on_paper =
-                                (16.0..=364.0).contains(&lx) && (4.0..=508.0).contains(&ly);
-                            let want_ignore = in_outer && !on_paper;
-                            if want_ignore != ignoring
-                                && win.set_ignore_cursor_events(want_ignore).is_ok()
-                            {
-                                ignoring = want_ignore;
-                            }
-                        }
-                    })
-                    .ok();
-            }
-            Ok(())
-        })
+        .setup(setup_app)
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::Focused(false)) && window.label() == "tray" {
                 let _ = window.hide();
@@ -169,7 +152,6 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            commands::probe_anchor,
             commands::latest_readout,
             commands::debug_pane,
             commands::dispatch,
@@ -219,8 +201,61 @@ fn main() {
 /// 意味着系统层面没有任何可见的关闭入口。托盘是唯一的。
 ///
 /// `tray-icon` 这个 feature 一直开着，只是**一次都没被用上**。
+fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
+    match event.id().as_ref() {
+        "show" => {
+            let _ = commands::show_panel(app.clone());
+        }
+        "relock" => {
+            let _ = app.emit(events::MENU_RELOCK, ());
+        }
+        "settings" => {
+            let _ = commands::open_settings(app.clone());
+        }
+        "debug" => {
+            let _ = commands::open_debug(app.clone());
+        }
+        "quit" => {
+            let _ = commands::quit_app(app.clone());
+        }
+        _ => {}
+    }
+}
+
+fn handle_tray_click(tray: &tauri::tray::TrayIcon, event: tauri::tray::TrayIconEvent) {
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+    let TrayIconEvent::Click {
+        button,
+        button_state: MouseButtonState::Up,
+        position,
+        ..
+    } = event
+    else {
+        return;
+    };
+    let app = tray.app_handle().clone();
+    match button {
+        MouseButton::Left => {
+            if let Some(tw) = app.get_webview_window("tray") {
+                let _ = tw.hide();
+            }
+            let visible = app
+                .get_webview_window("main")
+                .and_then(|w| w.is_visible().ok())
+                .unwrap_or(false);
+            if visible {
+                let _ = commands::hide_panel(app);
+            } else {
+                let _ = commands::show_panel(app);
+            }
+        }
+        MouseButton::Right => show_tray_menu(&app, position),
+        _ => {}
+    }
+}
+
 fn build_tray(app: &tauri::AppHandle) {
-    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    use tauri::tray::TrayIconBuilder;
 
     // **图标必须显式给。**（实测 2026-10-10）
     //
@@ -259,57 +294,8 @@ fn build_tray(app: &tauri::AppHandle) {
         // 菜单默认**只在右键**出现。左键不接管的话，用户点了图标
         // 什么都不会发生 —— 那个图标看着就是坏的。
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "show" => {
-                let _ = commands::show_panel(app.clone());
-            }
-            "relock" => {
-                // 和面板上那颗按钮走**同一条 Rust 路径**：
-                // 事件 → 前端 → `relock_session`。两处不各写一遍。
-                let _ = app.emit(events::MENU_RELOCK, ());
-            }
-            "settings" => {
-                let _ = commands::open_settings(app.clone());
-            }
-            "debug" => {
-                let _ = commands::open_debug(app.clone());
-            }
-            "quit" => {
-                let _ = commands::quit_app(app.clone());
-            }
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button,
-                button_state: MouseButtonState::Up,
-                position,
-                ..
-            } = event
-            {
-                let app = tray.app_handle().clone();
-                match button {
-                    MouseButton::Left => {
-                        if let Some(tw) = app.get_webview_window("tray") {
-                            let _ = tw.hide();
-                        }
-                        let visible = app
-                            .get_webview_window("main")
-                            .and_then(|w| w.is_visible().ok())
-                            .unwrap_or(false);
-                        if visible {
-                            let _ = commands::hide_panel(app);
-                        } else {
-                            let _ = commands::show_panel(app);
-                        }
-                    }
-                    MouseButton::Right => {
-                        show_tray_menu(&app, position);
-                    }
-                    _ => {}
-                }
-            }
-        });
+        .on_menu_event(handle_menu_event)
+        .on_tray_icon_event(handle_tray_click);
     if app.get_webview_window("tray").is_none() {
         builder = builder.menu(&menu);
     }

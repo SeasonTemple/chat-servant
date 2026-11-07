@@ -35,23 +35,6 @@ use serde::{Deserialize, Serialize};
 pub mod events {
     /// 每轮观察的结果。面板的全部内容都从这里来。
     pub const READOUT: &str = "readout";
-    /// 「已装填」——**历史事件**，原属 `Confirm` 档两次点击之间的那一步。
-    ///
-    ///**2026-10-15 起它不再被发出。** `Confirm` 取消之后没有「第二次点击」
-    ///   了，那一步随之消失；现在这条消息**没有任何 `emit` 调用**。
-    ///   常量留着是因为它在 `KNOWN_UNLISTENED` 里占一个可见的位置——
-    ///   删掉它等于假装这条事件从未存在过。
-    ///
-    ///**2026-10-14 实测：前端也没有监听者。** 旧面板删掉时
-    ///   （`5031ab3`）连它一起没了，而动作行（发送那一排）至今未做
-    ///   ——`docs/前端设计进度.md` §3 记着「动作行未做，碰发送路径」。
-    ///   所以下面那句「前端据此让按钮显形」描述的是**尚未实现**的行为。
-    ///
-    /// 保留这条 emit 而不是删掉：Rust 侧的装填语义（[`Arming`]）是
-    ///   真的，事件是它对外的声明。**但别把这行注释读成「已经有界面了」**——
-    ///   本轮补的 `every_listed_event_is_actually_emitted` 只查
-    ///   「有没有 emit」，查不出「有没有人听」，后者仍是空话。
-    pub const ARMED: &str = "armed";
     /// 托盘菜单点了「重新锁定当前会话」。前端监听它并调 `relock_session`，
     /// **和面板上那颗按钮走同一条 Rust 路径** —— 两处不各写一遍。
     pub const MENU_RELOCK: &str = "menu:relock";
@@ -70,21 +53,9 @@ pub mod events {
     /// 一个**声明了却永远不触发**的事件名比没有更坏：它让人以为那条
     /// 链路是通的。`debug_pane` 的数据走的是同名**命令**
     /// （`invoke('debug_pane')`），不是事件，别再把两者混记。
-    pub const ALL: [&str; 4] = [READOUT, ARMED, MENU_RELOCK, MENU_SETTINGS];
+    pub const ALL: [&str; 3] = [READOUT, MENU_RELOCK, MENU_SETTINGS];
 
-    /// **明知道「发了但没人听」的事件名。**
-    ///
-    /// 这不是免罪，是**把欠账挂在门上**。每一条都要写清为什么现在
-    /// 没人听、什么时候会有人听；动作行做完就把 `ARMED` 删掉，
-    /// 删掉之后 `every_emitted_event_has_a_frontend_listener` 立刻会红。
-    ///
-    ///   `armed` —— 装填事件的接收端是**发送那一排按钮**（动作行），
-    ///   而动作行至今未做，见 `docs/前端设计进度.md` §3
-    ///   「宁可少一行，不要一个没验过的发送控件」。
-    ///
-    /// 豁免必须**显式、逐条可见**。给测试留一个通用的跳过开关，
-    ///   等于让人养成习惯——而被习惯绕过的检查等于没有检查。
-    pub const KNOWN_UNLISTENED: [&str; 1] = [ARMED];
+    pub const KNOWN_UNLISTENED: [&str; 0] = [];
 }
 
 /// Tauri **命令**名。**2026-10-14 才补上**——本文件原来只收事件名，
@@ -105,8 +76,7 @@ pub mod commands {
     /// 别为了消掉这条 allow 去生产代码里硬凑一次引用——那是让门禁
     ///   反过来决定代码形状。
     #[allow(dead_code)]
-    pub const ALL: [&str; 36] = [
-        "probe_anchor",
+    pub const ALL: [&str; 35] = [
         "latest_readout",
         "debug_pane",
         "dispatch",
@@ -145,29 +115,8 @@ pub mod commands {
         "set_always_on_top",
     ];
 
-    /// **明知道「注册了、前端却不调」的命令。**
-    ///
-    /// 每条都要写清**为什么现在没人调**。豁免要显式、逐条可见，
-    /// 别给测试留通用跳过开关——被习惯绕过的检查等于没有检查。
-    ///
-    /// | 命令 | 现在谁在用 | 为什么不调 |
-    /// |---|---|---|
-    /// | `probe_anchor` | 没人（`cargo xtask probe anchor` 走的是库函数，不是这条 IPC） | 锚点探针的**前端入口没做** |
-    /// | `dispatch` | 没人 | 发送那一排按钮（**动作行**）未做，见 `docs/前端设计进度.md` §3 |
-    /// | `open_settings` | 托盘菜单在 **Rust 内部**直接调同一个函数 | 前端不需要第二入口 |
-    /// | `open_debug` | 同上 | 同上 |
-    /// | `show_panel` | 托盘与托盘左键都在 Rust 内部直接调 | 同上 |
-    ///
-    /// 后三条是**内部复用**而非死代码，删掉会破托盘；前两条是真欠账。
-    ///   两者都列在这里，是因为「前端不调」这件事本身需要有人盯着。
-    #[allow(dead_code)] // 同 ALL：只服务测试，见上面那句「别硬凑引用」。
-    pub const KNOWN_UNREACHED: [&str; 5] = [
-        "probe_anchor",
-        "dispatch",
-        "open_settings",
-        "open_debug",
-        "show_panel",
-    ];
+    #[allow(dead_code)]
+    pub const KNOWN_UNREACHED: [&str; 0] = [];
 }
 
 /// 投递动作。
@@ -280,6 +229,7 @@ impl Phase {
     ///
     /// 其他三种状态返回空串，让界面不占地方——一个一直显示「一切正常」的横幅
     /// 会把真的异常稀释掉，这正是 §5.5 判据 12 背后的道理。
+    #[cfg(test)]
     pub fn error(&self) -> Option<&str> {
         match self {
             Self::Failed { error, .. } => Some(error),
@@ -466,10 +416,9 @@ mod tests {
     #[test]
     fn event_names_are_stable() {
         assert_eq!(events::READOUT, "readout");
-        assert_eq!(events::ARMED, "armed");
         assert_eq!(events::MENU_RELOCK, "menu:relock");
         assert_eq!(events::MENU_SETTINGS, "menu:settings");
-        assert_eq!(events::ALL.len(), 4);
+        assert_eq!(events::ALL.len(), 3);
     }
 
     /// **守住「清单里不许躺着永远不会触发的事件名」这条纪律。**
@@ -622,7 +571,7 @@ mod tests {
         // 豁免表不许悄悄变长。
         assert_eq!(
             events::KNOWN_UNLISTENED.len(),
-            1,
+            0,
             "known-unlistened 表变长了，确认是故意加的吗"
         );
     }

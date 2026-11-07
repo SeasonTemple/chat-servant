@@ -117,15 +117,6 @@ pub struct CallCounts {
     // （按 probability 降序），不发请求 ⇒ 没有次数可报。
 }
 
-impl CallCounts {
-    pub fn explain(&self) -> String {
-        format!(
-            "判断 {} · 起草 {} · 视觉 {}",
-            self.judge, self.draft, self.vision
-        )
-    }
-}
-
 /// 往 UI 推的一份完整快照。
 #[derive(Debug, Clone, Serialize)]
 pub struct Readout {
@@ -202,11 +193,6 @@ impl Readout {
     /// 候选。**只有 `Drafted` 非空**，判据就是判别字段本身。
     pub fn candidates(&self) -> &[DraftCandidate] {
         self.phase.candidates()
-    }
-
-    /// 最近一次出错在哪一段。**空 = 没出错。**
-    pub fn error(&self) -> Option<&str> {
-        self.phase.error()
     }
 }
 
@@ -926,6 +912,81 @@ impl Watcher {
     }
 }
 
+fn init_scratch(cfg: &LoopConfig) -> Scratch {
+    let mut s = Scratch::new(cfg.recent_n.clone());
+    // 会话名闸的目标从 LoopConfig 拷进 Scratch，避免 step 额外收参数。
+    s.locked_peer = cfg.locked_peer.clone();
+    // 总闸与预算共用同一份句柄，确保设置页改动对观察循环立即可见。
+    s.images_out = cfg.images_out.clone();
+    s.token_budget = cfg.token_budget.clone();
+    s.provider = cfg.provider;
+    s.relock = cfg.relock.clone();
+    s.session_mode = cfg.session_mode.clone();
+    s.source = cfg.source.clone();
+    s
+}
+
+fn push_readout(latest: &(std::sync::Mutex<Option<Readout>>, std::sync::Condvar), out: Readout) {
+    let mut g = latest.0.lock().unwrap_or_else(|e| e.into_inner());
+    *g = Some(out);
+    drop(g);
+    latest.1.notify_all();
+}
+
+fn log_watch_tick(ticks: u64, s: &Scratch) {
+    if ticks % 20 == 1 {
+        tracing::info!(
+            target: "chat_servant::watch",
+            "tick={ticks} peer={:?} candidates={}",
+            s.peer,
+            s.candidates.len()
+        );
+    }
+}
+
+fn maybe_rebuild_transport(
+    transport_fp: &mut u64,
+    groups: &mut crate::commands::ModelGroups,
+    proxy: &chatservant_reason::ProxyCell,
+    reasoner: &mut Box<dyn Reasoner + Send>,
+    s: &mut Scratch,
+) {
+    // 判据是传输指纹是否变化：改了厂商或 key 下一次生成立即生效，未改则不重建 runtime。
+    let fp = crate::commands::transport_fingerprint().unwrap_or(*transport_fp);
+    if fp != *transport_fp {
+        *transport_fp = fp;
+        if let Some(latest_groups) = crate::commands::current_groups() {
+            *groups = latest_groups;
+        }
+        let (new_reasoner, ready) = crate::commands::build_reasoner(groups, proxy);
+        *reasoner = new_reasoner;
+        s.provider = groups.llm.provider();
+        tracing::info!(
+            transport_ready = ready,
+            decision = %groups.decision.provider().key(),
+            llm = %groups.llm.provider().key(),
+            "传输已按当前设置重建（key 或厂商变了）"
+        );
+    }
+}
+
+fn build_failed_readout(
+    e: String,
+    s: &Scratch,
+    anchor: Option<PaneAnchor>,
+    ticks: u64,
+    last_calls: u32,
+    st: chatservant_reason::StageCalls,
+) -> Readout {
+    // 失败原因必须进日志，且保留已读到的消息以免单次 OCR 抖动清空对话。
+    tracing::warn!(target: "chat_servant::watch", "这一轮失败：{e}");
+    let phase = Phase::Failed {
+        messages: s.messages.clone(),
+        error: e,
+    };
+    snapshot(s, anchor, phase, ticks, last_calls, st, "这一轮没跑通")
+}
+
 /// 起一条观察循环。
 ///
 /// **会立刻起一个新线程**。返回的 `Watcher` 被 drop 时线程自己会停。
@@ -938,105 +999,29 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
     std::thread::Builder::new()
         .name("cs-watch".into())
         .spawn(move || {
+            let mut s = init_scratch(&cfg);
             let mut watcher = PaneWatcher::new(cfg.ignore_top);
             let mut reasoner = cfg.reasoner;
-            let mut s = Scratch::new(cfg.recent_n);
-            // 会话名闸的目标。**从 LoopConfig 拷进 Scratch**，
-            // 这样 `step` 不用再收第七个参数。
-            s.locked_peer = cfg.locked_peer.clone();
-            // 总闸与预算也要**共用同一份**，否则设置页改了循环读不到。
-            s.images_out = cfg.images_out.clone();
-            s.token_budget = cfg.token_budget.clone();
-            s.provider = cfg.provider;
-            s.relock = cfg.relock.clone();
-            s.session_mode = cfg.session_mode.clone();
-            s.source = cfg.source.clone();
-            // 重建传输要用的两样：从全局状态同步最新格子（`apply_route` 拆格会换新 `ModelCell`）与同一个代理格。
-            let mut groups = cfg.groups.clone();
-            let proxy = cfg.proxy.clone();
-            // 当前这条传输的指纹。**变了就重建**——
-            // 这就是「设置改动下一次生成立即生效，不用重启」那条的落点。
-            // 基准由启动时交过来（见 `LoopConfig::transport_fp`），
-            // 不在这里自己算：那时候全局状态可能还没建好。
+            let mut groups = cfg.groups;
+            let proxy = cfg.proxy;
             let mut transport_fp = cfg.transport_fp;
             let mut last_calls = 0u32;
             let mut ticks = 0u64;
             let mut anchor: Option<PaneAnchor> = None;
-            // 上一轮推给界面的是不是「失败」那一帧。
-            //
-            // ⚠ 它是**恢复**那条判据的开关：失败之后，采集恢复的那一轮
-            // 「什么都没变」，于是**不发** ⇒ 界面会一直挂着
-            // 「没写成：抓不到：窗口已最小化——还原它才能抓到」，
-            // 而用户明明已经还原了窗口（真机，2026-10-20）。
             let mut last_failed = false;
-            // 最近一次认出的会话名。**认不出来就是空串**，
-            // 界面据此显示「没认出会话」，不显示空白。
-            // 最近一次认出的会话名由 `step` 写进 `s.peer`，这里直接读。
 
             while !stop_bg.load(Ordering::Relaxed) {
                 ticks += 1;
-                // 每 20 圈打一行**实测线程数**。
-                //
-                // 起因：实机观察到进程 2300+ 线程、增速 9 个/秒，全是等待态。
-                // 抓帧线程每秒只该有 1 个，对不上——说明还有别的东西在开线程。
-                // 没有这行就只能靠猜；有了它，泄漏源被定位到哪一段一目了然。
-                if ticks % 20 == 1 {
-                    tracing::info!(
-                        // ⚠ **2026-10-18 改：连字符 → 下划线。**
-                        // 本模块**只有这一条**用了 `chat-servant::watch`（连字符），
-                        // 同模块另外两条本来就是 `chat_servant::watch`（下划线），
-                        // 而 `commands.rs` 用 `chat_servant::pump`。
-                        // ⚠ target 字符串对 `EnvFilter` 不透明 ⇒ **一条拼错就等于
-                        // 这一路的日志永远收不到**，而它不报错，只是安静。
-                        // Rust 的 target 惯例是下划线（包名 `chat-servant-app`
-                        // 进到 crate 名会转成 `chat_servant_app`），所以下划线是正解。
-                        // 守卫：`xtask` 的
-                        // `every_explicit_tracing_target_is_named_in_the_run_app_filter`
-                        // ——它扫源码里每一个显式 `target:` 并要求诊断脚本逐个点名。
-                        target: "chat_servant::watch",
-                        "tick={ticks} peer={:?} candidates={}",
-                        s.peer,
-                        s.candidates.len()
-                    );
-                }
-                // ⚠ **传输变了就重建。**
-                //
-                // 「设置改动下一次生成立即生效，不用重启」——这一段是它的落点。
-                // 变的三种情形：换了厂商、换了 key、key 从没有到有。
-                //
-                // ⚠ **判据是「指纹变了没有」，不是「设置页有没有被点过」**：
-                //   点过但没改（或者改回原样）不该重建——重建要起一个 tokio
-                //   runtime，不是免费的。
-                let fp = crate::commands::transport_fingerprint().unwrap_or(transport_fp);
-                if fp != transport_fp {
-                    transport_fp = fp;
-                    if let Some(latest_groups) = crate::commands::current_groups() {
-                        groups = latest_groups;
-                    }
-                    let (new_reasoner, ready) = crate::commands::build_reasoner(&groups, &proxy);
-                    reasoner = new_reasoner;
-                    // 计费那一档跟着**回复组**走（图片外发跟着起草走）。
-                    s.provider = groups.llm.provider();
-                    tracing::info!(
-                        transport_ready = ready,
-                        decision = %groups.decision.provider().key(),
-                        llm = %groups.llm.provider().key(),
-                        "传输已按当前设置重建（key 或厂商变了）"
-                    );
-                }
+                log_watch_tick(ticks, &s);
+                maybe_rebuild_transport(
+                    &mut transport_fp,
+                    &mut groups,
+                    &proxy,
+                    &mut reasoner,
+                    &mut s,
+                );
                 let t_round = std::time::Instant::now();
-                // 一轮**中间**推出去的帧（`Drafting`）走这里。
-                //
-                // 它与轮末那一帧的唯一区别是 `ticks` 相同而阶段不同，
-                // 所以 `cs-pump` 的去重指纹必须带 `phase.key()`——
-                // 只看 `ticks` 会把这一帧吃掉，首屏就还是 6~9s
-                // （见 [`crate::contract::Phase::key`] 的注释）。
-                let mut interim = |out: Readout| {
-                    let mut g = latest_bg.0.lock().unwrap_or_else(|e| e.into_inner());
-                    *g = Some(out);
-                    drop(g);
-                    latest_bg.1.notify_all();
-                };
+                let mut interim = |out: Readout| push_readout(&latest_bg, out);
                 match step(
                     &mut watcher,
                     &mut reasoner,
@@ -1050,54 +1035,24 @@ pub fn spawn(cfg: LoopConfig) -> Watcher {
                         anchor = Some(a);
                         last_calls = reasoner.calls();
                         let st = reasoner.stage_calls();
-                        // 阶段由 Rust 判，不让界面去猜 `candidates` 空不空。
                         let phase = current_phase(&s);
                         let out = snapshot(&s, anchor, phase, ticks, last_calls, st, &s.reason);
-                        let mut g = latest_bg.0.lock().unwrap_or_else(|e| e.into_inner());
-                        *g = Some(out);
-                        drop(g);
-                        latest_bg.1.notify_all();
+                        push_readout(&latest_bg, out);
                         last_failed = false;
                     }
                     Ok(None) => {
-                        // 什么都没变。**不发**——前端不需要知道「循环还活着」。
-                        //
-                        // ⚠ **除非上一轮是失败**：那时采集已经恢复了，
-                        // 而界面还挂着「没写成：抓不到：窗口已最小化——
-                        // 还原它才能抓到」。用户明明已经还原了窗口，
-                        // 界面却还在催他还原（真机，2026-10-20）。
-                        // ⇒ 补一帧正常态，让界面自己回到常态。
+                        // 静默期不发，除非上一轮失败需要补一帧正常态让界面恢复。
                         if let Some(phase) = phase_to_push(&s, false, last_failed) {
                             let st = reasoner.stage_calls();
                             let out = snapshot(&s, anchor, phase, ticks, last_calls, st, &s.reason);
-                            let mut g = latest_bg.0.lock().unwrap_or_else(|e| e.into_inner());
-                            *g = Some(out);
-                            drop(g);
-                            latest_bg.1.notify_all();
+                            push_readout(&latest_bg, out);
                         }
                         last_failed = false;
                     }
                     Err(e) => {
-                        // ⚠ **失败原因必须进日志**（2026-10-23 补）。
-                        //   原来只有界面上的 `Phase::Failed` 带原因，
-                        //   而日志里只有一句「phase=failed」⇒
-                        //   **线上看不到「为什么失败」**，排查只能靠猜。
-                        tracing::warn!(target: "chat_servant::watch", "这一轮失败：{e}");
-                        // 失败这一轮也要报分段计数——**出错的段就在数字里**。
                         let st = reasoner.stage_calls();
-                        // 出错时**保留已读到的消息**：一个 OCR 抖动不该把
-                        // 整段对话清空，用户会以为程序把会话弄丢了。
-                        let phase = Phase::Failed {
-                            messages: s.messages.clone(),
-                            error: e,
-                        };
-                        let out =
-                            snapshot(&s, anchor, phase, ticks, last_calls, st, "这一轮没跑通");
-                        let mut g = latest_bg.0.lock().unwrap_or_else(|e| e.into_inner());
-                        *g = Some(out);
-                        drop(g);
-                        latest_bg.1.notify_all();
-                        // 失败后歇一拍，别把错误刷成瀑布
+                        let out = build_failed_readout(e, &s, anchor, ticks, last_calls, st);
+                        push_readout(&latest_bg, out);
                         std::thread::sleep(Duration::from_millis(2500));
                         last_failed = true;
                     }
@@ -1676,73 +1631,9 @@ fn try_auto_send_pending(s: &mut Scratch) -> bool {
     }
 }
 
-fn step(
-    watcher: &mut PaneWatcher,
-    reasoner: &mut Box<dyn Reasoner + Send>,
-    s: &mut Scratch,
-    last_boxes: &std::sync::Mutex<Option<crate::debug::DebugPane>>,
-    ticks: u64,
-    model_calls: u32,
-    interim: &mut dyn FnMut(Readout),
-) -> Result<Option<PaneAnchor>, String> {
-    // ① 找窗口 + 抓帧（或读夹具）
-    let frame = load_frame(&s.source, &mut s.last_hwnd)?;
-
-    // ④ 锚点与消息区。
-    //
-    // **坐标系必须从头统一**：给 `PaneWatcher` 的必须是**消息区**，
-    // 它内部算出来的 ROI 是消息区坐标；拿整帧去喂，它会按消息区尺寸算，
-    // 于是 ROI 变成「整帧左上角起、宽 852」——把侧边栏也圈进来，
-    // 而行框又没减 `chat.x0`，**所有气泡在消息区坐标系里整体右移 304px**。
-    // 分类去采样时采到的是别的气泡的位置，于是**一条消息都判不出来**
-    // （实测：97 轮全是 `messages=0`）。
-    let anchor =
-        chatservant_capture::anchor::derive(&frame).map_err(|e| format!("锚点推导失败：{e}"))?;
-    let full = frame
-        .crop(anchor.chat)
-        .ok_or_else(|| "裁不出消息区".to_string())?;
-
-    // ② **会话身份闸。必须排在任何 OCR 之前。**
-    //
-    // 闸认的是**头部区域的像素指纹**，不是 OCR 读出来的名字。
-    //
-    // 为什么不比名字：实测真实帧上头部的**归类**是对的（`NoiseClass::Header`），
-    // 但 OCR 把「小号」读成了 `G8W`。按文字锁的话，闸在真实环境上**永远是关的**
-    // ——不误发，但也永远不工作。
-    //
-    // 为什么指纹可靠：文字是 OCR 的产物，那一小块像素不是。
-    // 换会话像素必然变；同一会话在帧之间基本不变（阈值吸收角标抖动）。
-    //
-    // 闸关着 = 屏幕上那块**不是我们要读的对话**，那就不该对它做任何识别。
-    //
-    // 以前闸排在 OCR 之后，于是用户切到别的会话期间，循环**每秒跑一次
-    // 整帧 OCR + 放大 + 分类**，识别出来的消息立刻被丢掉——直到用户切回来。
-    // 识别了不用是一回事，**不该识别**是另一回事：那是在对一段我们无权
-    // 处理的对话反复读像素。闸只需要头部那块像素、不碰 OCR，
-    // 所以它可以、也必须排在前面。
-    // 这里传的是 **`frame`（整帧）**，不是下面那个 `full`。
-    // 2026-10-14 修：会话名行在 `anchor.chat` **之内但不在其上沿**
-    // （实测 `chat.y0 + 18`），喂裁过的消息区会切在它上面/下面。
-    // 2026-10-14 票 31：位置不再猜，由 `HeaderPrint::discover` 从像素推出。
-    let discovered = header_print(&frame, &anchor);
-    refresh_peer(
-        s,
-        &frame,
-        &anchor,
-        discovered.as_ref().map(|(p, _)| p),
-        discovered.as_ref().map(|(_, r)| *r),
-    );
-    // 重锁请求必须**在建锁判断之前**取走，否则这一轮的请求会被跳过，
-    // 用户点了按钮却什么也没发生——那是最难查的一种「没反应」。
-    //
-    //**必须连水位线一起退**，否则重锁等于「锁上了但永远读不到东西」。
-    // 见 [`chatservant_perceive::PaneWatcher::rewind`]：水位线不在 `Scratch`
-    // 里，所以「把这个会话的状态清干净」这件事天然会漏掉它。
+fn take_pending_relock(watcher: &mut PaneWatcher, s: &mut Scratch) {
+    // 重锁请求必须在建锁判断之前取走，并连同引擎水位线一起退回。
     if s.relock.take() {
-        // 2026-11-01：这条路径原来**一行日志都没有** ⇒ 真机上出现「同一批消息被推理了两次」
-        // （同一帧两轮 `本轮新到=7`、两次 Judge+Draft）时，日志既不能证实也不能否证
-        // 「是不是重锁了」——清账本的全仓只有 `apply_relock` 一处，而它静默。
-        // ⚠ 只打个数，不打正文（硬约束 3）。
         tracing::info!(
             target: "chat_servant::watch",
             "重锁：清空账本并退水位线（清之前 seen={} messages={}）",
@@ -1753,18 +1644,24 @@ fn step(
         apply_relock(s);
         watcher.rewind();
     }
+}
+
+fn evaluate_session_gate(
+    watcher: &mut PaneWatcher,
+    s: &mut Scratch,
+    discovered: &Option<(
+        chatservant_perceive::identity::HeaderPrint,
+        chatservant_core::frame::Rect,
+    )>,
+) -> (bool, bool) {
     let mut just_switched = false;
-    let peer_ok = match (&s.locked_print.clone(), &discovered) {
-        // 还没锁过（或刚重锁）：拿当前读到的头部建锁，若分桶里有该会话旧记忆则直接恢复。
+    let peer_ok = match (&s.locked_print.clone(), discovered) {
         (None, Some((p, _))) => {
             just_switched = restore_or_bind_bucket(s, p);
             true
         }
-        // 锁过但这帧认不出 → **关**。认不出不等于「是同一个」。
-        // `(None, None)` 也落到这里：连基准都还没有，更不能动手。
         (_, None) => false,
         (Some(a), Some((b, _))) => {
-            // 像素指纹通过时，若两边都已认出非空会话名且名字不同，仍判定为不同会话（防同字数指纹碰撞）。
             let same_name =
                 s.locked_name.is_empty() || s.peer.is_empty() || s.locked_name == s.peer;
             if a.is_same(b) && same_name {
@@ -1786,35 +1683,205 @@ fn step(
             }
         }
     };
+    (peer_ok, just_switched)
+}
+
+struct AbsorbedRound {
+    messages: Vec<Message>,
+    novel: Vec<Message>,
+    seen_snap: Vec<Message>,
+    msgs_snap: Vec<Message>,
+    newest: Option<i32>,
+}
+
+fn read_and_absorb_round(
+    frame: &chatservant_capture::Frame,
+    full: &chatservant_capture::Frame,
+    anchor: &PaneAnchor,
+    roi: chatservant_core::frame::Rect,
+    s: &mut Scratch,
+    last_boxes: &std::sync::Mutex<Option<crate::debug::DebugPane>>,
+) -> Result<AbsorbedRound, String> {
+    let Round {
+        total_lines,
+        lines,
+        attrs,
+        messages,
+        ocr_pixels,
+    } = read_round(frame, full, anchor, roi, &chatservant_perceive::SystemOcr)?;
+    s.ocr_calls += 1;
+
+    *last_boxes.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::debug::build(
+        anchor.chat,
+        frame.width(),
+        frame.height(),
+        attrs.as_slice(),
+    ));
+    record_cost(
+        last_boxes,
+        ocr_pixels,
+        Some(pane_area(roi)),
+        pane_area(anchor.chat),
+        1,
+    );
+
+    // 先把我们自己发出的消息认回来，再按内容身份计算新颖度并合流。
+    let mut messages = messages;
+    relabel_our_own(&mut messages);
+    let seen_snap = s.seen.clone();
+    let msgs_snap = s.messages.clone();
+    let novel = absorb_round(&mut s.seen, &mut s.messages, &messages);
+    let newest = novel
+        .iter()
+        .filter(|m| m.speaker == Speaker::Them)
+        .map(|m| m.rect.y1)
+        .max();
+
+    tracing::debug!(
+        target: "chat_servant::watch",
+        "roi={roi:?} ocr总行={} 本轮行={} 归类={} 消息={} 本轮新到={}（对方={} 我方={}） 本轮记到y={:?}",
+        total_lines,
+        lines.len(),
+        attrs.len(),
+        messages.len(),
+        novel.len(),
+        novel.iter().filter(|m| m.speaker == Speaker::Them).count(),
+        novel.iter().filter(|m| m.speaker == Speaker::Me).count(),
+        newest,
+    );
+    for (kind, w, h) in novel.iter().filter_map(merged_pair_suspect) {
+        tracing::debug!(
+            target: "chat_servant::watch",
+            "窄框诊断：{kind} {w}x{h}",
+        );
+    }
+
+    Ok(AbsorbedRound {
+        messages,
+        novel,
+        seen_snap,
+        msgs_snap,
+        newest,
+    })
+}
+
+fn render_trimmed_history(s: &mut Scratch, recent_n: usize) -> String {
+    match s
+        .context
+        .trim(SESSION, &s.history, recent_n, &mut NoSummary)
+    {
+        Ok(t) => t.render(),
+        Err(e) => {
+            s.reason = format!("摘要失败（{e}）；本轮只用最近消息");
+            let tail: Vec<&String> = s.history.iter().rev().take(recent_n).collect();
+            let mut lines: Vec<String> = vec!["[最近的对话]".into()];
+            lines.extend(tail.into_iter().rev().cloned());
+            lines.join("\n")
+        }
+    }
+}
+
+fn run_draft_turn(
+    reasoner: &mut dyn Reasoner,
+    frame: &chatservant_capture::Frame,
+    anchor: &PaneAnchor,
+    s: &mut Scratch,
+    absorbed: &AbsorbedRound,
+    last_boxes: &std::sync::Mutex<Option<crate::debug::DebugPane>>,
+) -> Result<(), String> {
+    let recent_n = s.recent.get();
+    let hist_len_before = s.history.len();
+    let mine_len_before = s.mine.len();
+    s.history.extend(absorbed.novel.iter().map(history_line));
+    s.mine.extend(
+        chatservant_reason::voice::my_side(&absorbed.novel)
+            .into_iter()
+            .filter(|t| !crate::commands::sent_by_us(t)),
+    );
+
+    let rendered = render_trimmed_history(s, recent_n);
+    let images = collect_images(frame, anchor, s);
+    record_vision_tokens(last_boxes, images.iter().map(|i| u64::from(i.tokens)).sum());
+
+    let ctx = TurnContext {
+        messages: rendered.lines().map(str::to_string).collect(),
+        peer: s.peer.clone(),
+        images,
+        voice: chatservant_reason::voice::voice_samples(&s.mine),
+    };
+    match chatservant_reason::turn(reasoner, &ctx) {
+        Ok(t) => {
+            s.candidates = t
+                .draft
+                .display_order()
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| DraftCandidate {
+                    id: format!("c{i}"),
+                    text: c.text.clone(),
+                    probability: c.probability,
+                    confidence: ConfidenceTier::from_probability(c.probability),
+                })
+                .collect();
+            s.reason = t.explain();
+            s.auto_gate.begin_new_round();
+            try_auto_send_pending(s);
+            Ok(())
+        }
+        Err(chatservant_reason::ReasonError::NothingToDo) => {
+            s.reason = "没有新消息".into();
+            Ok(())
+        }
+        Err(e) => {
+            // 推理失败必须回滚本轮入账，且不调 watcher.commit，让下一圈重试。
+            s.seen.clone_from(&absorbed.seen_snap);
+            s.messages.clone_from(&absorbed.msgs_snap);
+            s.history.truncate(hist_len_before);
+            s.mine.truncate(mine_len_before);
+            s.reason = format!("推理失败：{e}");
+            tracing::warn!(target: "chat_servant::watch", "推理失败（下一圈自动重试）：{e}");
+            Err(format!("推理失败，正在重试：{e}"))
+        }
+    }
+}
+
+fn step(
+    watcher: &mut PaneWatcher,
+    reasoner: &mut Box<dyn Reasoner + Send>,
+    s: &mut Scratch,
+    last_boxes: &std::sync::Mutex<Option<crate::debug::DebugPane>>,
+    ticks: u64,
+    model_calls: u32,
+    interim: &mut dyn FnMut(Readout),
+) -> Result<Option<PaneAnchor>, String> {
+    let frame = load_frame(&s.source, &mut s.last_hwnd)?;
+    let anchor =
+        chatservant_capture::anchor::derive(&frame).map_err(|e| format!("锚点推导失败：{e}"))?;
+    let full = frame
+        .crop(anchor.chat)
+        .ok_or_else(|| "裁不出消息区".to_string())?;
+
+    // 会话身份闸必须排在任何 OCR 之前（认头部像素指纹，不碰 OCR）。
+    let discovered = header_print(&frame, &anchor);
+    refresh_peer(
+        s,
+        &frame,
+        &anchor,
+        discovered.as_ref().map(|(p, _)| p),
+        discovered.as_ref().map(|(_, r)| *r),
+    );
+    take_pending_relock(watcher, s);
+    let (peer_ok, just_switched) = evaluate_session_gate(watcher, s, &discovered);
     if !peer_ok {
-        // 连引擎的上一帧参照系一起退，否则切回锁定会话时
-        // 「画面跟上一帧一模一样」会继续成立。
-        //   见 `park_on_other_conversation`——面板清空和引擎退位必须同一次做。
         let just_closed = park_on_other_conversation(s, discovered.as_ref().map(|(p, _)| p));
-        // 闸关着 = 这一帧没读任何像素。**照样记账**，
-        // 否则界面挂着上一帧的数字，用户以为程序还在给那个新会话干活。
         record_cost(last_boxes, 0, None, pane_area(anchor.chat), 0);
         return Ok(if just_closed { Some(anchor) } else { None });
     }
-    // 闸是开的。记一笔，供下次关闸时判断「是不是刚刚才关的」。
-    //
-    // ⚠ 同时要判断「是不是刚刚才**开**的」——**闸重新打开时必须推一帧**。
-    //
-    // 停泊期间面板显示的是「锁着别的对话，切回来才继续」，
-    // 而切回来这一轮**很可能什么都没变**（没有新消息）⇒
-    // `observe` 返回 `Quiet` ⇒ 本来不会推帧 ⇒ 面板就一直停在
-    // 「切回来才继续」，**明明已经切回来了**。
-    //
-    // ⇒ 闸从关变成开，要推一帧把锁定会话的历史恢复出来。
     let just_opened = gate_opened(s);
-    // 推给界面的那份也一样要跟着变——否则用户切回锁定会话之后，
-    // 面板还挂着上一轮「闸关着」的横幅。
     s.gate_open = true;
 
-    // ③ 变化门控 + 增量 ROI。**静默期在这里就返回了。**
+    // 变化门控 + 增量 ROI（静默期直接返回，硬约束第 6 条）。
     let Decision::Read { roi } = watcher.observe(&full) else {
-        // 没变：一行都没读。**这是硬约束第 6 条的落点**，
-        // 而「这一帧 0 像素 / 0 次 OCR」正是它唯一可信的证据。
         record_cost(last_boxes, 0, None, pane_area(anchor.chat), 0);
         let auto_fired = try_auto_send_pending(s);
         return Ok(if just_opened || just_switched || auto_fired {
@@ -1824,348 +1891,27 @@ fn step(
         });
     };
 
-    // ③ **OCR 的画面与倍数由引擎决定**，产品路径与探针走同一个入口
-    // （[`chatservant_perceive::read_lines`]）。这里不再自己拼配方。
-    //
-    // ## 曾经的配方，以及它为什么在这台机上把消息读没了
-    //
-    // 这里原先手抄的是「**整帧** + `OCR_UPSCALE` 倍」，
-    // 而那是 **WinRT** 实测要的那一组：
-    //
-    // ```text
-    // 整帧 2x        5 行，读到「乐」（对方消息）
-    // ROI 带子 2x   4 行，读不到「乐」
-    // ```
-    //
-    // 「乐」就在带子里（pane 坐标 79,128），它没消失，是识别器在裁剪后
-    // 把它漏了。这与「乐」气泡那次、标题栏 40px 那次是**同一类毛病**：
-    // `Windows.Media.Ocr` 需要行周围有内容才收，裁得越紧漏得越多。
-    // 与其为裁剪框反复试参数，不如**永远 OCR 整帧**——这也顺带消掉了
-    // 「裁剪坐标 ↔ 帧坐标 ↔ 消息区坐标」三套换算，正是坐标 bug 的来源。
-    //
-    // ⚠ **上面这段结论只对 WinRT 成立**（2026-10-07）。默认引擎 PP-OCR
-    // 要的是**反过来**的那一组：**只给消息区 + 1 倍**（2026-10-18 实测，
-    // 见 `chatservant_capture::ocr::crops_to_pane`）。而两个引擎要的
-    // 画面**不一样**，这件事由**引擎自己**决定，不由调用方决定。
-    //
-    // 抄错的后果不是「慢一点」，是**一条消息都读不出来**：
-    // PP-OCR 的 det 在 2 倍的整帧上把**头像和正文框进同一块**，
-    // 外圈探针于是采到头像的杂色 ⇒ 判成「图里的字」⇒ 消息数 0。
-    // 真机实测：OCR 总行 56、本轮行 10、**归类 10、消息 0**。
-    let Round {
-        total_lines,
-        lines,
-        attrs,
-        messages,
-        ocr_pixels,
-    } = read_round(
-        &frame,
-        &full,
-        &anchor,
-        roi,
-        &chatservant_perceive::SystemOcr,
-    )?;
-    s.ocr_calls += 1;
-
-    // **累积**给界面。直接发本轮 ROI 的那几条，面板上的聊天记录会在
-    // 「本轮那几条」和「空」之间来回跳——因为一轮只覆盖**新增**的那些。
-    // 累积后面板显示的是这个会话最近的一段对话。
-    //
-    //**这一行必须在身份闸之后**，这是 2026-10-11 修的真实缺陷。
-    //
-    // 它原来排在闸**前面**。于是用户在微信里切到会话 B 时，B 的消息先被
-    // `merge_into_stream` 并进了 A 的消息流，然后闸才关——闸只挡住了推理与
-    // 投递，**没挡住消息累积**。面板于是挂着「B 的会话名」显示「A 的历史
-    // 夹着 B 的新消息」，正是这段注释原本要防的
-    // 「看起来在处理 A，其实已经在看 B」。
-    //
-    // 现在闸整块提到了 OCR 之前，这个约束是**结构上**成立的：闸关着时
-    // 根本走不到这里，也就没什么可漏进来的。
-    // ⚠ **顺序承重**：新颖度必须拿「并入本轮之前」的流去比，
-    //   所以并流这件事交给 `absorb_round`（它在函数内部先算后并）。
-    //   见那个函数的文档。
-
-    // 存一份给调试画布。**在整帧坐标系**——画布按帧的百分比定位，
-    // 用 ROI 坐标会让框整体偏移。
-    *last_boxes.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::debug::build(
-        anchor.chat,
-        frame.width(),
-        frame.height(),
-        attrs.as_slice(),
-    ));
-
-    // 开销账。`ocr_pixels` 是**真正送进 OCR 的那张图的面积**，不是 ROI。
-    //
-    // 送进去的是整帧还是消息区、放大几倍，**由引擎决定**
-    // （见 [`chatservant_perceive::ocr_input_pixels`]）——这里不再手算：
-    // 手算过一次，而那次把 2 倍放大算成了 ×2（实际是 ×4），
-    // 还把 PP-OCR 的「只给消息区」报成了整帧。
-    //
-    // 报成 ROI 面积的话，用户会以为「调小 ROI 就能省 OCR」，而那调了没用：
-    // ROI 只决定**读哪几行**，送进 OCR 的画面根本没变小。
-    record_cost(
-        last_boxes,
-        ocr_pixels,
-        Some(pane_area(roi)),
-        pane_area(anchor.chat),
-        1,
-    );
-
-    // **本轮新出现的那些消息。**
-    //
-    // ⚠ 为什么不能按位置判「新的」（2026-10-23 实测逼出来的）：
-    // 微信的消息列表是**底部对齐**的 —— 对话变长时**视口整体上移**，
-    // 最新的那条始终贴在输入框上方。⇒ 对方又发了消息之后，
-    // **新消息落在旧水位线之上**（实测：新增的 5 条在 y 130..567，
-    // 旧水位线是 569 ⇒ 全在其上），按像素行划出来的增量带里**一条都没有**。
-    //
-    // ⇒ 判据只能是**内容身份**（说话人 + 正文）。
-    // 「只是滚动、翻出旧消息」这件事也顺带解决了：旧消息在消息流里已经有了
-    // ⇒ 不算新 ⇒ 不会对旧消息重复推理。
-    //
-    // ⚠⚠ **先把我们自己说过的话认回来**（2026-10-24，用户真机报出）。
-    //
-    // 现象：`Auto` 档点了一条候选之后，面板**又起草了一轮**——
-    // 用户怀疑「自己发出去的消息被当成了对方的新消息」。
-    //
-    // 气泡颜色判据本该把它判成「我」（真机帧实测：绿色气泡 `彩度=91` ⇒ 「我」✔），
-    // 但**判据失手一次**，那句话就成了「对方的新消息」
-    // ⇒ 触发一次完整推理 ⇒ `Auto` 档下还可能**再发一条** ⇒ 自问自答。
-    //
-    // ⇒ 这里不靠颜色，靠**「我们自己说过这句话」这个事实**
-    // （`commands::note_sent` 在装填/发送的那一刻记下正文）：
-    // 读到同一条正文 ⇒ 一律算「我」。
-    //
-    // ⚠ **顺序承重**：必须在 `absorb_round` **之前**改判——
-    // 否则账本里先存成「对方说的」，新颖度会拿「我方那句话」去比对方 ⇒ 对不上。
-    let mut messages = messages;
-    relabel_our_own(&mut messages);
-    let seen_snap = s.seen.clone();
-    let msgs_snap = s.messages.clone();
-    let novel = absorb_round(&mut s.seen, &mut s.messages, &messages);
-
-    // 只有真的有**对方说的话**（且是新到的）才触发推理。
-    // 对方说话但都是说过的旧消息（滚出来的）⇒ 不推理、不调外部接口。
-    let newest = novel
-        .iter()
-        .filter(|m| m.speaker == Speaker::Them)
-        .map(|m| m.rect.y1)
-        .max();
-
-    tracing::debug!(
-        target: "chat_servant::watch",
-        // ⚠⚠ **「本轮新到」必须按说话人拆开打**（2026-10-24）。
-        //
-        // 用户报「发出去的消息被当成了新接收消息，又起草了一轮」——
-        // 而这一行**只打总数**，于是分不清「对方来了新消息」
-        // 与「我们自己发的那条被算成了新的」。
-        //
-        // ⇒ 拆成「对方 N / 我方 M」：只要「对方=0」却起草了，
-        // 就是**判据坏了**（而不是「对方真的说话了」）。
-        // ⇒ **只打个数，不打正文**：聊天内容不进日志。
-        "roi={roi:?} ocr总行={} 本轮行={} 归类={} 消息={} 本轮新到={}（对方={} 我方={}） 本轮记到y={:?}",
-        total_lines,
-        lines.len(),
-        attrs.len(),
-        messages.len(),
-        novel.len(),
-        novel.iter().filter(|m| m.speaker == Speaker::Them).count(),
-        novel.iter().filter(|m| m.speaker == Speaker::Me).count(),
-        // ⚠ 这里打的是**本轮将要记的位置**（还没 commit）。
-        //   打 `committed_bottom()` 会滞后一轮 —— 看起来像「位置没记上」。
-        newest,
-    );
-
-    // 窄框诊断（票 96 缺陷 B 的延伸）：两个字被 rec 并成一字的形态。
-    //
-    // ⚠ 只打**几何**，不打正文（硬约束 3）；一条新到的消息最多一行，
-    //   所以稳定态是零输出。唯一用途是量频率：这件事一天一次与一周一次，
-    //   决定要不要为它引入字体光栅化 + 18708 字的形状匹配。没有这个数，
-    //   任何「值不值得」都是猜的。
-    for (kind, w, h) in novel.iter().filter_map(merged_pair_suspect) {
-        tracing::debug!(
-            target: "chat_servant::watch",
-            "窄框诊断：{kind} {w}x{h}",
-        );
-    }
-
-    // ⑤ 有对方说话才推理。**没读到就不推理**——省的不只是钱，
-    // 还有一次可能失败的外部调用。
-    // ⑥ 起草闸：对方本轮有新话，**且当前可见消息的最后一条是对方说的**。
-    //
-    // 后半个条件是 2026-10-25 真机那个缺陷的落点：对方只有 1 条（很靠上），
-    // 用户自己 8 条在后面 ⇒ 模型看到最后一段全是「我」，于是接着用户的话
-    // 往下写——生成的是用户下一句要说什么，而不是回复对方。
-    // 用户刚说完、对方还没回时本来就没有可回复的对象，所以这一条同时挡住
-    // 「自问自答」。判据只读已有的消息列表与 `Speaker`，不新造状态。
-    if should_draft_now(newest.is_some(), &messages) {
-        // **先把「读到消息了、模型还没回来」这件事推出去**，再去做耗时的事。
-        //
-        // 这是 S3（起草中）唯一的来源。少了这一帧，起草中这一态在真机上
-        // 根本不存在——而模型这一段要 6~9s，用户面对的是一个**不动的面板**，
-        // 分不清是在跑还是卡死了（票 21 的根因之一）。
-        //
-        // 代价是**一轮里推两帧**，所以 `cs-pump` 的去重指纹必须带 `phase.key()`。
-        // 只看 `ticks` 会把这一帧当重复吃掉，首屏就白做了。
-        {
-            let st = reasoner.stage_calls();
-            interim(snapshot(
-                s,
-                Some(anchor),
-                Phase::Drafting {
-                    messages: s.messages.clone(),
-                },
-                ticks,
-                model_calls,
-                st,
-                "正在起草",
-            ));
-        }
-
-        // **每圈读一次**活值，读完存成本地变量给整轮用。
-        // 分两次读的话，用户恰好在中间拖了滑块，同一轮里
-        // 裁剪用 N=12、兜底用 N=11——半套生效比不生效更难查。
-        let recent_n = s.recent.get();
-
-        // 历史**只增不减**——摘要靠它判断「更早的部分」有多长。
-        // 只在这条路径上追加：没读到对方说话时不追加，避免把
-        // 时间戳、系统提示当成对话塞进上下文。
-        // ⚠ **只追加新到的**（`novel`）。ROI 现在覆盖整块消息区，
-        // `messages` 里含全部可见消息；全量追加会让每轮都把整段历史
-        // 再塞一遍给模型（上下文被重复灌水）。
-        // ⚠ **每行必须带说话人**（2026-10-25，与上面那个闸同一次修）：
-        // 只存正文时 `Trimmed::render` 拼出来的是九行光秃秃的原文，模型
-        // 分不出谁说的 ⇒ 顺着用户自己的话往下写。标签焊在写入口，摘要那一路
-        // （也只吃字符串）和下面的兜底那一路就都自动带上了。
-        let hist_len_before = s.history.len();
-        let mine_len_before = s.mine.len();
-        s.history.extend(novel.iter().map(history_line));
-
-        // 口吻样本走**另一路**（`FEATURE.md` 的「单独一路」）。
-        //
-        // 它和 `history` 是两份**平行**的累积，不是同一份的视图：
-        // `history` 要全部消息（对方说的也在里面），这里**只要我说过的**。
-        // 早先这里只推 `.text`，`speaker` 整个被丢掉——于是上层根本没有
-        // 任何办法知道哪句是我说的，这条路在实现层面就不存在。
-        // 同上：只收**新到的**我方消息。
-        s.mine.extend(
-            chatservant_reason::voice::my_side(&novel)
-                .into_iter()
-                .filter(|t| !crate::commands::sent_by_us(t)),
-        );
-
-        // 裁剪。**摘要只在这里发生，且按块**（见 RESUMMARIZE_CHUNK）——
-        // 这就是「惰性」的落点：不是每次都算，是攒够一块才算。
-        let rendered = match s
-            .context
-            .trim(SESSION, &s.history, recent_n, &mut NoSummary)
-        {
-            Ok(t) => t.render(),
-            Err(e) => {
-                // 摘要失败**不阻断本轮**——用最近的消息先出候选，
-                // 在 reason 里说清楚摘要没成。硬失败等于「不回复」，
-                // 那比语境差一点糟得多。
-                s.reason = format!("摘要失败（{e}）；本轮只用最近消息");
-                let tail: Vec<&String> = s.history.iter().rev().take(recent_n).collect();
-                let mut lines: Vec<String> = vec!["[最近的对话]".into()];
-                lines.extend(tail.into_iter().rev().cloned());
-                lines.join("\n")
-            }
-        };
-
-        let images = collect_images(&frame, &anchor, s);
-        // 视觉 token 记在**收完图之后**——收图之前谁也不知道这一帧花了多少。
-        // 默认配置（多模态 B）这里是 0，而 0 是有意义的数，必须照报。
-        record_vision_tokens(last_boxes, images.iter().map(|i| u64::from(i.tokens)).sum());
-
-        let ctx = TurnContext {
-            messages: rendered.lines().map(str::to_string).collect(),
-            // 过了闸才填对端名。**这里不是空串了**——早先一直留空占位，
-            // 判据是「还没接识别会话名」，现在接上了。
-            peer: s.peer.clone(),
-            images,
-            // 「我平时的说话风格」。空的时候是空 Vec，渲染那一步会整节省掉，
-            // 不往提示里塞空标题。
-            voice: chatservant_reason::voice::voice_samples(&s.mine),
-        };
-        match chatservant_reason::turn(reasoner.as_mut(), &ctx) {
-            Ok(t) => {
-                // 起草出来了。**趁 `draft` 还在手上，先把自动发送的判据算完。**
-                //
-                // 顺序很重要：`blind` 只存在于 `DraftSet` 上，
-                //   存进 `s.candidates` 之后就拿不到了（面板契约里没有这个字段）。
-                s.candidates = t
-                    .draft
-                    .display_order()
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, c)| DraftCandidate {
-                        id: format!("c{i}"),
-                        text: c.text.clone(),
-                        probability: c.probability,
-                        confidence: ConfidenceTier::from_probability(c.probability),
-                    })
-                    .collect();
-                s.reason = t.explain();
-
-                s.auto_gate.begin_new_round();
-                try_auto_send_pending(s);
-            }
-            // `NothingToDo` = 静默期，**不是错误**
-            Err(chatservant_reason::ReasonError::NothingToDo) => {
-                s.reason = "没有新消息".into();
-            }
-            Err(e) => {
-                // ⚠ 推理失败必须回滚本轮写进 `s.seen` / `s.history` / `s.mine` 的记录，
-                //   并且不调 `watcher.commit`，直接返回 `Err` 让下一圈 tick 重新读并重试推理！
-                //   否则本轮消息已进 `s.seen`，下一圈 `novel` 为空、候选也为空，
-                //   面板就会永久卡在「对方说完了，这轮没起草」，自动回复彻底中断。
-                s.seen = seen_snap;
-                s.messages = msgs_snap;
-                s.history.truncate(hist_len_before);
-                s.mine.truncate(mine_len_before);
-                s.reason = format!("推理失败：{e}");
-                tracing::warn!(target: "chat_servant::watch", "推理失败（下一圈自动重试）：{e}");
-                return Err(format!("推理失败，正在重试：{e}"));
-            }
-        }
+    let absorbed = read_and_absorb_round(&frame, &full, &anchor, roi, s, last_boxes)?;
+    if should_draft_now(absorbed.newest.is_some(), &absorbed.messages) {
+        let st = reasoner.stage_calls();
+        interim(snapshot(
+            s,
+            Some(anchor),
+            Phase::Drafting {
+                messages: s.messages.clone(),
+            },
+            ticks,
+            model_calls,
+            st,
+            "正在起草",
+        ));
+        run_draft_turn(reasoner.as_mut(), &frame, &anchor, s, &absorbed, last_boxes)?;
     } else {
-        //**这里绝不能清候选。** 这是 2026-10-08 实机抓到的路径：
-        //
-        // ```text
-        // 第 1 轮   ROI = 整屏 → 读到对方的话 → 起草 3 条 → 面板上出现候选
-        // 第 3 轮   ROI = 贴着输入框的一条缝，里面只有我自己说的话
-        //           → candidates.clear() → 候选没了，面板说「对方还没发新消息」
-        // 第 4 轮   同上——因为「没有对方说话」所以水位线不推进，
-        //           ROI 还是那条缝，**这个状态不会自愈**
-        // ```
-        //
-        // 也就是说**候选活不过两秒**，而对话里明明已经有对方说的话。
-        // 之前每轮 `roi=... 消息=1` 且 `candidates=0` 的日志就是它。
-        //
-        // 为什么「这一段没有对方说话」不该推翻已有候选：候选对应的是
-        // **这段对话的状态**，不是「刚才这条带子里有什么」。一条自己发的
-        // 消息出现在底下，既没有让对方说话失效，也没有让已起草的内容过时。
-        //
-        // 清候选只有两个正当时机，都不在这里：
-        // · 真的起草出新的 —— `Ok(t)` 分支整体覆盖；
-        // · 会话闸判定当前不是锁定会话 —— `!peer_ok` 分支（那里清得对）。
-        //
-        // reason 照旧更新成「这一段里没有对方说的话」：它描述的是**这一轮**
-        // 读到的东西，不是「界面上一条候选都没有」，两者不能混为一谈。
+        // 候选对应整段对话状态，本轮无对方新话时不清空已有候选。
         s.reason = "这一段里没有对方说的话".into();
     }
 
-    // ⚠⚠ 这里**必须**清 `pending`。
-    //
-    // 读成功了却没走任何一条 ⇒ `observe` 里 `pending` 命中就**先于像素比对**
-    // 直接返回 `Read` ⇒ **之后每帧都重读同一段，永不停止**，
-    // 与硬约束第 6 条「静默期零调用」直接矛盾。
-    //
-    // ⚠ **`commit(y)` 的 `y` 现在只是「记下来给人看」**（2026-10-23 改）：
-    // 它不再划下一轮的 ROI —— 那个判据在底部对齐的聊天窗上结构性失效
-    // （见 `perceive::stream` 模块头的真机实测）。
-    match newest {
+    match absorbed.newest {
         Some(y) => watcher.commit(y),
         None => watcher.complete(),
     }
@@ -2962,6 +2708,59 @@ mod tests {
     ///
     /// 前端判据（`ui/src/lib/PaperPanel.svelte:249`）是「最后一条**对方**消息」，
     /// 不是「最后一条消息是不是对方」⇒ 我方把着话头时它照样非空 ⇒ 前端堵不住。
+    fn assert_non_read_phases_keep_status_hints(s: &Scratch, st: chatservant_reason::StageCalls) {
+        let drafting = snapshot(
+            s,
+            None,
+            Phase::Drafting {
+                messages: vec![mine_msg("x")],
+            },
+            1,
+            1,
+            st,
+            "起草中",
+        );
+        assert_eq!(
+            drafting.status_hint.as_deref(),
+            Some("正在起草，通常几秒"),
+            "起草中说成了「等待回复」"
+        );
+        let drafted = snapshot(
+            s,
+            None,
+            Phase::Drafted {
+                messages: vec![mine_msg("x")],
+                candidates: Vec::new(),
+            },
+            1,
+            1,
+            st,
+            "有候选",
+        );
+        assert!(
+            drafted.status_hint.is_none(),
+            "drafted 被塞了这句：{:?}",
+            drafted.status_hint
+        );
+        let failed = snapshot(
+            s,
+            None,
+            Phase::Failed {
+                messages: vec![mine_msg("x")],
+                error: "OCR 失败".into(),
+            },
+            1,
+            0,
+            st,
+            "这一轮没跑通",
+        );
+        assert!(
+            failed.status_hint.is_none(),
+            "failed 被塞了这句：{:?}",
+            failed.status_hint
+        );
+    }
+
     #[test]
     fn when_i_have_the_floor_the_panel_says_so() {
         let st = chatservant_reason::StageCalls::default();
@@ -3032,56 +2831,7 @@ mod tests {
         );
 
         // 另外三档不受影响：补一句会盖掉它们各自的话（或故意不说话）。
-        let drafting = snapshot(
-            &s,
-            None,
-            Phase::Drafting {
-                messages: vec![mine_msg("x")],
-            },
-            1,
-            1,
-            st,
-            "起草中",
-        );
-        assert_eq!(
-            drafting.status_hint.as_deref(),
-            Some("正在起草，通常几秒"),
-            "起草中说成了「等待回复」"
-        );
-        let drafted = snapshot(
-            &s,
-            None,
-            Phase::Drafted {
-                messages: vec![mine_msg("x")],
-                candidates: Vec::new(),
-            },
-            1,
-            1,
-            st,
-            "有候选",
-        );
-        assert!(
-            drafted.status_hint.is_none(),
-            "drafted 被塞了这句：{:?}",
-            drafted.status_hint
-        );
-        let failed = snapshot(
-            &s,
-            None,
-            Phase::Failed {
-                messages: vec![mine_msg("x")],
-                error: "OCR 失败".into(),
-            },
-            1,
-            0,
-            st,
-            "这一轮没跑通",
-        );
-        assert!(
-            failed.status_hint.is_none(),
-            "failed 被塞了这句：{:?}",
-            failed.status_hint
-        );
+        assert_non_read_phases_keep_status_hints(&s, st);
     }
 
     /// **`Readout` 全仓只有一个构造点。**
@@ -4368,10 +4118,45 @@ mod tests {
     /// 恒等操作，两套坐标系一模一样——**坐标换算算错了它也测不出来**。
     /// 而 `park_on_other_conversation` 那条另有测试守着，所以本条的新增
     /// 价值在于「真实帧 → 指纹」这半条链，和帧序里闸的开关时机。
+    fn assert_parked_snapshot_hides_retained_history(
+        s: &Scratch,
+        anchor: chatservant_capture::anchor::PaneAnchor,
+    ) {
+        assert_eq!(
+            s.messages.len(),
+            2,
+            "闸关着的时候锁定会话的消息流变了 —— 切回来会读到错的区间，\
+             而旧消息会被当成新消息再推理一次"
+        );
+        let parked = snapshot(
+            s,
+            Some(anchor),
+            current_phase(s),
+            2,
+            0,
+            chatservant_reason::StageCalls::default(),
+            &s.reason,
+        );
+        assert!(
+            parked.phase.messages().is_empty(),
+            "闸关着却还挂着锁定会话的内容：{:?}",
+            parked.phase.messages()
+        );
+        assert!(
+            parked.phase.candidates().is_empty(),
+            "闸关着却还向界面推候选：{:?}",
+            parked.phase.candidates()
+        );
+        assert_eq!(
+            s.messages.len(),
+            2,
+            "锁定会话的历史被清掉了：{:?}",
+            s.messages
+        );
+    }
+
     #[test]
     fn the_gate_closes_and_reopens_over_a_frame_sequence_with_one_watcher() {
-        // 首条消息从 **y 80** 起（票 31）：与 y 58..69 的会话名行留出
-        // y 70..79 的空行，对齐真机几何。原先从 60 起会与名字行粘连。
         let rows_a: [(u32, u32); 8] = [
             (80, 100),
             (160, 180),
@@ -4382,21 +4167,11 @@ mod tests {
             (560, 580),
             (640, 660),
         ];
-        // B 是另一个会话：字形不同、**亮度完全一样**，且消息更少。
         let rows_b: [(u32, u32); 2] = [(520, 540), (620, 640)];
 
         let a = conversation_frame(&rows_a, 0);
         let b = conversation_frame(&rows_b, 1);
         let anchor = test_anchor();
-
-        // 走生产路径取指纹，不手搓。
-        //
-        // **两套坐标系，2026-10-14 起真的分开了**：
-        //   · `header_print` / `refresh_peer` 收**整帧**——标题栏在
-        //     `anchor.chat` **之上**，喂裁过的画面它就根本不在输入里。
-        //   · `PaneWatcher::observe` 收**消息区**（它的 ROI 是消息区坐标）。
-        // 以前两者都喂裁过的那块，于是闸取样取到了消息区顶部。
-        // `pane` 闭包保留给 `observe`；闸那几处一律传 `&a` / `&b`。
         let pane = |f: &chatservant_capture::Frame| f.crop(anchor.chat).expect("消息区裁得出来");
         let pa = header_print(&a, &anchor).expect("A 的指纹取得到").0;
         let pb = header_print(&b, &anchor).expect("B 的指纹取得到").0;
@@ -4426,45 +4201,7 @@ mod tests {
         assert!(!peer_ok, "前提：B 必须被认成不是锁定的那个会话");
         let just_closed = park_on_other_conversation(&mut s, Some(&pb));
         assert!(just_closed, "刚换会话：面板要推一次 readout");
-
-        // ⚠⚠ **闸关着 = 这一轮一个像素都没读**（`step` 在闸关着时提前返回），
-        //   所以 B 的内容**从来没进过 OCR**，锁定会话的消息流也不该动。
-        //
-        //   消息流是**锁定会话**的凭证；屏幕上看谁跟它无关。
-        assert_eq!(
-            s.messages.len(),
-            2,
-            "闸关着的时候锁定会话的消息流变了 —— 切回来会读到错的区间，\
-             而旧消息会被当成新消息再推理一次"
-        );
-
-        // ⚠ **面板不许显示锁定会话的内容**（停泊面板说假话，票 32），
-        //   但**状态里留着**（切回来时要原样恢复）。
-        let parked = snapshot(
-            &s,
-            Some(anchor),
-            current_phase(&s),
-            2,
-            0,
-            chatservant_reason::StageCalls::default(),
-            &s.reason,
-        );
-        assert!(
-            parked.phase.messages().is_empty(),
-            "闸关着却还挂着锁定会话的内容：{:?}",
-            parked.phase.messages()
-        );
-        assert!(
-            parked.phase.candidates().is_empty(),
-            "闸关着却还向界面推候选：{:?}",
-            parked.phase.candidates()
-        );
-        assert_eq!(
-            s.messages.len(),
-            2,
-            "锁定会话的历史被清掉了：{:?}",
-            s.messages
-        );
+        assert_parked_snapshot_hides_retained_history(&s, anchor);
 
         // ── 第 3 圈：切回 A（闸重新打开）──
         let back = header_print(&a, &anchor).expect("切回来的指纹取得到").0;
@@ -4472,8 +4209,6 @@ mod tests {
         let just_opened = gate_opened(&mut s);
         assert!(just_opened, "切回来：闸重新打开，要推一帧");
         assert!(!s.parked_on_other, "切回来之后面板不再是停泊态");
-
-        // A 的画面没变 ⇒ **零 OCR、零推理**（硬约束第 6 条）。
         assert!(
             matches!(w.observe(&pane(&a)), Decision::Quiet),
             "切回锁定会话时画面没变 ⇒ 必须是静默（零 OCR）；\
@@ -4481,7 +4216,6 @@ mod tests {
         );
         assert_eq!(w.calls(), 1, "整场只该读过一次（A 里的那一次）");
 
-        // 面板把锁定会话的历史原样恢复。
         let restored = snapshot(
             &s,
             Some(anchor),
@@ -4538,11 +4272,30 @@ mod tests {
     /// 之前那两个夹具各造一半（`header_frame` 只画字、`pane_frame` 只画行），
     /// 于是测试只能分别取指纹、分别喂行。真实的那一块是**一起**的，
     /// 而且左右**带着侧边栏**——坐标换算只有在这种画面上才算得出来。
+    fn is_header_glyph_pixel(x: u32, y: u32, name_top: u32, name: u32) -> bool {
+        let mut on = false;
+        for off in [24u32, 42, 60] {
+            let (Some(cx), Some(cy)) = (x.checked_sub(off), y.checked_sub(name_top)) else {
+                continue;
+            };
+            if cx < 13
+                && cy < 13
+                && match name {
+                    0 => cx < 7,
+                    1 => cx >= 7,
+                    _ => cy < 7,
+                }
+            {
+                on = true;
+            }
+        }
+        on
+    }
+
     fn conversation_frame(rows: &[(u32, u32)], name: u32) -> chatservant_capture::Frame {
         let w = SIDEBAR_W + PANE_W;
         let mut px = vec![30u8; (w * PANE_H * 3) as usize];
-        // 侧边栏换个底色：一眼能看出「它不在消息区里」，
-        // 也就知道头带不该从这儿取。
+        // 侧边栏换个底色：一眼能看出「它不在消息区里」，头带不该从这儿取。
         for y in 0..PANE_H {
             for x in 0..SIDEBAR_W {
                 let i = ((y * w + x) * 3) as usize;
@@ -4551,35 +4304,11 @@ mod tests {
                 px[i + 2] = 62;
             }
         }
-        // 会话名行：按**真机几何**画（票 31）。
-        //
-        //原来这里画在整帧 y 12..25，而 `test_anchor()` 的
-        // `chat.y0 = 40` ⇒ 字块落在**消息区上沿之上**。于是「头部在哪」
-        // 这个答案**被夹具自带了**：被测代码猜哪个位置都能对上，
-        // 三次修复的测试因此全绿——而真机上一次都没对过。
-        //
-        // 现在按实测画：`chat.y0` 往下 18px、行高 11（真机 y 49..59、
-        // `chat.y0 = 31`）。**被测代码必须自己把这个位置推出来。**
-        let name_top = 40u32 + 18; // 40 == test_anchor() 的 chat.y0 == header_top
+        // 会话名行：按真机几何画在 chat.y0 往下 18px、行高 11。
+        let name_top = 40u32 + 18;
         for y in name_top..(name_top + 11u32) {
             for x in 0..PANE_W {
-                let mut on = false;
-                for off in [24u32, 42, 60] {
-                    let (Some(cx), Some(cy)) = (x.checked_sub(off), y.checked_sub(name_top)) else {
-                        continue;
-                    };
-                    if cx < 13
-                        && cy < 13
-                        && match name {
-                            0 => cx < 7,
-                            1 => cx >= 7,
-                            _ => cy < 7,
-                        }
-                    {
-                        on = true;
-                    }
-                }
-                if on {
+                if is_header_glyph_pixel(x, y, name_top, name) {
                     let i = ((y * w + SIDEBAR_W + x) * 3) as usize;
                     px[i] = 225;
                     px[i + 1] = 225;
@@ -4587,17 +4316,7 @@ mod tests {
                 }
             }
         }
-        // 消息行。
-        //
-        //2026-10-14 票 31：首条消息原本从 y=60 起，而会话名行是 y 58..69
-        // ——**两者首尾相接、中间没有空行**。于是 `discover` 的行游程把它们
-        // **合并成一个 22px 的行段**（量化后 20），取样带 8000 px 里消息文字
-        // 占 5760、会话名字形差只剩 ~189 ⇒ 相似度 0.9704 ≥ 阈值 0.90
-        //   ⇒ 判成「同一个会话」。
-        //
-        // 真机是有间隙的：名字 y 49..59、首条消息 y 80..97，中间空 60..79
-        //（`HEAD_SEARCH_H` 的注释就记着「首条消息在 y 80」）。
-        // ⇒ 首条消息一律从 **y 80** 起，否则夹具测的是「行粘连」而不是「会话身份」。
+        // 消息行从 y=80 起，与 y 58..69 的会话名行留出空隙。
         for &(y0, y1) in rows {
             for y in y0..y1 {
                 for x in 40..(PANE_W - 40) {

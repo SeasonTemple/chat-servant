@@ -1346,34 +1346,9 @@ impl HttpReasoner {
             Stage::Draft => self.draft_calls.set(self.draft_calls.get() + 1),
         }
         let effort = self.route.effort();
-        let opts = route.protocol().chat_options_with_effort(effort);
         // **这里就是 async → sync 那道桥。** 对外（`Reasoner`）仍然是同步的。
         let t0 = std::time::Instant::now();
-        let mut res = self
-            .rt
-            .block_on(client.exec_chat(model.clone(), req.clone(), Some(&opts)));
-        if let Err(ref e) = res {
-            let msg = e.to_string();
-            if msg.contains("error sending request") || msg.contains("connection") {
-                if let Ok(mut g) = self.clients.lock() {
-                    *g = ClientSlot::default();
-                }
-                if let Ok(fresh) = self.client() {
-                    res =
-                        self.rt
-                            .block_on(fresh.exec_chat(model.clone(), req.clone(), Some(&opts)));
-                }
-            } else if msg.contains("reasoning")
-                || msg.contains("Unrecognized")
-                || msg.contains("unknown field")
-            {
-                // 部分非推理模型端点不接受 reasoning_effort 字段，自动退回基础参数重试
-                let base_opts = route.protocol().chat_options();
-                res = self
-                    .rt
-                    .block_on(client.exec_chat(model, req, Some(&base_opts)));
-            }
-        }
+        let res = self.exec_chat_with_retries(&client, model, req, &route, effort);
         let ms = t0.elapsed().as_millis();
         // ⚠ **每次调用都记耗时**（2026-10-23 加）。
         //
@@ -1574,6 +1549,43 @@ async fn resolve_via_doh(host: &str) -> Option<std::net::IpAddr> {
 }
 
 impl HttpReasoner {
+    fn exec_chat_with_retries(
+        &self,
+        client: &Client,
+        model: ModelIden,
+        req: ChatRequest,
+        route: &Route,
+        effort: ThinkingEffort,
+    ) -> Result<genai::chat::ChatResponse, genai::Error> {
+        let opts = route.protocol().chat_options_with_effort(effort);
+        let mut res = self
+            .rt
+            .block_on(client.exec_chat(model.clone(), req.clone(), Some(&opts)));
+        if let Err(ref e) = res {
+            let msg = e.to_string();
+            if msg.contains("error sending request") || msg.contains("connection") {
+                if let Ok(mut g) = self.clients.lock() {
+                    *g = ClientSlot::default();
+                }
+                if let Ok(fresh) = self.client() {
+                    res =
+                        self.rt
+                            .block_on(fresh.exec_chat(model.clone(), req.clone(), Some(&opts)));
+                }
+            } else if msg.contains("reasoning")
+                || msg.contains("Unrecognized")
+                || msg.contains("unknown field")
+            {
+                // 部分非推理模型端点不接受 reasoning_effort 字段，自动退回基础参数重试
+                let base_opts = route.protocol().chat_options();
+                res = self
+                    .rt
+                    .block_on(client.exec_chat(model, req, Some(&base_opts)));
+            }
+        }
+        res
+    }
+
     /// 将 `TurnContext::messages`（`"我: …"` / `"对方: …"`）转换为 Jev 要求的 `state.chat` 结构。
     fn build_jev_state(ctx: &TurnContext) -> serde_json::Value {
         let mut msgs = Vec::with_capacity(ctx.messages.len());
@@ -1625,8 +1637,37 @@ impl HttpReasoner {
             .lock()
             .map_err(|e| ReasonError::Judge(e.to_string()))?
             .clone();
-        let proxy = effective_proxy_for(&route, self.proxy.get());
-        let payload = serde_json::json!({
+        let payload = Self::build_jev_payload(model, ctx);
+        self.calls.set(self.calls.get() + 1);
+        self.judge_calls.set(self.judge_calls.get() + 1);
+        let t0 = std::time::Instant::now();
+        let res = self.rt.block_on(async {
+            let cli = self.get_or_build_jev_client(&route, &url, false).await?;
+            let resp = match Self::send_jev_request(cli, &url, &key, &payload).await {
+                Ok(r) => r,
+                Err(_) => {
+                    let fresh = self.get_or_build_jev_client(&route, &url, true).await?;
+                    Self::send_jev_request(fresh, &url, &key, &payload)
+                        .await
+                        .map_err(|e| redact(&format!("Jev 网络请求失败：{e}")))?
+                }
+            };
+            Self::parse_jev_response(resp).await
+        });
+        let ms = t0.elapsed().as_millis();
+        tracing::info!(
+            target: "chatservant_reason::transport",
+            stage = ?Stage::Judge,
+            ms,
+            ok = res.is_ok(),
+            "模型调用完成 (Jev)"
+        );
+        let v = res.map_err(ReasonError::Judge)?;
+        Ok(Self::parse_jev_answers(&v))
+    }
+
+    fn build_jev_payload(model: String, ctx: &TurnContext) -> serde_json::Value {
+        serde_json::json!({
             "model": model,
             "state": Self::build_jev_state(ctx),
             "questions": {
@@ -1680,110 +1721,116 @@ impl HttpReasoner {
                     "criteria": ["0","1","2","3","4","5","6","7","8","9"]
                 }
             }
-        });
-        self.calls.set(self.calls.get() + 1);
-        self.judge_calls.set(self.judge_calls.get() + 1);
-        let t0 = std::time::Instant::now();
-        let host_key = reqwest::Url::parse(&url)
+        })
+    }
+
+    async fn get_or_build_jev_client(
+        &self,
+        route: &Route,
+        url: &str,
+        force_rebuild: bool,
+    ) -> Result<reqwest::Client, String> {
+        let proxy = effective_proxy_for(route, self.proxy.get());
+        let host_key = reqwest::Url::parse(url)
             .ok()
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default();
-        let res: Result<serde_json::Value, String> = self.rt.block_on(async {
-            let get_or_build = |force_rebuild: bool| {
-                let proxy = proxy.clone();
-                let url = url.clone();
-                let host_key = host_key.clone();
-                async move {
-                    if !force_rebuild
-                        && let Ok(g) = self.clients.lock()
-                        && let Some(ref slot) = g.jev_client
-                        && slot.proxy == proxy
-                        && slot.host == host_key
-                    {
-                        return Ok::<reqwest::Client, String>(slot.client.clone());
-                    }
-                    let mut b = reqwest::Client::builder()
-                        .timeout(REQUEST_TIMEOUT)
-                        .connect_timeout(CONNECT_TIMEOUT);
-                    if let Some(p) = &proxy {
-                        let px = reqwest::Proxy::all(p.clone())
-                            .map_err(|e| redact(&format!("代理配置无效：{e}")))?;
-                        b = b.proxy(px);
-                    } else if let Ok(parsed) = reqwest::Url::parse(&url)
-                        && let Some(host) = parsed.host_str()
-                        && !matches!(host, "127.0.0.1" | "localhost")
-                        && let Some(ip) = resolve_via_doh(host).await
-                    {
-                        let port = parsed.port_or_known_default().unwrap_or(443);
-                        b = b.resolve(host, std::net::SocketAddr::new(ip, port));
-                    }
-                    let cli = b
-                        .build()
-                        .map_err(|e| redact(&format!("HTTP 客户端构建失败：{e}")))?;
-                    if let Ok(mut g) = self.clients.lock() {
-                        g.jev_client = Some(JevSlot {
-                            proxy,
-                            host: host_key,
-                            client: cli.clone(),
-                        });
-                    }
-                    Ok(cli)
-                }
-            };
-            let cli = get_or_build(false).await?;
-            let send_once = |c: reqwest::Client| {
-                let url = url.clone();
-                let key = key.clone();
-                let payload = payload.clone();
-                async move {
-                    c.post(&url)
-                        .header("Authorization", format!("Bearer {key}"))
-                        .json(&payload)
-                        .send()
-                        .await
-                }
-            };
-            let resp = match send_once(cli).await {
-                Ok(r) => r,
-                Err(_) => {
-                    let fresh = get_or_build(true).await?;
-                    send_once(fresh)
-                        .await
-                        .map_err(|e| redact(&format!("Jev 网络请求失败：{e}")))?
-                }
-            };
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(redact(&format!(
-                    "Jev HTTP {}: {}",
-                    status.as_u16(),
-                    truncate(&body, 200)
-                )));
-            }
-            serde_json::from_str(&body).map_err(|e| format!("Jev 响应非合法 JSON：{e}"))
-        });
-        let ms = t0.elapsed().as_millis();
-        tracing::info!(
-            target: "chatservant_reason::transport",
-            stage = ?Stage::Judge,
-            ms,
-            ok = res.is_ok(),
-            "模型调用完成 (Jev)"
-        );
-        let v = res.map_err(ReasonError::Judge)?;
-        Ok(Self::parse_jev_answers(&v))
+        if !force_rebuild
+            && let Ok(g) = self.clients.lock()
+            && let Some(ref slot) = g.jev_client
+            && slot.proxy == proxy
+            && slot.host == host_key
+        {
+            return Ok(slot.client.clone());
+        }
+        let mut b = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT);
+        if let Some(p) = &proxy {
+            let px = reqwest::Proxy::all(p.clone())
+                .map_err(|e| redact(&format!("代理配置无效：{e}")))?;
+            b = b.proxy(px);
+        } else if let Ok(parsed) = reqwest::Url::parse(url)
+            && let Some(host) = parsed.host_str()
+            && !matches!(host, "127.0.0.1" | "localhost")
+            && let Some(ip) = resolve_via_doh(host).await
+        {
+            let port = parsed.port_or_known_default().unwrap_or(443);
+            b = b.resolve(host, std::net::SocketAddr::new(ip, port));
+        }
+        let cli = b
+            .build()
+            .map_err(|e| redact(&format!("HTTP 客户端构建失败：{e}")))?;
+        if let Ok(mut g) = self.clients.lock() {
+            g.jev_client = Some(JevSlot {
+                proxy,
+                host: host_key,
+                client: cli.clone(),
+            });
+        }
+        Ok(cli)
+    }
+
+    async fn send_jev_request(
+        client: reqwest::Client,
+        url: &str,
+        key: &str,
+        payload: &serde_json::Value,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        client
+            .post(url)
+            .header("Authorization", format!("Bearer {key}"))
+            .json(payload)
+            .send()
+            .await
+    }
+
+    async fn parse_jev_response(resp: reqwest::Response) -> Result<serde_json::Value, String> {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(redact(&format!(
+                "Jev HTTP {}: {}",
+                status.as_u16(),
+                truncate(&body, 200)
+            )));
+        }
+        serde_json::from_str(&body).map_err(|e| format!("Jev 响应非合法 JSON：{e}"))
     }
 
     /// 解析 Jev 返回的 `answers` 字典（`choice` / `noul` / `score`）并转成中文 [`Intent`]。
     fn parse_jev_answers(v: &serde_json::Value) -> Intent {
         let ans = v.get("answers");
-        let choice_raw = ans
-            .and_then(|a| a.get("true_intent"))
+        let choice_raw = Self::jev_choice(ans, "true_intent", "casual_chat");
+        let need_raw = Self::jev_choice(ans, "she_needs", "care");
+        let best_act = Self::jev_choice(ans, "best_action", "acknowledge");
+        let danger = ans
+            .and_then(|a| a.get("danger_level"))
+            .and_then(|x| x.get("score"))
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0);
+        Intent {
+            intent: Self::jev_intent(ans, choice_raw),
+            need: Self::jev_need(need_raw),
+            action: Self::jev_action(choice_raw, need_raw, best_act),
+            tension: ((danger / 9.0).clamp(0.0, 1.0)) as f32,
+        }
+    }
+
+    fn jev_choice<'a>(
+        answers: Option<&'a serde_json::Value>,
+        question: &str,
+        default: &'a str,
+    ) -> &'a str {
+        answers
+            .and_then(|a| a.get(question))
             .and_then(|x| x.get("choice"))
             .and_then(|x| x.as_str())
-            .unwrap_or("casual_chat");
-        let mut intent_zh = match choice_raw {
+            .unwrap_or(default)
+    }
+
+    fn jev_intent(answers: Option<&serde_json::Value>, choice: &str) -> String {
+        let mut intent = match choice {
             "confirm_you_care" => "希望确认你在意",
             "vent_anger" => "表达不满或情绪",
             "request_action" => "希望你采取行动",
@@ -1793,20 +1840,19 @@ impl HttpReasoner {
             other => other,
         }
         .to_string();
-        if let Some(noul) = ans
+        if let Some(noul) = answers
             .and_then(|a| a.get("literal_question"))
             .and_then(|x| x.get("noul"))
             .and_then(|x| x.as_f64())
             && noul < 0.5
         {
-            intent_zh.push_str("（有潜台词）");
+            intent.push_str("（有潜台词）");
         }
-        let need_raw = ans
-            .and_then(|a| a.get("she_needs"))
-            .and_then(|x| x.get("choice"))
-            .and_then(|x| x.as_str())
-            .unwrap_or("care");
-        let need_zh = match need_raw {
+        intent
+    }
+
+    fn jev_need(need: &str) -> String {
+        match need {
             "apology" => "真诚道歉",
             "action" => "具体行动或安排",
             "explanation" => "清楚的解释",
@@ -1814,38 +1860,24 @@ impl HttpReasoner {
             "nothing" => "无需额外补充",
             other => other,
         }
-        .to_string();
-        let best_act = ans
-            .and_then(|a| a.get("best_action"))
-            .and_then(|x| x.get("choice"))
-            .and_then(|x| x.as_str())
-            .unwrap_or("acknowledge");
-        let action_zh = if choice_raw == "close_topic" && need_raw == "nothing" {
-            "wait".to_string()
-        } else {
-            match best_act {
-                "check_history" => "先核对聊天记录",
-                "apologize" => "为已知问题道歉",
-                "give_commitment" => "给出具体承诺",
-                "explain" => "说明事实与原因",
-                "acknowledge" => "回应并表达理解",
-                "say_less" => "简短回应或留白",
-                "make_plan" => "商量具体安排",
-                other => other,
-            }
-            .to_string()
-        };
-        let danger = ans
-            .and_then(|a| a.get("danger_level"))
-            .and_then(|x| x.get("score"))
-            .and_then(|x| x.as_f64())
-            .unwrap_or(0.0);
-        Intent {
-            intent: intent_zh,
-            need: need_zh,
-            action: action_zh,
-            tension: ((danger / 9.0).clamp(0.0, 1.0)) as f32,
+        .to_string()
+    }
+
+    fn jev_action(choice: &str, need: &str, best_action: &str) -> String {
+        if choice == "close_topic" && need == "nothing" {
+            return "wait".to_string();
         }
+        match best_action {
+            "check_history" => "先核对聊天记录",
+            "apologize" => "为已知问题道歉",
+            "give_commitment" => "给出具体承诺",
+            "explain" => "说明事实与原因",
+            "acknowledge" => "回应并表达理解",
+            "say_less" => "简短回应或留白",
+            "make_plan" => "商量具体安排",
+            other => other,
+        }
+        .to_string()
     }
 }
 
