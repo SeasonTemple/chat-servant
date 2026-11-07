@@ -8,12 +8,13 @@
 
 **截图常驻内存不落盘 · API 密钥仅存系统凭据库 · 默认仅填入不自动发送**
 
+[![在线交互体验](https://img.shields.io/badge/%E5%9C%A8%E7%BA%BF%E4%BD%93%E9%AA%8C-%E6%92%95%E8%BE%B9%E7%BA%B8%E9%9D%A2%E6%9D%BF%E6%BC%94%E7%A4%BA-C8322A.svg)](https://seasontemple.github.io/chat-servant/)
 [![许可: BSL 1.1](https://img.shields.io/badge/license-BSL_1.1-orange.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-black.svg)](https://www.rust-lang.org/)
 [![仅 Windows](https://img.shields.io/badge/platform-Windows%2010%2B-0078D4.svg)](https://learn.microsoft.com/windows/)
 [![CI](https://github.com/SeasonTemple/chat-servant/actions/workflows/ci.yml/badge.svg)](https://github.com/SeasonTemple/chat-servant/actions/workflows/ci.yml)
 
-[简体中文](README.md) · [English](README.en.md) · [隐私与安全边界](#隐私与安全边界) · [快速开始](#快速开始) · [诊断探针](#开发者诊断探针) · [质量门禁](#质量门禁) · [参与贡献](CONTRIBUTING.md)
+[✨ 在线交互宣传页](https://seasontemple.github.io/chat-servant/) · [简体中文](README.md) · [English](README.en.md) · [隐私与安全边界](#隐私与安全边界) · [快速开始](#快速开始) · [诊断探针](#开发者诊断探针) · [质量门禁](#质量门禁) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 

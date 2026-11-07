@@ -8,12 +8,13 @@
 
 **Frames stay in memory and never touch disk · API keys live only in the OS credential store · Fill-only (`Manual`) by default**
 
+[![Live Demo](https://img.shields.io/badge/live_demo-interactive_paper_panel-C8322A.svg)](https://seasontemple.github.io/chat-servant/)
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL_1.1-orange.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-black.svg)](https://www.rust-lang.org/)
 [![Windows](https://img.shields.io/badge/platform-Windows%2010%2B-0078D4.svg)](https://learn.microsoft.com/windows/)
 [![CI](https://github.com/SeasonTemple/chat-servant/actions/workflows/ci.yml/badge.svg)](https://github.com/SeasonTemple/chat-servant/actions/workflows/ci.yml)
 
-[Chinese](README.md) · [English](README.en.md) · [Privacy](#privacy-and-security-boundaries) · [Getting started](#getting-started) · [Probes](#developer-probes) · [Gate](#quality-gate) · [Contributing](CONTRIBUTING.md)
+[✨ Interactive Live Demo](https://seasontemple.github.io/chat-servant/) · [Chinese](README.md) · [English](README.en.md) · [Privacy](#privacy-and-security-boundaries) · [Getting started](#getting-started) · [Probes](#developer-probes) · [Gate](#quality-gate) · [Contributing](CONTRIBUTING.md)
 
 </div>
 

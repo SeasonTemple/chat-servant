@@ -2546,6 +2546,7 @@
     text-align: left;
     cursor: pointer;
     isolation: isolate;
+    transition: transform 45ms cubic-bezier(0.22, 1, 0.36, 1);
     /* 常态：一片安静躺着的纸。
      *
      * ⚠⚠ **两层影决定的是「它有没有落在纸上」，不是装饰。**
@@ -2647,41 +2648,40 @@
     border-width: 16px;
     border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
     filter: drop-shadow(0 1px 3px rgb(24 18 10 / 0.16));
-    transform-origin: 0 0;
+    transform-origin: 50% 50%;
     transition:
-      transform 85ms ease-out,
-      filter 85ms ease-out;
+      transform 45ms cubic-bezier(0.22, 1, 0.36, 1),
+      filter 45ms ease-out;
     @media (prefers-reduced-motion: reduce) {
       transition: none;
     }
   }
 
-  /* ── 悬停 / 聚焦：只加深纸条投影（不做形变，文字零变换不发糊；压角留给点击） ── */
-  .cs-act:hover,
-  .cs-act:focus-visible {
+  /* ── 悬停 / 聚焦：整条纸片整数像素上抬 -2px + 影加深（45ms 跟手响应，无旋转故文字零发糊） ── */
+  .cs-act:hover:not(:disabled),
+  .cs-act:focus-visible:not(:disabled) {
     z-index: 2;
+    transform: translateY(-2px);
   }
-  .cs-act:hover::before,
-  .cs-act:focus-visible::before {
-    filter: drop-shadow(0 6px 12px rgb(24 18 10 / 0.24));
+  .cs-act:hover:not(:disabled)::before,
+  .cs-act:focus-visible:not(:disabled)::before {
+    filter: drop-shadow(0 7px 14px rgb(24 18 10 / 0.25));
   }
 
-  /* ── 按下 / 点击投递：射影同应性 matrix3d 钉死左上(0,0)、左下(0,H)、右上(W,0)，
-   *    只把右下角(W,H)向纸面内侧与下方压入；保留整条底影（不设 filter:none），
-   *    彻底消除「整条纸片一起平塌按下」的观感。 ──────────────────── */
-  .cs-act:active,
+  /* ── 按下 / 点击投递：整条纸片连同文字整体向下压入纸面（+1px），
+   *    背衬伪元素以中心（50% 50%）微缩压实（scale(0.988, 0.975)）并收紧底影，
+   *    替代原先不真实的「仅右下角单角拉扯」。 ──────────────────── */
+  .cs-act:active:not(:disabled),
   .cs-act-busy {
     z-index: 2;
+    transform: translateY(1px);
+    transition-duration: 30ms;
   }
-  .cs-act:active::before,
+  .cs-act:active:not(:disabled)::before,
   .cs-act-busy::before {
-    transform: matrix3d(1.12, 0.022, 0, 0.00038, 0, 1.09, 0, 0.00075, 0, 0, 1, 0, 0, 0, 0, 1);
-    filter: drop-shadow(0 2px 3px rgb(24 18 10 / 0.12));
-    transition-duration: 55ms;
-  }
-  .cs-act:active .cs-act-meta,
-  .cs-act-busy .cs-act-meta {
-    transform: translateY(2px);
+    transform: scale(0.988, 0.975);
+    filter: drop-shadow(0 1px 2px rgb(24 18 10 / 0.14));
+    transition-duration: 30ms;
   }
 
   /* ⚠ 焦点环用墨不用红（规范 §5.4）。
