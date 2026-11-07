@@ -1319,4 +1319,31 @@ mod tests {
             a.similarity(&b)
         );
     }
+
+    #[test]
+    fn perf_header_print_discover_and_9_shift_similarity_stay_under_budget() {
+        let f1 = real_frame(18, 0);
+        let f2 = real_frame(19, 1);
+        let rect = chat_rect();
+        let mut samples_ms = Vec::with_capacity(40);
+        for _ in 0..40 {
+            let t0 = std::time::Instant::now();
+            let (a, _) = HeaderPrint::discover(&f1, rect, 300).expect("discover a");
+            let (b, _) = HeaderPrint::discover(&f2, rect, 300).expect("discover b");
+            let sim = a.similarity(&b);
+            std::hint::black_box(sim);
+            samples_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        samples_ms.sort_by(f64::total_cmp);
+        let p50 = samples_ms[samples_ms.len() / 2];
+        let p95 = samples_ms[(samples_ms.len() * 95) / 100];
+        let max = *samples_ms.last().unwrap_or(&0.0);
+        eprintln!(
+            "PERF HeaderPrint::discoverx2+similarity(9-shift): p50={p50:.2}ms p95={p95:.2}ms max={max:.2}ms"
+        );
+        assert!(
+            p50 < 20.0,
+            "HeaderPrint discover+similarity p50={p50:.2}ms 超出 20ms 预算"
+        );
+    }
 }

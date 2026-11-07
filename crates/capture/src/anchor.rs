@@ -408,6 +408,29 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn perf_anchor_derive_full_hd_frame_stays_under_budget() {
+        const W: u32 = 1267;
+        const H: u32 = 930;
+        let f = synthetic(W, H, 0.25, 0.035, 0.72);
+        let mut samples_ms = Vec::with_capacity(40);
+        for _ in 0..40 {
+            let t0 = std::time::Instant::now();
+            let a = derive(&f).expect("derive must succeed");
+            std::hint::black_box(a);
+            samples_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        samples_ms.sort_by(f64::total_cmp);
+        let p50 = samples_ms[samples_ms.len() / 2];
+        let p95 = samples_ms[(samples_ms.len() * 95) / 100];
+        let max = *samples_ms.last().unwrap_or(&0.0);
+        eprintln!("PERF anchor::derive (1267x930): p50={p50:.2}ms p95={p95:.2}ms max={max:.2}ms");
+        assert!(
+            p50 < 25.0,
+            "anchor::derive 1267x930 p50={p50:.2}ms 超出 25ms 预算（发生全图扫描退化？）"
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

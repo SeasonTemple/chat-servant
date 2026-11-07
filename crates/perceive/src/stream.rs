@@ -613,4 +613,33 @@ mod tests {
         assert_eq!(a.observe(&f), Decision::Quiet);
         assert_eq!(a.calls(), before, "切回已读的会话不该重复上报");
     }
+
+    #[test]
+    fn perf_pane_watcher_quiet_frame_diff_stays_under_budget() {
+        const PW: u32 = 940;
+        const PH: u32 = 637;
+        let f = Frame::from_rgb(PW, PH, vec![17u8; (PW * PH * 3) as usize]).expect("940x637 pane");
+        let mut w = PaneWatcher::new(0);
+        assert!(matches!(w.observe(&f), Decision::Read { .. }));
+        w.complete();
+
+        let mut samples_ms = Vec::with_capacity(80);
+        for _ in 0..80 {
+            let t0 = std::time::Instant::now();
+            let d = w.observe(&f);
+            std::hint::black_box(d);
+            samples_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        samples_ms.sort_by(f64::total_cmp);
+        let p50 = samples_ms[samples_ms.len() / 2];
+        let p95 = samples_ms[(samples_ms.len() * 95) / 100];
+        let max = *samples_ms.last().unwrap_or(&0.0);
+        eprintln!(
+            "PERF PaneWatcher::observe (940x637 quiet): p50={p50:.3}ms p95={p95:.3}ms max={max:.3}ms"
+        );
+        assert!(
+            p50 < 5.0,
+            "PaneWatcher::observe 940x637 静默期差分 p50={p50:.3}ms 超出 5ms 预算"
+        );
+    }
 }

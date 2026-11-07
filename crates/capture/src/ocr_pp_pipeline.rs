@@ -3346,13 +3346,35 @@ mod tests {
     #[test]
     fn unchanged_line_crops_hit_the_rec_line_cache() {
         let cache = BucketCache::new(PathBuf::from("dummy"));
-        let sample = vec![0.25f32, -0.5, 0.75, 1.0];
+        let sample = vec![0.25f32; 3 * 48 * 320];
         let key = (320, hash_rec_input(&sample));
         assert!(cache.get_cached_line(key).is_none());
         cache.put_cached_line(key, ("测试行缓存".to_string(), 0.98));
         assert_eq!(
             cache.get_cached_line(key),
             Some(("测试行缓存".to_string(), 0.98))
+        );
+
+        let mut samples_ms = Vec::with_capacity(50);
+        for _ in 0..50 {
+            let t0 = std::time::Instant::now();
+            for _ in 0..10 {
+                let k = (320, hash_rec_input(&sample));
+                let hit = cache.get_cached_line(k);
+                std::hint::black_box(hit);
+            }
+            samples_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        samples_ms.sort_by(f64::total_cmp);
+        let p50 = samples_ms[samples_ms.len() / 2];
+        let p95 = samples_ms[(samples_ms.len() * 95) / 100];
+        let max = *samples_ms.last().unwrap_or(&0.0);
+        eprintln!(
+            "PERF rec_line_cache (10 lines x 48x320): p50={p50:.3}ms p95={p95:.3}ms max={max:.3}ms"
+        );
+        assert!(
+            p50 < 15.0,
+            "10 行 OCR 行级缓存哈希+命中 p50={p50:.3}ms 超出 15ms 预算"
         );
     }
 }
