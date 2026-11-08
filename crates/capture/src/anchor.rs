@@ -114,6 +114,61 @@ pub enum AnchorError {
     NoInputTop,
 }
 
+impl PaneAnchor {
+    /// 极速校验上一帧锚点在本帧是否仍然成立（仅抽检 4 条边界特征线，耗时 `< 0.05ms`）。
+    ///
+    /// 一旦窗口尺寸、深浅色主题、左侧会话列表宽度、顶栏高度或输入框上边框发生任何位移，
+    /// 立即返回 `false` 交由 [`derive`] 全量重算。
+    pub fn still_matches(&self, frame: &Frame) -> bool {
+        let (w, h) = (frame.width() as i32, frame.height() as i32);
+        if !self.geometry_fits(w, h) {
+            return false;
+        }
+        let bg = Rgb(self.panel_bg);
+        let (y_lo, y_hi) = ((h / 4) as u32, (h * 3 / 4) as u32);
+        let (x0, x1) = (self.chat.x0 as u32, self.chat.x1 as u32);
+
+        let left_in = col_bg_ratio(frame, bg, x0, y_lo, y_hi, 16) > COLUMN_DENSE;
+        let left_out = x0 < 4 || col_bg_ratio(frame, bg, x0 - 4, y_lo, y_hi, 16) <= COLUMN_DENSE;
+        let right_in = col_bg_ratio(frame, bg, x1.saturating_sub(4), y_lo, y_hi, 16) > COLUMN_DENSE;
+        let right_out =
+            x1 >= frame.width() || col_bg_ratio(frame, bg, x1, y_lo, y_hi, 16) <= COLUMN_DENSE;
+        let hdr_ok = row_bg_ratio(frame, bg, self.header_top as u32, x0, x1, 16) < BAND_LOW
+            && row_bg_ratio(frame, bg, (self.header_top + 1) as u32, x0, x1, 16) >= BAND_LOW;
+        let inp_ok = row_bg_ratio(frame, bg, self.input_top as u32, x0, x1, 16) < BAND_LOW
+            && row_bg_ratio(frame, bg, (self.input_top - 2) as u32, x0, x1, 16) >= BAND_LOW;
+
+        left_in && left_out && right_in && right_out && hdr_ok && inp_ok
+    }
+
+    fn geometry_fits(&self, w: i32, h: i32) -> bool {
+        w >= 300
+            && h >= 300
+            && self.panel.y0 == 0
+            && self.panel.y1 == h
+            && self.chat.x0 >= 0
+            && self.chat.x1 <= w
+            && self.chat.x0 == self.panel.x0
+            && self.chat.x1 == self.panel.x1
+            && self.header_top > 0
+            && self.input_top > self.header_top + 2
+            && self.input_top < h
+    }
+}
+
+/// 若缓存锚点的四条边界特征线在本帧仍然成立则直接复用（`< 0.05ms`），否则全量重算 [`derive`]。
+pub fn derive_or_reuse(
+    frame: &Frame,
+    cached: Option<PaneAnchor>,
+) -> Result<PaneAnchor, AnchorError> {
+    if let Some(a) = cached
+        && a.still_matches(frame)
+    {
+        return Ok(a);
+    }
+    derive(frame)
+}
+
 /// 推导一帧的消息区。
 pub fn derive(frame: &Frame) -> Result<PaneAnchor, AnchorError> {
     let (w, h) = (frame.width(), frame.height());
@@ -430,6 +485,27 @@ mod tests {
             p25 < 25.0,
             "anchor::derive 1267x930 p25={p25:.2}ms 超出 25ms 预算（发生全图扫描退化？）"
         );
+
+        let cached = derive(&f).expect("initial derive");
+        let t_hit = std::time::Instant::now();
+        for _ in 0..100 {
+            let a = derive_or_reuse(&f, Some(cached)).expect("reuse must succeed");
+            std::hint::black_box(a);
+        }
+        let hit_avg_us = t_hit.elapsed().as_secs_f64() * 1_000_000.0 / 100.0;
+        eprintln!("PERF anchor::derive_or_reuse (1267x930 hit): avg={hit_avg_us:.1}us");
+        assert!(
+            hit_avg_us < 500.0,
+            "derive_or_reuse 命中耗时 {hit_avg_us:.1}us 超出 500us 预算"
+        );
+
+        let moved_sidebar = synthetic(W, H, 0.30, 0.035, 0.72);
+        assert!(
+            !cached.still_matches(&moved_sidebar),
+            "侧栏拉宽后仍误判命中"
+        );
+        let rederived = derive_or_reuse(&moved_sidebar, Some(cached)).expect("rederive");
+        assert_eq!(rederived, derive(&moved_sidebar).unwrap());
     }
 }
 
@@ -441,6 +517,59 @@ struct Rgb([u8; 3]);
 #[inline(always)]
 fn near(a: [u8; 3], b: Rgb) -> bool {
     a[0].abs_diff(b.0[0]) <= 4 && a[1].abs_diff(b.0[1]) <= 4 && a[2].abs_diff(b.0[2]) <= 4
+}
+
+fn col_bg_ratio(frame: &Frame, bg: Rgb, x: u32, y0: u32, y1: u32, step: u32) -> f32 {
+    let (w, h) = (frame.width(), frame.height());
+    if x >= w || y0 >= y1 || y1 > h {
+        return 0.0;
+    }
+    let bytes = frame.as_bytes();
+    let row_stride = (w as usize) * 3;
+    let x_off = (x as usize) * 3;
+    let mut hits = 0u32;
+    let mut total = 0u32;
+    let mut y = y0;
+    while y < y1 {
+        let row = &bytes[(y as usize) * row_stride..((y as usize) + 1) * row_stride];
+        if near([row[x_off], row[x_off + 1], row[x_off + 2]], bg) {
+            hits += 1;
+        }
+        total += 1;
+        y += step.max(1);
+    }
+    if total == 0 {
+        0.0
+    } else {
+        hits as f32 / total as f32
+    }
+}
+
+fn row_bg_ratio(frame: &Frame, bg: Rgb, y: u32, x0: u32, x1: u32, step: u32) -> f32 {
+    let (w, h) = (frame.width(), frame.height());
+    if y >= h || x0 >= x1 {
+        return 0.0;
+    }
+    let bytes = frame.as_bytes();
+    let row_stride = (w as usize) * 3;
+    let row = &bytes[(y as usize) * row_stride..((y as usize) + 1) * row_stride];
+    let mut off = (x0.min(w) as usize) * 3;
+    let end = (x1.min(w) as usize) * 3;
+    let step_off = (step.max(1) as usize) * 3;
+    let mut hits = 0u32;
+    let mut total = 0u32;
+    while off + 3 <= end {
+        if near([row[off], row[off + 1], row[off + 2]], bg) {
+            hits += 1;
+        }
+        total += 1;
+        off += step_off;
+    }
+    if total == 0 {
+        0.0
+    } else {
+        hits as f32 / total as f32
+    }
 }
 
 fn dominant_in_band(frame: &Frame, x0: u32, x1: u32, y0: u32, y1: u32, step: u32) -> Option<Rgb> {

@@ -546,6 +546,8 @@ struct Scratch {
     source: FrameSource,
     /// 现场模式下最近一次用到的窗口句柄。给日志与投递用。
     last_hwnd: Option<isize>,
+    /// 上一帧验证过的消息区几何锚点（若本帧 4 条边界特征线未动则直接 `< 0.05ms` 复用）。
+    last_anchor: Option<PaneAnchor>,
     /// `Auto` 档自动发送的护栏状态。见 [`AutoGate`]。
     auto_gate: AutoGate,
     /// 会话切换策略（锁定当前 / 自动跟随）。
@@ -675,6 +677,7 @@ impl Scratch {
             // 默认现场；`spawn` 会用 `LoopConfig` 里的那份覆盖。
             source: FrameSource::Live,
             last_hwnd: None,
+            last_anchor: None,
             auto_gate: AutoGate::default(),
             session_mode: SessionModeCell::default_lock(),
             buckets: Vec::new(),
@@ -1884,8 +1887,9 @@ fn step(
     interim: &mut dyn FnMut(Readout),
 ) -> Result<Option<PaneAnchor>, String> {
     let frame = load_frame(&s.source, &mut s.last_hwnd)?;
-    let anchor =
-        chatservant_capture::anchor::derive(&frame).map_err(|e| format!("锚点推导失败：{e}"))?;
+    let anchor = chatservant_capture::anchor::derive_or_reuse(&frame, s.last_anchor)
+        .map_err(|e| format!("锚点推导失败：{e}"))?;
+    s.last_anchor = Some(anchor);
     let full = frame
         .crop(anchor.chat)
         .ok_or_else(|| "裁不出消息区".to_string())?;

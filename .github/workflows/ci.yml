@@ -316,9 +316,21 @@ jobs:
           Write-Output 'SECRET_SCAN_OK —— 抓得到探针，也放得过干净仓库'
 
       # ⑥ 许可证 / advisory / 来源合规，策略见 docs/adr/0003-dependency-strategy.md
-      - name: "Gate 10 | cargo deny check"
-        run: cargo install cargo-deny --locked && cargo deny check
+      - name: "Gate 10a | Cache cargo-deny binary and advisory-db"
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-deny.exe
+            ~/.cargo/advisory-dbs
+          key: cargo-deny-win-x64-v1
 
+      - name: "Gate 10 | cargo deny check"
+        shell: pwsh
+        run: |
+          if (-not (Get-Command cargo-deny -ErrorAction SilentlyContinue)) {
+            cargo install cargo-deny --locked
+          }
+          cargo deny check
       # ⑦ npm 侧漏洞（2026-10-23 加，票 81）。
       #
       # ⚠⚠ **调与本地门禁同一份脚本**（`scripts/npmaudit.ps1`）⇒
