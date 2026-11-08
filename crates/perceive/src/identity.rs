@@ -129,17 +129,7 @@ impl HeaderPrint {
         // 裁剪过了却取不到像素**不该发生**；真发生了按「亮度 0」处理，
         //   它会让这个像素更接近亮背景而不是暗背景，即**偏向不被当成字**——
         //   宁可少认，不可多认。
-        let mut lum: Vec<u8> = Vec::with_capacity(w * h);
-        let mut hist = [0u32; 256];
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let l = frame.pixel(x, y).map_or(0, |[r, g, b]| luminance(r, g, b));
-                hist[l as usize] += 1;
-                lum.push(l);
-            }
-        }
-        let bg = mode(&hist)?;
-
+        let (lum, bg) = extract_luma_and_bg(frame, x0, y0, x1, y1)?;
         let mut raw = vec![0u8; w * h];
         let mut ink = 0u32;
         // 最靠右的墨迹列（**块内**偏移）。算出来是为了裁读名字那条窄带。
@@ -147,7 +137,7 @@ impl HeaderPrint {
         for y in 0..h {
             for x in 0..w {
                 let l = lum[y * w + x];
-                if (l as f64 - bg as f64).abs() > INK_DELTA {
+                if l.abs_diff(bg) > INK_DELTA {
                     raw[y * w + x] = 1;
                     ink += 1;
                     right_ink = right_ink.max(x as i32);
@@ -210,6 +200,9 @@ impl HeaderPrint {
     pub fn similarity(&self, other: &Self) -> f32 {
         if self.ink == 0 || other.ink == 0 || self.mask.len() != other.mask.len() {
             return 0.0;
+        }
+        if self.w == other.w && self.h == other.h && self.mask == other.mask {
+            return 1.0;
         }
         let (w, h) = (self.w as isize, self.h as isize);
         let a = &self.mask;
@@ -479,16 +472,7 @@ fn ink_rows(frame: &Frame, band: Rect) -> Option<Vec<(i32, i32, u32, i32)>> {
     }
 
     // 一趟取亮度 + 直方图。
-    let mut lum = Vec::with_capacity((x1 - x0) as usize * (y1 - y0) as usize);
-    let mut hist = [0u32; 256];
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let l = frame.pixel(x, y).map_or(0, |[r, g, b]| luminance(r, g, b));
-            hist[l as usize] += 1;
-            lum.push(l);
-        }
-    }
-    let bg = mode(&hist)?;
+    let (lum, bg) = extract_luma_and_bg(frame, x0, y0, x1, y1)?;
 
     let w = (x1 - x0) as usize;
     let h = (y1 - y0) as usize;
@@ -508,7 +492,7 @@ fn ink_rows(frame: &Frame, band: Rect) -> Option<Vec<(i32, i32, u32, i32)>> {
         let mut line_left: i32 = i32::MAX;
         for c in 0..w {
             let l = lum[row * w + c];
-            if (l as f64 - bg as f64).abs() > INK_DELTA {
+            if l.abs_diff(bg) > INK_DELTA {
                 line_ink += 1;
                 if line_left == i32::MAX {
                     line_left = (x0 as usize + c) as i32;
@@ -554,6 +538,28 @@ fn ink_rows(frame: &Frame, band: Rect) -> Option<Vec<(i32, i32, u32, i32)>> {
 }
 
 /// 直方图的众数。整片全 0（不该发生）返回 `None`。
+fn extract_luma_and_bg(frame: &Frame, x0: u32, y0: u32, x1: u32, y1: u32) -> Option<(Vec<u8>, u8)> {
+    let w = (x1 - x0) as usize;
+    let h = (y1 - y0) as usize;
+    let bytes = frame.as_bytes();
+    let row_stride = (frame.width() as usize) * 3;
+    let x0_off = (x0 as usize) * 3;
+    let x1_off = (x1 as usize) * 3;
+    let mut lum = Vec::with_capacity(w * h);
+    let mut hist = [0u32; 256];
+    for y in y0..y1 {
+        let row_start = (y as usize) * row_stride;
+        let slice = &bytes[row_start + x0_off..row_start + x1_off];
+        for px in slice.chunks_exact(3) {
+            let l = luminance(px[0], px[1], px[2]);
+            hist[l as usize] += 1;
+            lum.push(l);
+        }
+    }
+    let bg = mode(&hist)?;
+    Some((lum, bg))
+}
+
 fn mode(hist: &[u32; 256]) -> Option<u8> {
     let mut best = 0u32;
     let mut at = 0usize;
@@ -574,8 +580,7 @@ const MIN_PIXELS: u32 = 200;
 /// 取 60 是因为实测那块区域里正文是 lum≈200、背景是 lum≈30，
 /// 中间没有渐变层；60 卡在两侧中间，对主题整体深浅不敏感
 /// （只要字与底仍差得开）。
-const INK_DELTA: f64 = 60.0;
-
+const INK_DELTA: u8 = 60;
 /// 墨迹少于这个像素数就当「这块里没有身份」。
 const MIN_INK: u32 = 40;
 

@@ -1890,11 +1890,8 @@ fn step(
     let anchor = chatservant_capture::anchor::derive_or_reuse(&frame, s.last_anchor)
         .map_err(|e| format!("锚点推导失败：{e}"))?;
     s.last_anchor = Some(anchor);
-    let full = frame
-        .crop(anchor.chat)
-        .ok_or_else(|| "裁不出消息区".to_string())?;
 
-    // 会话身份闸必须排在任何 OCR 之前（认头部像素指纹，不碰 OCR）。
+    // 会话身份闸必须排在任何消息区裁剪与 OCR 之前（认头部像素指纹，停泊态零裁剪零分配）。
     let discovered = header_print(&frame, &anchor);
     refresh_peer(
         s,
@@ -1912,6 +1909,10 @@ fn step(
     }
     let just_opened = gate_opened(s);
     s.gate_open = true;
+
+    let full = frame
+        .crop(anchor.chat)
+        .ok_or_else(|| "裁不出消息区".to_string())?;
 
     // 变化门控 + 增量 ROI（静默期直接返回，硬约束第 6 条）。
     let Decision::Read { roi } = watcher.observe(&full) else {
