@@ -370,13 +370,18 @@
                         d="M 12.8 8.6 L 15.6 9.5 L 23.2 36.2 L 42 5"
                         fill="none"
                         stroke="white"
-                        stroke-width="11"
-                        stroke-linecap="round"
+                        stroke-width="6.2"
+                        stroke-linecap="butt"
                         stroke-linejoin="round"
                         pathLength="100"
                       />
                     </mask>
                   </defs>
+                  <path
+                    class="stroke-guide-line"
+                    d="M 12.8 8.6 L 15.6 9.5 L 23.2 36.2 L 42 5"
+                    fill="none"
+                  />
                   <g
                     mask="url(#tick-draw-{strokeKey})"
                     filter={craftFilter ? 'url(#pencil)' : undefined}
@@ -384,6 +389,7 @@
                   >
                     {#each TICK_NESTED as s, idx (idx)}<path d={s.d} fill-opacity={s.o} />{/each}
                   </g>
+                  <circle class="stroke-pen-tip tick-tip" r="2.3" />
                 </svg>
               {:else}
                 <svg class="lab-mark-svg" viewBox="12 0 42 40">
@@ -401,12 +407,17 @@
                         d="M 21.5 25.5 C 18 14, 24 3.5, 34 3.5 C 45 3.5, 50.5 12, 49.5 20 C 48.5 30.5, 39 36.5, 31 36.5 C 22.5 36.5, 16.5 29, 18 21"
                         fill="none"
                         stroke="white"
-                        stroke-width="13"
-                        stroke-linecap="round"
+                        stroke-width="6.5"
+                        stroke-linecap="butt"
                         pathLength="100"
                       />
                     </mask>
                   </defs>
+                  <path
+                    class="stroke-guide-line"
+                    d="M 21.5 25.5 C 18 14, 24 3.5, 34 3.5 C 45 3.5, 50.5 12, 49.5 20 C 48.5 30.5, 39 36.5, 31 36.5 C 22.5 36.5, 16.5 29, 18 21"
+                    fill="none"
+                  />
                   <g
                     mask="url(#ring-draw-{strokeKey})"
                     filter={craftFilter ? 'url(#pencil)' : undefined}
@@ -414,10 +425,14 @@
                   >
                     {#each RING_MARK as s, idx (idx)}<path d={s.d} fill-opacity={s.o} />{/each}
                   </g>
+                  <circle class="stroke-pen-tip ring-tip" r="2.3" />
                 </svg>
               {/if}
               <span class="lab-caption"
-                >{t('↻ 点击此处或按钮重演运笔轨迹', '↻ Click here or above to replay stroke')}</span
+                >{t(
+                  '↻ 点击重放 1.2s 慢速运笔与中心线轨迹',
+                  '↻ Click to replay 1.2s stroke & centerline',
+                )}</span
               >
             </button>
           {/key}
@@ -787,14 +802,33 @@
 	.stage-frame { width: 380px; height: 560px; border: 0; display: block; margin: 0 auto; border-radius: 4px; }
 	.stage-hint { margin: 0.65rem 0 0; font-size: 0.82rem; color: var(--cs-paper); opacity: 0.88; text-align: center; }
 	@keyframes revealStrokePath {
-		from { stroke-dashoffset: 100; }
-		to { stroke-dashoffset: 0; }
+		0% { stroke-dashoffset: 100; }
+		100% { stroke-dashoffset: 0; }
+	}
+	@keyframes movePenTip {
+		0% { offset-distance: 0%; opacity: 1; }
+		88% { offset-distance: 100%; opacity: 1; }
+		100% { offset-distance: 100%; opacity: 0; }
 	}
 	.stroke-reveal-path {
 		stroke-dasharray: 100;
 		stroke-dashoffset: 100;
-		animation: revealStrokePath 720ms cubic-bezier(0.32, 0, 0.24, 1) forwards;
+		animation: revealStrokePath 1200ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 	}
+	.stroke-guide-line {
+		stroke: rgb(46 34 18 / 0.22);
+		stroke-width: 0.75;
+		stroke-dasharray: 2 2;
+	}
+	.stroke-pen-tip {
+		fill: var(--cs-pencil-red);
+		stroke: #fff8ea;
+		stroke-width: 0.9;
+		filter: drop-shadow(0 0 3px rgb(200 50 42 / 0.75));
+		animation: movePenTip 1320ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+	}
+	.tick-tip { offset-path: path('M 12.8 8.6 L 15.6 9.5 L 23.2 36.2 L 42 5'); }
+	.ring-tip { offset-path: path('M 21.5 25.5 C 18 14, 24 3.5, 34 3.5 C 45 3.5, 50.5 12, 49.5 20 C 48.5 30.5, 39 36.5, 31 36.5 C 22.5 36.5, 16.5 29, 18 21'); }
 	.lab-stage { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 0.45rem; padding: 0.55rem 0.75rem; border-top: 1px dashed rgb(46 34 18 / 0.2); }
 	.lab-stage-btn { width: 100%; background: none; border-left: 0; border-right: 0; border-bottom: 0; font: inherit; cursor: pointer; text-align: left; }
 	.lab-mark-svg { width: 68px; height: 44px; overflow: visible; }
