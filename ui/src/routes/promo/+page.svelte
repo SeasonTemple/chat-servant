@@ -380,18 +380,23 @@
         <article class="paper-card">
           <div class="card-top">
             <span class="card-no">{t('器物二', 'CRAFT 02')}</span><code class="card-guard"
-              >CONF_STROKES · 3.6 / 2.56 / 1.98</code
+              >{t('-3° 楷体分值 + 26% 退隐叠印', '-3° Graphite Score + 26% Stamp Overlay')}</code
             >
           </div>
-          <h3>{t('不写百分比：以笔迹轻重编码把握度', 'Confidence by Stroke Weight, Never %')}</h3>
+          <h3>
+            {t(
+              '不印百分号：铅笔斜体分值与朱砂叠印',
+              'No % Sign: Graphite Marginal Score & Cinnabar Stamp',
+            )}
+          </h3>
           <p>
             {t(
-              '言侍不在纸上印冷冰冰的「87%」。三档置信度共用同一条中心线，只靠笔锋按压轻重区分「笃定 / 稳妥 / 备选」。',
-              'YanShi never prints "87%" on paper. Three confidence tiers share the exact same centerline, differing only in pencil pressure.',
+              '言侍不在纸上印冷冰冰的「72%」进度条。每条候选右侧以 -3° 楷体铅笔写下两位数分值（72 / 54 / 28）；选中项分值自动退隐为 26% 浅底纹，原位叠盖一枚朱砂红勾或红圈。',
+              'YanShi never prints a cold "72%" progress bar. Each strip carries a -3° italic graphite score (72 / 54 / 28); on the chosen strip, the score recedes to 26% opacity beneath a cinnabar red tick or ring.',
             )}
           </p>
           <div class="lab-controls">
-            {#each [['high', '重按 · 笃定', 'Heavy · High'], ['mid', '中按 · 稳妥', 'Medium · Mid'], ['low', '轻按 · 备选', 'Light · Low']] as lv (lv[0])}
+            {#each [['high', '72 · 笃定首选', '72 · Top'], ['mid', '54 · 稳妥备选', '54 · Mid'], ['low', '28 · 补充角度', '28 · Alt']] as lv (lv[0])}
               <button
                 type="button"
                 class="strip-tab"
@@ -401,17 +406,40 @@
               >
             {/each}
           </div>
-          {#key confLevel}
+          {#key `${confLevel}-${craftShape}`}
             <div class="lab-stage">
-              <svg class="lab-conf-svg" viewBox="0 10 {MARK_VIEW.w} 16" preserveAspectRatio="none">
-                <g filter="url(#pencil)" fill="var(--cs-pencil-red)">
-                  {#each CONF_STROKES[confLevel] as s, idx (idx)}<path
-                      d={s.d}
-                      fill-opacity={s.o}
-                    />{/each}
-                </g>
-              </svg>
-              <span class="lab-caption">{t('三道细线叠画柔边', '3-pass overlapped soft edge')}</span
+              <div class="lab-score-row">
+                {#each [['high', '72'], ['mid', '54'], ['low', '28']] as item (item[0])}
+                  {@const picked = confLevel === item[0]}
+                  <button
+                    type="button"
+                    class="lab-score-slot"
+                    class:picked
+                    onclick={() => (confLevel = item[0] as 'high' | 'mid' | 'low')}
+                  >
+                    <span class="lab-score-num" class:faded={picked}>{item[1]}</span>
+                    {#if picked}
+                      <svg
+                        class="lab-score-mark"
+                        viewBox={craftShape === 'ring'
+                          ? `14 1 38 37`
+                          : `0 0 ${TICK_VIEW.w} ${TICK_VIEW.h}`}
+                        preserveAspectRatio="none"
+                        aria-hidden="true"
+                      >
+                        <g filter="url(#pencil)" fill="var(--cs-pencil-red)">
+                          {#each craftShape === 'ring' ? RING_MARK : TICK_NESTED as s, idx (idx)}<path
+                              d={s.d}
+                              fill-opacity={s.o}
+                            />{/each}
+                        </g>
+                      </svg>
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+              <span class="lab-caption"
+                >{t('← 点选分值看退隐与落印', '← Click score to stamp')}</span
               >
             </div>
           {/key}
@@ -423,11 +451,16 @@
               >probe-sheet.png · 5 Layers</code
             >
           </div>
-          <h3>{t('五层撕口纸边与整条下压反馈', '5-Layer Deckle Edge & Full-Strip Press')}</h3>
+          <h3>
+            {t(
+              '五层撕口纸边与右下偏心指压反馈',
+              '5-Layer Deckle Edge & Right-Weighted Finger Press',
+            )}
+          </h3>
           <p>
             {t(
-              '不用 CSS 直线边框，也不用 SetWindowRgn 二值硬阶梯。整张棉纸含五层物理细节，悬停整条微抬、按下整条压实。',
-              'No CSS solid borders or jagged SetWindowRgn masks. Real cotton paper with 5 edge layers, instant hover lift, and full-strip press.',
+              '不用 CSS 直线边框，也不用 SetWindowRgn 二值硬阶梯。整张棉纸含五层物理细节，悬停整条微抬（-2px），按下时整条联动下沉、且受力重心偏向右侧/右下角压入纸面。',
+              'No CSS solid borders or jagged SetWindowRgn masks. Real cotton paper with 5 edge layers, instant hover lift (-2px), and a full-strip press weighted toward the bottom-right finger contact.',
             )}
           </p>
           <ul class="layer-list">
@@ -709,7 +742,40 @@
 	.stage-hint { margin: 0.65rem 0 0; font-size: 0.82rem; color: var(--cs-paper); opacity: 0.88; text-align: center; }
 	.lab-stage { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 0.45rem; padding: 0.55rem 0.75rem; border-top: 1px dashed rgb(46 34 18 / 0.2); }
 	.lab-mark-svg { width: 64px; height: 38px; overflow: visible; animation: drawMark 380ms cubic-bezier(0.22, 1, 0.36, 1) both; }
-	.lab-conf-svg { width: 156px; height: 24px; overflow: visible; animation: drawMark 380ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+	.lab-score-row { display: inline-flex; align-items: center; gap: 0.65rem; }
+	.lab-score-slot {
+		position: relative;
+		width: 44px;
+		height: 30px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		background: rgb(46 34 18 / 0.05);
+		border: 1px dashed rgb(46 34 18 / 0.24);
+		border-radius: 3px;
+		cursor: pointer;
+		padding: 0;
+	}
+	.lab-score-slot.picked { border-style: solid; border-color: rgb(200 50 42 / 0.45); background: rgb(200 50 42 / 0.05); }
+	.lab-score-num {
+		font-family: 'STKaiti', 'KaiTi', 'FangSong', Georgia, serif;
+		font-style: italic;
+		font-weight: 700;
+		font-size: 16px;
+		color: #544d42;
+		transform: rotate(-3deg);
+		filter: url(#pencil);
+		transition: opacity 80ms ease-out;
+	}
+	.lab-score-num.faded { opacity: 0.26; color: var(--cs-ink); }
+	.lab-score-mark {
+		position: absolute;
+		width: 38px;
+		height: 26px;
+		overflow: visible;
+		pointer-events: none;
+		animation: drawMark 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+	}
 	.lab-caption { font: 700 0.78rem ui-monospace, Consolas, monospace; color: var(--cs-pencil-red); }
 	.layer-list { list-style: none; padding: 0; margin: 0.35rem 0 0; display: flex; flex-direction: column; gap: 0.38rem; font-size: clamp(0.84rem, 0.9vw, 0.96rem); font-weight: 600; color: var(--cs-ink-2); }
 	.layer-list code { color: var(--cs-pencil-red); font-weight: 700; margin-right: 0.3rem; }
