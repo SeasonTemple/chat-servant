@@ -45,7 +45,7 @@
   import type { Attachment } from 'svelte/attachments';
   import TierSwitch from '$lib/TierSwitch.svelte';
   import SegSlider from '$lib/SegSlider.svelte';
-  import { IS_DEMO as DEMO } from '$lib/runtime';
+  import { IS_DEMO as DEMO, HAS_TAURI } from '$lib/runtime';
   import { markShape, type MarkShape } from '$lib/mark-shape.svelte';
   import type { BudgetView, Tier } from '$lib/types';
   import PencilDefs from '$lib/PencilDefs.svelte';
@@ -393,6 +393,12 @@
    */
   async function saveProxy() {
     proxyNote = null;
+    if (!HAS_TAURI) {
+      proxyNote = proxyDraft.trim()
+        ? '已设。**两组模型都走它**，下一次请求生效。'
+        : '已清空，现在直连。';
+      return;
+    }
     try {
       const p = await invoke<ProxyView>('set_proxy', { url: proxyDraft });
       proxyDraft = p.url;
@@ -413,6 +419,11 @@
    * 写回 `$bindable` 的 `tier` 之后，主面板纸底那道档位记号立刻跟着变。
    */
   async function changeTier(t: Tier) {
+    if (!HAS_TAURI) {
+      tier = t;
+      tierNote = null;
+      return;
+    }
     try {
       tier = await invoke<Tier>('set_tier', { tier: t });
       tierNote = null;
@@ -437,6 +448,14 @@
 
   async function setSessionMode(next: SessionMode) {
     sessionModeNote = '';
+    if (!HAS_TAURI) {
+      sessionMode = next;
+      sessionModeNote =
+        sessionMode === 'follow'
+          ? '微信切换聊天窗口时自动切到对应会话分桶，各会话历史独立隔离。'
+          : '只处理锁定的那一个会话；微信切到其它窗口时暂停，需手动点「改为锁定此会话」。';
+      return;
+    }
     try {
       const applied = await invoke<string>('set_session_mode', { mode: next });
       sessionMode = applied === 'follow' ? 'follow' : 'lock';
@@ -474,6 +493,14 @@
 
   async function setClose(next: 'exit' | 'tray') {
     closeNote = '';
+    if (!HAS_TAURI) {
+      closeBehavior = next;
+      closeNote =
+        next === 'tray'
+          ? '按 − 收进托盘，系统关闭（Alt+F4）也只是收起来。托盘图标在「会发出去」的档位下会带红点。'
+          : '按 × 直接退出，系统关闭（Alt+F4）也会退出。程序不会在后台继续跑。';
+      return;
+    }
     try {
       await invoke('set_close_behavior', { behavior: next });
       closeBehavior = next;
@@ -496,6 +523,23 @@
    * 真实帧上完整验证，所以没有「自动」档，只有开和关。
    */
   async function toggleImagesOut(next: boolean) {
+    if (!HAS_TAURI) {
+      imagesOut = next;
+      if (next && !budget) {
+        budget = {
+          budget: 4000,
+          min: 1400,
+          max: 16000,
+          visible: true,
+          provider_base: 1400,
+          provider: 'DeepSeek',
+        };
+      }
+      imagesNote = imagesOut
+        ? '已打开：对方发来的图片会被裁出并发给模型。'
+        : '已关闭：一张图都不会外发。';
+      return;
+    }
     try {
       imagesOut = await invoke<boolean>('set_images_out', { on: next });
       // 开关变了，预算滑块的可显示性也跟着变——**重新读一次**，
@@ -518,6 +562,10 @@
    */
   async function commitBudget() {
     if (!budget) return;
+    if (!HAS_TAURI) {
+      budgetNote = `已设为每张 ${budget.budget} token，下一张图就会用上`;
+      return;
+    }
     try {
       budget = await invoke<BudgetView>('set_token_budget', { budget: budget.budget });
       budgetNote = `已设为每张 ${budget.budget} token，下一张图就会用上`;
@@ -536,6 +584,10 @@
   // 滑块改动 → 立刻生效。`change` 而不是 `input`：拖动过程中不该
   // 一路发请求，松手时才提交一次。
   async function commitRecent() {
+    if (!HAS_TAURI) {
+      recentNote = `已设为 ${recentN} 条，下一次生成就会用上`;
+      return;
+    }
     try {
       const v = await invoke<RecentView>('set_recent_n', { n: recentN });
       // ⚠ 用回包覆盖：值被夹过的话，界面必须显示夹完的数。
@@ -545,7 +597,6 @@
       recentNote = String(e);
     }
   }
-
   onMount(() => {
     // ⚠ 演示模式**不走 IPC**。这一屏改的是真设置（key、档位、预算），
     // 浏览器里没有 `window.__TAURI_INTERNALS__`，`invoke` 必然抛。
