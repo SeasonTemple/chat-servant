@@ -14,7 +14,6 @@
   let craftShape = $state<'tick' | 'ring'>('tick');
   let craftFilter = $state(true);
   let confLevel = $state<'high' | 'mid' | 'low'>('high');
-  let strokeKey = $state(0);
   const t = (zh: string, en: string) => (lang === 'zh' ? zh : en);
   const rows = (list: string[]) => list.map((s) => s.split('|'));
 
@@ -325,117 +324,47 @@
               type="button"
               class="strip-tab"
               class:active={craftShape === 'tick'}
-              onclick={() => {
-                craftShape = 'tick';
-                strokeKey++;
-              }}>{t('朱砂勾', 'Tick')}</button
+              onclick={() => (craftShape = 'tick')}>{t('朱砂勾', 'Tick')}</button
             >
             <button
               type="button"
               class="strip-tab"
               class:active={craftShape === 'ring'}
-              onclick={() => {
-                craftShape = 'ring';
-                strokeKey++;
-              }}>{t('朱砂圈', 'Ring')}</button
+              onclick={() => (craftShape = 'ring')}>{t('朱砂圈', 'Ring')}</button
             >
             <button
               type="button"
               class="strip-tab"
               class:active={craftFilter}
-              onclick={() => {
-                craftFilter = !craftFilter;
-                strokeKey++;
-              }}
+              onclick={() => (craftFilter = !craftFilter)}
               >{craftFilter
                 ? t('蜡质颗粒：开', 'Grain: ON')
                 : t('蜡质颗粒：关（平涂）', 'Grain: OFF')}</button
             >
           </div>
-          {#key strokeKey}
-            <button type="button" class="lab-stage lab-stage-btn" onclick={() => strokeKey++}>
-              {#if craftShape === 'tick'}
-                <svg class="lab-mark-svg" viewBox="0 0 56 39">
-                  <defs>
-                    <mask
-                      id="tick-draw-{strokeKey}"
-                      maskUnits="userSpaceOnUse"
-                      x="0"
-                      y="0"
-                      width="56"
-                      height="40"
-                    >
-                      <path
-                        class="stroke-reveal-path"
-                        d="M 12.8 8.6 L 15.6 9.5 L 23.2 36.2 L 42 5"
-                        fill="none"
-                        stroke="white"
-                        stroke-width="6.2"
-                        stroke-linecap="butt"
-                        stroke-linejoin="round"
-                        pathLength="100"
-                      />
-                    </mask>
-                  </defs>
-                  <path
-                    class="stroke-guide-line"
-                    d="M 12.8 8.6 L 15.6 9.5 L 23.2 36.2 L 42 5"
-                    fill="none"
-                  />
-                  <g
-                    mask="url(#tick-draw-{strokeKey})"
-                    filter={craftFilter ? 'url(#pencil)' : undefined}
-                    fill="var(--cs-pencil-red)"
-                  >
-                    {#each TICK_NESTED as s, idx (idx)}<path d={s.d} fill-opacity={s.o} />{/each}
-                  </g>
-                  <circle class="stroke-pen-tip tick-tip" r="2.3" />
-                </svg>
-              {:else}
-                <svg class="lab-mark-svg" viewBox="12 0 42 40">
-                  <defs>
-                    <mask
-                      id="ring-draw-{strokeKey}"
-                      maskUnits="userSpaceOnUse"
-                      x="0"
-                      y="0"
-                      width="60"
-                      height="42"
-                    >
-                      <path
-                        class="stroke-reveal-path"
-                        d="M 21.5 25.5 C 18 14, 24 3.5, 34 3.5 C 45 3.5, 50.5 12, 49.5 20 C 48.5 30.5, 39 36.5, 31 36.5 C 22.5 36.5, 16.5 29, 18 21"
-                        fill="none"
-                        stroke="white"
-                        stroke-width="6.5"
-                        stroke-linecap="butt"
-                        pathLength="100"
-                      />
-                    </mask>
-                  </defs>
-                  <path
-                    class="stroke-guide-line"
-                    d="M 21.5 25.5 C 18 14, 24 3.5, 34 3.5 C 45 3.5, 50.5 12, 49.5 20 C 48.5 30.5, 39 36.5, 31 36.5 C 22.5 36.5, 16.5 29, 18 21"
-                    fill="none"
-                  />
-                  <g
-                    mask="url(#ring-draw-{strokeKey})"
-                    filter={craftFilter ? 'url(#pencil)' : undefined}
-                    fill="var(--cs-pencil-red)"
-                  >
-                    {#each RING_MARK as s, idx (idx)}<path d={s.d} fill-opacity={s.o} />{/each}
-                  </g>
-                  <circle class="stroke-pen-tip ring-tip" r="2.3" />
-                </svg>
-              {/if}
-              <span class="lab-caption"
-                >{t(
-                  '↻ 点击重放 1.2s 慢速运笔与中心线轨迹',
-                  '↻ Click to replay 1.2s stroke & centerline',
-                )}</span
-              >
-            </button>
-          {/key}
+          <div class="lab-stage">
+            {#if craftShape === 'tick'}
+              <svg class="lab-mark-svg" viewBox="0 0 56 39">
+                <g filter={craftFilter ? 'url(#pencil)' : undefined} fill="var(--cs-pencil-red)">
+                  {#each TICK_NESTED as s, idx (idx)}<path d={s.d} fill-opacity={s.o} />{/each}
+                </g>
+              </svg>
+            {:else}
+              <svg class="lab-mark-svg" viewBox="12 0 42 40">
+                <g filter={craftFilter ? 'url(#pencil)' : undefined} fill="var(--cs-pencil-red)">
+                  {#each RING_MARK as s, idx (idx)}<path d={s.d} fill-opacity={s.o} />{/each}
+                </g>
+              </svg>
+            {/if}
+            <span class="lab-caption"
+              >{craftFilter
+                ? t(
+                    '五层同心羽化 + feTurbulence 石墨颗粒',
+                    '5-layer feathering + feTurbulence grain',
+                  )
+                : t('已关颗粒滤镜：退化为普通矢量平涂', 'Grain filter off: flat vector fill')}</span
+            >
+          </div>
         </article>
 
         <article class="paper-card">
@@ -801,46 +730,7 @@
 	.stage-sheet-anim { animation: sheetFlip 220ms cubic-bezier(0.22, 1, 0.36, 1) both; }
 	.stage-frame { width: 380px; height: 560px; border: 0; display: block; margin: 0 auto; border-radius: 4px; }
 	.stage-hint { margin: 0.65rem 0 0; font-size: 0.82rem; color: var(--cs-paper); opacity: 0.88; text-align: center; }
-	@keyframes revealStrokePath {
-		0% { stroke-dashoffset: 100; }
-		100% { stroke-dashoffset: 0; }
-	}
-	@keyframes movePenTip {
-		0% { offset-distance: 0%; opacity: 1; }
-		88% { offset-distance: 100%; opacity: 1; }
-		100% { offset-distance: 100%; opacity: 0; }
-	}
-	:global(.promo-desk) .stroke-reveal-path {
-		stroke-dasharray: 100;
-		stroke-dashoffset: 100;
-		animation: revealStrokePath 1200ms cubic-bezier(0.4, 0, 0.2, 1) forwards !important;
-		animation-duration: 1200ms !important;
-	}
-	.stroke-guide-line {
-		stroke: rgb(46 34 18 / 0.22);
-		stroke-width: 0.75;
-		stroke-dasharray: 2 2;
-	}
-	:global(.promo-desk) .stroke-pen-tip {
-		fill: var(--cs-pencil-red);
-		stroke: #fff8ea;
-		stroke-width: 0.9;
-		filter: drop-shadow(0 0 3px rgb(200 50 42 / 0.75));
-		animation: movePenTip 1320ms cubic-bezier(0.4, 0, 0.2, 1) forwards !important;
-		animation-duration: 1320ms !important;
-	}
-	:global(.promo-desk) .lab-score-mark,
-	:global(.promo-desk) .hero-underline {
-		animation-duration: 520ms !important;
-	}
-	:global(.promo-desk) .strip-tab,
-	:global(.promo-desk) .paper-card {
-		transition-duration: 55ms !important;
-	}
-	.tick-tip { offset-path: path('M 12.8 8.6 L 15.6 9.5 L 23.2 36.2 L 42 5'); }
-	.ring-tip { offset-path: path('M 21.5 25.5 C 18 14, 24 3.5, 34 3.5 C 45 3.5, 50.5 12, 49.5 20 C 48.5 30.5, 39 36.5, 31 36.5 C 22.5 36.5, 16.5 29, 18 21'); }
 	.lab-stage { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 0.45rem; padding: 0.55rem 0.75rem; border-top: 1px dashed rgb(46 34 18 / 0.2); }
-	.lab-stage-btn { width: 100%; background: none; border-left: 0; border-right: 0; border-bottom: 0; font: inherit; cursor: pointer; text-align: left; }
 	.lab-mark-svg { width: 68px; height: 44px; overflow: visible; }
 	.lab-score-row { display: inline-flex; align-items: center; gap: 0.65rem; }
 	.lab-score-slot {
