@@ -810,22 +810,32 @@
 		88% { offset-distance: 100%; opacity: 1; }
 		100% { offset-distance: 100%; opacity: 0; }
 	}
-	.stroke-reveal-path {
+	:global(.promo-desk) .stroke-reveal-path {
 		stroke-dasharray: 100;
 		stroke-dashoffset: 100;
-		animation: revealStrokePath 1200ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+		animation: revealStrokePath 1200ms cubic-bezier(0.4, 0, 0.2, 1) forwards !important;
+		animation-duration: 1200ms !important;
 	}
 	.stroke-guide-line {
 		stroke: rgb(46 34 18 / 0.22);
 		stroke-width: 0.75;
 		stroke-dasharray: 2 2;
 	}
-	.stroke-pen-tip {
+	:global(.promo-desk) .stroke-pen-tip {
 		fill: var(--cs-pencil-red);
 		stroke: #fff8ea;
 		stroke-width: 0.9;
 		filter: drop-shadow(0 0 3px rgb(200 50 42 / 0.75));
-		animation: movePenTip 1320ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+		animation: movePenTip 1320ms cubic-bezier(0.4, 0, 0.2, 1) forwards !important;
+		animation-duration: 1320ms !important;
+	}
+	:global(.promo-desk) .lab-score-mark,
+	:global(.promo-desk) .hero-underline {
+		animation-duration: 520ms !important;
+	}
+	:global(.promo-desk) .strip-tab,
+	:global(.promo-desk) .paper-card {
+		transition-duration: 55ms !important;
 	}
 	.tick-tip { offset-path: path('M 12.8 8.6 L 15.6 9.5 L 23.2 36.2 L 42 5'); }
 	.ring-tip { offset-path: path('M 21.5 25.5 C 18 14, 24 3.5, 34 3.5 C 45 3.5, 50.5 12, 49.5 20 C 48.5 30.5, 39 36.5, 31 36.5 C 22.5 36.5, 16.5 29, 18 21'); }
