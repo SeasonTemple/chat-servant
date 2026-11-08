@@ -2648,7 +2648,7 @@
     border-width: 16px;
     border-image: url('/strip.png') 32 fill / 16px / 0 stretch;
     filter: drop-shadow(0 1px 3px rgb(24 18 10 / 0.16));
-    transform-origin: 50% 50%;
+    transform-origin: 12% 28%;
     transition:
       transform 45ms cubic-bezier(0.22, 1, 0.36, 1),
       filter 45ms ease-out;
@@ -2668,9 +2668,10 @@
     filter: drop-shadow(0 7px 14px rgb(24 18 10 / 0.25));
   }
 
-  /* ── 按下 / 点击投递：整条纸片连同文字整体向下压入纸面（+1px），
-   *    背衬伪元素以中心（50% 50%）微缩压实（scale(0.988, 0.975)）并收紧底影，
-   *    替代原先不真实的「仅右下角单角拉扯」。 ──────────────────── */
+  /* ── 按下 / 点击投递：模拟手指按压候选纸条右侧/右下角——
+   *    整张纸条连同文字联动下沉（+1px，保持整数像素栅格零发糊），
+   *    同时背衬伪元素以左上侧（12% 28%）为支点向右侧/右下角做 3D 倾角下压，
+   *    右下角置信度标再多沉 1px，既消除「三角钉死只拉扯单角」的生硬感，又保留右下受力的真实重心。 ── */
   .cs-act:active:not(:disabled),
   .cs-act-busy {
     z-index: 2;
@@ -2679,9 +2680,14 @@
   }
   .cs-act:active:not(:disabled)::before,
   .cs-act-busy::before {
-    transform: scale(0.988, 0.975);
+    transform: perspective(480px) translate3d(0.5px, 1px, 0) rotateX(-1.8deg) rotateY(2.2deg)
+      rotateZ(0.45deg) scale(0.992, 0.985);
     filter: drop-shadow(0 1px 2px rgb(24 18 10 / 0.14));
     transition-duration: 30ms;
+  }
+  .cs-act:active:not(:disabled) .cs-act-meta,
+  .cs-act-busy .cs-act-meta {
+    transform: translateY(1px);
   }
 
   /* ⚠ 焦点环用墨不用红（规范 §5.4）。

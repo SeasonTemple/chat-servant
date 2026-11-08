@@ -117,7 +117,7 @@
     border: 8px solid transparent;
     border-image: url('/strip.png') 32 fill / 8px / 0 stretch;
     filter: drop-shadow(0 2px 5px rgb(20 26 31 / 0.22));
-    transform-origin: 50% 50%;
+    transform-origin: 15% 30%;
     transition:
       opacity 45ms ease-out,
       transform 45ms cubic-bezier(0.22, 1, 0.36, 1),
@@ -144,11 +144,11 @@
 
   .tray-item:active::before {
     opacity: 1;
-    transform: scale(0.985, 0.97);
+    transform: perspective(360px) translate3d(0.5px, 0.8px, 0) rotateX(-1.6deg) rotateY(2deg)
+      rotateZ(0.4deg) scale(0.99, 0.98);
     filter: drop-shadow(0 1px 2px rgb(20 26 31 / 0.14));
     transition-duration: 25ms;
   }
-
   .tray-sep {
     border-top: 1px dashed rgb(46 34 18 / 0.26);
     margin: 3px 4px;
