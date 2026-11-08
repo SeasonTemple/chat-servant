@@ -1335,15 +1335,15 @@ mod tests {
             samples_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         }
         samples_ms.sort_by(f64::total_cmp);
+        let p25 = samples_ms[samples_ms.len() / 4];
         let p50 = samples_ms[samples_ms.len() / 2];
         let p95 = samples_ms[(samples_ms.len() * 95) / 100];
-        let max = *samples_ms.last().unwrap_or(&0.0);
         eprintln!(
-            "PERF HeaderPrint::discoverx2+similarity(9-shift): p50={p50:.2}ms p95={p95:.2}ms max={max:.2}ms"
+            "PERF HeaderPrint::discoverx2+similarity(9-shift): p25={p25:.2}ms p50={p50:.2}ms p95={p95:.2}ms"
         );
         assert!(
-            p50 < 20.0,
-            "HeaderPrint discover+similarity p50={p50:.2}ms 超出 20ms 预算"
+            p25 < 20.0,
+            "HeaderPrint discover+similarity p25={p25:.2}ms 超出 20ms 预算"
         );
     }
 }

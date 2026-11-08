@@ -65,6 +65,7 @@ fn spawn_clickthrough(win: tauri::WebviewWindow) {
         .name("cs-clickthrough".into())
         .spawn(move || {
             let mut ignoring = false;
+            let mut wait = std::time::Duration::from_millis(40);
             loop {
                 if !win.is_visible().unwrap_or(true) {
                     if ignoring && win.set_ignore_cursor_events(false).is_ok() {
@@ -73,20 +74,20 @@ fn spawn_clickthrough(win: tauri::WebviewWindow) {
                     std::thread::sleep(std::time::Duration::from_millis(250));
                     continue;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(40));
-                update_clickthrough(&win, &mut ignoring);
+                std::thread::sleep(wait);
+                wait = update_clickthrough(&win, &mut ignoring);
             }
         })
         .ok();
 }
 
-fn update_clickthrough(win: &tauri::WebviewWindow, ignoring: &mut bool) {
+fn update_clickthrough(win: &tauri::WebviewWindow, ignoring: &mut bool) -> std::time::Duration {
     let (Ok(cur), Ok(pos), Ok(scale)) = (
         win.cursor_position(),
         win.outer_position(),
         win.scale_factor(),
     ) else {
-        return;
+        return std::time::Duration::from_millis(160);
     };
     let lx = (cur.x - f64::from(pos.x)) / scale;
     let ly = (cur.y - f64::from(pos.y)) / scale;
@@ -96,6 +97,8 @@ fn update_clickthrough(win: &tauri::WebviewWindow, ignoring: &mut bool) {
     if want_ignore != *ignoring && win.set_ignore_cursor_events(want_ignore).is_ok() {
         *ignoring = want_ignore;
     }
+    let near_window = (-80.0..=460.0).contains(&lx) && (-80.0..=640.0).contains(&ly);
+    std::time::Duration::from_millis(if near_window { 40 } else { 160 })
 }
 
 fn main() {

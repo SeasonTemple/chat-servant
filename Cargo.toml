@@ -33,7 +33,7 @@ exclude = ["ui/src-tauri/gen"]
 # 一上来全 deny 会产生几百条噪声，**噪声本身会让人忽略警告**——
 # 那正好违背 Effective Rust 那条原则。**warn 起步，逐条升 deny。**
 [workspace.lints.rust]
-future-incompatible = "warn"
+future_incompatible = "warn"
 missing_docs = "warn"
 # 每个 `unsafe` 块必须带 `// Safety:` 说明为什么安全。
 #

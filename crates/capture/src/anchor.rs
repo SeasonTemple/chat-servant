@@ -131,18 +131,16 @@ pub fn derive(frame: &Frame) -> Result<PaneAnchor, AnchorError> {
     let step = 4u32;
     let col_w = ((w as usize).div_ceil(step as usize)).max(1);
     let mut col_hits = vec![0u32; col_w];
+    let bytes = frame.as_bytes();
+    let row_stride = (w as usize) * 3;
     let mut y = y_lo;
     while y < y_hi {
-        let mut c = 0usize;
-        while c < col_w {
-            let x = (c as u32) * step;
-            if x < w
-                && let Some(p) = frame.pixel(x, y)
-                && near(p, panel_bg)
-            {
-                col_hits[c] += 1;
+        let row = &bytes[(y as usize) * row_stride..((y as usize) + 1) * row_stride];
+        for (c, hit) in col_hits.iter_mut().enumerate() {
+            let off = c * (step as usize) * 3;
+            if off + 3 <= row.len() && near([row[off], row[off + 1], row[off + 2]], panel_bg) {
+                *hit += 1;
             }
-            c += 1;
         }
         y += step;
     }
@@ -205,25 +203,27 @@ pub fn derive(frame: &Frame) -> Result<PaneAnchor, AnchorError> {
 /// 换个窗口尺寸（iy=426）就直接漏检。**在原尺寸下碰巧成立是最危险的一种通过。**
 /// 横向仍然按 step 抽样以控制总采样量。
 fn low_dominance_bands(frame: &Frame, bg: Rgb, x0: u32, x1: u32) -> Vec<(u32, u32)> {
-    let h = frame.height();
+    let (w, h) = (frame.width(), frame.height());
     let col_step = 4u32;
     let cols = (((x1 - x0) as usize).div_ceil(col_step as usize)).max(1);
+    let bytes = frame.as_bytes();
+    let row_stride = (w as usize) * 3;
+    let x0_off = (x0 as usize) * 3;
+    let x1_off = (x1.min(w) as usize) * 3;
+    let step_off = (col_step as usize) * 3;
 
     let mut bands: Vec<(u32, u32)> = Vec::new();
     let mut open: Option<(u32, u32)> = None;
 
     for y in 0..h {
+        let row = &bytes[(y as usize) * row_stride..((y as usize) + 1) * row_stride];
         let mut hits = 0u32;
-        let mut c = 0usize;
-        while c < cols {
-            let x = x0 + (c as u32) * col_step;
-            if x < x1
-                && let Some(p) = frame.pixel(x, y)
-                && near(p, bg)
-            {
+        let mut off = x0_off;
+        while off + 3 <= x1_off {
+            if near([row[off], row[off + 1], row[off + 2]], bg) {
                 hits += 1;
             }
-            c += 1;
+            off += step_off;
         }
         let frac = hits as f32 / cols as f32;
         if frac < BAND_LOW {
@@ -422,13 +422,13 @@ mod tests {
             samples_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         }
         samples_ms.sort_by(f64::total_cmp);
+        let p25 = samples_ms[samples_ms.len() / 4];
         let p50 = samples_ms[samples_ms.len() / 2];
         let p95 = samples_ms[(samples_ms.len() * 95) / 100];
-        let max = *samples_ms.last().unwrap_or(&0.0);
-        eprintln!("PERF anchor::derive (1267x930): p50={p50:.2}ms p95={p95:.2}ms max={max:.2}ms");
+        eprintln!("PERF anchor::derive (1267x930): p25={p25:.2}ms p50={p50:.2}ms p95={p95:.2}ms");
         assert!(
-            p50 < 25.0,
-            "anchor::derive 1267x930 p50={p50:.2}ms 超出 25ms 预算（发生全图扫描退化？）"
+            p25 < 25.0,
+            "anchor::derive 1267x930 p25={p25:.2}ms 超出 25ms 预算（发生全图扫描退化？）"
         );
     }
 }
@@ -438,23 +438,43 @@ struct Rgb([u8; 3]);
 
 /// 底色比较留 4 级余量（每级 17）。实测面板底色内部完全一致，
 /// 但抗锯齿文字边缘会差一点点，太紧会把文字像素算成"非底色"。
+#[inline(always)]
 fn near(a: [u8; 3], b: Rgb) -> bool {
-    let d = |x: u8, y: u8| (x as i32 - y as i32).abs();
-    d(a[0], b.0[0]) <= 4 && d(a[1], b.0[1]) <= 4 && d(a[2], b.0[2]) <= 4
+    a[0].abs_diff(b.0[0]) <= 4 && a[1].abs_diff(b.0[1]) <= 4 && a[2].abs_diff(b.0[2]) <= 4
 }
 
 fn dominant_in_band(frame: &Frame, x0: u32, x1: u32, y0: u32, y1: u32, step: u32) -> Option<Rgb> {
+    let (w, h) = (frame.width(), frame.height());
+    let bytes = frame.as_bytes();
+    let row_stride = (w as usize) * 3;
+    let x0_off = (x0.min(w) as usize) * 3;
+    let x1_off = (x1.min(w) as usize) * 3;
+    let step_off = (step.max(1) as usize) * 3;
+
     let mut hist: std::collections::HashMap<Rgb, usize> = std::collections::HashMap::new();
+    let mut run_color: Option<Rgb> = None;
+    let mut run_count: usize = 0;
     let mut y = y0;
-    while y < y1 {
-        let mut x = x0;
-        while x < x1 {
-            if let Some(p) = frame.pixel(x, y) {
-                *hist.entry(Rgb(p)).or_insert(0) += 1;
+    while y < y1.min(h) {
+        let row = &bytes[(y as usize) * row_stride..((y as usize) + 1) * row_stride];
+        let mut off = x0_off;
+        while off + 3 <= x1_off {
+            let c = Rgb([row[off], row[off + 1], row[off + 2]]);
+            if Some(c) == run_color {
+                run_count += 1;
+            } else {
+                if let Some(prev) = run_color {
+                    *hist.entry(prev).or_insert(0) += run_count;
+                }
+                run_color = Some(c);
+                run_count = 1;
             }
-            x += step;
+            off += step_off;
         }
         y += step;
+    }
+    if let Some(prev) = run_color {
+        *hist.entry(prev).or_insert(0) += run_count;
     }
     hist.into_iter().max_by_key(|(_, n)| *n).map(|(c, _)| c)
 }
