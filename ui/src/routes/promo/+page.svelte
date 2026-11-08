@@ -353,27 +353,73 @@
             >
           </div>
           {#key strokeKey}
-            <div class="lab-stage">
+            <button type="button" class="lab-stage lab-stage-btn" onclick={() => strokeKey++}>
               {#if craftShape === 'tick'}
-                <svg class="lab-mark-svg" viewBox="0 0 {TICK_VIEW.w} {TICK_VIEW.h}">
-                  <g filter={craftFilter ? 'url(#pencil)' : undefined} fill="var(--cs-pencil-red)">
+                <svg class="lab-mark-svg" viewBox="0 0 56 39">
+                  <defs>
+                    <mask
+                      id="tick-draw-{strokeKey}"
+                      maskUnits="userSpaceOnUse"
+                      x="0"
+                      y="0"
+                      width="56"
+                      height="40"
+                    >
+                      <path
+                        class="stroke-reveal-path"
+                        d="M 12.8 8.6 L 15.6 9.5 L 23.2 36.2 L 42 5"
+                        fill="none"
+                        stroke="white"
+                        stroke-width="11"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        pathLength="100"
+                      />
+                    </mask>
+                  </defs>
+                  <g
+                    mask="url(#tick-draw-{strokeKey})"
+                    filter={craftFilter ? 'url(#pencil)' : undefined}
+                    fill="var(--cs-pencil-red)"
+                  >
                     {#each TICK_NESTED as s, idx (idx)}<path d={s.d} fill-opacity={s.o} />{/each}
                   </g>
                 </svg>
               {:else}
-                <svg class="lab-mark-svg" viewBox="0 1 {MARK_VIEW.w} 28">
-                  <g filter={craftFilter ? 'url(#pencil)' : undefined} fill="var(--cs-pencil-red)">
-                    {#each RING_LABEL_MARK_BIG as s, idx (idx)}<path
-                        d={s.d}
-                        fill-opacity={s.o}
-                      />{/each}
+                <svg class="lab-mark-svg" viewBox="12 0 42 40">
+                  <defs>
+                    <mask
+                      id="ring-draw-{strokeKey}"
+                      maskUnits="userSpaceOnUse"
+                      x="0"
+                      y="0"
+                      width="60"
+                      height="42"
+                    >
+                      <path
+                        class="stroke-reveal-path"
+                        d="M 21.5 25.5 C 18 14, 24 3.5, 34 3.5 C 45 3.5, 50.5 12, 49.5 20 C 48.5 30.5, 39 36.5, 31 36.5 C 22.5 36.5, 16.5 29, 18 21"
+                        fill="none"
+                        stroke="white"
+                        stroke-width="13"
+                        stroke-linecap="round"
+                        pathLength="100"
+                      />
+                    </mask>
+                  </defs>
+                  <g
+                    mask="url(#ring-draw-{strokeKey})"
+                    filter={craftFilter ? 'url(#pencil)' : undefined}
+                    fill="var(--cs-pencil-red)"
+                  >
+                    {#each RING_MARK as s, idx (idx)}<path d={s.d} fill-opacity={s.o} />{/each}
                   </g>
                 </svg>
               {/if}
               <span class="lab-caption"
-                >{t('← 点击按钮重演运笔动画', '← Click above to replay stroke')}</span
+                >{t('↻ 点击此处或按钮重演运笔轨迹', '↻ Click here or above to replay stroke')}</span
               >
-            </div>
+            </button>
           {/key}
         </article>
 
@@ -740,8 +786,18 @@
 	.stage-sheet-anim { animation: sheetFlip 220ms cubic-bezier(0.22, 1, 0.36, 1) both; }
 	.stage-frame { width: 380px; height: 560px; border: 0; display: block; margin: 0 auto; border-radius: 4px; }
 	.stage-hint { margin: 0.65rem 0 0; font-size: 0.82rem; color: var(--cs-paper); opacity: 0.88; text-align: center; }
+	@keyframes revealStrokePath {
+		from { stroke-dashoffset: 100; }
+		to { stroke-dashoffset: 0; }
+	}
+	.stroke-reveal-path {
+		stroke-dasharray: 100;
+		stroke-dashoffset: 100;
+		animation: revealStrokePath 720ms cubic-bezier(0.32, 0, 0.24, 1) forwards;
+	}
 	.lab-stage { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 0.45rem; padding: 0.55rem 0.75rem; border-top: 1px dashed rgb(46 34 18 / 0.2); }
-	.lab-mark-svg { width: 64px; height: 38px; overflow: visible; animation: drawMark 380ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+	.lab-stage-btn { width: 100%; background: none; border-left: 0; border-right: 0; border-bottom: 0; font: inherit; cursor: pointer; text-align: left; }
+	.lab-mark-svg { width: 68px; height: 44px; overflow: visible; }
 	.lab-score-row { display: inline-flex; align-items: center; gap: 0.65rem; }
 	.lab-score-slot {
 		position: relative;
