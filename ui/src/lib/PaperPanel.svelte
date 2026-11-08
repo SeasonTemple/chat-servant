@@ -660,8 +660,12 @@
    */
   async function dispatchCandidate(candidateId: string) {
     if (sending) return;
-    sending = true;
     pickedId = candidateId;
+    if (!HAS_TAURI) {
+      sentNote = null;
+      return;
+    }
+    sending = true;
     busyId = candidateId;
     try {
       const r = await invoke<{ outcome: string; detail: string; next_hint: string | null }>(
@@ -1654,6 +1658,10 @@
             class="cs-act cs-act-lead"
             disabled={readout.relock_pending}
             onclick={() => {
+              if (!HAS_TAURI) {
+                if (readout) readout = { ...readout, gate_open: true };
+                return;
+              }
               invoke('relock_session').catch((e) => console.error('重新锁定失败：', e));
             }}
             aria-label="改为锁定此会话：{peer || '当前会话'}"
